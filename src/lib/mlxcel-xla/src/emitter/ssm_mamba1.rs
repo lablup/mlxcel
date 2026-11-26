@@ -18,7 +18,7 @@
 //! It never forms a context-capacity-sized `[T, d_inner, state_size]` value.
 
 use super::builder::{Builder, Val};
-use super::config::{SsmConfig, SsmKind};
+use super::config::{BcdtNorm, SsmConfig, SsmKind};
 use super::ssm::{
     SsmLayerState, add_last, conv1d_causal_step, conv1d_over_left_context, silu, softplus, splat,
     tail_of_left_context, to_f32,
@@ -43,6 +43,17 @@ pub(crate) struct Mamba1MixerW {
     pub d: Val,
     pub out_proj: Val,
     pub out_proj_b: Option<Val>,
+    /// Jamba's learned dt/B/C RMSNorm weights, `[dt_rank]`, `[N]`, `[N]`
+    /// ([`BcdtNorm::Weighted`]); `None` for the weightless and plain variants.
+    pub bcdt_norm_w: Option<BcdtNormW>,
+}
+
+/// The learned `dt_layernorm`, `b_layernorm`, and `c_layernorm` weights.
+#[derive(Clone, Debug)]
+pub(crate) struct BcdtNormW {
+    pub dt: Val,
+    pub b: Val,
+    pub c: Val,
 }
 
 /// One diagonal recurrence step, entirely in f32:
@@ -160,7 +171,7 @@ pub(crate) fn diag_scan_prefill(
     (all_y.expect("the mixer requires a non-empty sequence"), h)
 }
 
-fn kind(c: &SsmConfig) -> (usize, bool) {
+fn kind(c: &SsmConfig) -> (usize, BcdtNorm) {
     match c.kind {
         SsmKind::Mamba1 { dt_rank, bcdt_norm } => (dt_rank, bcdt_norm),
         SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
@@ -202,6 +213,16 @@ fn in_projection(b: &mut Builder, c: &SsmConfig, w: &Mamba1MixerW, x: &Val) -> (
     (xs, z)
 }
 
+/// Weighted RMSNorm over the last axis (Jamba's `JambaRMSNorm`): the
+/// weightless normalization followed by a per-channel scale, all in f32.
+fn rms_weighted(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Val {
+    let normed = rms_no_weight(b, x, eps);
+    let weight = to_f32(b, weight);
+    let axis = normed.ty.shape.len() - 1;
+    let weight = b.broadcast(&weight, &[axis], normed.ty.shape.clone());
+    b.multiply(&normed, &weight)
+}
+
 /// Project activated conv rows into discretized dt and the B/C read vectors.
 fn scan_parameters(b: &mut Builder, c: &SsmConfig, w: &Mamba1MixerW, x: &Val) -> (Val, Val, Val) {
     let rows = x.ty.shape[0];
@@ -212,10 +233,22 @@ fn scan_parameters(b: &mut Builder, c: &SsmConfig, w: &Mamba1MixerW, x: &Val) ->
     let mut dt = b.slice(&projected, &[(0, rows), (0, rank)]);
     let mut bm = b.slice(&projected, &[(0, rows), (rank, rank + n)]);
     let mut cm = b.slice(&projected, &[(0, rows), (rank + n, rank + 2 * n)]);
-    if normalize {
-        dt = rms_no_weight(b, &dt, c.norm_eps);
-        bm = rms_no_weight(b, &bm, c.norm_eps);
-        cm = rms_no_weight(b, &cm, c.norm_eps);
+    match (normalize, &w.bcdt_norm_w) {
+        (BcdtNorm::None, None) => {}
+        (BcdtNorm::Weightless, None) => {
+            dt = rms_no_weight(b, &dt, c.norm_eps);
+            bm = rms_no_weight(b, &bm, c.norm_eps);
+            cm = rms_no_weight(b, &cm, c.norm_eps);
+        }
+        (BcdtNorm::Weighted, Some(norm)) => {
+            dt = rms_weighted(b, &dt, &norm.dt, c.norm_eps);
+            bm = rms_weighted(b, &bm, &norm.b, c.norm_eps);
+            cm = rms_weighted(b, &cm, &norm.c, c.norm_eps);
+        }
+        (mode, weights) => panic!(
+            "Mamba1 {mode:?} dt/B/C norm with weights present = {}",
+            weights.is_some()
+        ),
     }
     let dt = b.linear_seq_proj(&dt, &w.dt_proj);
     let dt = add_last(b, &dt, &w.dt_proj_b);

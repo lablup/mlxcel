@@ -104,14 +104,32 @@ impl Config {
     /// `norm -> mixer -> residual` with no FFN.
     #[must_use]
     pub fn layer_has_ffn(&self, li: usize) -> bool {
-        if self.weight_scheme == WeightScheme::NemotronH {
-            self.layer_mixer(li) == MixerKind::None
-        } else if self.weight_scheme == WeightScheme::Plamo2 {
+        match self.weight_scheme {
+            WeightScheme::NemotronH => self.layer_mixer(li) == MixerKind::None,
             // Every PLaMo 2 block, Mamba or attention, ends in a dense MLP.
-            li < self.n_layers
-        } else {
-            self.layer_mixer(li).has_attention()
+            WeightScheme::Plamo2 => li < self.n_layers,
+            // Every Jamba block, attention or Mamba1, ends in a dense or MoE FFN.
+            WeightScheme::Jamba => li < self.n_layers,
+            _ => self.layer_mixer(li).has_attention(),
         }
+    }
+
+    /// Whether layer `li` is a pure SSM block, `x + mixer(norm(x))` with no
+    /// FFN (Mamba, Mamba2, Nemotron-H `M`). Such a layer takes the short
+    /// recurrent weight list; a recurrent layer with an FFN (Jamba) does not.
+    #[must_use]
+    pub fn is_ffn_free_ssm_layer(&self, li: usize) -> bool {
+        matches!(self.layer_mixer(li), MixerKind::Mamba2 | MixerKind::Mamba1)
+            && !self.layer_has_ffn(li)
+    }
+
+    /// Whether layer `li` normalizes the residual between its token mixer and
+    /// its FFN (`post_attention_layernorm`, or Falcon-H1 / Jamba
+    /// `pre_ff_layernorm`). False for a parallel block, which feeds the FFN the
+    /// mixer's input norm, and for a block without a mixer or without an FFN.
+    #[must_use]
+    pub fn layer_has_post_mixer_norm(&self, li: usize) -> bool {
+        !self.parallel_block && self.layer_has_ffn(li) && self.layer_mixer(li) != MixerKind::None
     }
 
     /// Number of attention rows in the KV cache, excluding SSM and FFN blocks.

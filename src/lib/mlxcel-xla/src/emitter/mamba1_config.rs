@@ -15,8 +15,8 @@
 //! Mamba1 and Falcon-Mamba `config.json` parsing (issue #3348).
 
 use super::config::{
-    Config, NormStyle, QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SsmConfig, SsmKind,
-    WeightScheme, check_layer_count,
+    BcdtNorm, Config, NormStyle, QuantConfig, RopeScaling, SSM_DEFAULT_CHUNK_SIZE, SsmConfig,
+    SsmKind, WeightScheme, check_layer_count,
 };
 use super::recurrent_config::MixerKind;
 
@@ -129,7 +129,14 @@ pub(super) fn mamba1_from_json(
         ));
     }
     let ssm = SsmConfig {
-        kind: SsmKind::Mamba1 { dt_rank, bcdt_norm },
+        kind: SsmKind::Mamba1 {
+            dt_rank,
+            bcdt_norm: if bcdt_norm {
+                BcdtNorm::Weightless
+            } else {
+                BcdtNorm::None
+            },
+        },
         // Reuse `n_heads * head_dim` as the common d_inner representation.
         n_heads: 1,
         head_dim: d_inner,

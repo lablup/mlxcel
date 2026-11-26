@@ -35,11 +35,12 @@
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
 use super::config::{
-    Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig, SsmKind,
+    BcdtNorm, Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig,
+    SsmKind,
 };
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
-use super::ssm::{self, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
+use super::ssm::{self, BcdtNormW, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
 use super::ssm_scan::SsmPrefillForm;
 
 #[path = "model_plamo2.rs"]
@@ -686,10 +687,9 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    if matches!(
-        c.layer_mixer(li),
-        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
-    ) {
+    // A pure Mamba block (no FFN) has its own short weight list. A recurrent
+    // layer with an FFN (Jamba) takes the general list below, its mixer last.
+    if c.is_ffn_free_ssm_layer(li) {
         return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
     }
     let h = c.hidden;
@@ -704,8 +704,7 @@ fn take_layer_weights(
     let gated = !c.dense_mlp;
     let has_ffn = c.layer_has_ffn(li);
     let has_attn = c.attn_layer_index(li).is_some();
-    let plamo2_mamba = c.layer_mixer(li) == super::config::MixerKind::Plamo2Mamba;
-    let has_post = !c.parallel_block && has_ffn && (has_attn || plamo2_mamba);
+    let has_post = c.layer_has_post_mixer_norm(li);
     let moe_layer = c.is_moe_layer(li);
     // The big linear projections take the packed-quantized path when enabled
     // (issue #516: `take_weight` declares packed+scales+biases and dequants in the
@@ -911,7 +910,9 @@ fn take_layer_weights(
         up_bias,
         moe,
         phi4_lora,
-        ssm: (c.falcon_h1.is_some() || plamo2_mamba)
+        ssm: c
+            .layer_mixer(li)
+            .is_recurrent()
             .then(|| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
     };
     plamo2::offset_layer_norms(b, c, lw)
@@ -3049,11 +3050,20 @@ fn emit_transformer_layer(
     vcache: &mut Val,
     state: &mut RecurrentLayers,
 ) -> Val {
+    if c.is_ffn_free_ssm_layer(li) {
+        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+    }
     if matches!(
         c.layer_mixer(li),
         super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
     ) {
-        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+        // Jamba: `x + mixer(norm(x))`, then a separately normed dense or MoE FFN.
+        let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
+        let mixed = recurrent::emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+        let x1 = b.add(x, &mixed);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_ffn_body(b, c, k, layout, &hn2, lw, li);
+        return b.add(&x1, &down);
     }
     if c.layer_mixer(li) == super::config::MixerKind::Plamo2Mamba {
         return plamo2::emit_mamba_block(b, c, k, lw, li, x, layout, state);
@@ -5064,12 +5074,17 @@ pub(crate) fn emit_ssm_probe_with(
                 out_proj_b,
             })
         }
-        SsmKind::Mamba1 { dt_rank, .. } => {
+        SsmKind::Mamba1 { dt_rank, bcdt_norm } => {
             let x_proj = arg(vec![dt_rank + 2 * n, di], "x_proj");
             let dt_proj = arg(vec![di, dt_rank], "dt_proj");
             let dt_proj_b = arg(vec![di], "dt_proj_b");
             let a_log = arg(vec![di, n], "a_log");
             let d = arg(vec![di], "d");
+            let bcdt_norm_w = (bcdt_norm == BcdtNorm::Weighted).then(|| BcdtNormW {
+                dt: arg(vec![dt_rank], "dt_norm_w"),
+                b: arg(vec![n], "b_norm_w"),
+                c: arg(vec![n], "c_norm_w"),
+            });
             let out_proj = arg(vec![hidden, di], "out_proj");
             let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
             SsmMixerW::Mamba1(Mamba1MixerW {
@@ -5084,6 +5099,7 @@ pub(crate) fn emit_ssm_probe_with(
                 d,
                 out_proj,
                 out_proj_b,
+                bcdt_norm_w,
             })
         }
         SsmKind::Plamo2 { dt_rank } => SsmMixerW::Plamo2(ssm::Plamo2MixerW {

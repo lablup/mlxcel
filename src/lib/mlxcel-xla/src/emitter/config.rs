@@ -204,6 +204,9 @@ pub enum WeightScheme {
     /// PLaMo 2 hybrid (`model.layers.layers.{i}`, `mixer.*`, four offset
     /// norms per block, fused `qkv_proj` and `gate_up_proj`).
     Plamo2,
+    /// Jamba: `model.layers.{i}.mamba.*` or `self_attn.*` per block, then
+    /// `pre_ff_layernorm` and a dense or MoE `feed_forward` (issue #3349).
+    Jamba,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -298,15 +301,36 @@ pub struct MoeConfig {
 pub enum SsmKind {
     /// Mamba2's head/group SSD form.
     Mamba2,
-    /// Mamba1's diagonal recurrence. Falcon-Mamba enables weightless RMSNorm
+    /// Mamba1's diagonal recurrence. `bcdt_norm` selects the optional RMSNorm
     /// on the projected dt, B, and C tensors.
-    Mamba1 { dt_rank: usize, bcdt_norm: bool },
+    Mamba1 { dt_rank: usize, bcdt_norm: BcdtNorm },
     /// PLaMo 2's Mamba2 variant: `in_proj` yields per-head interleaved `z`/`x`
     /// only, the conv runs over `x` alone (`conv_dim = d_inner`), and B, C and
     /// a `dt_rank`-wide dt come from a post-conv `bcdt_proj`, each RMS-normed
     /// with a learned weight, before `dt_proj` maps dt to the heads. The state
     /// is Mamba2's `[H, P, N]` (issue #3347).
     Plamo2 { dt_rank: usize },
+}
+
+/// The RMSNorm Mamba1 applies to the `x_proj` outputs (dt, B, C) before the
+/// dt projection and the scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BcdtNorm {
+    /// Plain Mamba: the projected dt, B, and C are used as they are.
+    None,
+    /// Falcon-Mamba: weightless RMSNorm over each of dt, B, and C.
+    Weightless,
+    /// Jamba: RMSNorm with learned `dt_layernorm` `[dt_rank]`, `b_layernorm`
+    /// `[N]`, and `c_layernorm` `[N]` weights (issue #3349).
+    Weighted,
+}
+
+impl BcdtNorm {
+    /// Whether dt, B, and C are normalized at all.
+    #[must_use]
+    pub fn normalizes(self) -> bool {
+        self != Self::None
+    }
 }
 
 /// Selective state-space mixer parameters (epic #564).
@@ -518,7 +542,7 @@ impl SsmConfig {
 
     /// A small Mamba1 mixer for pure-Rust emitter tests.
     #[cfg(test)]
-    pub(crate) fn tiny_mamba1(bcdt_norm: bool) -> Self {
+    pub(crate) fn tiny_mamba1(bcdt_norm: BcdtNorm) -> Self {
         let (d_inner, state_size) = (16, 4);
         Self {
             kind: SsmKind::Mamba1 {
@@ -534,7 +558,7 @@ impl SsmConfig {
             use_conv_bias: true,
             use_bias: false,
             time_step_limit: (0.0, f32::INFINITY),
-            norm_eps: if bcdt_norm { 1e-6 } else { 1e-5 },
+            norm_eps: if bcdt_norm.normalizes() { 1e-6 } else { 1e-5 },
             norm_group_size: d_inner,
             chunk_size: 4,
         }
@@ -1026,6 +1050,9 @@ impl Config {
         }
         if model_type == Some("plamo2") {
             return super::plamo2_config::from_json(&v, quantization);
+        }
+        if model_type == Some("jamba") {
+            return super::jamba_config::from_json(&v, quantization);
         }
         if model_type == Some("nemotron_h") {
             return super::nemotron_h_config::from_json(&v, quantization);
