@@ -49,6 +49,10 @@ Off (the default), a verify block forms every dense product one row at a time, w
 
 Plain decode runs at the same speed with the kernel on (33.63 against 33.48 tok/s), but its greedy text differs from the default kernels' (a different reduction order in every dense product), so the kernel stays opt-in: turning it on by default would change Raon-1 mini's classic output for every user, which needs its own reference comparison.
 
+## Final state notes
+
+Prefill captures the four mHC streams only for the newest 2048 prompt rows, the drafter's context window; the drafter is told how many earlier rows were left out so positions stay absolute. Older rows never reach a window of that size, so greedy equality and acceptance do not depend on it, and a long prompt no longer holds its full `[n, 51200]` feature history. Sampled drafting serves temperature, top-k / top-p / min-p, penalties and token bias; Mirostat and adaptive-p keep state from one token to the next that independently sampled verify rows cannot carry, so `mlxcel generate` rejects them with a named error and the server decodes those requests classically.
+
 ## Reproduce
 
 ```bash
