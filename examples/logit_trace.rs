@@ -113,6 +113,9 @@
 // compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
 // prompt and the companion rows are text-only.
 //
+// `MLXCEL_TRACE_REASONING_EFFORT=LEVEL` steers a reasoning-effort model
+// (Raon-1 mini) at LEVEL for every traced forward.
+//
 // `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr after
 // the trace, so an arm that claims the absorbed path can be checked against
 // the path its forward actually took. Each chunk's stderr line also reports the
@@ -395,6 +398,20 @@ fn main() -> Result<()> {
     };
 
     kv_arm.install(&model)?;
+
+    // `MLXCEL_TRACE_REASONING_EFFORT=LEVEL` runs a reasoning-effort steering
+    // model (Raon-1 mini, #3435) at LEVEL, as `mlxcel generate
+    // --reasoning-effort` does; unset keeps the config's default level. Models
+    // that do not steer ignore it.
+    if let Ok(level) = std::env::var("MLXCEL_TRACE_REASONING_EFFORT") {
+        mlxcel_core::generate::LanguageModel::set_sequence_reasoning_effort(
+            &model,
+            None,
+            Some(&level),
+        )
+        .map_err(|err| anyhow::anyhow!("MLXCEL_TRACE_REASONING_EFFORT: {err}"))?;
+        println!("# reasoning_effort\t{level}");
+    }
 
     // The audio arm traces one transcript behind one clip, so the corpus is
     // the transcript and there is no chunking.

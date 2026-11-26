@@ -45,6 +45,8 @@ impl BatchScheduler {
         }) else {
             return false;
         };
+        // The request keeps its reasoning effort under the new id (#3435).
+        let reasoning_effort = self.engine.model().sequence_reasoning_effort(old_id);
         self.release_sequence_caches(old_id);
         let new_id = match self.allocate_sequence_state() {
             Ok(id) => id,
@@ -64,6 +66,13 @@ impl BatchScheduler {
                 return true;
             }
         };
+        if let Err(err) = self
+            .engine
+            .model()
+            .set_sequence_reasoning_effort(Some(new_id), reasoning_effort.as_deref())
+        {
+            tracing::warn!("dropped adoption: reasoning effort not carried over: {err}");
+        }
         if let Some(mut ctx) = self.prompt_cache_seq_ctx.remove(&old_id) {
             // The request now prefills every row itself, so nothing it stores
             // descends from the dropped prefix (issue #3047).

@@ -751,6 +751,14 @@ pub(crate) fn attach_native_chat_renderer_for_model(
     model_dir: Option<&std::path::Path>,
 ) -> (Arc<MlxcelTokenizer>, ChatTemplateProcessor) {
     let tokenizer = Arc::new(tokenizer);
+    // An operator template override (`--chat-template`) builds the processor
+    // without the model directory; the steering block is the model's, so it
+    // is attached from the directory either way (#3435).
+    if let Some(dir) = model_dir
+        && chat_template.reasoning_effort_steering().is_none()
+    {
+        chat_template.attach_reasoning_effort_steering_from(dir);
+    }
     if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
         tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
         let renderer = match model_dir

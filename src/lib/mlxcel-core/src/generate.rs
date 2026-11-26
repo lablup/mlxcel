@@ -808,6 +808,34 @@ pub trait LanguageModel {
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
 
+    /// Set the reasoning effort a sequence's forward runs at, for a model
+    /// whose weights steer by it (Raon-1 mini's `reasoning_effort_steering`,
+    /// #3435). `seq_id == None` sets the model default that every sequence
+    /// without its own setting uses; `level == None` selects the config's
+    /// default level. The effort changes hidden states, not the prompt, so
+    /// the caller keys any prefix reuse by it as well.
+    ///
+    /// Models that do not steer ignore it, which is the default.
+    ///
+    /// # Errors
+    /// Returns a client-facing message when the level is not one this model
+    /// accepts; the caller fails that request before prefill.
+    fn set_sequence_reasoning_effort(
+        &self,
+        _seq_id: Option<SequenceId>,
+        _level: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The level `seq_id` set through [`Self::set_sequence_reasoning_effort`],
+    /// so a caller that moves a request to a new id (preemption) can carry it
+    /// over. `None` for models that do not steer and for a sequence at the
+    /// model default.
+    fn sequence_reasoning_effort(&self, _seq_id: SequenceId) -> Option<String> {
+        None
+    }
+
     /// Which RoPE frequency table a prompt of `total_prompt_len` tokens will be
     /// rotated with, when this model chooses one from the sequence length.
     ///

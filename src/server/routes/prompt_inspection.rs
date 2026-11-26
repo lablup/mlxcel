@@ -262,6 +262,8 @@ pub(crate) async fn count_prompt_tokens(
         RequestOptionOverrides::default(),
     );
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids;
     let provider = Arc::clone(&state.model_provider);
     let live = Arc::clone(live);

@@ -69,6 +69,7 @@ pub mod realtime_protocol;
 mod realtime_session;
 pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
+pub(crate) mod reasoning_steering;
 mod request_options;
 pub mod rerank_maxsim;
 pub mod rerank_model;

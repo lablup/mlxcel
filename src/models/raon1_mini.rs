@@ -28,10 +28,11 @@
 //! logits = lm_head(norm(mean(streams.f32, stream).astype(dt)))
 //! ```
 //!
-//! The five `moe.reasoning_effort_steering` vectors are loaded and kept in
-//! float32 but not applied: this is the model at steering alpha 0, which the
-//! reference produces with `set_reasoning_effort("max")`. Applying them is
-//! #3435.
+//! Reasoning-effort steering (#3435): each layer that
+//! `reasoning_effort_steering.layers` lists adds `alpha * c` to its MoE
+//! output in float32 before the mHC mix, with one alpha per batch row
+//! (`raon1_mini_effort.rs`). Alpha 0 (`max`, or a config without the block)
+//! skips the add, which is the steering-free model bit for bit.
 //!
 //! Reference: https://huggingface.co/KRAFTON/Raon-1-mini/blob/6691a076/modeling_raon1_mini.py
 
@@ -49,6 +50,10 @@ pub use super::raon1_mini_config::Raon1MiniConfig;
 
 #[path = "raon1_mini_lm.rs"]
 mod lm;
+
+#[path = "raon1_mini_effort.rs"]
+mod effort;
+use effort::EffortState;
 
 /// Per-layer state: RDA conv window plus recurrent state, or the MLA latent
 /// pair (`kv_latent`, `k_pe`) in a `KVCache`.
@@ -112,10 +117,13 @@ enum Ffn {
 }
 
 impl Ffn {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        match self {
-            Ffn::Dense(mlp) => mlp.forward(x),
-            Ffn::Moe(moe) => moe.forward(x),
+    /// The branch output, steered by `steer` (`[B, 1, 1]` float32 alphas)
+    /// on a steered MoE layer.
+    fn forward(&self, x: &MlxArray, steer: Option<&MlxArray>) -> UniquePtr<MlxArray> {
+        match (self, steer) {
+            (Ffn::Dense(mlp), _) => mlp.forward(x),
+            (Ffn::Moe(moe), Some(alpha)) => moe.steer(moe.forward(x), alpha),
+            (Ffn::Moe(moe), None) => moe.forward(x),
         }
     }
 }
@@ -137,8 +145,9 @@ impl Raon1MiniDecoderLayer {
         streams: &MlxArray,
         cache: &mut Raon1MiniLayerCache,
         masks: &StepMasks,
+        steer: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_with_mixer(streams, |mixer, x| match (mixer, cache) {
+        self.forward_with_mixer(streams, steer, |mixer, x| match (mixer, cache) {
             (Mixer::Rda(attn), Raon1MiniLayerCache::Delta(c)) => {
                 attn.forward(x, c, masks.token_mask.as_deref())
             }
@@ -155,9 +164,11 @@ impl Raon1MiniDecoderLayer {
     /// Both mHC sites and the FFN around `mixer`, which runs the token
     /// mixer (RDA or MLA) on the normalized branch input `x`. The single
     /// sequence forward and the native batched decode differ only there.
+    /// `steer` is the per-row alpha (`None`: every row at 0).
     fn forward_with_mixer(
         &self,
         streams: &MlxArray,
+        steer: Option<&MlxArray>,
         mixer: impl FnOnce(&Mixer, &MlxArray) -> UniquePtr<MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let dt = mlxcel_core::array_dtype(streams);
@@ -174,7 +185,7 @@ impl Raon1MiniDecoderLayer {
         let x = self
             .post_attention_layernorm
             .forward(&raon_mhc::aggregate(&sf, &route.h_pre, dt));
-        let y = self.ffn.forward(&x);
+        let y = self.ffn.forward(&x, steer);
         raon_mhc::mix(&sf, &y, &route, dt)
     }
 
@@ -232,10 +243,15 @@ impl Raon1MiniDecoderLayer {
                 situ_linear_beta: config.activation_situ_linear_beta,
                 has_shared_expert: config.num_shared_experts > 0,
             };
+            let steered = config
+                .reasoning_effort_steering
+                .as_ref()
+                .is_some_and(|s| s.steers_layer(layer_idx));
             Ffn::Moe(RaonMoe::from_weights(
                 weights,
                 &format!("{prefix}.moe"),
                 spec,
+                steered,
             )?)
         } else {
             Ffn::Dense(RaonSituMlp::from_weights(
@@ -287,6 +303,7 @@ pub struct Raon1MiniModel {
     sequence_state: ModelOwnedSequenceState<Raon1MiniLayerCache>,
     kv_cache_layer_modes: KvCacheLayerModes,
     eos_token_ids: Vec<i32>,
+    effort: EffortState,
 }
 
 impl Raon1MiniModel {
@@ -374,6 +391,7 @@ impl Raon1MiniModel {
             sequence_state: ModelOwnedSequenceState::new(internal),
             kv_cache_layer_modes,
             eos_token_ids: config.eos_token_ids(),
+            effort: EffortState::new(config.reasoning_effort_steering.clone())?,
         })
     }
 
@@ -385,10 +403,10 @@ impl Raon1MiniModel {
         make_layer_caches(&self.layers, &self.kv_cache_layer_modes)
     }
 
-    /// Logits for every position of `input_ids` against explicit `caches`.
-    /// `left_pad` (one count per row) masks left padding out of the RDA
-    /// state and the MLA window; the caller passes the same counts for
-    /// every step of those rows.
+    /// Logits for every position of `input_ids` against explicit `caches`,
+    /// every row at the model-default effort. `left_pad` (one count per
+    /// row) masks left padding out of the RDA state and the MLA window; the
+    /// caller passes the same counts for every step of those rows.
     pub fn forward_with_caches(
         &self,
         input_ids: &MlxArray,
@@ -403,8 +421,10 @@ impl Raon1MiniModel {
             }
             None => StepMasks::default(),
         };
+        let rows = mlxcel_core::array_shape(input_ids)[0] as usize;
+        let steer = self.steer_rows(&vec![self.effort.alpha(None); rows]);
         let h = self.embed_tokens.forward(input_ids);
-        self.forward_hidden(h, caches, &masks, None)
+        self.forward_hidden(h, caches, &masks, None, steer.as_deref())
     }
 
     /// Decoder stack, stream reduction, final norm and head over embeddings
@@ -415,6 +435,7 @@ impl Raon1MiniModel {
         caches: &mut [Raon1MiniLayerCache],
         masks: &StepMasks,
         row: Option<usize>,
+        steer: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
@@ -423,7 +444,7 @@ impl Raon1MiniModel {
         );
         let mut streams = raon_mhc::expand_streams(&h, self.streams);
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            streams = layer.forward(&streams, cache, masks);
+            streams = layer.forward(&streams, cache, masks, steer);
         }
         self.head(&streams, row)
     }
@@ -438,17 +459,6 @@ impl Raon1MiniModel {
             Some(head) => head.forward(&h),
             None => self.embed_tokens.as_linear(&h),
         }
-    }
-
-    /// Steering vectors per MoE layer, `(layer, [hidden] float32)`.
-    pub fn reasoning_effort_steering(&self) -> Vec<(usize, &MlxArray)> {
-        self.layers
-            .iter()
-            .filter_map(|layer| match &layer.ffn {
-                Ffn::Moe(moe) => moe.steering_vector().map(|v| (layer.layer_idx, v)),
-                Ffn::Dense(_) => None,
-            })
-            .collect()
     }
 }
 
@@ -478,3 +488,7 @@ mod tests;
 #[cfg(test)]
 #[path = "raon1_mini_block_tests.rs"]
 mod block_tests;
+
+#[cfg(test)]
+#[path = "raon1_mini_steering_tests.rs"]
+pub(crate) mod steering_tests;

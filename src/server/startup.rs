@@ -2317,6 +2317,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             video_num_frames: None,
             video_min_frames: None,
             pre_rendered_prompt_tokens: None,
+            model_reasoning_effort: None,
         },
     )?;
     Ok(())

@@ -428,6 +428,23 @@ impl BatchScheduler {
             }
         };
 
+        // The model-side reasoning effort (#3435), set on every admitted
+        // sequence (`None` is the model default) so a reused or adopted id
+        // never runs at another request's level. Models that do not steer
+        // ignore it. The route already validated the level; a refusal here
+        // still fails only this request, before prefill.
+        if let Err(err) = self
+            .engine
+            .model()
+            .set_sequence_reasoning_effort(Some(seq_id), options.model_reasoning_effort.as_deref())
+        {
+            self.prompt_cache_seq_ctx.remove(&seq_id);
+            self.release_sequence_caches(seq_id);
+            self.engine.model().clear_vlm_fallback_state();
+            let _ = response_tx.send(GenerateEvent::Error(err));
+            return;
+        }
+
         // Resolve the per-sequence input embeddings. On the VLM-sharing path
         // the tokens were already expanded above; if a prefix was adopted
         // (`prefill_start_offset > 0`) the remaining suffix is the appended

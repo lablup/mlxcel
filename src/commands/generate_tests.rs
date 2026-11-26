@@ -25,9 +25,9 @@ use super::{
     generation_stats_from_duration, kv_cache_mode_banner_suffix, memory_preflight_ctx_len,
     repl_drafter, resolve_cli_pipeline_assignments, resolve_cli_prompt,
     resolve_offline_draft_route, should_route_offline_mtp, strip_trailing_eos,
-    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
-    validate_prompt_lookup_args, validate_tensor_parallel_args, validate_xla_cli_image_cardinality,
-    validate_xla_output_audio,
+    validate_cli_reasoning_effort, validate_muse_glimmer_cli_unsupported_options,
+    validate_pipeline_parallel_args, validate_prompt_lookup_args, validate_tensor_parallel_args,
+    validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel::server::chat_template_kwargs::ChatTemplateKwargs;
@@ -1917,4 +1917,32 @@ fn audio_refusal_leaves_other_families_and_audio_free_runs_alone() {
     // An unreadable directory is left to the loader to report.
     let missing = qwen.path().join("missing");
     assert!(super::refuse_audio_without_encoder(&missing, true).is_ok());
+}
+
+#[test]
+fn cli_reasoning_effort_is_checked_against_the_steering_block_before_load() {
+    let steered = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        steered.path().join("config.json"),
+        r#"{"num_hidden_layers": 4, "reasoning_effort_steering": {
+            "alpha": {"none": 0, "low": 0.3, "high": 0.05, "max": 0},
+            "default": "high", "layers": [1, 2]}}"#,
+    )
+    .unwrap();
+    assert!(validate_cli_reasoning_effort(steered.path(), None).is_ok());
+    assert!(validate_cli_reasoning_effort(steered.path(), Some("LOW")).is_ok());
+    let err = validate_cli_reasoning_effort(steered.path(), Some("minimal"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("--reasoning-effort: "), "{err}");
+    assert!(err.contains("none, low, high, max"), "{err}");
+
+    // A model without a steering block leaves the level to its template.
+    let plain = tempfile::tempdir().expect("temp dir");
+    fs::write(
+        plain.path().join("config.json"),
+        r#"{"num_hidden_layers": 4}"#,
+    )
+    .unwrap();
+    assert!(validate_cli_reasoning_effort(plain.path(), Some("minimal")).is_ok());
 }

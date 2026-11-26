@@ -153,6 +153,7 @@ pub(crate) fn build_prompt_cache_request_context(
         root_prompt: renders.root.map(str::to_string),
         root_prefix_tokens: None,
         snapshot_lineage: Default::default(),
+        model_reasoning_effort: chat_model_reasoning_effort(state, live, request),
     })
 }
 
@@ -178,7 +179,7 @@ pub(crate) fn chat_template_signature(
         live.chat_template_kwargs.as_ref(),
         &request.merged_extra_body(),
     );
-    template_sig(
+    let signature = template_sig(
         state.chat_template.template_source(),
         &merged_kwargs,
         request.tool_choice.as_ref(),
@@ -190,7 +191,32 @@ pub(crate) fn chat_template_signature(
         state.prefill_assistant()
             && crate::server::assistant_prefill::resolve(request, true)
                 .is_ok_and(|prefill| prefill.is_some()),
+    );
+    // A steering model's effort changes every hidden state from its first
+    // steered layer on without touching the prompt (#3435), so it is part of
+    // the bucket. Unchanged for every other model.
+    crate::server::prompt_cache::key::fold_model_reasoning_effort(
+        signature,
+        chat_model_reasoning_effort(state, live, request).as_deref(),
     )
+}
+
+/// The model-side reasoning effort of a chat request (#3435), or `None` for a
+/// model that does not steer by it. A level the model refuses yields `None`
+/// here: request preparation refuses the same request with a 400 first.
+pub(crate) fn chat_model_reasoning_effort(
+    state: &AppState,
+    live: &LiveSettings,
+    request: &ChatCompletionRequest,
+) -> Option<String> {
+    crate::server::reasoning_steering::resolve_model_reasoning_effort(
+        &state.chat_template,
+        request,
+        live.chat_template_kwargs.as_ref(),
+        &request.merged_extra_body(),
+    )
+    .ok()
+    .flatten()
 }
 
 /// Cache-key template dimension for the two raw-prompt routes (#1473).
@@ -235,6 +261,9 @@ pub(crate) fn build_raw_prompt_cache_context(
         root_prompt: None,
         root_prefix_tokens: None,
         snapshot_lineage: Default::default(),
+        // Raw prompts run at the model's default effort, under their own
+        // sentinel bucket.
+        model_reasoning_effort: None,
     })
 }
 
@@ -1168,6 +1197,8 @@ pub(crate) async fn stream_asr_completion(
     options.priority = priority;
     options.prompt_cache_ctx = prompt_cache_ctx;
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3's XTML format, #1338) produced the
     // prompt as token ids. Handing them to the provider is what keeps the
     // rendered structure intact: re-tokenizing `prepared.prompt` would have to
