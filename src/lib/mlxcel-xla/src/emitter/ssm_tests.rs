@@ -17,7 +17,7 @@
 //! `examples/xla_ssm_probe.rs`.
 
 use super::builder::{Builder, Precision, Ty};
-use super::config::{SsmConfig, SsmKind};
+use super::config::{BcdtNorm, SsmConfig, SsmKind};
 use super::model::{ProbeMode, emit_ssm_probe, emit_ssm_probe_with};
 use super::ssm;
 use super::ssm_scan::SsmPrefillForm;
@@ -63,7 +63,7 @@ fn ssm_config_validates_structure() {
 
 #[test]
 fn mamba1_config_uses_diagonal_projection_widths() {
-    let c = SsmConfig::tiny_mamba1(false);
+    let c = SsmConfig::tiny_mamba1(BcdtNorm::None);
     c.validate().expect("tiny Mamba1 config is valid");
     assert_eq!(c.d_inner(), 16);
     assert_eq!(c.in_proj_dim(), 32);
@@ -90,10 +90,10 @@ fn ssm_config_rejects_overflow_and_non_finite_parameters() {
     let mut bad = c.clone();
     bad.conv_kernel = usize::MAX;
     assert!(bad.validate().unwrap_err().contains("overflow"));
-    let mut bad = SsmConfig::tiny_mamba1(false);
+    let mut bad = SsmConfig::tiny_mamba1(BcdtNorm::None);
     bad.kind = super::config::SsmKind::Mamba1 {
         dt_rank: usize::MAX,
-        bcdt_norm: false,
+        bcdt_norm: BcdtNorm::None,
     };
     assert!(bad.validate().unwrap_err().contains("x_proj_dim"));
 
@@ -169,7 +169,7 @@ fn ssm_decode_probe_carries_batched_state() {
 
 #[test]
 fn mamba1_probe_uses_bounded_diagonal_scan_and_state_shapes() {
-    let c = SsmConfig::tiny_mamba1(false);
+    let c = SsmConfig::tiny_mamba1(BcdtNorm::None);
     let graph = emit_ssm_probe(&c, 8, 9, ProbeMode::Prefill);
     let sig = signature(&graph);
     for arg in [
@@ -203,10 +203,10 @@ fn mamba1_probe_uses_bounded_diagonal_scan_and_state_shapes() {
 
 #[test]
 fn mamba1_capacity_4096_graph_stays_chunk_bounded_and_log_depth() {
-    let mut c = SsmConfig::tiny_mamba1(false);
+    let mut c = SsmConfig::tiny_mamba1(BcdtNorm::None);
     c.kind = SsmKind::Mamba1 {
         dt_rank: 48,
-        bcdt_norm: false,
+        bcdt_norm: BcdtNorm::None,
     };
     c.head_dim = 1536;
     c.state_size = 16;
@@ -230,8 +230,18 @@ fn mamba1_capacity_4096_graph_stays_chunk_bounded_and_log_depth() {
 
 #[test]
 fn falcon_mamba_probe_adds_weightless_bcdt_norms() {
-    let plain = emit_ssm_probe(&SsmConfig::tiny_mamba1(false), 8, 3, ProbeMode::Decode);
-    let falcon = emit_ssm_probe(&SsmConfig::tiny_mamba1(true), 8, 3, ProbeMode::Decode);
+    let plain = emit_ssm_probe(
+        &SsmConfig::tiny_mamba1(BcdtNorm::None),
+        8,
+        3,
+        ProbeMode::Decode,
+    );
+    let falcon = emit_ssm_probe(
+        &SsmConfig::tiny_mamba1(BcdtNorm::Weightless),
+        8,
+        3,
+        ProbeMode::Decode,
+    );
     assert_eq!(plain.matches("stablehlo.rsqrt").count(), 0);
     assert_eq!(falcon.matches("stablehlo.rsqrt").count(), 3);
 }

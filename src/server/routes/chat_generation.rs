@@ -241,6 +241,8 @@ pub(crate) async fn prepare_chat_generation<'r>(
     options.prompt_cache_ctx = prompt_cache_ctx;
     // Per-request Gemma 4 image soft-token budget, validated by preparation.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3, #1338) produced token ids; handing
     // them over keeps control-token structure out of re-tokenization.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();

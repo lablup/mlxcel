@@ -1,0 +1,29 @@
+{
+  "prompt_text": "tok4 tok17 tok5 tok29 tok11 tok8",
+  "prompt_ids": [
+    4,
+    17,
+    5,
+    29,
+    11,
+    8
+  ],
+  "ref_token_ids": [
+    8,
+    8,
+    22,
+    29,
+    29,
+    7,
+    29,
+    29,
+    24,
+    24,
+    24,
+    22
+  ],
+  "max_new_tokens": 12,
+  "eos_token_id": 31,
+  "dtype": "float32",
+  "oracle": "transformers JambaForCausalLM eager CPU, fresh prefix per step"
+}

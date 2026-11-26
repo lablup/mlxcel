@@ -75,14 +75,18 @@ impl RecurrentLayers {
         let layers = (0..c.recurrent_layer_count())
             .map(|s| {
                 let h = match ssm.kind {
-                    SsmKind::Mamba2 => b.slice(h_all, &[(s, s + 1), (0, hh), (0, p), (0, n)]),
+                    SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
+                        b.slice(h_all, &[(s, s + 1), (0, hh), (0, p), (0, n)])
+                    }
                     SsmKind::Mamba1 { .. } => b.slice(h_all, &[(s, s + 1), (0, d), (0, n)]),
                 };
                 let conv = b.slice(conv_all, &[(s, s + 1), (0, k1), (0, cd)]);
                 if unbatched {
                     SsmLayerState {
                         h: match ssm.kind {
-                            SsmKind::Mamba2 => b.reshape(&h, vec![hh, p, n]),
+                            SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
+                                b.reshape(&h, vec![hh, p, n])
+                            }
                             SsmKind::Mamba1 { .. } => b.reshape(&h, vec![d, n]),
                         },
                         conv: b.reshape(&conv, vec![k1, cd]),
@@ -110,7 +114,7 @@ impl RecurrentLayers {
         let layers = (0..c.recurrent_layer_count())
             .map(|s| {
                 let h = match ssm.kind {
-                    SsmKind::Mamba2 => {
+                    SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
                         b.slice(h_all, &[(0, bsz), (s, s + 1), (0, hh), (0, p), (0, n)])
                     }
                     SsmKind::Mamba1 { .. } => {
@@ -120,7 +124,9 @@ impl RecurrentLayers {
                 let conv = b.slice(conv_all, &[(0, bsz), (s, s + 1), (0, k1), (0, cd)]);
                 SsmLayerState {
                     h: match ssm.kind {
-                        SsmKind::Mamba2 => b.reshape(&h, vec![bsz, hh, p, n]),
+                        SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
+                            b.reshape(&h, vec![bsz, hh, p, n])
+                        }
                         SsmKind::Mamba1 { .. } => b.reshape(&h, vec![bsz, d, n]),
                     },
                     conv: b.reshape(&conv, vec![bsz, k1, cd]),
@@ -299,7 +305,7 @@ pub(super) fn take_ssm_mixer_weights(
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
             })
         }
-        SsmKind::Mamba1 { dt_rank, .. } => {
+        SsmKind::Mamba1 { dt_rank, bcdt_norm } => {
             let x_proj = take_weight(
                 b,
                 decls,
@@ -318,6 +324,12 @@ pub(super) fn take_ssm_mixer_weights(
                 p("ssm.a_log"),
             );
             let d = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.d"));
+            let n = ssm.state_size;
+            let bcdt_norm_w = (bcdt_norm == BcdtNorm::Weighted).then(|| BcdtNormW {
+                dt: take_arg(decls, idx, Ty::f32(vec![dt_rank]), p("ssm.dt_norm_w")),
+                b: take_arg(decls, idx, Ty::f32(vec![n]), p("ssm.b_norm_w")),
+                c: take_arg(decls, idx, Ty::f32(vec![n]), p("ssm.c_norm_w")),
+            });
             SsmMixerW::Mamba1(Mamba1MixerW {
                 in_proj,
                 in_proj_b,
@@ -332,6 +344,34 @@ pub(super) fn take_ssm_mixer_weights(
                 out_proj_b: ssm
                     .use_bias
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
+                bcdt_norm_w,
+            })
+        }
+        SsmKind::Plamo2 { dt_rank } => {
+            let (n, nh) = (ssm.state_size, ssm.n_heads);
+            let bcdt_proj = take_weight(b, decls, idx, c, 2 * n + dt_rank, di, p("ssm.bcdt_proj"));
+            let dt_proj = take_weight(b, decls, idx, c, nh, dt_rank, p("ssm.dt_proj"));
+            let mut vector = |len: usize, name: &str| {
+                take_arg(decls, idx, Ty::f32(vec![len]), p(&format!("ssm.{name}")))
+            };
+            let dt_norm = vector(dt_rank, "dt_norm");
+            let b_norm = vector(n, "b_norm");
+            let c_norm = vector(n, "c_norm");
+            let a_log = vector(nh, "a_log");
+            let d = vector(nh, "d");
+            let dt_bias = vector(nh, "dt_bias");
+            SsmMixerW::Plamo2(ssm::Plamo2MixerW {
+                in_proj,
+                conv_w,
+                bcdt_proj,
+                dt_proj,
+                dt_norm,
+                b_norm,
+                c_norm,
+                a_log,
+                d,
+                dt_bias,
+                out_proj: take_weight(b, decls, idx, c, h, di, p("ssm.out_proj")),
             })
         }
     }
@@ -392,6 +432,9 @@ pub(super) fn emit_recurrent_mixer(
                 SsmMixerW::Mamba1(w) => {
                     ssm::mamba1_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
                 }
+                SsmMixerW::Plamo2(w) => {
+                    ssm::plamo2_mixer_prefill(b, ssm, w, hn, &real_len, &current.h, &current.conv)
+                }
             };
             state.layers[s] = SsmLayerState { h, conv };
             y
@@ -401,6 +444,7 @@ pub(super) fn emit_recurrent_mixer(
             let (y, next) = match w {
                 SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, &row, &state.layers[s]),
                 SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, &row, &state.layers[s]),
+                SsmMixerW::Plamo2(w) => ssm::plamo2_mixer_step(b, ssm, w, &row, &state.layers[s]),
             };
             state.layers[s] = next;
             b.reshape(&y, vec![c.hidden])
@@ -410,6 +454,7 @@ pub(super) fn emit_recurrent_mixer(
             let (y, next) = match w {
                 SsmMixerW::Mamba2(w) => ssm::mamba2_mixer_step(b, ssm, w, hn, &state.layers[s]),
                 SsmMixerW::Mamba1(w) => ssm::mamba1_mixer_step(b, ssm, w, hn, &state.layers[s]),
+                SsmMixerW::Plamo2(w) => ssm::plamo2_mixer_step(b, ssm, w, hn, &state.layers[s]),
             };
             state.layers[s] = next;
             y

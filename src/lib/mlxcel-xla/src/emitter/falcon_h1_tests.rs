@@ -1,6 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
 // SPDX-License-Identifier: Apache-2.0
-use super::config::{Config, MixerKind};
+use super::config::{Config, MixerKind, RopeScaling};
 use super::{emit_decode, emit_decode_ragged, emit_prefill};
 const TINY: &str = include_str!("../../assets/falcon_h1/config.json");
 
@@ -95,6 +95,33 @@ fn falcon_h1_optional_norm_bias_and_auto_head_dimension() {
     v["mamba_norm_before_gate"] = serde_json::json!(false);
     let after = emit_decode(&Config::from_json_str(&v.to_string()).unwrap(), false);
     assert_eq!(before, after, "without a norm, gating always occurs once");
+}
+
+#[test]
+fn falcon_h1_uses_plain_rope() {
+    // The parser spreads the Llama-3.2 base, whose Llama3 scaling only bends
+    // low-frequency bands and so stays invisible to short prompts.
+    let c = Config::from_json_str(TINY).unwrap();
+    assert_eq!(c.rope, RopeScaling::Plain);
+    let mut v: serde_json::Value = serde_json::from_str(TINY).unwrap();
+    v["rope_theta"] = serde_json::json!(1e11);
+    v["rope_scaling"] = serde_json::Value::Null;
+    v["rope_parameters"] = serde_json::json!({"rope_type": "default", "rope_theta": 1e11});
+    let c = Config::from_json_str(&v.to_string()).unwrap();
+    assert_eq!(c.rope, RopeScaling::Plain);
+    assert_eq!(c.rope_theta, 1e11);
+}
+
+#[test]
+fn falcon_h1_rejects_non_default_rope_scaling() {
+    for key in ["rope_parameters", "rope_scaling"] {
+        for field in ["rope_type", "type"] {
+            let mut v: serde_json::Value = serde_json::from_str(TINY).unwrap();
+            v[key] = serde_json::json!({field: "linear", "factor": 4.0});
+            let err = Config::from_json_str(&v.to_string()).unwrap_err();
+            assert!(err.contains(key), "{key}.{field}: {err}");
+        }
+    }
 }
 
 #[test]

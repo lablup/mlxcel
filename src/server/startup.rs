@@ -345,6 +345,9 @@ pub struct ServerStartupConfig {
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
     pub presence_penalty: f32,
+    /// `--presence-penalty` was passed; otherwise `generation_config.json`'s
+    /// value, when present, is the server default (issue #3457).
+    pub presence_penalty_was_set: bool,
     pub frequency_penalty: f32,
 
     // DRY
@@ -816,6 +819,7 @@ impl Default for ServerStartupConfig {
             repeat_last_n: 64,
             repeat_penalty: 1.0,
             presence_penalty: 0.0,
+            presence_penalty_was_set: false,
             frequency_penalty: 0.0,
             dry_multiplier: 0.0,
             dry_base: 1.75,
@@ -1410,6 +1414,19 @@ fn is_muse_glimmer_model_path(model_path: &Path) -> bool {
     )
 }
 
+/// Whether the OpenXLA engine serves this process's requests: an `xla-iree`
+/// build with `MLXCEL_BACKEND=xla`, the provider's own test.
+fn xla_serve_backend_active() -> bool {
+    #[cfg(feature = "xla-iree")]
+    {
+        crate::server::xla_prompt_cache_guard::xla_serve_backend_selected()
+    }
+    #[cfg(not(feature = "xla-iree"))]
+    {
+        false
+    }
+}
+
 fn xla_backend_requested_from_env() -> bool {
     std::env::var("MLXCEL_BACKEND")
         .ok()
@@ -1974,7 +1991,7 @@ pub(super) fn build_server_config(
         ),
         default_seed: startup.seed,
         default_frequency_penalty: startup.frequency_penalty,
-        default_presence_penalty: startup.presence_penalty,
+        default_presence_penalty: sampling_defaults.presence_penalty,
         default_dry_multiplier: startup.dry_multiplier,
         default_dry_base: sanitize_dry_base_default(startup.dry_base),
         default_dry_allowed_length: startup.dry_allowed_length,
@@ -2127,6 +2144,7 @@ pub(super) struct ResolvedGenerationSamplingDefaults {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: i32,
+    pub presence_penalty: f32,
 }
 
 pub(super) fn resolve_generation_sampling_defaults(
@@ -2149,6 +2167,28 @@ pub(super) fn resolve_generation_sampling_defaults(
         } else {
             config_defaults.top_k.unwrap_or(startup.top_k)
         },
+        presence_penalty: resolve_presence_penalty_default(
+            startup,
+            config_defaults.presence_penalty,
+        ),
+    }
+}
+
+/// The server's default presence penalty: `--presence-penalty` when passed,
+/// else `generation_config.json`'s (Transformers applies it on every
+/// `generate` step), else the flag's 0.0 default. A request's own
+/// `presence_penalty` still overrides it (issue #3457).
+fn resolve_presence_penalty_default(startup: &ServerStartupConfig, config: Option<f32>) -> f32 {
+    match config {
+        Some(value) if !startup.presence_penalty_was_set => {
+            tracing::info!(
+                "Default presence_penalty {value} from {}/generation_config.json \
+                 (pass --presence-penalty to override)",
+                startup.model_path.display()
+            );
+            value
+        }
+        _ => startup.presence_penalty,
     }
 }
 
@@ -2317,6 +2357,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             video_num_frames: None,
             video_min_frames: None,
             pre_rendered_prompt_tokens: None,
+            model_reasoning_effort: None,
         },
     )?;
     Ok(())
@@ -4128,6 +4169,18 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             );
         }
     }
+    // A reasoning-effort steering model needs the per-request level, which
+    // only the batch scheduler carries (issue #3457).
+    super::reasoning_steering_startup_guard::refuse_reasoning_effort_steering_on_unsteered_paths(
+        &startup.model_path,
+        super::reasoning_steering_startup_guard::ServePaths {
+            pipeline_parallel: config.pipeline_parallel_runtime.is_some()
+                || distributed.remote_stage_service.is_some()
+                || startup.pp_peer,
+            serving_mode: config.serving_mode,
+            xla: xla_serve_backend_active(),
+        },
+    )?;
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }

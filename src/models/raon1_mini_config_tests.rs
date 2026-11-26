@@ -65,31 +65,24 @@ fn unsupported_configs_fail_by_name() {
         .unwrap(),
     )
     .unwrap();
-    let cases: [(&str, serde_json::Value, &str); 12] = [
+    let cases: [(&str, serde_json::Value, &str); 10] = [
         (
-            "raon_global_scaled_linears",
-            serde_json::json!(["model.layers.1.moe.switch_mlp.gate_proj"]),
-            "raon_global_scaled_linears",
-        ),
-        (
-            "raon_merged_gate_up",
-            serde_json::json!(true),
-            "raon_merged_gate_up",
+            "quantization",
+            serde_json::json!({"group_size": 64, "bits": 4}),
+            "nvfp4 with group_size 16",
         ),
         (
             "quantization",
-            serde_json::json!({"group_size": 16, "bits": 4, "mode": "nvfp4"}),
-            "`quantization` block",
+            serde_json::json!({"group_size": 16, "bits": 4, "mode": "nvfp4",
+                "lm_head": {"group_size": 32, "bits": 4, "mode": "mxfp4"}}),
+            "MLX quantization entry lm_head",
         ),
         (
-            "raon_fused_mhc_decode",
-            serde_json::json!(true),
-            "Raon-1-mini-mlx",
-        ),
-        (
-            "model_file",
-            serde_json::json!("raon_mlx_model.py"),
-            "#3437",
+            "quantization_config",
+            serde_json::json!({"quant_method": "modelopt_fp4", "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {"lm_head": {"quant_algo": "FP8"},
+                    "model.layers.0.mlp.up_proj": {"quant_algo": "NVFP4", "group_size": 16}}}),
+            "layer lm_head uses quant_algo \"FP8\"",
         ),
         ("hidden_act", serde_json::json!("silu"), "hidden_act"),
         (
@@ -176,4 +169,66 @@ fn oversized_or_zero_geometry_fails_by_name() {
             .unwrap_err()
             .contains("cover layer 4")
     );
+}
+
+/// The configs of both published NVFP4 exports parse (#3437): the vendor
+/// MLX export with its runtime switches and `quantization` overrides, and the
+/// ModelOpt mixed-precision export. Each gives its linears the NVFP4 layout.
+#[test]
+fn published_nvfp4_export_configs_parse() {
+    let base: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/models/raon1_mini_config_fixture.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let original = Raon1MiniConfig::from_json_str(&base.to_string()).unwrap();
+    assert_eq!(original.dense_quant(), (64, 4));
+
+    let mut mlx = base.clone();
+    let object = mlx.as_object_mut().unwrap();
+    object.remove("quantization_config");
+    object.insert(
+        "quantization".into(),
+        serde_json::json!({
+            "group_size": 16, "bits": 4, "mode": "nvfp4",
+            "model.layers.1.moe.switch_mlp.gate_proj":
+                {"group_size": 16, "bits": 4, "mode": "nvfp4", "global_scale": true},
+            "lm_head": {"group_size": 32, "bits": 8, "mode": "mxfp8"}
+        }),
+    );
+    for (key, value) in [
+        (
+            "raon_global_scaled_linears",
+            serde_json::json!(["model.layers.0.mlp.up_proj"]),
+        ),
+        ("raon_merged_gate_up", serde_json::json!(true)),
+        ("raon_fused_mhc_decode", serde_json::json!(true)),
+        ("raon_fp32_export_head", serde_json::json!(false)),
+        ("model_file", serde_json::json!("raon_mlx_model.py")),
+    ] {
+        object.insert(key.into(), value);
+    }
+    let config = Raon1MiniConfig::from_json_str(&mlx.to_string()).expect("MLX export parses");
+    assert_eq!(config.dense_quant(), (16, 4));
+
+    let mut modelopt = base.clone();
+    modelopt["quantization_config"] = serde_json::json!({
+        "quant_method": "modelopt_fp4", "quant_algo": "MIXED_PRECISION", "group_size": 16,
+        "kv_cache_scheme": null, "ignore": ["model.layers.1.moe.gate"],
+        "quantized_layers": {
+            "model.layers.1.moe.experts.0.gate_proj": {"quant_algo": "NVFP4", "group_size": 16},
+            "model.layers.0.self_attn.q_proj": {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+            "lm_head": {"quant_algo": "MXFP8", "group_size": 32}
+        }
+    });
+    let config =
+        Raon1MiniConfig::from_json_str(&modelopt.to_string()).expect("ModelOpt export parses");
+    assert_eq!(config.dense_quant(), (16, 4));
+
+    modelopt["quantization_config"]["kv_cache_scheme"] = serde_json::json!({"type": "float"});
+    let err = Raon1MiniConfig::from_json_str(&modelopt.to_string()).unwrap_err();
+    assert!(err.contains("kv_cache_scheme"), "{err}");
 }

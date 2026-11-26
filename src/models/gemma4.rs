@@ -4825,10 +4825,18 @@ fn trimmed_family_row_mask(
 /// group's weights 4-bit float at group size 16, the `{weight, weight_scale,
 /// weight_scale_2}` triplet layout the sanitize layer repacks at load.
 ///
+/// A ModelOpt `MIXED_PRECISION` export (`quant_method` `modelopt_fp4`) counts
+/// too when every `quantized_layers` entry is NVFP4, W4A16_NVFP4 or MXFP8
+/// ([`crate::models::modelopt_mixed_precision`], issue #3437).
+///
 /// Used by: [`validate_quantization_scheme`], and `load_text_weights` /
 /// `modelopt_nvfp4_group_size` in `src/models/sanitize.rs`, which apply the
-/// same repack to every text family (issue #2351)
+/// same repack to every text family (issue #2351), and Raon1Mini
 pub(crate) fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
+    use crate::models::modelopt_mixed_precision as mixed;
+    if mixed::is_mixed_precision_declaration(obj) {
+        return mixed::mixed_precision_mxfp8_layers(obj).is_ok();
+    }
     let method = obj
         .get("quant_method")
         .and_then(|v| v.as_str())
@@ -4928,7 +4936,7 @@ pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result
             let norm = raw.trim().to_ascii_lowercase();
             let accepted = norm.is_empty()
                 || SUPPORTED_QUANT_SCHEMES.contains(&norm.as_str())
-                || (norm == "modelopt" && is_modelopt_nvfp4(obj));
+                || (matches!(norm.as_str(), "modelopt" | "modelopt_fp4") && is_modelopt_nvfp4(obj));
             if !accepted {
                 return Err(unsupported(raw, location, "quant_method"));
             }

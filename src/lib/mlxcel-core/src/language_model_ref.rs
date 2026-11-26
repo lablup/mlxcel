@@ -166,6 +166,18 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).release_sequence_state_by_id(seq_id)
     }
 
+    fn set_sequence_reasoning_effort(
+        &self,
+        seq_id: Option<SequenceId>,
+        level: Option<&str>,
+    ) -> Result<(), String> {
+        (**self).set_sequence_reasoning_effort(seq_id, level)
+    }
+
+    fn sequence_reasoning_effort(&self, seq_id: SequenceId) -> Option<String> {
+        (**self).sequence_reasoning_effort(seq_id)
+    }
+
     fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
         (**self).rope_table_regime(total_prompt_len)
     }

@@ -1,0 +1,97 @@
+== cuda-falcon-h1: MLXCEL_FALCON_H1_FIXTURES=/tmp/claude-1000/-home-inureyes-Development-mlxcel-2/bfebfc55-0873-4744-85a3-61ca7426ba3f/scratchpad/fx MLXCEL_FALCON_H1_MODEL=/tmp/epic564-models/falcon-h1 MLXCEL_FALCON_H1_ORACLE=spike/openxla/falcon_h1_reference/hf-f32-oracle.json cargo test --profile test-fast --features xla-iree,test-utils --test xla_falcon_h1 -- --ignored --nocapture --test-threads=1
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4685:5
+     |
+4685 | /     pub fn prefill_prepared_slot_logits(
+4686 | |         &mut self,
+4687 | |         slot: usize,
+4688 | |         prepared: &PreparedIreePrefill,
+4689 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4822:5
+     |
+4822 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4823 | |         &mut self,
+4824 | |         slot: usize,
+4825 | |         prepared: &PreparedIreePrefill,
+4826 | |         deepstack: &PreparedDeepStack,
+4827 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedDeepStack` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4822:5
+     |
+4822 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4823 | |         &mut self,
+4824 | |         slot: usize,
+4825 | |         prepared: &PreparedIreePrefill,
+4826 | |         deepstack: &PreparedDeepStack,
+4827 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedDeepStack` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared_deepstack.rs:340:1
+     |
+ 340 | pub(crate) struct PreparedDeepStack {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4974:5
+     |
+4974 | /     pub fn prefill_gemma3n_prepared_slot_logits(
+4975 | |         &mut self,
+4976 | |         slot: usize,
+4977 | |         prepared: &PreparedIreePrefill,
+4978 | |         dense_ple: &Gemma3nDensePle,
+4979 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mlxcel-xla` (lib) generated 4 warnings
+
+running 3 tests
+test falcon_h1_hf_synthetic_parity ... ok
+test falcon_h1_original_checkpoint_long_positions ... prefix   32 step 0 position   31: max_abs=3.147125e-5 argmax_match=true
+prefix  512 step 0 position  511: max_abs=3.862381e-5 argmax_match=true
+prefix 2048 step 0 position 2047: max_abs=4.959106e-5 argmax_match=true
+prefix 3584 step 0 position 3583: max_abs=9.059906e-5 argmax_match=true
+prefix   32 step 1 position   32: max_abs=3.051758e-5 argmax_match=true
+prefix  512 step 1 position  512: max_abs=2.670288e-5 argmax_match=true
+prefix 2048 step 1 position 2048: max_abs=6.580353e-5 argmax_match=true
+prefix 3584 step 1 position 3584: max_abs=7.438660e-5 argmax_match=true
+prefix   32 step 2 position   33: max_abs=9.727478e-5 argmax_match=true
+prefix  512 step 2 position  513: max_abs=4.196167e-5 argmax_match=true
+prefix 2048 step 2 position 2049: max_abs=4.959106e-5 argmax_match=true
+prefix 3584 step 2 position 3585: max_abs=5.245209e-5 argmax_match=true
+prefix   32 step 3 position   34: max_abs=2.479553e-5 argmax_match=true
+prefix  512 step 3 position  514: max_abs=5.722046e-5 argmax_match=true
+prefix 2048 step 3 position 2050: max_abs=4.386902e-5 argmax_match=true
+prefix 3584 step 3 position 3586: max_abs=5.531311e-5 argmax_match=true
+Falcon-H1 long-position logits match on cuda up to position 3584
+ok
+test falcon_h1_original_checkpoint_oracle_tokens ... Falcon-H1 40 oracle tokens match on cuda
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.25s
+
+exit=0

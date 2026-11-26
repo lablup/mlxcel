@@ -39,9 +39,11 @@ impl Raon1MiniModel {
             self.sequence_state
                 .replace_internal(self.make_layer_caches());
         }
+        let rows = mlxcel_core::array_shape(input_ids)[0] as usize;
+        let steer = self.steer_rows(&vec![self.reasoning_effort_alpha(seq_id); rows]);
         let run = |caches: &mut [Raon1MiniLayerCache]| {
             let h = self.embed_tokens.forward(input_ids);
-            self.forward_hidden(h, caches, &StepMasks::default(), row)
+            self.forward_hidden(h, caches, &StepMasks::default(), row, steer.as_deref())
         };
         match seq_id {
             Some(id) => self
@@ -53,11 +55,12 @@ impl Raon1MiniModel {
     }
 
     /// One row at a time against each row's own state (the fallback when
-    /// the rows cannot share one batched step).
+    /// the rows cannot share one batched step), each at its own alpha.
     fn forward_rows_with_states(
         &self,
         input_ids: &MlxArray,
         rows: &mut [Vec<Raon1MiniLayerCache>],
+        ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let outputs: Vec<_> = rows
@@ -66,8 +69,9 @@ impl Raon1MiniModel {
             .map(|(row, caches)| {
                 let r = row as i32;
                 let input = mlxcel_core::slice(input_ids, &[r, 0], &[r + 1, shape[1]]);
+                let steer = self.steer_sequences(&ids[row..=row]);
                 let h = self.embed_tokens.forward(&input);
-                self.forward_hidden(h, caches, &StepMasks::default(), None)
+                self.forward_hidden(h, caches, &StepMasks::default(), None, steer.as_deref())
             })
             .collect();
         mlxcel_core::concatenate_many(&outputs.iter().map(|o| &**o).collect::<Vec<_>>(), 0)
@@ -150,39 +154,46 @@ impl Raon1MiniModel {
     /// are stacked into one `[B, ...]` state for the step and split back,
     /// and the MLA layers read each row's own latent cache, so the weights
     /// (128 experts, the 260K-row head) are read once per step instead of
-    /// once per row. The caller has checked [`Self::batch_states_uniform`].
+    /// once per row. Each row is steered at its own sequence's alpha. The
+    /// caller has checked [`Self::batch_states_uniform`].
     fn forward_batched_decode_with_caches(
         &self,
         input_ids: &MlxArray,
         rows: &mut [Vec<Raon1MiniLayerCache>],
+        ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
+        let steer = self.steer_sequences(ids);
+        let _rows = super::speculative::row_scope(false);
         let h = self.embed_tokens.forward(input_ids);
         let mut streams = super::raon_mhc::expand_streams(&h, self.streams);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            streams = layer.forward_with_mixer(&streams, |mixer, x| match mixer {
-                Mixer::Rda(attn) => {
-                    let states = Self::delta_states(rows, layer_idx);
-                    let offsets: Vec<i32> = states.iter().map(|s| s.offset).collect();
-                    let mut stacked = Self::stack_delta(&states);
-                    let out = attn.forward(x, &mut stacked, None);
-                    for (row, state) in rows.iter_mut().zip(Self::split_delta(&stacked, &offsets)) {
-                        row[layer_idx] = Raon1MiniLayerCache::Delta(state);
+            streams =
+                layer.forward_with_mixer(&streams, steer.as_deref(), |mixer, x| match mixer {
+                    Mixer::Rda(attn) => {
+                        let states = Self::delta_states(rows, layer_idx);
+                        let offsets: Vec<i32> = states.iter().map(|s| s.offset).collect();
+                        let mut stacked = Self::stack_delta(&states);
+                        let out = attn.forward(x, &mut stacked, None);
+                        for (row, state) in
+                            rows.iter_mut().zip(Self::split_delta(&stacked, &offsets))
+                        {
+                            row[layer_idx] = Raon1MiniLayerCache::Delta(state);
+                        }
+                        out
                     }
-                    out
-                }
-                Mixer::Mla(attn) => {
-                    let mut caches: Vec<&mut KVCache> = rows
-                        .iter_mut()
-                        .map(|row| match &mut row[layer_idx] {
-                            Raon1MiniLayerCache::Attn(cache) => cache,
-                            Raon1MiniLayerCache::Delta(_) => {
-                                unreachable!("preflighted cache kind")
-                            }
-                        })
-                        .collect();
-                    attn.forward_batched_decode(x, &mut caches)
-                }
-            });
+                    Mixer::Mla(attn) => {
+                        let mut caches: Vec<&mut KVCache> = rows
+                            .iter_mut()
+                            .map(|row| match &mut row[layer_idx] {
+                                Raon1MiniLayerCache::Attn(cache) => cache,
+                                Raon1MiniLayerCache::Delta(_) => {
+                                    unreachable!("preflighted cache kind")
+                                }
+                            })
+                            .collect();
+                        attn.forward_batched_decode(x, &mut caches)
+                    }
+                });
         }
         self.head(&streams, None)
     }
@@ -249,6 +260,24 @@ impl LanguageModel for Raon1MiniModel {
         self.eos_token_ids.clone()
     }
 
+    /// Lent to the DFlash2 drafter, which embeds its block with the target's
+    /// table (#3436).
+    fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+
+    /// Lent to the DFlash2 drafter, which scores its block with the target's
+    /// head (#3436).
+    fn lm_head_module(&self) -> Option<mlxcel_core::layers::UnifiedLinear> {
+        self.lm_head
+            .as_ref()
+            .map(mlxcel_core::layers::UnifiedLinear::clone_shared)
+    }
+
+    fn residual_stream_count(&self) -> Option<usize> {
+        Some(self.streams)
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         self.sequence_state
             .replace_internal(self.make_layer_caches());
@@ -291,13 +320,29 @@ impl LanguageModel for Raon1MiniModel {
             .replace_internal(self.make_layer_caches());
     }
 
+    /// A fresh sequence runs at the model default until it sets its own
+    /// effort, so a reused id never inherits a finished request's level.
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.forget_reasoning_effort(seq_id);
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_layer_caches());
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.forget_reasoning_effort(seq_id);
         self.sequence_state.release_sequence_state(seq_id);
+    }
+
+    fn set_sequence_reasoning_effort(
+        &self,
+        seq_id: Option<SequenceId>,
+        level: Option<&str>,
+    ) -> Result<(), String> {
+        self.set_reasoning_effort(seq_id, level)
+    }
+
+    fn sequence_reasoning_effort(&self, seq_id: SequenceId) -> Option<String> {
+        self.reasoning_effort_level(seq_id)
     }
 
     fn forward_with_sequence_id(
@@ -363,9 +408,9 @@ impl LanguageModel for Raon1MiniModel {
                 .with_batched_sequence_states(ids, |rows| {
                     self.validate_batch_cache_layout(rows);
                     if shape[1] != 1 || mask.is_some() || !self.batch_states_uniform(rows) {
-                        self.forward_rows_with_states(input_ids, rows)
+                        self.forward_rows_with_states(input_ids, rows, ids)
                     } else {
-                        self.forward_batched_decode_with_caches(input_ids, rows)
+                        self.forward_batched_decode_with_caches(input_ids, rows, ids)
                     }
                 })
                 .unwrap_or_else(|err| panic!("raon1_mini batched decode: {err}"))

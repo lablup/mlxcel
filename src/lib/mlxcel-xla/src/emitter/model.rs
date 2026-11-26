@@ -35,13 +35,16 @@
 
 use super::builder::{Builder, Precision, ProjectionLayout, Ty, Val, precision_from_env};
 use super::config::{
-    Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig, SsmKind,
+    BcdtNorm, Config, DeepStackConfig, ExpertAct, MoeScoring, MropeLayout, NormStyle, SsmConfig,
+    SsmKind,
 };
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
-use super::ssm::{self, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
+use super::ssm::{self, BcdtNormW, Mamba1MixerW, Mamba2MixerW, SsmLayerState, SsmMixerW};
 use super::ssm_scan::SsmPrefillForm;
 
+#[path = "model_plamo2.rs"]
+mod plamo2;
 #[path = "model_recurrent.rs"]
 mod recurrent;
 use recurrent::RecurrentLayers;
@@ -684,10 +687,9 @@ fn take_layer_weights(
     c: &Config,
     li: usize,
 ) -> LayerW {
-    if matches!(
-        c.layer_mixer(li),
-        super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
-    ) {
+    // A pure Mamba block (no FFN) has its own short weight list. A recurrent
+    // layer with an FFN (Jamba) takes the general list below, its mixer last.
+    if c.is_ffn_free_ssm_layer(li) {
         return recurrent::take_ssm_layer_weights(b, decls, idx, c, li);
     }
     let h = c.hidden;
@@ -702,7 +704,7 @@ fn take_layer_weights(
     let gated = !c.dense_mlp;
     let has_ffn = c.layer_has_ffn(li);
     let has_attn = c.attn_layer_index(li).is_some();
-    let has_post = !c.parallel_block && has_ffn && has_attn;
+    let has_post = c.layer_has_post_mixer_norm(li);
     let moe_layer = c.is_moe_layer(li);
     // The big linear projections take the packed-quantized path when enabled
     // (issue #516: `take_weight` declares packed+scales+biases and dequants in the
@@ -780,15 +782,18 @@ fn take_layer_weights(
     };
     // q/k norm weights, after the biases. Per-head (Qwen3 / Gemma3) sizes them
     // `[head_dim]`; flat (OLMo2/3) sizes them `[n_q*head_dim]` / `[n_kv*head_dim]`.
-    let (q_norm, k_norm) = match c.qk_norm {
+    // PLaMo 2 instead scales each head by its own `[heads, head_dim]` row.
+    let (q_norm, k_norm) = match c.qk_norm.filter(|_| has_attn) {
         Some(qn) => {
-            let (qsz, ksz) = if qn.per_head {
-                (c.head_dim, c.head_dim)
+            let (qsz, ksz) = if c.plamo2.is_some() {
+                (vec![c.n_q, c.head_dim], vec![c.n_kv, c.head_dim])
+            } else if qn.per_head {
+                (vec![c.head_dim], vec![c.head_dim])
             } else {
-                (qd, kv)
+                (vec![qd], vec![kv])
             };
-            let qn_w = take_arg(decls, idx, Ty::f32(vec![qsz]), p("q_norm"));
-            let kn_w = take_arg(decls, idx, Ty::f32(vec![ksz]), p("k_norm"));
+            let qn_w = take_arg(decls, idx, Ty::f32(qsz), p("q_norm"));
+            let kn_w = take_arg(decls, idx, Ty::f32(ksz), p("k_norm"));
             (Some(qn_w), Some(kn_w))
         }
         None => (None, None),
@@ -879,7 +884,7 @@ fn take_layer_weights(
             down: modal(decls, idx, "down", inter, h),
         }
     });
-    LayerW {
+    let lw = LayerW {
         down,
         gate,
         in_ln,
@@ -906,10 +911,11 @@ fn take_layer_weights(
         moe,
         phi4_lora,
         ssm: c
-            .falcon_h1
-            .as_ref()
-            .map(|_| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
-    }
+            .layer_mixer(li)
+            .is_recurrent()
+            .then(|| recurrent::take_ssm_mixer_weights(b, decls, idx, c, li)),
+    };
+    plamo2::offset_layer_norms(b, c, lw)
 }
 
 /// Append a MoE layer's expert-bank args (issue #500): the router `[E, H]`, the
@@ -1013,6 +1019,7 @@ fn build_arg_schema(b: &mut Builder, c: &Config, scalar_abi: bool) -> (Vec<ArgDe
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm = plamo2::offset_final_norm(b, c, final_norm);
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
@@ -1372,6 +1379,9 @@ fn apply_qk_norm(
     let Some(qn) = c.qk_norm else {
         return (q, kk);
     };
+    if c.plamo2.is_some() {
+        return plamo2::head_scaled_qk_norm(b, lw, q, kk);
+    }
     let qw = lw
         .q_norm
         .as_ref()
@@ -3040,11 +3050,23 @@ fn emit_transformer_layer(
     vcache: &mut Val,
     state: &mut RecurrentLayers,
 ) -> Val {
+    if c.is_ffn_free_ssm_layer(li) {
+        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+    }
     if matches!(
         c.layer_mixer(li),
         super::config::MixerKind::Mamba2 | super::config::MixerKind::Mamba1
     ) {
-        return recurrent::emit_recurrent_block(b, c, k, lw, li, x, layout, state);
+        // Jamba: `x + mixer(norm(x))`, then a separately normed dense or MoE FFN.
+        let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
+        let mixed = recurrent::emit_recurrent_mixer(b, c, lw, li, &hn, layout, state);
+        let x1 = b.add(x, &mixed);
+        let hn2 = mlp_pre_norm(b, c, k, layout, &x1, lw);
+        let down = emit_ffn_body(b, c, k, layout, &hn2, lw, li);
+        return b.add(&x1, &down);
+    }
+    if c.layer_mixer(li) == super::config::MixerKind::Plamo2Mamba {
+        return plamo2::emit_mamba_block(b, c, k, lw, li, x, layout, state);
     }
     if c.layer_mixer(li) == super::config::MixerKind::ParallelMamba2Attention {
         let (hn, attn) = emit_attention(b, c, k, lw, li, x, layout, kcache, vcache);
@@ -3447,6 +3469,7 @@ fn build_batched_arg_schema(
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm = plamo2::offset_final_norm(b, c, final_norm);
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
@@ -3829,6 +3852,7 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm = plamo2::offset_final_norm(b, c, final_norm);
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
@@ -4194,6 +4218,7 @@ fn build_prefill_arg_schema(
         Ty::f32(vec![h]),
         "params['final_norm']".into(),
     );
+    let final_norm = plamo2::offset_final_norm(b, c, final_norm);
     let final_norm_bias = take_final_norm_bias(&mut decls, &mut idx, c);
     let lm_head = take_lm_head(&mut decls, &mut idx, c, b);
 
@@ -5049,12 +5074,17 @@ pub(crate) fn emit_ssm_probe_with(
                 out_proj_b,
             })
         }
-        SsmKind::Mamba1 { dt_rank, .. } => {
+        SsmKind::Mamba1 { dt_rank, bcdt_norm } => {
             let x_proj = arg(vec![dt_rank + 2 * n, di], "x_proj");
             let dt_proj = arg(vec![di, dt_rank], "dt_proj");
             let dt_proj_b = arg(vec![di], "dt_proj_b");
             let a_log = arg(vec![di, n], "a_log");
             let d = arg(vec![di], "d");
+            let bcdt_norm_w = (bcdt_norm == BcdtNorm::Weighted).then(|| BcdtNormW {
+                dt: arg(vec![dt_rank], "dt_norm_w"),
+                b: arg(vec![n], "b_norm_w"),
+                c: arg(vec![n], "c_norm_w"),
+            });
             let out_proj = arg(vec![hidden, di], "out_proj");
             let out_proj_b = c.use_bias.then(|| arg(vec![hidden], "out_proj_b"));
             SsmMixerW::Mamba1(Mamba1MixerW {
@@ -5069,8 +5099,22 @@ pub(crate) fn emit_ssm_probe_with(
                 d,
                 out_proj,
                 out_proj_b,
+                bcdt_norm_w,
             })
         }
+        SsmKind::Plamo2 { dt_rank } => SsmMixerW::Plamo2(ssm::Plamo2MixerW {
+            in_proj,
+            conv_w,
+            bcdt_proj: arg(vec![2 * n + dt_rank, di], "bcdt_proj"),
+            dt_proj: arg(vec![hh, dt_rank], "dt_proj"),
+            dt_norm: arg(vec![dt_rank], "dt_norm"),
+            b_norm: arg(vec![n], "b_norm"),
+            c_norm: arg(vec![n], "c_norm"),
+            a_log: arg(vec![hh], "a_log"),
+            d: arg(vec![hh], "d"),
+            dt_bias: arg(vec![hh], "dt_bias"),
+            out_proj: arg(vec![hidden, di], "out_proj"),
+        }),
     };
     let x = arg(vec![t, hidden], "x");
 
@@ -5084,7 +5128,7 @@ pub(crate) fn emit_ssm_probe_with(
                 "ssm.real_len".into(),
             );
             let h_shape = match c.kind {
-                SsmKind::Mamba2 => vec![hh, p, n],
+                SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => vec![hh, p, n],
                 SsmKind::Mamba1 { .. } => vec![di, n],
             };
             let h0 = take_arg(&mut decls, &mut idx, Ty::f32(h_shape), "ssm.h0".into());
@@ -5101,6 +5145,9 @@ pub(crate) fn emit_ssm_probe_with(
                 SsmMixerW::Mamba1(w) => {
                     ssm::mamba1_mixer_prefill(&mut b, c, w, &x, &real_len, &h0, &conv0)
                 }
+                SsmMixerW::Plamo2(w) => {
+                    ssm::plamo2_mixer_prefill(&mut b, c, w, &x, &real_len, &h0, &conv0)
+                }
             }
         }
         ProbeMode::Decode => {
@@ -5113,6 +5160,9 @@ pub(crate) fn emit_ssm_probe_with(
                 }
                 SsmMixerW::Mamba1(w) => {
                     ssm::mamba1_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
+                }
+                SsmMixerW::Plamo2(w) => {
+                    ssm::plamo2_mixer_step(&mut b, c, w, &x, &SsmLayerState { h, conv })
                 }
             };
             (y, st.h, st.conv)

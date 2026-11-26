@@ -1,0 +1,109 @@
+{
+  "seed": 3352,
+  "torch": "2.12.1+cpu",
+  "transformers": "5.12.1",
+  "layers_block_type": [
+    "mamba",
+    "attention",
+    "mamba",
+    "attention"
+  ],
+  "layers_num_experts": [
+    4,
+    1,
+    1,
+    4
+  ],
+  "experts": 4,
+  "top_k": 2,
+  "routing": "softmax over all experts, top-k, no renormalization (HF JambaSparseMoeBlock)",
+  "selected_expert_sets_per_moe_block": {
+    "0": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        2,
+        3
+      ]
+    ],
+    "3": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        2
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  "dt_b_c_norm_weight_logit_delta": 0.2219715118408203,
+  "topk_renormalization_logit_delta": 0.02032315731048584,
+  "tie_word_embeddings": true,
+  "raw_prompts": [
+    [
+      3,
+      17,
+      5,
+      29,
+      11,
+      8
+    ],
+    [
+      21,
+      4,
+      4,
+      19,
+      26
+    ],
+    [
+      9
+    ],
+    [
+      14,
+      10,
+      27,
+      6,
+      6,
+      12,
+      25
+    ]
+  ],
+  "steps_per_raw_prompt": 8,
+  "tokenizer": "WordLevel with unique IDs, shared by hf/ and mlx/",
+  "eos_absent_from_reference": true
+}

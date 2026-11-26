@@ -38,7 +38,9 @@
 //! - **Hybrid attention+SSM** (Jamba, NemotronH, RecurrentGemma, Qwen3-Next):
 //!   only the attention layers hold a context-proportional KV cache; the
 //!   recurrent/Mamba layers carry an O(1) state, negligible for budgeting. The
-//!   flat formula counts every layer as attention (*overcount*).
+//!   flat formula counts every layer as attention (*overcount*). Raon-1 is the
+//!   exception: its RDA layers' f32 delta-rule state is about 48.8 MB per
+//!   sequence, so `total_bytes` adds it once per sequence (issue #3457).
 //! - **Pure SSM / attention-free** (Mamba, Mamba2, Z1T): no KV cache at all
 //!   (*phantom* KV). Z1T keeps an O(1) AFT-conv pool and conv window per layer.
 //!
@@ -322,6 +324,43 @@ fn kda_hybrid_mla_layers(text: &Value, num_layers: u64) -> Option<u64> {
         .filter(|layer| (1..=num_layers).contains(layer))
         .collect();
     Some(num_layers.saturating_sub(kda.len() as u64))
+}
+
+/// Per-sequence bytes of a Raon-1 stack's RDA recurrent state, or `None`
+/// without an `rda_config` (issue #3457). Each RDA layer keeps a float32
+/// `[H, D, D]` delta-rule state and a `[K - 1, 3 * H * D]` raw conv window in
+/// the bf16 activation dtype (`models::raon_rda::RaonDeltaCache`). Unlike the
+/// O(1) state of the other hybrids this is not negligible: 48.8 MB per
+/// sequence on Raon-1 mini, against 2.4 MB of latent per 1k tokens. It does
+/// not grow with the context, so it enters `total_bytes` only.
+///
+/// `num_heads` / `head_dim` fall back to the attention fields and the kernel
+/// to 4, as `Raon1MiniConfig` resolves them.
+fn rda_recurrent_state_bytes(text: &Value, num_layers: u64) -> Option<u64> {
+    let rda = text.get("rda_config")?;
+    let layers: std::collections::HashSet<u64> = rda
+        .get("rda_layers")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_u64)
+        .filter(|layer| (1..=num_layers).contains(layer))
+        .collect();
+    let heads = get_u64(rda, &["num_heads"]).or_else(|| get_u64(text, NUM_HEADS_KEYS))?;
+    let head_dim = get_u64(rda, &["head_dim"])
+        .or_else(|| get_u64(text, HEAD_DIM_KEYS))
+        .or_else(|| get_u64(text, HIDDEN_SIZE_KEYS).and_then(|h| h.checked_div(heads)))?;
+    let kernel = get_u64(rda, &["conv_kernel_size"]).unwrap_or(4);
+    let state = heads
+        .saturating_mul(head_dim)
+        .saturating_mul(head_dim)
+        .saturating_mul(4);
+    let conv = kernel
+        .saturating_sub(1)
+        .saturating_mul(3)
+        .saturating_mul(heads)
+        .saturating_mul(head_dim)
+        .saturating_mul(2);
+    Some((layers.len() as u64).saturating_mul(state.saturating_add(conv)))
 }
 
 /// HF `Gemma3TextConfig` defaults for the fields a real `text_config` often
@@ -967,7 +1006,7 @@ fn estimate_kv_arch_inner(
     let (mut groups, kind) = classify(&text, model_type, v2_latent, v2_latent_bits)?;
     // The detail line describes the architecture, so it keeps the windows even
     // when the byte figure below ignores them.
-    let detail = detail_line(&groups, kind);
+    let mut detail = detail_line(&groups, kind);
     if !apply_windows {
         for group in &mut groups {
             group.window = None;
@@ -986,6 +1025,15 @@ fn estimate_kv_arch_inner(
         let (total_extra, marginal_extra) = fp16_last_layer_extra(&groups, ctx_len, batch);
         total_bytes = total_bytes.saturating_add(total_extra);
         marginal_bytes_per_token = marginal_bytes_per_token.saturating_add(marginal_extra);
+    }
+    // Raon-1's RDA layers hold a fixed per-sequence state (issue #3457).
+    let num_layers = get_u64(&text, LAYER_COUNT_KEYS).unwrap_or(0);
+    if let Some(state) = rda_recurrent_state_bytes(&text, num_layers).filter(|s| *s > 0) {
+        total_bytes = total_bytes.saturating_add(state.saturating_mul(batch));
+        detail.push_str(&format!(
+            "; plus {:.1} MB RDA recurrent state per sequence",
+            state as f64 / 1e6
+        ));
     }
     Some(KvArchEstimate {
         total_bytes,
@@ -1006,6 +1054,10 @@ mod dsa_tests;
 #[cfg(test)]
 #[path = "kv_arch_latent_option_tests.rs"]
 mod latent_option_tests;
+
+#[cfg(test)]
+#[path = "kv_arch_rda_tests.rs"]
+mod rda_state_tests;
 
 #[cfg(test)]
 mod tests {

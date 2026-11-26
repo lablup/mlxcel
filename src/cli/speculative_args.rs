@@ -313,6 +313,14 @@ pub fn resolve_draft_block_size_detailed(
     {
         return from_checkpoint(n, "the Inkling 2 DSpark drafter's trained block size");
     }
+    // The Raon-1 mini DFlash2 drafter (issue #3436) runs at its measured
+    // width; the flat DFlash default of 16 is twice its trained block.
+    if kind == DrafterKind::Dflash
+        && let Some(width) = mlxcel_core::drafter::peek_raon_dflash2_default_block_size(model_path)
+        && let Ok(n) = u32::try_from(width)
+    {
+        return from_checkpoint(n, "the Raon DFlash2 drafter's measured verify width");
+    }
     // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
     // and runs at `min(block_size + 1, runtime_block_size)` rows by default
     // (8 on the published checkpoints); the flat DFlash default of 16 would

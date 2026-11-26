@@ -69,6 +69,7 @@ pub(crate) mod kv_ring_checkpoint;
 pub(crate) mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
+pub(crate) mod modelopt_mixed_precision;
 pub mod multimodal_placeholders;
 pub mod pooled_model;
 pub(crate) mod qwen_mrope_state;
@@ -331,9 +332,11 @@ pub mod qwen4_exp_mtp_target;
 pub mod raon1_mini;
 mod raon1_mini_config;
 pub(crate) mod raon1_mini_moe;
+mod raon1_mini_quant;
 pub(crate) mod raon1_mini_sanitize;
 pub(crate) mod raon_mhc;
 pub(crate) mod raon_rda;
+pub mod reasoning_effort_steering;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
@@ -1322,7 +1325,7 @@ impl ModelType {
                 "MoE (other)",
             ),
             ModelType::Raon1Mini => (
-                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE)",
+                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE, reasoning-effort steering)",
                 "MoE (other)",
             ),
             ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),

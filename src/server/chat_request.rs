@@ -133,6 +133,12 @@ pub(crate) struct PreparedChatRequest {
     /// that gets tokenized. `None` for every template-rendered request, which
     /// keeps the existing tokenize-the-string path exactly as it was.
     pub(crate) prompt_token_ids: Option<Vec<i32>>,
+    /// The reasoning effort the model itself runs this request at (#3435),
+    /// from [`super::reasoning_steering::resolve_model_reasoning_effort`].
+    /// `Some` only for a model whose config declares
+    /// `reasoning_effort_steering`; the route copies it onto
+    /// `ServerGenerateOptions::model_reasoning_effort`.
+    pub(crate) model_reasoning_effort: Option<String>,
     /// b10621 `--prefill-assistant` (#1470): the trailing assistant text this
     /// prompt continues from, when the request had one and prefill is on.
     ///
@@ -935,6 +941,15 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     // Determine effective tools based on tool_choice
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
+    // The model-side reasoning effort (#3435). An unknown level fails the
+    // request here, before any render or prefill, with the accepted set.
+    let model_reasoning_effort = super::reasoning_steering::resolve_model_reasoning_effort(
+        processor,
+        request,
+        server_default_kwargs,
+        &merged_extra_body,
+    )
+    .map_err(|msg| anyhow::anyhow!("{msg}"))?;
 
     // resolve merged kwargs once up-front. See
     // `resolve_effective_kwargs` for the precedence chain; the prompt-cache
@@ -1225,6 +1240,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     Ok(PreparedChatRequest {
         prompt,
         prompt_token_ids: None,
+        model_reasoning_effort,
         assistant_prefill,
         history_prompt,
         root_prompt,
@@ -1343,6 +1359,7 @@ fn prepare_kimi_k3_chat_request(
     Ok(PreparedChatRequest {
         prompt: rendered.text,
         prompt_token_ids: Some(rendered.ids),
+        model_reasoning_effort: None,
         assistant_prefill: None,
         history_prompt: None,
         root_prompt: None,

@@ -33,7 +33,8 @@ export MLXCEL_XLA_DEVICE=hip MLXCEL_XLA_ROCM_TARGET=gfx1151 MLXCEL_XLA_PRECISION
 export MLXCEL_FALCON_H1_MODEL=/path/to/original-hf-falcon-h1
 export MLXCEL_FALCON_H1_ORACLE="$PWD/spike/openxla/falcon_h1_reference/hf-f32-oracle.json"
 export MLXCEL_FALCON_H1_FIXTURES=/tmp/falcon-h1-fixtures
-$MLXCEL_ORACLE_PYTHON spike/openxla/falcon_h1_oracle.py --out "$MLXCEL_FALCON_H1_FIXTURES"
+$MLXCEL_ORACLE_PYTHON spike/openxla/falcon_h1_oracle.py --out "$MLXCEL_FALCON_H1_FIXTURES" \
+  --long-model "$MLXCEL_FALCON_H1_MODEL"
 scripts/rocm_gpu_guard.sh --hold -- cargo test --profile test-fast \
   --features xla-iree,test-utils --test xla_falcon_h1 -- --ignored --nocapture --test-threads=1
 scripts/rocm_gpu_guard.sh --hold -- scripts/xla/validate_arch.sh \
@@ -72,3 +73,18 @@ scripts/rocm_gpu_guard.sh --hold -- "$MLXCEL_ORACLE_PYTHON" \
 The replay writes byte-preserved CLI stdout, token IDs, HTTP responses, exact comparisons, binary hashes, and owned-server termination evidence. Output-policy CPU tests and CUDA replay do not claim a new HIP run; the external replay remains a separate evidence boundary.
 
 At integrated runtime source `8c7b4412d37b91807f8d688ba2f3febbc7a7e41f` on base `2e46fc09e47208898e708d7090b196ec47b22357`, CPU and CUDA again passed all three synthetic norm modes, ragged/recycled trajectories, and the real 40-token oracle. CUDA CLI matched the same 40 tokens. Strict displayed stdout matched all four non-streaming HTTP and all four SSE completions and their token counts; Germany retained its exact `"  \n"` suffix. Each transport's four requests overlapped, and the owned server was reaped and GPU lock released. The integrated core suite passed 560 tests with 22 ignored, registered goldens and every-family layouts matched, all 7 display tests and 146 filter tests passed, and all 5 CUDA hybrid tests and 6 Mamba2 tests passed. The `integrated-*` artifacts record exact source, binary hashes, output and response evidence. This is new CPU/CUDA evidence; final-head ROCm replay is still requested.
+
+## Plain RoPE at long positions
+
+The parser spreads `Config::llama_3_2_1b()` and did not override `rope`, so Falcon-H1 inherited `RopeScaling::Llama3` (factor 32, original context 8192). HF Falcon-H1 uses plain RoPE here: the loader already rejects non-default `rope_parameters`, and now also rejects a non-default legacy `rope_scaling`, which HF folds into `rope_parameters`. Llama3 scaling changes only the bands with wavelengths above 2048 tokens. The Tiny90M checkpoint uses `rope_theta = 1e11` and head width 64, so 24 of its 32 frequency pairs fall in that band (22 above 8192, divided by the full factor). The 40-token oracle compares tokens only: logits already differed by 0.50 at position 31, but every argmax held. The logit gate ran only on the synthetic fixtures (head width 4, theta 1e4), whose wavelengths of about 6 and 628 tokens make the scaling a numeric no-op at any length. Its goldens are byte-identical after the fix.
+
+`falcon_h1_oracle.py --long-model` writes `long_oracle.json`: native HF fp32 CPU logits for prefixes of 32, 512, 2048, and 3584 tokens taken from one seeded stream, plus four teacher-forced steps each. The ignored `falcon_h1_original_checkpoint_long_positions` test prefills the four prefixes into ragged slots, decodes the steps together, and requires max absolute error below `1e-3` with matching argmax. The file is about 10.7 MB, so it is regenerated rather than committed; `falcon_h1_reference/long-position-provenance.json` records its hash and the commands.
+
+| Prefix | Before: max abs | After: max abs |
+| --- | --- | --- |
+| 32 | 5.02e-1 | 1.16e-4 |
+| 512 | 4.41 | 6.87e-5 |
+| 2048 | 4.69 | 8.96e-5 |
+| 3584 | 4.74 | 1.20e-4 |
+
+Each value is the worst of the four steps for that prefix, on `local-task`. Before the fix, 8 of 16 argmaxes differed. After it, all 16 match, and the synthetic gate and the 40-token oracle still pass. Logs: `falcon_h1_reference/cpu-long-before.log` (origin/main `c5afefbd` plus the probe only) and `cpu-long-after.log`. CUDA and HIP were not rerun for this change.

@@ -281,6 +281,13 @@ pub struct ChatTemplateProcessor {
     /// instead of the disaggregated router. `prepare_chat_request_with_cache`
     /// refuses the request instead of reaching that fallback when this is set.
     kimi_k3_family_unrenderable: bool,
+    /// The checkpoint's `reasoning_effort_steering` block (Raon-1 mini,
+    /// #3435): the effort levels the model steers by, read from
+    /// `config.json` next to the template. `Some` means a request's
+    /// reasoning effort also reaches the model, not only the template; see
+    /// [`crate::server::reasoning_steering`].
+    reasoning_effort_steering:
+        Option<Arc<crate::models::reasoning_effort_steering::ReasoningEffortSteering>>,
     #[cfg(test)]
     template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -456,10 +463,12 @@ impl ChatTemplateProcessor {
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
+            reasoning_effort_steering: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         processor.wrap_string_content = template_requires_typed_text_content(&processor);
+        processor.attach_reasoning_effort_steering_from(model_path);
         Ok(Some(processor))
     }
 
@@ -480,6 +489,7 @@ impl ChatTemplateProcessor {
             generation_prompt_suffix: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
+            reasoning_effort_steering: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -531,6 +541,33 @@ impl ChatTemplateProcessor {
     /// renders through [`Self::kimi_k3`] rather than through the template.
     pub(crate) fn attach_kimi_k3(&mut self, renderer: Arc<super::kimi_k3_chat::KimiK3Renderer>) {
         self.kimi_k3 = Some(renderer);
+    }
+
+    /// Read the checkpoint's `reasoning_effort_steering` block from
+    /// `model_dir/config.json` (#3435). A block that does not validate is
+    /// left unattached with a warning: the model load refuses it by name.
+    pub(crate) fn attach_reasoning_effort_steering_from(&mut self, model_dir: &Path) {
+        use crate::models::reasoning_effort_steering::ReasoningEffortSteering;
+        match ReasoningEffortSteering::from_model_dir(model_dir) {
+            Ok(steering) => self.reasoning_effort_steering = steering.map(Arc::new),
+            Err(err) => tracing::warn!("reasoning_effort_steering not attached: {err}"),
+        }
+    }
+
+    /// Attach a steering block directly (tests).
+    #[cfg(test)]
+    pub(crate) fn set_reasoning_effort_steering(
+        &mut self,
+        steering: Option<crate::models::reasoning_effort_steering::ReasoningEffortSteering>,
+    ) {
+        self.reasoning_effort_steering = steering.map(Arc::new);
+    }
+
+    /// The model's reasoning-effort steering block, when it declares one.
+    pub(crate) fn reasoning_effort_steering(
+        &self,
+    ) -> Option<&crate::models::reasoning_effort_steering::ReasoningEffortSteering> {
+        self.reasoning_effort_steering.as_deref()
     }
 
     /// The native Kimi K3 renderer, when one is attached.

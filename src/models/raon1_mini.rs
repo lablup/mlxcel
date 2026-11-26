@@ -28,10 +28,11 @@
 //! logits = lm_head(norm(mean(streams.f32, stream).astype(dt)))
 //! ```
 //!
-//! The five `moe.reasoning_effort_steering` vectors are loaded and kept in
-//! float32 but not applied: this is the model at steering alpha 0, which the
-//! reference produces with `set_reasoning_effort("max")`. Applying them is
-//! #3435.
+//! Reasoning-effort steering (#3435): each layer that
+//! `reasoning_effort_steering.layers` lists adds `alpha * c` to its MoE
+//! output in float32 before the mHC mix, with one alpha per batch row
+//! (`raon1_mini_effort.rs`). Alpha 0 (`max`, or a config without the block)
+//! skips the add, which is the steering-free model bit for bit.
 //!
 //! Reference: https://huggingface.co/KRAFTON/Raon-1-mini/blob/6691a076/modeling_raon1_mini.py
 
@@ -49,6 +50,13 @@ pub use super::raon1_mini_config::Raon1MiniConfig;
 
 #[path = "raon1_mini_lm.rs"]
 mod lm;
+
+#[path = "raon1_mini_effort.rs"]
+mod effort;
+use effort::EffortState;
+
+#[path = "raon1_mini_speculative.rs"]
+pub mod speculative;
 
 /// Per-layer state: RDA conv window plus recurrent state, or the MLA latent
 /// pair (`kv_latent`, `k_pe`) in a `KVCache`.
@@ -112,10 +120,13 @@ enum Ffn {
 }
 
 impl Ffn {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        match self {
-            Ffn::Dense(mlp) => mlp.forward(x),
-            Ffn::Moe(moe) => moe.forward(x),
+    /// The branch output, steered by `steer` (`[B, 1, 1]` float32 alphas)
+    /// on a steered MoE layer.
+    fn forward(&self, x: &MlxArray, steer: Option<&MlxArray>) -> UniquePtr<MlxArray> {
+        match (self, steer) {
+            (Ffn::Dense(mlp), _) => mlp.forward(x),
+            (Ffn::Moe(moe), Some(alpha)) => moe.steer(moe.forward(x), alpha),
+            (Ffn::Moe(moe), None) => moe.forward(x),
         }
     }
 }
@@ -137,8 +148,9 @@ impl Raon1MiniDecoderLayer {
         streams: &MlxArray,
         cache: &mut Raon1MiniLayerCache,
         masks: &StepMasks,
+        steer: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_with_mixer(streams, |mixer, x| match (mixer, cache) {
+        self.forward_with_mixer(streams, steer, |mixer, x| match (mixer, cache) {
             (Mixer::Rda(attn), Raon1MiniLayerCache::Delta(c)) => {
                 attn.forward(x, c, masks.token_mask.as_deref())
             }
@@ -155,9 +167,11 @@ impl Raon1MiniDecoderLayer {
     /// Both mHC sites and the FFN around `mixer`, which runs the token
     /// mixer (RDA or MLA) on the normalized branch input `x`. The single
     /// sequence forward and the native batched decode differ only there.
+    /// `steer` is the per-row alpha (`None`: every row at 0).
     fn forward_with_mixer(
         &self,
         streams: &MlxArray,
+        steer: Option<&MlxArray>,
         mixer: impl FnOnce(&Mixer, &MlxArray) -> UniquePtr<MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let dt = mlxcel_core::array_dtype(streams);
@@ -174,7 +188,7 @@ impl Raon1MiniDecoderLayer {
         let x = self
             .post_attention_layernorm
             .forward(&raon_mhc::aggregate(&sf, &route.h_pre, dt));
-        let y = self.ffn.forward(&x);
+        let y = self.ffn.forward(&x, steer);
         raon_mhc::mix(&sf, &y, &route, dt)
     }
 
@@ -187,6 +201,7 @@ impl Raon1MiniDecoderLayer {
         let prefix = format!("model.layers.{layer_idx}");
         let is_rda = config.is_rda_layer(layer_idx);
         let attn_prefix = format!("{prefix}.self_attn");
+        let (group_size, bits) = config.dense_quant();
         let mixer = if is_rda {
             let spec = RdaSpec {
                 hidden_size: config.hidden_size,
@@ -195,8 +210,8 @@ impl Raon1MiniDecoderLayer {
                 kernel_size: config.rda_config.conv_kernel_size,
                 gate_lower_bound: config.rda_config.gate_lower_bound,
                 norm_eps: config.rms_norm_eps,
-                group_size: 64,
-                bits: 4,
+                group_size,
+                bits,
             };
             Mixer::Rda(RaonDeltaAttention::from_weights(
                 weights,
@@ -214,11 +229,13 @@ impl Raon1MiniDecoderLayer {
                 v_head_dim: config.v_head_dim,
                 use_output_gate: config.mla_use_output_gate,
                 latent_norm_eps: config.mla_latent_norm_eps,
-                group_size: 64,
-                bits: 4,
+                group_size,
+                bits,
                 family: "raon1_mini",
             };
-            Mixer::Mla(KimiK3MLAAttention::from_spec(weights, &spec, &attn_prefix)?)
+            let mla = KimiK3MLAAttention::from_spec(weights, &spec, &attn_prefix)?;
+            mla.check_input_widths(&spec, &attn_prefix)?;
+            Mixer::Mla(mla)
         };
 
         let ffn = if config.is_moe_layer(layer_idx) {
@@ -232,18 +249,28 @@ impl Raon1MiniDecoderLayer {
                 situ_linear_beta: config.activation_situ_linear_beta,
                 has_shared_expert: config.num_shared_experts > 0,
             };
-            Ffn::Moe(RaonMoe::from_weights(
-                weights,
-                &format!("{prefix}.moe"),
-                spec,
-            )?)
+            let steered = config
+                .reasoning_effort_steering
+                .as_ref()
+                .is_some_and(|s| s.steers_layer(layer_idx));
+            let moe_prefix = format!("{prefix}.moe");
+            let moe = RaonMoe::from_weights(weights, &moe_prefix, spec, steered)?;
+            moe.check_input_widths(
+                &moe_prefix,
+                config.moe_intermediate_size,
+                config.moe_intermediate_size * config.num_shared_experts,
+            )?;
+            Ffn::Moe(moe)
         } else {
-            Ffn::Dense(RaonSituMlp::from_weights(
+            let mlp_prefix = format!("{prefix}.mlp");
+            let mlp = RaonSituMlp::from_weights(
                 weights,
-                &format!("{prefix}.mlp"),
+                &mlp_prefix,
                 config.activation_situ_beta,
                 config.activation_situ_linear_beta,
-            )?)
+            )?;
+            mlp.check_input_widths(&mlp_prefix, config.hidden_size, config.intermediate_size)?;
+            Ffn::Dense(mlp)
         };
 
         let norm = |leaf: &str| -> Result<RMSNorm, String> {
@@ -287,6 +314,7 @@ pub struct Raon1MiniModel {
     sequence_state: ModelOwnedSequenceState<Raon1MiniLayerCache>,
     kv_cache_layer_modes: KvCacheLayerModes,
     eos_token_ids: Vec<i32>,
+    effort: EffortState,
 }
 
 impl Raon1MiniModel {
@@ -356,7 +384,9 @@ impl Raon1MiniModel {
             .get("model.norm.weight")
             .ok_or_else(|| "Missing weight: model.norm.weight".to_string())?;
         let lm_head = if weights.contains_key("lm_head.weight") {
-            Some(UnifiedLinear::from_weights(weights, "lm_head", 64, 4)?)
+            let head = super::raon1_mini_quant::linear(weights, "lm_head")?;
+            head.check_input_width("lm_head", config.hidden_size)?;
+            Some(head)
         } else if config.tie_word_embeddings {
             None
         } else {
@@ -374,6 +404,7 @@ impl Raon1MiniModel {
             sequence_state: ModelOwnedSequenceState::new(internal),
             kv_cache_layer_modes,
             eos_token_ids: config.eos_token_ids(),
+            effort: EffortState::new(config.reasoning_effort_steering.clone())?,
         })
     }
 
@@ -385,10 +416,10 @@ impl Raon1MiniModel {
         make_layer_caches(&self.layers, &self.kv_cache_layer_modes)
     }
 
-    /// Logits for every position of `input_ids` against explicit `caches`.
-    /// `left_pad` (one count per row) masks left padding out of the RDA
-    /// state and the MLA window; the caller passes the same counts for
-    /// every step of those rows.
+    /// Logits for every position of `input_ids` against explicit `caches`,
+    /// every row at the model-default effort. `left_pad` (one count per
+    /// row) masks left padding out of the RDA state and the MLA window; the
+    /// caller passes the same counts for every step of those rows.
     pub fn forward_with_caches(
         &self,
         input_ids: &MlxArray,
@@ -403,8 +434,10 @@ impl Raon1MiniModel {
             }
             None => StepMasks::default(),
         };
+        let rows = mlxcel_core::array_shape(input_ids)[0] as usize;
+        let steer = self.steer_rows(&vec![self.effort.alpha(None); rows]);
         let h = self.embed_tokens.forward(input_ids);
-        self.forward_hidden(h, caches, &masks, None)
+        self.forward_hidden(h, caches, &masks, None, steer.as_deref())
     }
 
     /// Decoder stack, stream reduction, final norm and head over embeddings
@@ -415,15 +448,17 @@ impl Raon1MiniModel {
         caches: &mut [Raon1MiniLayerCache],
         masks: &StepMasks,
         row: Option<usize>,
+        steer: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
             self.layers.len(),
             "raon1_mini: one cache per layer"
         );
+        let _rows = speculative::row_scope(false);
         let mut streams = raon_mhc::expand_streams(&h, self.streams);
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            streams = layer.forward(&streams, cache, masks);
+            streams = layer.forward(&streams, cache, masks, steer);
         }
         self.head(&streams, row)
     }
@@ -434,21 +469,11 @@ impl Raon1MiniModel {
         let h = raon_mhc::reduce_streams(streams, self.act_dtype);
         let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
+        // Row-invariant inside a speculative verify block (#3436).
         match &self.lm_head {
-            Some(head) => head.forward(&h),
-            None => self.embed_tokens.as_linear(&h),
+            Some(head) => mlxcel_core::row_invariant::linear(head, &h),
+            None => mlxcel_core::row_invariant::per_row(&h, |h| self.embed_tokens.as_linear(h)),
         }
-    }
-
-    /// Steering vectors per MoE layer, `(layer, [hidden] float32)`.
-    pub fn reasoning_effort_steering(&self) -> Vec<(usize, &MlxArray)> {
-        self.layers
-            .iter()
-            .filter_map(|layer| match &layer.ffn {
-                Ffn::Moe(moe) => moe.steering_vector().map(|v| (layer.layer_idx, v)),
-                Ffn::Dense(_) => None,
-            })
-            .collect()
     }
 }
 
@@ -478,3 +503,11 @@ mod tests;
 #[cfg(test)]
 #[path = "raon1_mini_block_tests.rs"]
 mod block_tests;
+
+#[cfg(test)]
+#[path = "raon1_mini_steering_tests.rs"]
+pub(crate) mod steering_tests;
+
+#[cfg(test)]
+#[path = "raon1_mini_export_tests.rs"]
+mod export_tests;

@@ -697,6 +697,30 @@ impl RMSNorm {
     }
 }
 
+/// RMS normalization rounded once: `(x.f32 * rsqrt(mean(x.f32^2) + eps) *
+/// w.f32).astype(x.dtype)`.
+///
+/// [`ffi::fast_rms_norm`] (and so [`RMSNorm::forward`]) rounds `x * inv` to
+/// the input dtype before the gamma multiply and rounds again after it,
+/// where references such as Raon-1's `Raon1MiniRMSNorm` round only the final
+/// product. This composes the single-rounding form from plain ops, for
+/// measuring that gap (issue #3457); it is several kernels instead of one.
+///
+/// Used by: the `rms_norm_small_axis_tests` double-rounding test and the
+///          #3457 Raon-1 mini trace measurement
+pub fn rms_norm_round_once(x: &MlxArray, weight: &MlxArray, eps: f32) -> UniquePtr<MlxArray> {
+    let in_dtype = ffi::array_dtype(x);
+    let xf = ffi::astype(x, crate::dtype::FLOAT32);
+    let mean_sq = ffi::mean_axis(&ffi::square(&xf), -1, true);
+    let eps = ffi::full_f32(&[1], eps, crate::dtype::FLOAT32);
+    let inv = ffi::rsqrt(&ffi::add(&mean_sq, &eps));
+    let normed = ffi::multiply(
+        &ffi::multiply(&xf, &inv),
+        &ffi::astype(weight, crate::dtype::FLOAT32),
+    );
+    ffi::astype(&normed, in_dtype)
+}
+
 /// Gemma-style RMS Normalization layer with (1 + weight) pattern
 /// Gemma-style RMS normalization with (1 + weight) adjustment.
 /// Used by: Gemma, Gemma2, Gemma3, Gemma3n
@@ -2577,6 +2601,53 @@ pub struct QuantizedTensorShapes<'a> {
     pub biases: Option<&'a [i32]>,
 }
 
+/// Refuse a quantized plane whose `scales` (and `biases`, when given) do not
+/// match its `weight` on every axis but the last.
+///
+/// MLX checks only the batch axes and the last axis of a quantized matmul's
+/// operands, while its qmv and `gather_qmm` kernels index `scales` by output
+/// row (and expert). A `scales` tensor with fewer rows than `weight` therefore
+/// passes MLX and reads past the scales buffer on the GPU. Quantization packs
+/// the last (input) axis only, so every leading axis must agree exactly.
+///
+/// `label` is the tensor prefix; the message names `{label}.scales`,
+/// `{label}.weight` and `{label}.biases` as the checkpoint spells them.
+///
+/// Used by: [`validate_quantized_packing`],
+///          [`UnifiedLinear::from_weights_with_mode`], SwitchLayers
+///          (`SwitchLinear::from_stacked_parts`) and Raon1MiniQuant
+///          (`check_scales_match_weight`)
+pub fn check_scales_leading_axes(
+    label: &str,
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    biases_shape: Option<&[i32]>,
+) -> Result<(), String> {
+    let (w_shape, s_shape) = (weight_shape, scales_shape);
+    if s_shape.len() != w_shape.len() || s_shape.len() < 2 {
+        return Err(format!(
+            "unexpected {label}.scales shape {s_shape:?}: must have the same rank as \
+             {label}.weight {w_shape:?} and be at least 2-D"
+        ));
+    }
+    if s_shape[..s_shape.len() - 1] != w_shape[..w_shape.len() - 1] {
+        return Err(format!(
+            "unexpected {label}.scales shape {s_shape:?}: every axis but the last must match \
+             {label}.weight {w_shape:?}; the quantized kernels index scales by output row and \
+             expert, so a short leading axis reads past the scales buffer on the GPU"
+        ));
+    }
+    if let Some(b_shape) = biases_shape
+        && b_shape != s_shape
+    {
+        return Err(format!(
+            "unexpected {label}.biases shape {b_shape:?}: the affine zero points must have \
+             the same shape as {label}.scales ({s_shape:?})"
+        ));
+    }
+    Ok(())
+}
+
 /// Check a quantized tensor's packing against the input width `config.json`
 /// claims, and its `biases` against its `scales`.
 ///
@@ -2628,18 +2699,7 @@ pub fn validate_quantized_packing(
 ) -> Result<(), String> {
     let w_shape = shapes.weight;
     let s_shape = shapes.scales;
-    if s_shape.len() != w_shape.len() || s_shape.len() < 2 {
-        return Err(format!(
-            "unexpected {label}.scales shape {s_shape:?}: must have the same rank as \
-             {label}.weight {w_shape:?} and be at least 2-D"
-        ));
-    }
-    if s_shape[..s_shape.len() - 1] != w_shape[..w_shape.len() - 1] {
-        return Err(format!(
-            "unexpected {label}.scales shape {s_shape:?}: every axis but the last must match \
-             {label}.weight {w_shape:?}"
-        ));
-    }
+    check_scales_leading_axes(label, w_shape, s_shape, None)?;
 
     let layout = reconcile_quantization_layout(w_shape, s_shape, group_size, bits, mode)
         .map_err(|e| format!("{label}: {e}"))?;
@@ -2807,6 +2867,11 @@ impl UnifiedLinear {
             // degenerate output.
             let w_shape = ffi::array_shape(&weight);
             let s_shape = ffi::array_shape(&scales);
+            // Before reconciliation, which reads the last axis only: a short
+            // row axis on `scales` passes MLX and reads past the scales buffer
+            // in qmv (issue #3457).
+            let b_shape = biases.as_ref().map(|b| ffi::array_shape(b));
+            check_scales_leading_axes(prefix, &w_shape, &s_shape, b_shape.as_deref())?;
             let layout = reconcile_quantization_layout_logged(
                 &w_shape, &s_shape, group_size, bits, mode, prefix,
             )?;
@@ -2859,6 +2924,54 @@ impl UnifiedLinear {
         } else {
             // Fallback to regular linear (non-quantized model)
             Ok(Self::Regular(Linear::from_weights(weights, prefix)?))
+        }
+    }
+
+    /// Check the layer's input width against the `in_features` the config
+    /// derives for it (issue #3457).
+    ///
+    /// Row-count checks cannot see the input axis, and a matmul whose inner
+    /// dimensions disagree throws inside MLX, which crosses the cxx bridge as
+    /// an uncatchable abort at the first forward pass. A quantized plane is
+    /// checked with [`validate_quantized_packing`] against the layout it was
+    /// loaded with; a dense one by its last axis. `label` is the tensor
+    /// prefix, and the error names `{label}.weight` and both widths.
+    ///
+    /// Used by: Raon1Mini (every RDA, MLA, MLP, shared expert and `lm_head`
+    ///          projection)
+    pub fn check_input_width(&self, label: &str, in_features: usize) -> Result<(), String> {
+        match self {
+            Self::Quantized { weight, .. } => {
+                let w_shape = ffi::array_shape(&weight.weight);
+                let s_shape = ffi::array_shape(&weight.scales);
+                let b_shape = weight.biases.as_ref().map(|b| ffi::array_shape(b));
+                let shapes = QuantizedTensorShapes {
+                    weight: &w_shape,
+                    scales: &s_shape,
+                    biases: b_shape.as_deref(),
+                };
+                validate_quantized_packing(
+                    label,
+                    &shapes,
+                    in_features,
+                    weight.group_size,
+                    weight.bits,
+                    &weight.mode,
+                )
+                .map_err(|e| format!("{label}.weight: input width check failed: {e}"))
+            }
+            Self::Regular(linear) => {
+                let shape = ffi::array_shape(&linear.weight);
+                let width = shape.last().copied().unwrap_or(0);
+                if usize::try_from(width).ok() == Some(in_features) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{label}.weight: shape {shape:?} has an input width of {width}, but the \
+                         config says {in_features}"
+                    ))
+                }
+            }
         }
     }
 
@@ -10783,3 +10896,7 @@ mod packed_weight_tests;
 #[cfg(test)]
 #[path = "layers_metal_chunk_tests.rs"]
 mod metal_chunk_tests;
+
+#[cfg(test)]
+#[path = "layers_scales_axes_tests.rs"]
+mod scales_axes_tests;
