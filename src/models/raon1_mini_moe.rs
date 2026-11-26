@@ -203,7 +203,6 @@ impl RaonMoe {
         })
     }
 
-    /// The layer's reasoning-effort steering vector, when the layer is steered.
     /// Input widths of the routed experts (`moe_intermediate`) and the
     /// shared experts (`shared_intermediate`) (issue #3457).
     pub fn check_input_widths(
@@ -228,6 +227,7 @@ impl RaonMoe {
         }
     }
 
+    /// The layer's reasoning-effort steering vector, when the layer is steered.
     pub fn steering_vector(&self) -> Option<&MlxArray> {
         self.steering.as_deref()
     }
