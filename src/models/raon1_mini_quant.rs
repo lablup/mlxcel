@@ -158,12 +158,52 @@ impl Raon1MiniConfig {
     }
 }
 
+/// Refuses a quantized plane whose `scales` (and `biases`) disagree with its
+/// `weight` on any axis but the last. MLX checks only the batch axes and the
+/// last axis, and its qmv / gather_qmm kernels index scales by output row
+/// (and expert), so a short row or expert axis from an untrusted export
+/// would read past the scales buffer on the GPU. A missing `scales` is left
+/// to the layout detection (a bf16 linear has none).
+///
+/// Used by: `linear` (dense MLP, shared experts, `lm_head`) and
+/// `RaonMoe::from_weights` (the routed `switch_mlp` stacks).
+pub(crate) fn check_scales_match_weight(weights: &WeightMap, prefix: &str) -> Result<(), String> {
+    let scales_key = format!("{prefix}.scales");
+    let Some(scales) = weights.get(&scales_key) else {
+        return Ok(());
+    };
+    let weight_key = format!("{prefix}.weight");
+    let weight = weights
+        .get(&weight_key)
+        .ok_or_else(|| format!("{scales_key} has no {weight_key}"))?;
+    let (w, s) = (
+        mlxcel_core::array_shape(weight),
+        mlxcel_core::array_shape(scales),
+    );
+    if w.len() < 2 || w.len() != s.len() || w[..w.len() - 1] != s[..s.len() - 1] {
+        return Err(format!(
+            "{scales_key} {s:?} does not match {weight_key} {w:?} on every axis but the last"
+        ));
+    }
+    let biases_key = format!("{prefix}.biases");
+    if let Some(biases) = weights.get(&biases_key) {
+        let b = mlxcel_core::array_shape(biases);
+        if b != s {
+            return Err(format!(
+                "{biases_key} {b:?} does not match {scales_key} {s:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A dense linear whose block-float layout (NVFP4 g16, MXFP8 g32, MXFP4 g32)
 /// is read from its `uint8` scales, so an NVFP4 projection and the MXFP8
 /// `lm_head` (whose packed widths an NVFP4 or MXFP4 reading would also fit)
 /// load without a declared layout. Anything else takes `UnifiedLinear`'s own
 /// detection; a bf16 linear loads unquantized.
 pub(crate) fn linear(weights: &WeightMap, prefix: &str) -> Result<UnifiedLinear, String> {
+    check_scales_match_weight(weights, prefix)?;
     let layout = match (
         weights.get(&format!("{prefix}.weight")),
         weights.get(&format!("{prefix}.scales")),

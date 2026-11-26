@@ -139,6 +139,10 @@ impl RaonMoe {
 
         let switch_prefix = format!("{prefix}.switch_mlp");
         for leaf in ["gate_proj", "up_proj", "down_proj"] {
+            super::raon1_mini_quant::check_scales_match_weight(
+                weights,
+                &format!("{switch_prefix}.{leaf}"),
+            )?;
             let key = format!("{switch_prefix}.{leaf}.weight");
             let w = weights
                 .get(&key)

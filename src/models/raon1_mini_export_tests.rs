@@ -474,3 +474,68 @@ fn global_scaled_linear_equals_dequantized_matmul_times_the_scale() {
     let q = head.quantized_weight().expect("quantized");
     assert_eq!((q.mode.as_str(), q.group_size, q.bits), ("mxfp8", 32, 8));
 }
+
+fn zeros(shape: &[i32]) -> UniquePtr<MlxArray> {
+    mlxcel_core::zeros(shape, dtype::UINT8)
+}
+
+/// A dense plane whose scales cover fewer output rows than the weight would
+/// send qmv past the scales buffer; it is refused at load.
+#[test]
+fn dense_linear_with_short_scale_rows_is_refused() {
+    let _guard = guard();
+    let mut weights = WeightMap::new();
+    weights.insert("p.weight".into(), zeros(&[8, 32]));
+    weights.insert("p.scales".into(), zeros(&[4, 4]));
+    let err = super::super::raon1_mini_quant::linear(&weights, "p")
+        .err()
+        .expect("short scales must be refused");
+    assert!(
+        err.contains("p.scales") && err.contains("p.weight"),
+        "{err}"
+    );
+
+    weights.insert("p.scales".into(), zeros(&[4]));
+    assert!(super::super::raon1_mini_quant::linear(&weights, "p").is_err());
+}
+
+/// An expert stack whose scales cover fewer experts than the weight (a
+/// per-expert leaf missing from the export) is refused before `gather_qmm`.
+#[test]
+fn expert_stack_with_short_scale_experts_is_refused() {
+    let _guard = guard();
+    let (e, h, i) = (EXPERTS as i32, HIDDEN as i32, MOE_INTER as i32);
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "moe.gate.weight".into(),
+        mlxcel_core::zeros(&[e, h], dtype::FLOAT32),
+    );
+    for (proj, out, inp) in [("gate_proj", i, h), ("up_proj", i, h), ("down_proj", h, i)] {
+        weights.insert(
+            format!("moe.switch_mlp.{proj}.weight"),
+            zeros(&[e, out, inp / 2]),
+        );
+        weights.insert(
+            format!("moe.switch_mlp.{proj}.scales"),
+            zeros(&[e, out, inp / 16]),
+        );
+    }
+    weights.insert(
+        "moe.switch_mlp.up_proj.scales".into(),
+        zeros(&[e - 1, i, h / 16]),
+    );
+    let spec = super::super::raon1_mini_moe::MoeSpec {
+        hidden_size: HIDDEN,
+        num_experts: EXPERTS,
+        top_k: 2,
+        renormalize: true,
+        routed_scaling_factor: 1.0,
+        situ_beta: 4.0,
+        situ_linear_beta: 25.0,
+        has_shared_expert: false,
+    };
+    let err = super::super::raon1_mini_moe::RaonMoe::from_weights(&weights, "moe", spec, false)
+        .err()
+        .expect("short expert scales must be refused");
+    assert!(err.contains("moe.switch_mlp.up_proj.scales"), "{err}");
+}
