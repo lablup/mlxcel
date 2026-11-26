@@ -209,8 +209,8 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
                 return std::make_tuple(
                     true, artifact_->payload, artifact_->symbols);
             },
-            false,
-            false);
+            /* use_disk_cache, upstream's flag, ignored by the overlay */ false,
+            cu::DiskCache::Bypass);
         CUfunction kernel = mod.get_kernel(entry.symbol);
 
         for (auto& out : outputs) {

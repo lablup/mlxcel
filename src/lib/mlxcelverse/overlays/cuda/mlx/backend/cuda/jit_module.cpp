@@ -54,10 +54,11 @@
 //   passes the same rules on load or is a miss, and the variables are read from
 //   the process environment, since the C runtime's copy does not hold what
 //   ensure_persistent_ptx_cache set. An empty MLX_PTX_CACHE_DIR counts as unset.
-// - A caller can opt one module out of the disk cache (read_disk_cache, #2833):
-//   the cuda-oxide fused RMSNorm module is a precompiled payload validated
-//   against its manifest, and a cache hit would load bytes that were never
-//   compared to it. The parameter is trailing and defaults to true.
+// - A caller can opt one module out of the disk cache (DiskCache::Bypass,
+//   #2833): the cuda-oxide fused RMSNorm module is a precompiled payload
+//   validated against its manifest, and a cache hit would load bytes that were
+//   never compared to it. The parameter is trailing and defaults to
+//   DiskCache::Use.
 
 #include "mlx/backend/cuda/jit_module.h"
 #include "mlx/backend/cuda/device.h"
@@ -1140,16 +1141,17 @@ JitModule::JitModule(
     const std::string& module_name,
     const KernelBuilder& builder,
     bool use_disk_cache,
-    bool read_disk_cache) {
+    DiskCache disk_cache) {
   // Will hold the actual device executable source code and kernel names
   std::string ptx;
   std::vector<std::pair<std::string, std::string>> ptx_kernels;
 
   // [mlxcel #2539] Keyed by device and compiler, trust-checked; empty when
   // the disk cache is off.
-  // [mlxcel #2833] Empty too when the caller opts out of the cache entirely.
-  const std::filesystem::path cache_dir =
-      read_disk_cache ? device_cache_dir(device) : std::filesystem::path();
+  // [mlxcel #2833] Empty too when the caller bypasses the cache entirely.
+  const std::filesystem::path cache_dir = disk_cache == DiskCache::Use
+      ? device_cache_dir(device)
+      : std::filesystem::path();
 
   // Compile from source (or take the precompiled blob) and publish the result
   // to the file cache.
@@ -1293,7 +1295,7 @@ JitModule& get_jit_module(
     const std::string& name,
     const KernelBuilder& builder,
     bool use_disk_cache,
-    bool read_disk_cache) {
+    DiskCache disk_cache) {
   // The cache are leak intentionally as user code may still be running JIT
   // compiled code after main thread teardown.
   static auto* cache = new std::unordered_map<std::string, JitModule>;
@@ -1311,7 +1313,7 @@ JitModule& get_jit_module(
   if (it == cache->end()) {
     it = cache
              ->try_emplace(
-                 name, device, name, builder, use_disk_cache, read_disk_cache)
+                 name, device, name, builder, use_disk_cache, disk_cache)
              .first;
   }
   return it->second;
