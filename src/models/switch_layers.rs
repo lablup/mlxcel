@@ -1326,8 +1326,8 @@ pub(crate) fn refuse_mismatched_expert_parts(
 ///
 /// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
 /// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), Gemma 4's
-/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), and
-/// Kolibri-1 (`kolibri1_weights::sanitize_weights`)
+/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), ERNIE 4.5 text
+/// (`Ernie45MoeModel::prepare_checkpoint_weights`), and Kolibri-1 (`kolibri1_weights::sanitize_weights`)
 pub(crate) fn drain_numbered_expert_planes(
     weights: &mut WeightMap,
     experts_root: &str,
