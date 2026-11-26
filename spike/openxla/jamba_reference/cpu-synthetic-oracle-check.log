@@ -1,0 +1,4 @@
+model = /tmp/epic564-models/jamba-moe-tiny/mlx
+device = local-task, prompt = 6 tokens, reference = 12 tokens
+RESULT: TOKEN-EXACT PASS (OpenXLA greedy == HF oracle)
+exit=0
