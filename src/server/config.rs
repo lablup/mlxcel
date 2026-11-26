@@ -196,6 +196,12 @@ pub struct PromptCacheRequestContext {
     /// state checkpoint is only rebuilt over a snapshot whose lineage agrees
     /// with its own.
     pub snapshot_lineage: crate::server::prompt_cache::SnapshotLineage,
+
+    /// The model-side reasoning effort this request's prefix was computed at
+    /// (#3435), already folded into [`Self::template_sig`]. Carried so a
+    /// next-turn warm-up, which prefills under this context alone, steers its
+    /// sequence at the same level. `None` for a model that does not steer.
+    pub model_reasoning_effort: Option<String>,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.
@@ -301,6 +307,13 @@ pub struct ServerGenerateOptions {
     /// off) or when the request does not participate in prefix reuse (e.g.
     /// raw text-completion endpoints that do not render a chat template).
     pub prompt_cache_ctx: Option<PromptCacheRequestContext>,
+
+    /// The reasoning effort the model itself runs this request at (#3435):
+    /// the scheduler hands it to `LanguageModel::set_sequence_reasoning_effort`
+    /// for the request's sequence before prefill. `None` runs at the model's
+    /// default (the config's `default` level for a steering model) and is the
+    /// value for every model that does not steer.
+    pub model_reasoning_effort: Option<String>,
 
     /// optional structured-output constraint produced by
     /// [`crate::server::structured::build_constraint_from_response_format`].

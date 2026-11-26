@@ -302,7 +302,7 @@ pub(super) fn values(a: &MlxArray) -> Vec<f32> {
     array_to_vec_f32(&a)
 }
 
-fn ids(rows: &[&[i32]]) -> UniquePtr<MlxArray> {
+pub(super) fn ids(rows: &[&[i32]]) -> UniquePtr<MlxArray> {
     let flat: Vec<i32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
     mlxcel_core::from_slice_i32(&flat, &[rows.len() as i32, rows[0].len() as i32])
 }
@@ -380,33 +380,6 @@ fn full_prefill_equals_chunked_prefill_plus_decode_including_a_padded_row() {
     let mut b_got = rows_of(&pre, 1, 0, 12);
     b_got.extend(rows_of(&step, 1, 0, 1));
     assert_close(&b_got, &b_want, tol, "unpadded neighbour row");
-}
-
-#[test]
-fn steering_vectors_are_kept_in_float32_and_not_applied() {
-    let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let model = tiny_model();
-    let steering = model.reasoning_effort_steering();
-    assert_eq!(steering.len(), 1);
-    assert_eq!(steering[0].0, 2);
-    assert_eq!(mlxcel_core::array_dtype(steering[0].1), dtype::FLOAT32);
-
-    // Zeroing the vector leaves the forward unchanged: it is not read.
-    let config = tiny_config();
-    let mut raw = raw_weights();
-    raw.insert(
-        "model.layers.2.moe.reasoning_effort_steering".into(),
-        mlxcel_core::zeros(&[HIDDEN as i32], dtype::FLOAT32),
-    );
-    let zeroed = Raon1MiniModel::from_weights(
-        &Raon1MiniModel::sanitize_weights(raw, &config).unwrap(),
-        &config,
-    )
-    .unwrap();
-    let tokens = ids(&[&[1, 2, 3, 4, 5]]);
-    let a = model.forward_with_caches(&tokens, &mut model.make_layer_caches(), None);
-    let b = zeroed.forward_with_caches(&tokens, &mut zeroed.make_layer_caches(), None);
-    assert_eq!(values(&a), values(&b));
 }
 
 /// Native batched decode (stacked RDA states, per-row MLA latent caches)

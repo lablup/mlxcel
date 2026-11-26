@@ -16,19 +16,21 @@
 
 Two modes, both on `KRAFTON/Raon-1-mini` (revision `6691a076`) run through the
 `modeling_raon1_mini.py` that ships in the checkpoint, in bfloat16 (the model
-dtype the reference is written for), with `set_reasoning_effort("max")`. The
-`max` alpha is 0, so the reasoning-effort steering vectors are not applied
-and the forward is the steering-free architecture mlxcel implements (#3225;
-steering is #3435).
+dtype the reference is written for), at `set_reasoning_effort(EFFORT)`.
+`--effort` takes `none`, `low`, `medium`, `high`, `xhigh`, `max` or `default`
+(the reference's `set_reasoning_effort(None)`, which is `high`); it defaults
+to `max`, whose alpha is 0, so the steering vectors are not applied and the
+forward is the steering-free architecture (#3225). Any other level adds
+`alpha * c` to the MoE output of the steered layers (#3435).
 
     raon1_mini_oracle_trace.py trace MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256]
-        [MAX_CHUNKS=4] [TOPK=8] [--no-prefix-sharing] > reference.tsv
+        [MAX_CHUNKS=4] [TOPK=8] [--no-prefix-sharing] [--effort LEVEL] > reference.tsv
 
 writes the teacher-forced TSV `examples/logit_trace.rs` writes (PREFILL 0
 only), so `scripts/compare_logit_traces.py` reads the pair unmodified.
 
     raon1_mini_oracle_trace.py generate MODEL_DIR PROMPT_FILE [MAX_TOKENS=64]
-        [--thinking] > greedy.json
+        [--thinking] [--effort LEVEL] > greedy.json
 
 renders PROMPT_FILE as one user turn through the checkpoint's chat template
 (`enable_thinking=False` unless `--thinking`), decodes greedily without the
@@ -98,7 +100,10 @@ def import_checkpoint_code(model_dir: Path):
     return modeling, digests
 
 
-def build_model(model_dir: Path):
+EFFORTS = ("none", "low", "medium", "high", "xhigh", "max", "default")
+
+
+def build_model(model_dir: Path, effort: str = "max"):
     import torch
 
     modeling, digests = import_checkpoint_code(model_dir)
@@ -107,11 +112,15 @@ def build_model(model_dir: Path):
         str(model_dir), dtype=torch.bfloat16, device_map="cpu"
     )
     model.eval()
-    model.set_reasoning_effort("max")
+    model.set_reasoning_effort(None if effort == "default" else effort)
     alphas = {layer.layer_idx: layer.effort_alpha for layer in model.model.layers if layer.is_moe}
-    if any(alphas.values()):
+    steered = sorted({a for a in alphas.values() if a})
+    if effort == "max" and steered:
         raise OracleError(f"steering is still on after set_reasoning_effort('max'): {alphas}")
-    log(f"loaded {model_dir} in {time.perf_counter() - started:.0f}s (bfloat16, cpu, alpha 0)")
+    log(
+        f"loaded {model_dir} in {time.perf_counter() - started:.0f}s (bfloat16, cpu, "
+        f"effort {effort}, alpha {steered[0] if steered else 0})"
+    )
     return model, digests
 
 
@@ -130,7 +139,7 @@ def run_trace(args) -> int:
     bos_prefix = tokenizer.encode("", add_special_tokens=True).ids[:1]
     chunks = plan_chunks(ids, bos_prefix, chunk_tokens, max_chunks, 0)
     groups = plan_forwards(chunks, share_prefixes=not args.no_prefix_sharing)
-    model, digests = build_model(model_dir)
+    model, digests = build_model(model_dir, args.effort)
 
     results = {}
     with torch.inference_mode():
@@ -153,7 +162,7 @@ def run_trace(args) -> int:
     out.write(
         f"# oracle\tmodeling_raon1_mini.py\tsha256\t{digests['modeling_raon1_mini.py']}"
         f"\ttransformers\t{transformers.__version__}\ttorch\t{torch.__version__}"
-        f"\ttokenizers\t{tokenizers.__version__}\treasoning_effort\tmax\n"
+        f"\ttokenizers\t{tokenizers.__version__}\treasoning_effort\t{args.effort}\n"
     )
     out.write("# dtype\tbfloat16\tdevice\tcpu\n")
     out.write(f"# corpus\t{args.text_file}\ttokens\t{len(ids)}\n")
@@ -190,7 +199,7 @@ def run_generate(args) -> int:
     )
     if isinstance(ids, dict) or hasattr(ids, "keys"):
         ids = ids["input_ids"]
-    model, _ = build_model(model_dir)
+    model, _ = build_model(model_dir, args.effort)
     started = time.perf_counter()
     with torch.inference_mode():
         out = model.generate(
@@ -206,6 +215,7 @@ def run_generate(args) -> int:
     log(f"generated {len(generated)} tokens in {time.perf_counter() - started:.0f}s")
     json.dump(
         {
+            "reasoning_effort": args.effort,
             "prompt_tokens": len(ids),
             "prompt_ids": list(ids),
             "generated_ids": generated,
@@ -229,11 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("max_chunks", nargs="?")
     tr.add_argument("topk", nargs="?")
     tr.add_argument("--no-prefix-sharing", action="store_true")
+    tr.add_argument("--effort", choices=EFFORTS, default="max")
     ge = sub.add_parser("generate")
     ge.add_argument("model_dir")
     ge.add_argument("prompt_file")
     ge.add_argument("max_tokens", nargs="?")
     ge.add_argument("--thinking", action="store_true")
+    ge.add_argument("--effort", choices=EFFORTS, default="max")
     args = ap.parse_args(argv)
     try:
         return run_trace(args) if args.mode == "trace" else run_generate(args)

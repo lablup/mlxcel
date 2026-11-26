@@ -418,7 +418,7 @@ fn router_selects_on_biased_scores_and_weighs_with_unbiased_ones() {
             situ_linear_beta: 25.0,
             has_shared_expert: true,
         };
-        let moe = RaonMoe::from_weights(&weights, "moe", spec).expect("moe loads");
+        let moe = RaonMoe::from_weights(&weights, "moe", spec, false).expect("moe loads");
         let (idx, w) = moe.route(&x);
         assert_eq!(mlxcel_core::array_dtype(&w), dtype::FLOAT32);
         let mut pairs: Vec<(i32, f32)> = values(&idx)

@@ -334,6 +334,7 @@ pub(crate) mod raon1_mini_moe;
 pub(crate) mod raon1_mini_sanitize;
 pub(crate) mod raon_mhc;
 pub(crate) mod raon_rda;
+pub mod reasoning_effort_steering;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
@@ -1322,7 +1323,7 @@ impl ModelType {
                 "MoE (other)",
             ),
             ModelType::Raon1Mini => (
-                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE)",
+                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE, reasoning-effort steering)",
                 "MoE (other)",
             ),
             ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),

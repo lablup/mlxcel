@@ -93,15 +93,22 @@ pub struct RaonMoe {
     correction_bias: Option<UniquePtr<MlxArray>>,
     switch_mlp: SwitchGLU,
     shared_experts: Option<RaonSituMlp>,
-    /// `moe.reasoning_effort_steering` (`[hidden]` float32), loaded and kept
-    /// but not applied: the forward here is the steering-free (alpha 0,
-    /// `reasoning_effort="max"`) model. Applying it is #3435.
+    /// `moe.reasoning_effort_steering` (`[hidden]` float32), present only on
+    /// a layer the config's `reasoning_effort_steering.layers` lists. The
+    /// decoder layer adds `alpha * steering` to this MoE's output (#3435).
     steering: Option<UniquePtr<MlxArray>>,
     spec: MoeSpec,
 }
 
 impl RaonMoe {
-    pub fn from_weights(weights: &WeightMap, prefix: &str, spec: MoeSpec) -> Result<Self, String> {
+    /// `steered` is whether the config lists this layer for reasoning-effort
+    /// steering: its vector is then required, and otherwise dropped.
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        spec: MoeSpec,
+        steered: bool,
+    ) -> Result<Self, String> {
         let gate_key = format!("{prefix}.gate.weight");
         let gate = weights
             .get(&gate_key)
@@ -165,9 +172,7 @@ impl RaonMoe {
         } else {
             None
         };
-        let steering = weights
-            .get(&format!("{prefix}.reasoning_effort_steering"))
-            .map(|s| mlxcel_core::astype(s, dtype::FLOAT32));
+        let steering = load_steering(weights, prefix, spec.hidden_size, steered)?;
 
         Ok(Self {
             router_t,
@@ -179,9 +184,25 @@ impl RaonMoe {
         })
     }
 
-    /// The layer's reasoning-effort steering vector, when the checkpoint has one.
+    /// The layer's reasoning-effort steering vector, when the layer is steered.
     pub fn steering_vector(&self) -> Option<&MlxArray> {
         self.steering.as_deref()
+    }
+
+    /// `y` steered by `alpha` (`[B, 1, 1]` float32, one alpha per row):
+    /// `(y.f32 + alpha * c).astype(dt)`, rounded once, as the reference's
+    /// `Raon1MiniDecoderLayer.forward` does. `y` unchanged when this layer
+    /// carries no vector.
+    pub fn steer(&self, y: UniquePtr<MlxArray>, alpha: &MlxArray) -> UniquePtr<MlxArray> {
+        let Some(c) = self.steering.as_deref() else {
+            return y;
+        };
+        let dt = mlxcel_core::array_dtype(&y);
+        let shift = mlxcel_core::multiply(alpha, c);
+        mlxcel_core::astype(
+            &mlxcel_core::add(&mlxcel_core::astype(&y, dtype::FLOAT32), &shift),
+            dt,
+        )
     }
 
     /// `(top-k expert ids [N, k], float32 routing weights [N, k])` for `x_flat` `[N, D]`.
@@ -228,4 +249,36 @@ impl RaonMoe {
         };
         mlxcel_core::reshape(&y, &shape)
     }
+}
+
+/// The `[hidden]` float32 steering vector of a steered layer. A steered layer
+/// without one is a load error; an unsteered layer's vector is dropped, as the
+/// reference registers the buffer only on listed layers.
+fn load_steering(
+    weights: &WeightMap,
+    prefix: &str,
+    hidden_size: usize,
+    steered: bool,
+) -> Result<Option<UniquePtr<MlxArray>>, String> {
+    let key = format!("{prefix}.reasoning_effort_steering");
+    let Some(vector) = weights.get(&key) else {
+        return if steered {
+            Err(format!(
+                "Missing weight: {key} (the config's reasoning_effort_steering lists this layer)"
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    if !steered {
+        tracing::debug!("{key}: layer not listed in reasoning_effort_steering.layers; dropped");
+        return Ok(None);
+    }
+    let shape = mlxcel_core::array_shape(vector);
+    if shape != [hidden_size as i32] {
+        return Err(format!(
+            "{key}: expected [hidden_size {hidden_size}], got {shape:?}"
+        ));
+    }
+    Ok(Some(mlxcel_core::astype(vector, dtype::FLOAT32)))
 }

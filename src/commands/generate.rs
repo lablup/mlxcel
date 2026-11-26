@@ -3504,6 +3504,15 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        // A model that steers by reasoning effort (Raon-1 mini, #3435) takes
+        // the level in its forward as well as in the rendered prompt; every
+        // other model ignores it here.
+        LanguageModel::set_sequence_reasoning_effort(
+            &model,
+            None,
+            args.generation.reasoning_effort.as_deref(),
+        )
+        .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
         if print_banner && !banner_before_load {
             let storage_modes = LanguageModel::kv_cache_storage_modes(&model);
             print_kv_cache_mode_banner(

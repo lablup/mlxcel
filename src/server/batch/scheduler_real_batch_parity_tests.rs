@@ -100,6 +100,7 @@ fn options() -> ServerGenerateOptions {
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 

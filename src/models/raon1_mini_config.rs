@@ -23,6 +23,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::reasoning_effort_steering::ReasoningEffortSteering;
+
 /// `rda_config` block: the Raon Delta Attention geometry and the 1-based
 /// layer lists that split the stack into RDA and MLA layers.
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +115,9 @@ pub struct Raon1MiniConfig {
     pub latent_moe_use_norm: bool,
     #[serde(default)]
     pub attn_res_block_size: Option<usize>,
+    /// Reasoning-effort steering (#3435); `None` means alpha 0 everywhere.
+    #[serde(default)]
+    pub reasoning_effort_steering: Option<ReasoningEffortSteering>,
     /// Every other top-level key (`quantization_config`, the vendor MLX
     /// export's markers, ...), checked by [`Raon1MiniConfig::validate`].
     #[serde(flatten)]
@@ -310,6 +315,16 @@ impl Raon1MiniConfig {
             ));
         }
         self.validate_geometry()?;
+        if let Some(steering) = &self.reasoning_effort_steering {
+            steering
+                .validate(self.num_hidden_layers)
+                .map_err(|e| format!("raon1_mini: {e}"))?;
+            if let Some(layer) = steering.layers.iter().find(|&&l| !self.is_moe_layer(l)) {
+                return fail(format!(
+                    "reasoning_effort_steering lists layer {layer}, which is not a MoE layer"
+                ));
+            }
+        }
         validate_layer_partition(
             &self.rda_config.rda_layers,
             &self.rda_config.mla_layers,

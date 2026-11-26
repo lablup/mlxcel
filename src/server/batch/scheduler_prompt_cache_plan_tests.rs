@@ -204,6 +204,7 @@ fn turn_ctx(history: Option<&[i32]>) -> PromptCacheRequestContext {
         root_prompt: None,
         root_prefix_tokens: None,
         snapshot_lineage: Default::default(),
+        model_reasoning_effort: None,
     }
 }
 

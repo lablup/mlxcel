@@ -894,6 +894,10 @@ pub(crate) struct GenerationOptions {
     /// level ignores the flag and renders the same prompt. The template decides
     /// which values are valid and its own message is shown for a bad one. Has no
     /// effect with `--no-chat-template`.
+    ///
+    /// Raon-1 mini applies the level in its weights (reasoning-effort steering):
+    /// `none`, `low`, `medium`, `high` (the default), `xhigh` or `max`; `none`
+    /// also turns thinking off in the prompt, and any other value is refused.
     #[arg(long, value_name = "LEVEL", value_parser = parse_reasoning_effort)]
     pub(crate) reasoning_effort: Option<String>,
 
