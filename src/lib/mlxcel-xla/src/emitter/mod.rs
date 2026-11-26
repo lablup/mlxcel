@@ -73,6 +73,7 @@ mod molmo_vision_ops;
 mod nemotron_h_config;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
+mod plamo2_config;
 pub(crate) mod production_probe_ops;
 mod quant_scale;
 mod qwen2_5_vl;
@@ -84,6 +85,7 @@ mod recurrent_config;
 mod rope;
 mod ssm;
 mod ssm_mamba1;
+mod ssm_plamo2;
 mod ssm_scan;
 #[cfg(test)]
 mod ssm_tests;
@@ -98,6 +100,8 @@ mod context_tests;
 mod falcon_h1_tests;
 #[cfg(test)]
 mod nemotron_h_tests;
+#[cfg(test)]
+mod plamo2_tests;
 #[cfg(test)]
 mod recurrent_ragged_tests;
 #[cfg(test)]

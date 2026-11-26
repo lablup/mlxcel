@@ -1,0 +1,23 @@
+{
+  "model_type": "plamo2",
+  "architectures": ["Plamo2ForCausalLM"],
+  "hidden_size": 16,
+  "intermediate_size": 24,
+  "num_hidden_layers": 4,
+  "vocab_size": 32,
+  "num_attention_heads": 4,
+  "num_key_value_heads": 2,
+  "hidden_size_per_head": 4,
+  "mamba_num_heads": 4,
+  "mamba_d_state": 4,
+  "mamba_d_conv": 4,
+  "mamba_step": 2,
+  "mamba_chunk_size": 8,
+  "mamba_enabled": true,
+  "attention_window_size": 8,
+  "full_attention_idx": [3],
+  "rope_theta": 10000,
+  "rope_local_theta": 5000,
+  "rms_norm_eps": 1e-06,
+  "tie_word_embeddings": true
+}

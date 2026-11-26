@@ -1,0 +1,25 @@
+{
+  "head": "ac2c4b27ad7967763f93f76c0c06e1850c02de6f",
+  "binary_source_head": "ac2c4b27ad7967763f93f76c0c06e1850c02de6f",
+  "server_ctx_size": 2048,
+  "checkpoint_revision": "92c75fd6eea9018bcb9c33ee8921589febe071fa",
+  "model": "/tmp/epic564-models/plamo-2-1b",
+  "precision": "f32",
+  "device": "cuda",
+  "context_capacity_override": 256,
+  "max_batch_size": 4,
+  "http_mode": "both",
+  "scope": "CLI 40-token oracle and four concurrent completions versus separate 40-token displayed CLI references",
+  "gpu_guard": "caller must hold gpu-lock on GB10 or rocm_gpu_guard on ROCm",
+  "binary_sha256": {
+    "mlxcel": "2af9985c8112fc47ce05fdea6489ebdbe1d06b1ac6345e1ba79a776ff06b84dc",
+    "mlxcel-server": "30757ce047ab1c746669b23cc66092a39939342c514ca20de84a4d9e4097997e"
+  },
+  "environment": {
+    "MLXCEL_BACKEND": "xla",
+    "MLXCEL_XLA_DEVICE": "cuda",
+    "MLXCEL_XLA_PRECISION": "f32",
+    "MLXCEL_XLA_CONTEXT_CAPACITY": "256",
+    "MLXCEL_CACHE_DIR": "/tmp/epic564-plan/plamo2-cli-server/cache"
+  }
+}

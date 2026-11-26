@@ -262,6 +262,7 @@ impl Config {
                 WeightScheme::Mamba2 | WeightScheme::NemotronH | WeightScheme::FalconH1
             ),
             SsmKind::Mamba1 { .. } => self.weight_scheme == WeightScheme::Mamba1,
+            SsmKind::Plamo2 { .. } => self.weight_scheme == WeightScheme::Plamo2,
         };
         if !scheme_matches_kind {
             return Err(format!(
@@ -272,6 +273,9 @@ impl Config {
         let mut shapes = HashMap::new();
         for file in checkpoint_files(model_dir)? {
             shapes.extend(header_shapes(&file)?);
+        }
+        if self.weight_scheme == WeightScheme::Plamo2 {
+            return super::plamo2_config::validate_checkpoint(self, &shapes);
         }
         let quant = self.quantization;
         let (h, di, cd) = (self.hidden, ssm.d_inner(), ssm.conv_dim);
@@ -514,6 +518,9 @@ impl Config {
                         format!("[{di}, {}]", ssm.state_size),
                     )?;
                     vector(&format!("{m}D"), di)?;
+                }
+                SsmKind::Plamo2 { .. } => {
+                    unreachable!("PLaMo 2 checkpoints are checked by plamo2_config")
                 }
             }
         }
