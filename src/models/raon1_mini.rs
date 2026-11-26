@@ -198,6 +198,7 @@ impl Raon1MiniDecoderLayer {
         let prefix = format!("model.layers.{layer_idx}");
         let is_rda = config.is_rda_layer(layer_idx);
         let attn_prefix = format!("{prefix}.self_attn");
+        let (group_size, bits) = config.dense_quant();
         let mixer = if is_rda {
             let spec = RdaSpec {
                 hidden_size: config.hidden_size,
@@ -206,8 +207,8 @@ impl Raon1MiniDecoderLayer {
                 kernel_size: config.rda_config.conv_kernel_size,
                 gate_lower_bound: config.rda_config.gate_lower_bound,
                 norm_eps: config.rms_norm_eps,
-                group_size: 64,
-                bits: 4,
+                group_size,
+                bits,
             };
             Mixer::Rda(RaonDeltaAttention::from_weights(
                 weights,
@@ -225,8 +226,8 @@ impl Raon1MiniDecoderLayer {
                 v_head_dim: config.v_head_dim,
                 use_output_gate: config.mla_use_output_gate,
                 latent_norm_eps: config.mla_latent_norm_eps,
-                group_size: 64,
-                bits: 4,
+                group_size,
+                bits,
                 family: "raon1_mini",
             };
             Mixer::Mla(KimiK3MLAAttention::from_spec(weights, &spec, &attn_prefix)?)
@@ -373,7 +374,7 @@ impl Raon1MiniModel {
             .get("model.norm.weight")
             .ok_or_else(|| "Missing weight: model.norm.weight".to_string())?;
         let lm_head = if weights.contains_key("lm_head.weight") {
-            Some(UnifiedLinear::from_weights(weights, "lm_head", 64, 4)?)
+            Some(super::raon1_mini_quant::linear(weights, "lm_head")?)
         } else if config.tie_word_embeddings {
             None
         } else {
@@ -492,3 +493,7 @@ mod block_tests;
 #[cfg(test)]
 #[path = "raon1_mini_steering_tests.rs"]
 pub(crate) mod steering_tests;
+
+#[cfg(test)]
+#[path = "raon1_mini_export_tests.rs"]
+mod export_tests;

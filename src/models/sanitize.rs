@@ -1273,7 +1273,8 @@ pub(crate) fn sanitize_modelopt_nvfp4_weights(
 ) -> Result<(), String> {
     compressed_tensors_nvfp4_to_modelopt_triplets(weights)?;
     normalize_nvfp4_keys(weights);
-    repack_nvfp4_weights_to_quantized(weights, config)
+    repack_nvfp4_weights_to_quantized(weights, config)?;
+    crate::models::modelopt_mixed_precision::repack_mixed_precision_mxfp8_layers(weights, config)
 }
 
 /// The `format` a compressed-tensors (llm-compressor) checkpoint declares for
@@ -1411,7 +1412,10 @@ fn modelopt_quantization_config(
             if qc
                 .get("quant_method")
                 .and_then(Value::as_str)
-                .is_some_and(|m| m.trim().eq_ignore_ascii_case("modelopt"))
+                .is_some_and(|m| {
+                    let m = m.trim();
+                    m.eq_ignore_ascii_case("modelopt") || m.eq_ignore_ascii_case("modelopt_fp4")
+                })
             {
                 return Some(qc.clone());
             }
