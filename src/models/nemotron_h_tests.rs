@@ -82,7 +82,8 @@ pub(crate) fn tiny_model() -> super::NemotronHModel {
         "backbone.layers.1.mixer.down_proj.weight",
         ramp(&[8, 16], 0.02),
     );
-    let w = super::NemotronHModel::sanitize_weights(w, &config);
+    let w = super::NemotronHModel::sanitize_weights(w, &config)
+        .expect("tiny Nemotron-H weights must sanitize");
     super::NemotronHModel::from_weights(config, w, block_types).expect("tiny Nemotron-H must build")
 }
 
@@ -936,6 +937,126 @@ fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
     }
     NemotronHModel::from_weights(config_with(0, 0), regular, vec![BlockType::MoE])
         .expect("a non-quantized expert plane must not be gated on quantization params");
+}
+
+/// Exercise the post-repack layout of NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4.
+#[test]
+fn per_expert_nvfp4_planes_are_stacked_with_their_tensor_scales() {
+    use super::{BlockType, NemotronHMixer, NemotronHModel, SwitchLinear};
+    use crate::models::switch_layers::{
+        expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
+    };
+
+    let mut config: NemotronHConfig =
+        serde_json::from_value(transformers_config(serde_json::json!({
+            "layer_types": ["moe"],
+            "n_routed_experts": 3,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 32,
+        })))
+        .unwrap();
+    config.post_init().unwrap();
+
+    let mixer = "backbone.layers.0.mixer";
+    let mut weights = WeightMap::new();
+    for (key, shape) in [
+        ("backbone.embeddings.weight", &[256, 64][..]),
+        ("lm_head.weight", &[256, 64]),
+        ("backbone.norm_f.weight", &[64]),
+        ("backbone.layers.0.norm.weight", &[64]),
+        ("backbone.layers.0.mixer.gate.weight", &[3, 64]),
+    ] {
+        weights.insert(key.into(), mlxcel_core::zeros(shape, dtype::FLOAT32));
+    }
+    for expert in 0..3 {
+        for (proj, out, input, scale) in [("up_proj", 32, 64, 0.25), ("down_proj", 64, 32, 0.5)] {
+            insert_modelopt_expert_plane(
+                &mut weights,
+                &format!("{mixer}.experts.{expert}.{proj}"),
+                out,
+                input,
+                expert as f32 + scale,
+                expert,
+            );
+        }
+    }
+
+    let weights = NemotronHModel::sanitize_weights(weights, &config)
+        .expect("matching per-expert planes must stack");
+    for (fc, expected) in [("fc1", [0.25, 1.25, 2.25]), ("fc2", [0.5, 1.5, 2.5])] {
+        let prefix = format!("{mixer}.switch_mlp.{fc}");
+        assert_eq!(stacked_inv_global_scale(&weights, &prefix), expected);
+    }
+    assert!(!weights.keys().any(|k| k.contains(".experts.")));
+    let Some(model) = expect_native_nvfp4_load(
+        NemotronHModel::from_weights(config, weights, vec![BlockType::MoE])
+            .map_err(|e| e.to_string()),
+        "backbone.layers.0.mixer.switch_mlp",
+        "load Nemotron-H with NVFP4 experts",
+    ) else {
+        return;
+    };
+    let NemotronHMixer::MoE(moe) = &model.layers[0].mixer else {
+        panic!("expected an MoE layer");
+    };
+    for plane in [&moe.switch_mlp.fc1, &moe.switch_mlp.fc2] {
+        assert!(matches!(
+            plane,
+            SwitchLinear::Quantized { mode, inv_global_scale: Some(_), .. } if mode == "nvfp4"
+        ));
+    }
+}
+
+/// A per-expert plane that disagrees with expert 0 must fail the load with the
+/// stacking helper's message naming the offending key. `mlxcel_core::stack` is
+/// not fallible, so a discarded error here would let the mismatch reach it.
+#[test]
+fn mismatched_per_expert_planes_fail_sanitize_with_the_expert_key() {
+    use super::NemotronHModel;
+
+    let mut config: NemotronHConfig =
+        serde_json::from_value(transformers_config(serde_json::json!({
+            "layer_types": ["moe"],
+            "n_routed_experts": 3,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 32,
+        })))
+        .unwrap();
+    config.post_init().unwrap();
+
+    let mixer = "backbone.layers.0.mixer";
+    let planes = |odd_proj: &str, odd_shape: &[i32], odd_dtype: i32| {
+        let mut weights = WeightMap::new();
+        for expert in 0..3 {
+            for (proj, shape) in [("up_proj", [32, 64]), ("down_proj", [64, 32])] {
+                let odd = expert == 2 && proj == odd_proj;
+                let plane = if odd {
+                    mlxcel_core::zeros(odd_shape, odd_dtype)
+                } else {
+                    mlxcel_core::zeros(&shape, dtype::FLOAT32)
+                };
+                weights.insert(format!("{mixer}.experts.{expert}.{proj}.weight"), plane);
+            }
+        }
+        weights
+    };
+    let sanitize_err = |weights: WeightMap| {
+        NemotronHModel::sanitize_weights(weights, &config)
+            .err()
+            .expect("mismatched per-expert planes must fail to sanitize")
+    };
+
+    let err = sanitize_err(planes("up_proj", &[32, 64], dtype::FLOAT16));
+    assert!(
+        err.contains(&format!("{mixer}.experts.2.up_proj.weight")) && err.contains("dtype"),
+        "{err}"
+    );
+
+    let err = sanitize_err(planes("down_proj", &[64, 16], dtype::FLOAT32));
+    assert!(
+        err.contains(&format!("{mixer}.experts.2.down_proj.weight")) && err.contains("[64, 16]"),
+        "{err}"
+    );
 }
 
 /// Nemotron-H builds its shared-expert and latent projections as optional

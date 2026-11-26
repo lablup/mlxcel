@@ -112,7 +112,8 @@ impl VoiceChatLanguageModel {
                 .map_err(|e| format!("nemotron_voicechat: function_head: {e}"))?;
         llm_weights.retain(|k, _| !k.starts_with("stt_model.function_head."));
 
-        let llm_weights = NemotronHModel::sanitize_weights(llm_weights, &text_config);
+        let llm_weights = NemotronHModel::sanitize_weights(llm_weights, &text_config)
+            .map_err(|e| format!("nemotron_voicechat: language model: {e}"))?;
         let llm = NemotronHModel::from_weights(text_config, llm_weights, block_types)
             .map_err(|e| format!("nemotron_voicechat: language model: {e}"))?;
         Ok(Self {

@@ -260,7 +260,8 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map(|name| models::nemotron_h::BlockType::from_str(name))
                 .collect();
             let owned = copy_weight_map(weights);
-            let owned = models::NemotronHModel::sanitize_weights(owned, &args);
+            let owned = models::NemotronHModel::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
             let model = models::NemotronHModel::from_weights(args, owned, block_types)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             LoadedModel::NemotronH(model)

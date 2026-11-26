@@ -414,7 +414,8 @@ pub(crate) fn load_nemotron_h_nano_omni_vlm(model_path: &Path) -> Result<LoadedM
     // and `from_weights` builder. This guarantees parity with the
     // text-only Nemotron-H path — any future text-side improvement
     // automatically benefits the VLM.
-    let text_weights = NemotronHModel::sanitize_weights(text_weights, &text_config);
+    let text_weights = NemotronHModel::sanitize_weights(text_weights, &text_config)
+        .map_err(|err| anyhow::anyhow!("Failed to load Nemotron H Nano Omni text model: {err}"))?;
     let text_model = NemotronHModel::from_weights(text_config, text_weights, block_types)
         .map_err(|err| anyhow::anyhow!("Failed to load Nemotron H Nano Omni text model: {err}"))?;
 
