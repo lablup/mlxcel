@@ -43,7 +43,7 @@ A file is a caller of ``utils.rs::softcap`` when, outside test code, it
 * names it by a path that resolves to it (``mlxcel_core::utils::softcap(..)``,
   ``utils::softcap(..)`` after ``use mlxcel_core::utils;``, ``crate::utils::``
   inside the defining crate), or
-* calls it bare under a glob import of its module.
+* names it under a glob import of its module, including as a function value.
 
 Paths are resolved through the file's own ``use`` declarations, its child
 ``mod`` declarations, ``crate``, ``self`` and ``super``. Matching the bare
@@ -169,10 +169,15 @@ Limits
   for every ``deepseek_*.rs`` caller, and a capitalised word that happens to
   equal a file stem accounts for that file. A looser match can hide a missing
   name; it cannot fail a correct annotation.
-* A caller that reaches the function through a re-export (``pub use`` in
-  another module, then a call through that module) is seen at the re-export
-  only. A function passed by value under a glob import is not seen. Macros
-  are not expanded, and nested block comments are not handled.
+* A public or visibility-restricted ``use`` of a scoped function fails at
+  the re-export, and so does one of its module (``pub use mlxcel_core::utils;``
+  or a glob of it) or of an ancestor of that module (``pub use
+  mlxcel_core::*;``). Downstream callers can otherwise use a path the checker
+  cannot resolve. Macros are not expanded. Block-local imports are collected
+  per file. Complex binding patterns and nested block comments are not parsed:
+  under a glob import, a scoped name rebound by a ``for``, ``match``, closure
+  or tuple pattern and then used as a value counts as a use. That fails
+  closed; rename the binding rather than naming the file.
 * The regenerating command is matched textually, as ``grep`` would, so the
   files it lists can include test files and comment mentions. That is what
   the annotation's own count is measured against; the caller set above is
@@ -260,11 +265,18 @@ PATH_ATTRIBUTE_RE = re.compile(r'#\[path\s*=\s*"([^"]+)"\s*\]')
 ATTRIBUTE_RE = re.compile(r"\s*#\[[^\]]*\]")
 BRACE_RE = re.compile(r"[{};]")
 MOD_RE = re.compile(r"\bmod\s+(\w+)\s*[;{]")
-USE_RE = re.compile(r"\buse\s+([^;]+);")
+USE_RE = re.compile(r"\b(?P<public>pub(?:\s*\([^)]*\))?\s+)?use\s+(?P<tree>[^;]+);")
+# A cheap pre-filter: a file with a public `use` is lexed even when it never
+# spells a scoped name, since `pub use mlxcel_core::*;` re-exports them all.
+PUB_USE_RE = re.compile(r"\bpub\s*(?:\([^)]*\)\s*)?use\b")
 USE_TOKEN_RE = re.compile(r"::|[{},*]|\w+")
 QUALIFIER_RE = re.compile(r"(?:\b\w+\s*::\s*)+\Z")
+# Delimiters after a bare function expression, including calls, turbofish
+# calls (`fused_add_rms_norm::<N>(..)`), callbacks, assignments and casts. A
+# field label, type qualifier or macro name differs.
+VALUE_FOLLOW_RE = re.compile(r"\s*(?:[(),;\]}?.]|::\s*<|as\b)")
+FN_HEADER_RE = re.compile(r"\bfn\s+\w+[^;{}]*\{")
 FN_KEYWORD_RE = re.compile(r"\bfn\s+\Z")
-CALL_RE = re.compile(r"\s*\(")
 TOP_LEVEL_PUB_FN_RE = re.compile(
     r"^pub\s+(?:(?:const|unsafe|async)\s+)*fn\s+(\w+)", re.M
 )
@@ -322,6 +334,14 @@ def item_end(code: str, start: int) -> int:
     return len(code)
 
 
+@dataclasses.dataclass(frozen=True)
+class Use:
+    path: tuple[str, ...]
+    local: str
+    at: int
+    public: bool
+
+
 def expand_use(tree: str) -> list[tuple[tuple[str, ...], str]]:
     """Flatten a `use` tree into (path, local name); the name is `*` for a glob."""
     tokens = USE_TOKEN_RE.findall(tree)
@@ -370,6 +390,8 @@ class RustFile:
     is_test: bool = False
     code: str | None = None
     test_spans: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    # Flattened imports keep their own location for caller and re-export diagnostics.
+    imports: list[Use] = dataclasses.field(default_factory=list)
     use_spans: list[tuple[int, int]] = dataclasses.field(default_factory=list)
     bindings: dict[str, set[tuple[str, ...]]] = dataclasses.field(default_factory=dict)
     globs: list[tuple[str, ...]] = dataclasses.field(default_factory=list)
@@ -389,7 +411,8 @@ class RustFile:
             if self.in_test(match.start()):
                 continue
             self.use_spans.append((match.start(), match.end()))
-            for path, local in expand_use(match.group(1)):
+            for path, local in expand_use(match["tree"]):
+                self.imports.append(Use(path, local, match.start(), bool(match["public"])))
                 if local == "*":
                     self.globs.append(path)
                 else:
@@ -586,7 +609,34 @@ def identifier_offsets(code: str, name: str):
         at = code.find(name, end)
 
 
-def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> None:
+def local_value_spans(code: str, name: str) -> list[tuple[int, int]]:
+    """Simple parameters and let bindings that shadow a glob in their block."""
+    spans = []
+    parameter = re.compile(rf"\b{name}\s*:(?!:)")
+    for header in FN_HEADER_RE.finditer(code):
+        if parameter.search(header.group()):
+            spans.append((header.start(), item_end(code, header.end() - 1)))
+    for binding in re.finditer(rf"\blet\s+(?:mut\s+)?{name}\b", code):
+        # The initializer still sees the outer binding. Shadowing starts after
+        # the let statement and ends at the nearest enclosing closing brace.
+        depth = 0
+        start = None
+        for token in BRACE_RE.finditer(code, binding.end()):
+            if token.group() == "{":
+                depth += 1
+            elif token.group() == "}":
+                if depth == 0:
+                    if start is not None:
+                        spans.append((start, token.start()))
+                    break
+                depth -= 1
+            elif depth == 0 and start is None:
+                start = token.end()
+        spans.append(binding.span())
+    return spans
+
+
+def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> list[str]:
     """Fill in `callers` for every function defined in `scoped`."""
     by_name: dict[str, list[Function]] = {}
     for function in functions:
@@ -600,29 +650,65 @@ def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> Non
         for function in by_name[name]:
             function.callers.setdefault(file.rel, line)
 
+    failures = []
     for file in tree.files.values():
-        if file.is_test or file.rel == scoped.rel:
+        if file.is_test:
             continue
         # A reference from another crate has to spell the module's name, in a
         # `use` or as a qualifier; inside the crate a `super::*` glob need not.
         # Plain substring tests first: they rule out most of the tree before
         # anything is lexed.
-        if file.crate != scoped.crate and leaf not in file.raw:
+        reexports = PUB_USE_RE.search(file.raw) is not None
+        if file.crate != scoped.crate and leaf not in file.raw and not reexports:
             continue
         present = [name for name in by_name if name in file.raw]
-        if not present:
+        if not present and "*" not in file.raw and not reexports:
             continue
         file.lex()
         code = file.code
         assert code is not None
-        for paths in file.bindings.values():
-            for path in paths:
-                if path[-1] in by_name and prefix + (path[-1],) in file.absolute(path):
-                    span = file.use_spans[0][0] if file.use_spans else 0
-                    record(path[-1], file, span)
-        local_fns: set[str] | None = None
+        local_fns = set(TOP_LEVEL_FN_RE.findall(code)) if file.globs else set()
+        glob_modules = {module for glob in file.globs for module in file.absolute(glob)}
+        for use in file.imports:
+            targets = file.absolute(use.path)
+            # A re-binding can name a previous import: `use self::mask as pcm;`.
+            short = use.path[1:] if use.path[:1] == ("self",) else use.path
+            if short and short[0] in file.bindings and short != use.path:
+                targets |= file.absolute(short)
+            elif len(short) == 1 and short[0] not in file.bindings and short[0] not in local_fns:
+                targets.update(module + short for module in glob_modules)
+            for target in sorted(targets):
+                module = "::".join(prefix)
+                if use.public and target == prefix:
+                    # `pub use mlxcel_core::utils;` gives callers a
+                    # `facade::utils::NAME` path as surely as a glob does.
+                    how = "through a glob" if use.local == "*" else "as a module"
+                    exported = f"scoped module `{module}` {how}"
+                elif use.public and target == prefix[: len(target)]:
+                    # An ancestor (`pub use mlxcel_core::*;`, `pub use
+                    # mlxcel_core as core;`) exposes the module path below it.
+                    exported = f"`{'::'.join(target)}`, which contains scoped module `{module}`"
+                elif target[:-1] == prefix and target[-1] in by_name:
+                    if not use.public:
+                        if file.rel != scoped.rel:
+                            record(target[-1], file, use.at)
+                        continue
+                    exported = f"scoped function `{target[-1]}`"
+                else:
+                    continue
+                line = code.count("\n", 0, use.at) + 1
+                failures.append(
+                    f"{file.rel}:{line}: re-exports {exported}. "
+                    "Import the function at the caller so its path can be checked."
+                )
+        if file.rel == scoped.rel:
+            continue
         for name in present:
             target = prefix + (name,)
+            glob_visible = (
+                prefix in glob_modules and name not in file.bindings and name not in local_fns
+            )
+            shadowed = local_value_spans(code, name) if glob_visible else []
             for at in identifier_offsets(code, name):
                 if file.in_test(at) or file.in_use(at):
                     continue
@@ -635,15 +721,10 @@ def find_callers(tree: Tree, scoped: RustFile, functions: list[Function]) -> Non
                     if target in file.absolute(segments + (name,)):
                         record(name, file, at)
                     continue
-                if name in file.bindings or not CALL_RE.match(code, at + len(name)):
-                    continue  # Imported by name (recorded above), or not a call.
-                for glob in file.globs:
-                    if target in file.absolute(glob + (name,)):
-                        if local_fns is None:
-                            local_fns = set(TOP_LEVEL_FN_RE.findall(code))
-                        if name not in local_fns:  # A local `fn` shadows the glob.
-                            record(name, file, at)
-                        break
+                if glob_visible and VALUE_FOLLOW_RE.match(code, at + len(name)):
+                    if not any(start <= at < end for start, end in shadowed):
+                        record(name, file, at)
+    return failures
 
 
 def normalise(name: str) -> str:
@@ -854,8 +935,10 @@ def check_function(
         if stated != measured:
             failures.append(
                 f"{function.where}: the annotation states {stated} files, but its "
-                f"regenerating command lists {measured} at this commit. Update the "
-                f"count and the groups it summarises: `{file_lists[0].text}`."
+                f"regenerating command lists {measured} at this commit. Its "
+                "extra files may be comment or test mentions. "
+                f"Review `{file_lists[0].text}`, then add a `grep -v` stage for files to "
+                "exclude or update the count and the groups it summarises."
             )
 
     positive_names = names_in(positive)
@@ -941,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(
                 f"{rel}: no top-level `pub fn`, so the check would pass over nothing."
             )
-        find_callers(tree, scoped, found)
+        failures.extend(find_callers(tree, scoped, found))
         report.append(f"{rel}: {len(found)} top-level pub fn")
         for function in found:
             failures.extend(check_function(tree, function, report, advisory))
