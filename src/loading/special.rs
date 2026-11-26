@@ -142,7 +142,8 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let owned = models::requantize_fp8_weights(owned, fp8)
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
-            let owned = models::qwen3_5::sanitize_moe_weights(owned, &args);
+            let owned = models::qwen3_5::sanitize_moe_weights(owned, &args)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             let model = models::Qwen35Model::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             if model_type == ModelType::Qwen35Moe {

@@ -1,6 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useCallback, useId, useRef } from 'react';
-import { Drawer as CommonDrawer } from '@lablup/ui-common/lab';
+import { Drawer as CommonDrawer } from '@lablup/ui-common/Drawer';
 import { IconButton } from './common-adapters';
 
 // The approved 4185 off-canvas sheet: 320 px (520 px for `medium`), inset 12 px; CSS keeps

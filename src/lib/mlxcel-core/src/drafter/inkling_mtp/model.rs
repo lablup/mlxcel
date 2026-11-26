@@ -22,10 +22,12 @@ use crate::inkling_layer::{
     InklingDecoderLayer, InklingDenseMlp, InklingLayerCache, InklingLayerSpec,
 };
 use crate::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use crate::weights::{WeightMap, dir_has_tensor_name, load_weights_from_dir_index_filtered};
+use crate::weights::WeightMap;
 
 use super::config::InklingMtpConfig;
-use super::sanitize::{is_inkling_mtp_tensor_name, sanitize_weights};
+pub use super::sanitize::has_inkling_mtp_tensors;
+pub(super) use super::sanitize::load_drafter_weights;
+use super::sanitize::sanitize_weights;
 
 enum InklingLmHead {
     Linear(UnifiedLinear),
@@ -479,6 +481,28 @@ impl Drafter for InklingMtpDraftModel {
         Ok(())
     }
 
+    fn extends_history_without_draft(&self) -> bool {
+        true
+    }
+
+    /// Block 0 takes the classic steps as it takes an accepted prefix, with
+    /// no snapshot to restore: none was taken, since no round drafted them.
+    fn extend_history(
+        &mut self,
+        hidden: &MlxArray,
+        tokens: &[i32],
+        sampler: &SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        self.require_bound()?;
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.round_snapshot = None;
+        self.round_appended = 0;
+        let output = self.forward_block(tokens, hidden, 0)?;
+        self.set_seed_from_hidden(&output, sampler)
+    }
+
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError> {
         sanitize_weights(weights).map_err(|reason| DrafterError::WeightLoad { reason })
     }
@@ -486,40 +510,4 @@ impl Drafter for InklingMtpDraftModel {
     fn kind(&self) -> DrafterKind {
         DrafterKind::Mtp
     }
-}
-
-/// Load and sanitize the `model.mtp.layers.*` tensors under `path`, keeping
-/// their checkpoint dtype.
-///
-/// Deliberately skips the shared drafter bf16 -> f16 load policy
-/// (`apply_drafter_load_dtype_policy`). Inkling targets stay in their
-/// checkpoint dtype on every backend (the f16 cast breaks the native NVFP4
-/// target, issue #1549), so an f16 drafter would put an f16/bf16 boundary at
-/// every shared embedding, norm and LM-head call, and MLX promotes that mix to
-/// float32. Measured on an M3 Ultra with `Inkling-Small-mlx-4bit` and the
-/// published bf16 `mtp.safetensors`: 128 greedy tokens at
-/// `--draft-block-size 2` took 11.6 s with an f16 drafter and 5.1 s with the
-/// bf16 shard as published, at the same acceptance.
-///
-/// Used by: [`InklingMtpDraftModel::from_path`].
-pub(super) fn load_drafter_weights(path: &Path) -> Result<WeightMap, DrafterError> {
-    let mut weights = load_weights_from_dir_index_filtered(path, |name| {
-        is_inkling_mtp_tensor_name(name) || name.starts_with("blocks.")
-    })
-    .map_err(|reason| DrafterError::WeightLoad { reason })?;
-    if weights.is_empty() {
-        return Err(DrafterError::WeightLoad {
-            reason: format!(
-                "{} has no model.mtp.layers.* tensors; an Inkling config flag alone is not a drafter",
-                path.display()
-            ),
-        });
-    }
-    sanitize_weights(&mut weights).map_err(|reason| DrafterError::WeightLoad { reason })?;
-    Ok(weights)
-}
-
-pub fn has_inkling_mtp_tensors(path: &Path) -> Result<bool, DrafterError> {
-    dir_has_tensor_name(path, is_inkling_mtp_tensor_name)
-        .map_err(|reason| DrafterError::WeightLoad { reason })
 }

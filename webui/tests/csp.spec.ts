@@ -69,11 +69,15 @@ for (const theme of ['light', 'dark'] as const) {
     const ratio = await determinate.evaluate((element) => {
       const fill = element.querySelector('.astryx-progress-bar-fill');
       if (!fill) throw new Error('Missing common fill');
-      return { actual: fill.getBoundingClientRect().width / element.clientWidth * 100, expected: Number(element.getAttribute('aria-valuenow')) };
+      // Astryx 0.7.11 draws the fill at the track's width and slides it by the filled share
+      // (`translateX(calc(var(--_progress-bar-fill) - 100%))`), clipped by the track, so the
+      // rendered share is the fill's trailing edge against the track's leading edge.
+      const track = element.getBoundingClientRect();
+      return { actual: (fill.getBoundingClientRect().right - track.left) / element.clientWidth * 100, expected: Number(element.getAttribute('aria-valuenow')) };
     });
     expect(Math.abs(ratio.actual - ratio.expected)).toBeLessThan(1);
     await expectSafeLayout(page); await expectAxeClean(page);
-    await expect(page.locator('.ds-progress .astryx-progress-bar-fill:not([style])').first()).toHaveCSS('animation-name', 'none');
+    await expect(page.locator('.ds-progress [role="progressbar"]:not([aria-valuenow]) .astryx-progress-bar-fill').first()).toHaveCSS('animation-name', 'none');
     const violations = await page.evaluate(() => Reflect.get(window, '__webuiCspViolations'));
     expect(violations).toEqual([]); expect(external).toEqual([]);
     // Nothing inserted a <style> element (the CSP would have blocked it), and Astryx found the

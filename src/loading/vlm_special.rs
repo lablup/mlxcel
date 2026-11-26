@@ -611,7 +611,8 @@ pub(crate) fn load_minicpmv4_6_vlm(model_path: &Path) -> Result<LoadedModel> {
     // special Qwen3.5 text loader (`special.rs`). `sanitize_weights` covers
     // both dense and MoE layouts (steps 6-8), and the text weights are
     // already de-prefixed to the `model.*` / `lm_head.*` namespace it expects.
-    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config);
+    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     models::sanitize_tied_embeddings(&mut text_weights, &full_config);
 

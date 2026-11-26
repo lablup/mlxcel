@@ -18,7 +18,8 @@
 
 use super::LimiteModel;
 use crate::models::limite_layers::Cache;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::KVCache;
@@ -116,7 +117,7 @@ impl mlxcel_core::generate::LanguageModel for LimiteWrapper {
                 .get(layer_idx)
                 .is_some_and(|layer| !layer.attn.is_global)
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 

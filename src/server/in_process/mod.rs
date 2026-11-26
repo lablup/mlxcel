@@ -38,6 +38,7 @@
 //! [`load_chat_front`]: crate::server::startup::load_chat_front
 
 pub mod chat;
+pub mod reasoning_effort;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -66,7 +66,7 @@ fn prefill_last_logits_are_the_sampled_row_of_the_full_forward() {
 
     // The scheduler's per-sequence entry point, mid-piece position included.
     let seq = SequenceId::from_raw(304_500);
-    let model = two_layer_model_with_vocab(vocab);
+    let model = crate::models::qwen3_5_tests::pooled_two_layer_model_with_vocab(vocab);
     model.prepare_sequence_state(seq);
     let mid = model.forward_last_logits_with_sequence_id(&input, Some(seq), &mut [], None, 4);
     assert_eq!(mlxcel_core::array_shape(&mid), vec![1, 1, vocab as i32]);

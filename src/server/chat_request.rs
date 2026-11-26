@@ -1949,6 +1949,11 @@ fn message_has_effective_input(message: &Message) -> bool {
                         return true;
                     }
                 }
+                ContentPart::AudioUrl { audio_url } => {
+                    if !audio_url.url.trim().is_empty() {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -2248,7 +2253,7 @@ fn template_content(
                             ordinals.image += 1;
                             flattened.push_str(&ordered_image_sentinel(ordinals.image));
                         }
-                        ContentPart::InputAudio { .. } => {
+                        ContentPart::InputAudio { .. } | ContentPart::AudioUrl { .. } => {
                             ordinals.audio += 1;
                             flattened.push_str(&ordered_audio_sentinel(ordinals.audio));
                         }
@@ -2276,9 +2281,11 @@ fn template_content(
                     ContentPart::VideoUrl { .. } => serde_json::json!({
                         "type": "video",
                     }),
-                    ContentPart::InputAudio { .. } => serde_json::json!({
-                        "type": "audio",
-                    }),
+                    ContentPart::InputAudio { .. } | ContentPart::AudioUrl { .. } => {
+                        serde_json::json!({
+                            "type": "audio",
+                        })
+                    }
                 })
                 .collect(),
         ),

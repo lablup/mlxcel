@@ -118,9 +118,12 @@ pub const FUSED_DECODE_MAX_KEYS: i32 = 8192;
 /// [`MlaDecodePath::AbsorbedFused`]. `None` sends the caller to its composed
 /// path: the kernel is unavailable or turned off
 /// ([`crate::mla::fused_decode_enabled`]), the window is longer than
-/// [`FUSED_DECODE_MAX_KEYS`], or a shape or dtype is outside what the kernel
-/// takes. The kernel's own shape check backs these up, and a refusal there
-/// also falls back rather than aborting the step.
+/// [`FUSED_DECODE_MAX_KEYS`], a shape or dtype is outside what the kernel
+/// takes, or the kernel does not evaluate at this geometry on this device
+/// (`ffi::mla_absorbed_decode_fused_supported`: an M1 Ultra caps the partial
+/// pass's pipeline below the 1024 threads it launches). The kernel's own
+/// shape check backs these up, and a refusal there also falls back rather
+/// than aborting the step.
 ///
 /// Used by: [`absorbed_attention`] (DeepSeek V2), DeepSeek V3's single-token
 /// decode, and the shared per-row latent decode in `models::mla_batched`
@@ -160,6 +163,7 @@ pub fn fused_absorbed_decode(
         || rope % 32 != 0
         || rank > 1024
         || !(1..=FUSED_DECODE_MAX_KEYS).contains(&keys)
+        || !ffi::mla_absorbed_decode_fused_supported(dtype, rank, rope)
     {
         return None;
     }
@@ -266,6 +270,15 @@ pub fn fused_absorbed_decode_quantized(
         || rope % 32 != 0
         || rank > 1024
         || !(1..=FUSED_DECODE_QUANTIZED_MAX_KEYS).contains(&keys)
+        || !ffi::mla_absorbed_decode_fused_quantized_supported(
+            ffi::array_dtype(q_absorbed),
+            ffi::array_dtype(kpe),
+            ffi::array_dtype(scales),
+            rank,
+            rope,
+            group_size,
+            bits,
+        )
     {
         return None;
     }
@@ -384,3 +397,8 @@ mod decode_tests;
 #[cfg(test)]
 #[path = "fused_quant_decode_tests.rs"]
 mod fused_quant_decode_tests;
+
+// The fused kernel is only taken where its 1024-thread pipeline evaluates.
+#[cfg(test)]
+#[path = "fused_decode_capacity_tests.rs"]
+mod fused_decode_capacity_tests;

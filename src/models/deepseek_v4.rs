@@ -1116,7 +1116,7 @@ impl LanguageModel for DeepSeekV4Model {
     /// table (issue #2790). Every layer keeps an FP16 local `RotatingKVCache` (plus pooling).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.layers.len(), |_| {
-            crate::models::model_owned::LayerKv::Fp16Only
+            mlxcel_core::cache::LayerStateKind::Full
         })
     }
 

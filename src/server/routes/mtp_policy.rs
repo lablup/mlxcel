@@ -79,8 +79,8 @@ pub struct MtpPolicyResponse {
     /// and no verdict will arrive (issue #1298).
     pub state: String,
     /// Why the policy is unavailable: `"no_mtp_dispatch"`,
-    /// `"adaptive_disabled"`, or `"worker_not_ready"`. `null` in every other
-    /// state.
+    /// `"dflash_dispatch"`, `"adaptive_disabled"`, or `"worker_not_ready"`.
+    /// `null` in every other state.
     pub reason: Option<String>,
     /// The exactness probe's one-line reason, present only when `state` is
     /// `"exactness_declined"`. The same sentence the boot-time WARN logs.

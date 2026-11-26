@@ -94,6 +94,20 @@ they are reproduced below:
     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
+Inkling 2 Mini Metal kernels (mlx-vlm, mlx-dspark, MLX)
+-------------------------------------------------------
+
+The fused short convolution, attention head preparation and grouped expert
+matvec kernels in src/lib/mlxcelverse/kernels/inkling2_kernels.cpp and
+src/lib/mlxcelverse/kernels/inkling2_grouped_experts.cpp are ported from
+mlx-vlm's mlx_vlm/models/inkling2/kernels.py and grouped_experts.py,
+Copyright (c) 2026 Neywa Labs Inc, Abdur Rahim. The head preparation kernel is
+adapted there from mlx-dspark's fused_head_prep, Copyright (c) 2026 erahim3.
+The fp4 / fp8 decoders inlined in the grouped kernel are MLX's
+mlx/backend/metal/kernels/fp4.h and fp8.h, Copyright (c) 2023 Apple Inc. All
+three are licensed under the MIT License, whose text is reproduced in the
+mlx-lm, mlx-vlm, and mlx-audio section above and the MLX section below.
+
 mlx (expm1f device routine)
 ----------------------------
 

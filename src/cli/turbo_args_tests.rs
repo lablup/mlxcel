@@ -497,7 +497,7 @@ fn a_dsa_key_slot_the_codec_cannot_group_is_refused_at_startup() {
     use serde_json::json;
     let cfg = |rank: u64, index: u64| json!({ "kv_lora_rank": rank, "index_head_dim": index });
     let int8 = KVCacheMode::Int8;
-    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa", "hy_v4"] {
         assert!(super::dsa_key_slot_refusal(&cfg(512, 128), family, int8).is_none());
         assert!(super::dsa_key_slot_refusal(&json!({}), family, int8).is_none());
         let reason = super::dsa_key_slot_refusal(&cfg(512, 100), family, int8)
@@ -514,7 +514,7 @@ fn a_dsa_key_slot_the_codec_cannot_group_is_refused_at_startup() {
 /// the top-k overlap gate of #3163 and are not quantized-latent families.
 #[test]
 fn int8_on_a_dsa_model_still_resolves_to_fp16() {
-    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+    for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa", "hy_v4"] {
         let dir = model_dir_with_type(family);
         let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Int8, dir.path());
         assert_eq!(mode, KVCacheMode::Fp16, "{family}");

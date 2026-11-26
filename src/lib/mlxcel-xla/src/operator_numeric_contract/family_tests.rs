@@ -200,41 +200,41 @@ const QWEN2_5_CPU: &[&str] = &[
 ];
 
 const QWEN3: &[&str] = &[
-    "deepstack-merger.gelu-projection gelu-projection bf16 f32>f32 backend-algorithm dense",
-    "deepstack-merger.norm layer-norm bf16 f32>f32 backend-algorithm dense",
-    "deepstack-merger.output-projection dense-matmul bf16 f32>f32 backend-algorithm dense",
-    "encoder.attention-context dense-matmul f32 f32>f32 backend-algorithm dense",
-    "encoder.attention-projection dense-matmul bf16 f32>f32 backend-algorithm dense",
-    "encoder.attention-scores dense-matmul f32 f32>f32 backend-algorithm dense",
-    "encoder.attention-softmax attention-softmax f32 f32>f32 backend-algorithm dense",
-    "encoder.mlp-activation-projection gelu-projection bf16 f32>f32 backend-algorithm dense",
-    "encoder.mlp-down-projection dense-matmul bf16 f32>f32 backend-algorithm dense",
-    "encoder.norm layer-norm bf16 f32>f32 backend-algorithm dense",
-    "encoder.residual-add residual-add f32 f32>f32 sequential dense",
-    "merger.gelu-projection gelu-projection bf16 f32>f32 backend-algorithm dense",
-    "merger.norm layer-norm bf16 f32>f32 backend-algorithm dense",
-    "merger.output-projection dense-matmul bf16 f32>f32 backend-algorithm dense",
-    "patch-embedding dense-matmul bf16 f32>f32 backend-algorithm dense",
+    "deepstack-merger.gelu-projection gelu-projection bf16 bf16>bf16 backend-algorithm dense",
+    "deepstack-merger.norm layer-norm bf16 f32>bf16 backend-algorithm dense",
+    "deepstack-merger.output-projection dense-matmul bf16 bf16>bf16 backend-algorithm dense",
+    "encoder.attention-context dense-matmul f32 bf16>bf16 backend-algorithm dense",
+    "encoder.attention-projection dense-matmul bf16 bf16>bf16 backend-algorithm dense",
+    "encoder.attention-scores dense-matmul f32 bf16>f32 backend-algorithm dense",
+    "encoder.attention-softmax attention-softmax f32 f32>bf16 backend-algorithm dense",
+    "encoder.mlp-activation-projection gelu-projection bf16 bf16>bf16 backend-algorithm dense",
+    "encoder.mlp-down-projection dense-matmul bf16 bf16>bf16 backend-algorithm dense",
+    "encoder.norm layer-norm bf16 f32>bf16 backend-algorithm dense",
+    "encoder.residual-add residual-add f32 f32>bf16 sequential dense",
+    "merger.gelu-projection gelu-projection bf16 bf16>bf16 backend-algorithm dense",
+    "merger.norm layer-norm bf16 f32>bf16 backend-algorithm dense",
+    "merger.output-projection dense-matmul bf16 bf16>bf16 backend-algorithm dense",
+    "patch-embedding dense-matmul bf16 bf16>bf16 backend-algorithm dense",
 ];
 
 const MOLMO: &[&str] = &[
-    "encoder.attention-context dense-matmul f32 f32>f32 backend-algorithm dense",
-    "encoder.attention-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
+    "encoder.attention-context dense-matmul f32 f32>f16 backend-algorithm dense",
+    "encoder.attention-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
     "encoder.attention-scores dense-matmul f32 f32>f32 backend-algorithm dense",
     "encoder.attention-softmax attention-softmax f32 f32>f32 backend-algorithm dense",
-    "encoder.mlp-activation-projection gelu-projection affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "encoder.mlp-down-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "encoder.norm layer-norm f16 f32>f32 backend-algorithm dense",
-    "encoder.residual-add residual-add f32 f32>f32 sequential dense",
-    "patch-embedding dense-matmul f16 f32>f32 backend-algorithm dense",
+    "encoder.mlp-activation-projection gelu-projection affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "encoder.mlp-down-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "encoder.norm layer-norm f16 f32>f16 backend-algorithm dense",
+    "encoder.residual-add residual-add f32 f32>f16 sequential dense",
+    "patch-embedding dense-matmul f16 f32>f16 backend-algorithm dense",
     "pool.attention-context dense-matmul f32 f32>f32 backend-algorithm dense",
-    "pool.attention-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
+    "pool.attention-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
     "pool.attention-scores dense-matmul f32 f32>f32 backend-algorithm dense",
     "pool.attention-softmax attention-softmax f32 f32>f32 backend-algorithm dense",
-    "projector.down-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "projector.silu-projection silu-projection affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "projector.up-projection dense-matmul affine-u4 f32>f32 backend-algorithm packed-affine-in-graph",
-    "weight-dequantize affine-q4-dequantize affine-u4 f32>f32 sequential packed-affine-in-graph",
+    "projector.down-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "projector.silu-projection silu-projection affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "projector.up-projection dense-matmul affine-u4 f32>f16 backend-algorithm packed-affine-in-graph",
+    "weight-dequantize affine-q4-dequantize affine-u4 f32>f16 sequential packed-affine-in-graph",
 ];
 
 const MOLMO2: &[&str] = &[
@@ -365,7 +365,7 @@ fn qwen2_vl_families_follow_the_device_default_precision() {
 fn fixed_precision_vision_families_pin_their_operator_sets() {
     let bf16 = float(CheckpointDType::Bf16);
     let ops = qwen3_vl_operators();
-    assert_pinned("qwen3-vl", fixed("q", &ops, Precision::F32, bf16), QWEN3);
+    assert_pinned("qwen3-vl", fixed("q", &ops, Precision::Bf16, bf16), QWEN3);
     let packed = affine(
         CheckpointDType::F16,
         4,
@@ -416,7 +416,7 @@ fn molmo_eight_bit_checkpoints_declare_q8_dequantization() {
     );
     let lines = fixed("m", &molmo_vision_operators(8), Precision::F32, packed);
     assert!(lines.contains(
-        &"weight-dequantize affine-q8-dequantize affine-u8 f32>f32 sequential packed-affine-in-graph"
+        &"weight-dequantize affine-q8-dequantize affine-u8 f32>f16 sequential packed-affine-in-graph"
             .to_string()
     ));
 }
@@ -440,12 +440,12 @@ fn removing_an_operator_or_policy_breaks_the_pin() {
     let mut ops = qwen3_vl_operators();
     let bf16 = float(CheckpointDType::Bf16);
     let removed = ops.pop().unwrap();
-    assert_ne!(fixed("q", &ops, Precision::F32, bf16), QWEN3);
+    assert_ne!(fixed("q", &ops, Precision::Bf16, bf16), QWEN3);
     ops.push(DeclaredOperator {
         association: super::AssociationPolicy::Sequential,
         ..removed
     });
-    assert_ne!(fixed("q", &ops, Precision::F32, bf16), QWEN3);
+    assert_ne!(fixed("q", &ops, Precision::Bf16, bf16), QWEN3);
 }
 
 #[test]
@@ -464,4 +464,35 @@ fn host_dequantization_rounding_is_part_of_the_identity() {
     let bf16_rounded = build(AffineExecution::HostBf16Sequential);
     assert!(bf16_rounded.contains("evaluation=separate-multiply-then-add-bf16-rounded"));
     assert_ne!(bf16_rounded, build(AffineExecution::Host));
+}
+
+#[test]
+fn qwen3_vl_rounds_to_eager_bf16_boundaries_on_every_target() {
+    // #3291: the BF16 activation grid is part of the graph on every device. Only
+    // the contraction input type follows the target: BF16 where it lowers, the
+    // BF16-exact f32 carrier on Metal. Either way the digest differs from the
+    // former all-f32 tower, so a cached f32 artifact cannot qualify.
+    let ops = qwen3_vl_operators();
+    let bf16 = float(CheckpointDType::Bf16);
+    let metal = fixed("q", &ops, Precision::F32, bf16);
+    assert_ne!(metal, QWEN3);
+    for (line, pinned) in metal.iter().zip(QWEN3) {
+        let output = |entry: &str| {
+            entry
+                .split(' ')
+                .nth(3)
+                .unwrap()
+                .split('>')
+                .nth(1)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(output(line), output(pinned), "{line}");
+        let expected = if line.starts_with("encoder.attention-scores ") {
+            "f32"
+        } else {
+            "bf16"
+        };
+        assert_eq!(output(line), expected, "{line}");
+    }
 }

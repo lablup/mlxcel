@@ -914,3 +914,78 @@ fn overlong_primed_to_prefix_does_not_hold_the_stream() {
         assert!(live.len() + 64 >= raw.len(), "width {width} held the reply");
     }
 }
+
+// -- Inkling tool calls (#3228) --
+
+const INKLING_THINK_THEN_CALL: &str = concat!(
+    "<|message_model|><|content_thinking|>I need the weather tool.<|end_message|>",
+    "<|message_model|><|content_text|>Checking.<|end_message|>",
+    "<|message_model|>get_weather<|content_invoke_tool_json|>",
+    r#"{"name":"get_weather","args":{"city":"Warsaw"}}<|end_message|>"#,
+);
+
+#[test]
+fn inkling_thinking_then_call_streams_no_recipient_or_json() {
+    let tools = [tool("get_weather")];
+    let (content, reasoning, calls) = assert_parity(INKLING_THINK_THEN_CALL, Some(&tools));
+    assert_eq!(content, "Checking.");
+    assert_eq!(reasoning, "I need the weather tool.");
+    let calls = calls.expect("tools were requested");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Warsaw"}"#);
+    // A no-tools request still never shows the call markup.
+    let (content, _, _) = assert_parity(INKLING_THINK_THEN_CALL, None);
+    assert_eq!(content, "Checking.");
+}
+
+#[test]
+fn inkling_two_calls_with_thinking_between_leave_no_content() {
+    let raw = concat!(
+        "<|message_model|><|content_thinking|>First Warsaw.<|end_message|>",
+        "<|message_model|>get_weather<|content_invoke_tool_json|>",
+        r#"{"name":"get_weather","args":{"city":"Warsaw"}}<|end_message|>"#,
+        "<|message_model|><|content_thinking|>Then Paris.<|end_message|>",
+        "<|message_model|>get_weather<|content_invoke_tool_json|>",
+        r#"{"name":"get_weather","args":{"city":"Paris"}}<|end_message|>"#,
+    );
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    let calls = calls.expect("tools were requested");
+    let cities: Vec<_> = calls.iter().map(|call| call.arguments.as_str()).collect();
+    assert_eq!(cities, [r#"{"city":"Warsaw"}"#, r#"{"city":"Paris"}"#]);
+}
+
+#[test]
+fn inkling_malformed_payloads_yield_no_call_and_no_markup() {
+    let tools = [tool("get_weather")];
+    for body in [
+        r#"{"name":"get_weather","args":{"city":"War"#,
+        r#"{"args":{"city":"Warsaw"}}"#,
+        r#"{"name":"get_weather","args":"Warsaw"}"#,
+    ] {
+        let raw = format!(
+            "<|message_model|><|content_text|>Let me check.<|end_message|>\
+             <|message_model|>get_weather<|content_invoke_tool_json|>{body}<|end_message|>"
+        );
+        let (content, _, calls) = assert_parity(&raw, Some(&tools));
+        assert_eq!(calls, Some(Vec::new()), "body {body}");
+        assert_eq!(content, "Let me check.", "body {body}");
+    }
+}
+
+#[test]
+fn inkling_message_header_without_a_call_streams_unchanged() {
+    // A long run after `<|message_model|>` is not a recipient and is not held.
+    let raw = format!("<|message_model|>{}", filler(600));
+    let (expected, _, _) = non_streamed(&raw, None);
+    for width in [1, 7, raw.len()] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(
+            live.len() + 300 >= expected.len(),
+            "width {width} held the reply"
+        );
+    }
+}

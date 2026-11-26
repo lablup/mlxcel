@@ -40,6 +40,15 @@ mod indexer;
 #[path = "deepseek_v32_latent.rs"]
 mod latent;
 
+#[path = "deepseek_v32_verify.rs"]
+mod verify;
+
+// Hy4 is a DeepSeek-V3.2 derivative. It is a child module so it can reuse the
+// private MLA, indexer and MoE pieces below without widening their visibility
+// (issue #2354); nothing in this file's forward changes for it.
+#[path = "hy_v4.rs"]
+pub mod hy_v4;
+
 #[path = "deepseek_v32_rope.rs"]
 mod rope;
 
@@ -55,6 +64,10 @@ pub(crate) mod deepseek_v32_tests;
 #[path = "deepseek_v32_latent_tests.rs"]
 mod latent_tests;
 
+#[cfg(test)]
+#[path = "deepseek_v32_verify_tests.rs"]
+mod verify_tests;
+
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
 use crate::models::rope_utils::RopeScalingSpec;
 use crate::models::switch_layers::validate_expert_quantization_params;
@@ -62,6 +75,7 @@ use indexer::Indexer;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::mla::LatentWindow;
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
 use mlxcel_core::utils::{silu, slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -345,9 +359,11 @@ impl MLAAttention {
 
         // LoRA-style Q projection. `qr` (post-layernorm, pre-q_b_proj) is the
         // LoRA-reduced query hidden the indexer also consumes.
-        let q_lora = self.q_a_proj.forward(x);
+        // The projections go through `row_linear`, the layer's own forward
+        // unless the model entered a row-invariant scope (#3421).
+        let q_lora = row_linear(&self.q_a_proj, x);
         let qr = self.q_a_layernorm.forward(&q_lora);
-        let q = self.q_b_proj.forward(&qr);
+        let q = row_linear(&self.q_b_proj, &qr);
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.q_head_dim]);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
 
@@ -356,7 +372,7 @@ impl MLAAttention {
         let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim, -1);
 
         // Compressed KV with MQA
-        let compressed_kv = self.kv_a_proj_with_mqa.forward(x);
+        let compressed_kv = row_linear(&self.kv_a_proj_with_mqa, x);
         let compressed = slice_axis(&compressed_kv, -1, 0, self.kv_lora_rank);
         let k_pe = slice_axis(&compressed_kv, -1, self.kv_lora_rank, -1);
 
@@ -407,10 +423,25 @@ impl MLAAttention {
             true,
         );
 
-        // Cost-model gate (issue #2408): one query is always absorbed, and a
-        // multi-token step behind a long enough cache can be cheaper absorbed
-        // than up-projecting the whole window. A cold prefill stays on the
-        // materializing side. Computed once so nothing below gates on `l`.
+        // One query is its own path: absorbed, over a dense or a quantized
+        // window, with the indexer's top-k when it selects any.
+        let index_query = indexer_new.as_ref().map(|(_, q, w)| (&**q, &**w));
+        if l == 1 {
+            let output = self.single_query_attention(&q_nope, &q_pe, window, index_query, mask);
+            return self.project_attention_output(&output, b, l);
+        }
+
+        // A verify block in the row-invariant scope (#3421) runs every row as
+        // the single query its decode step would run, over the keys that step
+        // would see, with that step's own top-k selection.
+        if b == 1 && mask.is_none() && mlxcel_core::row_invariant::in_verify_block() {
+            let output = self.verify_block_attention(&q_nope, &q_pe, &window, index_query);
+            return self.project_attention_output(&output, b, l);
+        }
+
+        // Cost-model gate (issue #2408): a multi-token step behind a long
+        // enough cache can be cheaper absorbed than up-projecting the whole
+        // window. A cold prefill stays on the materializing side.
         let absorbed = mlxcel_core::mla::use_absorbed_mla(
             l as usize,
             cache.seq_len() as usize,
@@ -419,21 +450,8 @@ impl MLAAttention {
             self.v_head_dim as usize,
         );
 
-        // One absorbed query over a quantized window: the indexer reads its
-        // own columns, the latent stays packed, and the top-k rows are
-        // gathered from the packed triple (`latent.rs`). The attention records
-        // its own path (fused or composed). Every other step over a quantized
-        // window dequantizes it once and runs the fp16 code below.
-        let (cache_keys, k_pe) = match window {
-            window @ mlxcel_core::mla::LatentWindow::Quantized { .. } if absorbed && l == 1 => {
-                let q_projected = self.embed_q.forward(&q_nope);
-                let index_query = indexer_new.as_ref().map(|(_, q, w)| (&**q, &**w));
-                let output = self.quantized_decode(window, &q_projected, &q_pe, index_query, mask);
-                let output = self.unembed_out.forward(&output);
-                return self.project_attention_output(&output, b, l);
-            }
-            window => window.into_dense(),
-        };
+        // A multi-token step over a quantized window dequantizes it once.
+        let (cache_keys, k_pe) = window.into_dense();
 
         // Slice the cached indexer key back off the shared buffer.
         let (kv_latent, indexer_keys) = match &self.indexer {
@@ -452,16 +470,14 @@ impl MLAAttention {
         // indexer top-k selection (or future keys get selected) and the sparse
         // attention mask (which `apply_sparse_prefill_mask` documents as
         // already-causal). Without a top-k selection the attention runs MLX's
-        // causal mode instead (issue #3071). Decode (`l == 1`) stays maskless:
-        // every cached position is causally valid.
+        // causal mode instead (issue #3071). Decode (`l == 1`) returned above
+        // and stays maskless: every cached position is causally valid.
         let causal_storage;
         let effective_mask: Option<&MlxArray> = if mask.is_some() {
             mask
-        } else if l > 1 {
+        } else {
             causal_storage = mlxcel_core::utils::create_causal_mask(l, live_before);
             Some(causal_storage.as_ref().unwrap())
-        } else {
-            None
         };
 
         // Top-k key selection. `None` at short context (kv_len <= index_topk),
@@ -472,29 +488,15 @@ impl MLAAttention {
             }
             _ => None,
         };
-        if l == 1
-            && let Some(indices) = &topk_indices
-        {
-            latent::trace_topk(
-                self.layer,
-                || mlxcel_core::array_shape(&kv_latent)[2],
-                indices,
-            );
-        }
-
         mlxcel_core::mla::stats::record(if absorbed {
-            if l == 1 {
-                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
-            } else {
-                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
-            }
+            mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
         } else {
             mlxcel_core::mla::MlaDecodePath::Decompressed
         });
 
         // MLA attention: absorbed or materializing, chosen by the cost model
         // above rather than by the query count alone.
-        let output = if l > 1 {
+        let output = {
             // Multi-token step (issue #3071): fold the rope half into the SDPA
             // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
             // dense `[B, H, L, S]` rope-score tensor as the additive mask. The
@@ -541,84 +543,6 @@ impl MLAAttention {
                     folded_mask,
                 )
             }
-        } else {
-            // Single-token decode keeps the rope term as an additive mask over
-            // one `[B, H, 1, S]` score row.
-            // pe_scores = (q_pe * scale) @ k_pe.T
-            let scale_scalar =
-                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
-            let pe_scores = if let Some(m) = effective_mask {
-                mlxcel_core::add(&pe_scores, m)
-            } else {
-                pe_scores
-            };
-            if absorbed {
-                // Absorbed: project Q into latent space, use kv_latent as K=V
-                let q_projected = self.embed_q.forward(&q_nope);
-                if let Some(indices) = &topk_indices {
-                    // Sparse decode fast path: gather the selected KV subset
-                    // with take_along_axis (no per-step sparse mask). Decode is
-                    // always called with `mask == None` here, and every
-                    // gathered position is causally valid, so pe_scores is
-                    // recomputed maskless over the gathered k_pe.
-                    let (kv_latent_g, k_pe_g) = gather_topk_kv(
-                        &kv_latent,
-                        &k_pe,
-                        indices,
-                        self.kv_lora_rank,
-                        self.qk_rope_head_dim,
-                    );
-                    let k_pe_g_t = mlxcel_core::transpose_axes(&k_pe_g, &[0, 1, 3, 2]);
-                    let pe_scores_g = mlxcel_core::matmul(&q_pe_scaled, &k_pe_g_t);
-                    let pe_mask_ptr = &*pe_scores_g as *const MlxArray;
-                    let output = unsafe {
-                        mlxcel_core::layers::attention_from_ptr(
-                            &q_projected,
-                            &kv_latent_g,
-                            &kv_latent_g,
-                            self.scale,
-                            pe_mask_ptr,
-                            0.0,
-                            0,
-                        )
-                    };
-                    self.unembed_out.forward(&output)
-                } else {
-                    let pe_mask_ptr = &*pe_scores as *const MlxArray;
-                    let output = unsafe {
-                        mlxcel_core::layers::attention_from_ptr(
-                            &q_projected,
-                            &kv_latent,
-                            &kv_latent,
-                            self.scale,
-                            pe_mask_ptr,
-                            0.0,
-                            0,
-                        )
-                    };
-                    // Project output from latent space to v_head_dim
-                    self.unembed_out.forward(&output)
-                }
-            } else {
-                // Materialize: project kv_latent to K and V, then attend.
-                let k = self.embed_q.forward_no_transpose(&kv_latent);
-                let v = self.unembed_out.forward(&kv_latent);
-                let pe_mask_ptr = &*pe_scores as *const MlxArray;
-                unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q_nope,
-                        &k,
-                        &v,
-                        self.scale,
-                        pe_mask_ptr,
-                        0.0,
-                        0,
-                    )
-                }
-            }
         };
 
         self.project_attention_output(&output, b, l)
@@ -628,7 +552,7 @@ impl MLAAttention {
     fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
         let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     fn forward_batched_decode(
@@ -811,10 +735,10 @@ struct DenseMLP {
 
 impl DenseMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = silu(&self.gate_proj.forward(x));
-        let up = self.up_proj.forward(x);
+        let gate = silu(&row_linear(&self.gate_proj, x));
+        let up = row_linear(&self.up_proj, x);
         let h = mlxcel_core::multiply(&gate, &up);
-        self.down_proj.forward(&h)
+        row_linear(&self.down_proj, &h)
     }
 }
 
@@ -830,9 +754,8 @@ struct MoEGate {
 
 impl MoEGate {
     fn forward(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        // gates = x @ weight.T
-        let weight_t = mlxcel_core::transpose(&self.weight);
-        let gates = mlxcel_core::matmul(x, &weight_t);
+        // gates = x @ weight.T (row-invariant inside the model's scope, #3421)
+        let gates = mlxcel_core::row_invariant::dense(x, &self.weight);
 
         // Sigmoid scoring in native dtype (f16 sigmoid saturation at |x|>5.5
         // preserves relative ordering for top-k selection, safe for MoE gating)
@@ -971,7 +894,29 @@ struct MoEBlock {
 impl MoEBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let (indices, scores) = self.gate.forward(x);
-        let y = self.experts.forward(x, &indices);
+        // Float experts multiply through `gather_mm`, which takes one kernel
+        // for a single token and another for several, so a verify block runs
+        // them one position at a time (#3421). The quantized gather is left
+        // whole, as in the DeepSeek V3 decoder.
+        let shape = mlxcel_core::array_shape(x);
+        let per_position = matches!(self.experts.gate_proj, SwitchLinear::Regular { .. })
+            && shape.len() == 3
+            && shape[1] > 1
+            && mlxcel_core::row_invariant::in_verify_block();
+        let y = if per_position {
+            let parts: Vec<UniquePtr<MlxArray>> = (0..shape[1])
+                .map(|i| {
+                    self.experts.forward(
+                        &slice_axis(x, 1, i, i + 1),
+                        &slice_axis(&indices, 1, i, i + 1),
+                    )
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+            mlxcel_core::concatenate_many(&refs, 1)
+        } else {
+            self.experts.forward(x, &indices)
+        };
 
         let mut result = crate::models::switch_layers::moe_weighted_sum(
             &y,
@@ -1071,15 +1016,24 @@ impl DeepSeekV32Model {
 
         let mask = mask.map(mlxcel_core::copy);
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        // Row-invariant products for this forward when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (#3421), as in the DeepSeek V3
+        // decoder: a verify block of the token-only round then equals the
+        // decode steps it stands for.
+        let _row_invariant =
+            super::mla_batched::row_invariant_scope(&mlxcel_core::array_shape(&h), mask.is_some());
+
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, mask.as_deref(), cache);
+            // Recorded only under the block-versus-chain diagnostic (#3421).
+            super::speculative_exactness_diag::capture(i, "dsa", "layer output", &h);
         }
 
         let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         if let Some(ref head) = self.lm_head {
-            head.forward(&h)
+            row_linear(head, &h)
         } else {
             self.embed_tokens.as_linear(&h)
         }

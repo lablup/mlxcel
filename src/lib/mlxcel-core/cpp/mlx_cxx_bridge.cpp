@@ -5,6 +5,8 @@
 #include "../../mlxcelverse/kernels/gpu_backend.h"
 #include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
 #include "../../mlxcelverse/kernels/mla_absorbed_decode.h"
+#include "../../mlxcelverse/kernels/inkling2_kernels.h"
+#include "../../mlxcelverse/kernels/row_invariant_matvec.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -2054,6 +2056,100 @@ std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
 
 bool mla_absorbed_decode_fused_quantized_available() {
     return mlxcel::turbo::mla_absorbed_decode_quantized_available();
+}
+
+// Whether the fused kernels evaluate at a geometry on this device: the
+// pipeline's thread limit is per chip and per template geometry, so the
+// launcher probes it once (see `mla_absorbed_decode_supported`).
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope) {
+    return mlxcel::turbo::mla_absorbed_decode_supported(to_dtype(dtype), rank, rope);
+}
+
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits) {
+    return mlxcel::turbo::mla_absorbed_decode_quantized_supported(
+        to_dtype(dtype), to_dtype(kpe_dtype), to_dtype(scales_dtype), rank, rope, group_size, bits);
+}
+
+// Inkling 2 Mini Metal kernels (#3359). Each launcher throws off-Metal or
+// outside its contract, and the Rust declarations are `-> Result`, so a
+// refusal sends the caller back to the ops path.
+bool inkling2_kernels_available() {
+    return mlxcel::turbo::inkling2_kernels_available();
+}
+
+void inkling2_short_convolution(
+    const MlxArray& history,
+    const MlxArray& weight,
+    const MlxArray& x,
+    const MlxArray* residual,
+    int32_t output_dtype,
+    int32_t margin,
+    std::unique_ptr<MlxArray>& out,
+    std::unique_ptr<MlxArray>& next_history) {
+    std::optional<mlx::core::array> res;
+    if (residual) res = residual->inner;
+    auto result = mlxcel::turbo::inkling2_short_convolution(
+        history.inner, weight.inner, x.inner, res, to_dtype(output_dtype), margin);
+    out = std::make_unique<MlxArray>(std::move(result.out));
+    next_history = std::make_unique<MlxArray>(std::move(result.history));
+}
+
+void inkling2_prepare_attention_heads(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& r,
+    const MlxArray& q_scale,
+    const MlxArray& r_scale,
+    float clip,
+    float rel_clip,
+    float eps,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& r_out) {
+    auto heads = mlxcel::turbo::inkling2_prepare_attention_heads(
+        q.inner, k.inner, v.inner, r.inner, q_scale.inner, r_scale.inner, clip, rel_clip, eps);
+    q_out = std::make_unique<MlxArray>(std::move(heads.q));
+    k_out = std::make_unique<MlxArray>(std::move(heads.k));
+    v_out = std::make_unique<MlxArray>(std::move(heads.v));
+    r_out = std::make_unique<MlxArray>(std::move(heads.r));
+}
+
+std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* global_scale,
+    const MlxArray& experts,
+    const MlxArray& source,
+    const MlxArray& destination,
+    int32_t bits,
+    int32_t group_size) {
+    std::optional<mlx::core::array> g;
+    if (global_scale) g = global_scale->inner;
+    return std::make_unique<MlxArray>(mlxcel::turbo::inkling2_grouped_expert_qmv(
+        x.inner, w.inner, scales.inner, g, experts.inner, source.inner, destination.inner,
+        bits, group_size));
+}
+
+bool row_invariant_matvec_available() {
+    return mlxcel::turbo::row_invariant_matvec_available();
+}
+
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype) {
+    return std::make_unique<MlxArray>(
+        mlxcel::turbo::row_invariant_matvec(x.inner, w.inner, to_dtype(output_dtype)));
 }
 
 // Compiled GeGLU: gelu(gate) * x

@@ -62,8 +62,9 @@ pub(crate) fn mla_geometry(
 /// `quantized_latent` is the caller's opt in: only the attention
 /// implementations that read a [`LatentWindow::Quantized`] back pass `true`
 /// (`DeepSeekV3Attention`, #3160; the Kimi Linear and Kimi K3 MLA layers,
-/// #3162; and the DeepSeek V3.2 MLA, #3163, whose types still resolve to fp16
-/// because they are outside `mla::QUANTIZED_LATENT_FAMILIES`). GLM-4.7-Flash
+/// #3162; and the DeepSeek V3.2 MLA, #3163, and the Hy4 attention, #2354,
+/// whose types still resolve to fp16 because they are outside
+/// `mla::QUANTIZED_LATENT_FAMILIES`). GLM-4.7-Flash
 /// passes its per-layer flag, which follows that list (#3161). LongCat MLA
 /// passes `true` because its model-owned caches are built in an `int8` mode
 /// only when the model opted in (`LongcatFlashNgramModel`'s mode table). A
@@ -138,9 +139,11 @@ fn warn_latent_view_declined(family: &str, mode: mlxcel_core::cache::KVCacheMode
 /// promotion was limited to the multi-token step itself (#3177).
 ///
 /// Used by: the Kimi Linear, Kimi K3, GLM-4.7-Flash and LongCat MLA
-/// multi-token steps, DeepSeek V2's decompressed step (`deepseek_v2.rs`) and
+/// multi-token steps, DeepSeek V2's decompressed step (`deepseek_v2.rs`),
 /// `DeepSeekV3Attention` (`deepseek_v3.rs`: deepseek_v3, kimi_k2,
-/// joyai_llm_flash, kimi_vl, kimi_k25, youtu, youtu_llm, youtu_vl).
+/// joyai_llm_flash, kimi_vl, kimi_k25, youtu, youtu_llm, youtu_vl) and every
+/// step of the Hy4 attention (`hy_v4_attention.rs`), whose sink SDPA reads a
+/// dense window.
 pub(crate) fn dense_latent_in(
     window: LatentWindow,
     dtype: i32,
@@ -158,6 +161,117 @@ pub(crate) fn dense_latent_in(
         }
     };
     (cast(ckv), cast(kpe))
+}
+
+/// Whether the MLA families make a token-only verify block byte-identical to
+/// single-token decode, from `MLXCEL_MLA_ROW_INVARIANT` (issue #3418). Off
+/// unless the variable is `1`/`true`/`yes`/`on`: measured on an M3 Ultra, the
+/// exact block costs prompt lookup 24% (8-bit) to 43% (bf16) of its
+/// throughput on a reply that copies the prompt, and the round's contract
+/// does not promise byte identity.
+///
+/// When on, a single-sequence forward enters a row-invariant scope with the
+/// matvec kernel, so dense products of up to 16 rows agree row for row, and
+/// a verify block (the engine's token-only round) runs its MLA attention and
+/// float experts per row. Quantized products stay whole: they are
+/// row-invariant only with `MLXCEL_QMV_WIDE=0`.
+///
+/// Returns the scope's `kernel` flag, `None` when there is no scope. Only a
+/// test selects `Some(false)`, the scope without the kernel, which is what
+/// [`mlxcel_core::row_invariant::dense`] falls back to off Metal.
+///
+/// Used by: [`row_invariant_scope`], `Glm4MoeLiteModel::forward`.
+pub(crate) fn row_invariant_mode() -> Option<bool> {
+    #[cfg(test)]
+    if let Some(mode) = ROW_INVARIANT_TEST_MODE.with(std::cell::Cell::get) {
+        return mode;
+    }
+    static MODE: OnceLock<Option<bool>> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        row_invariant_mode_from(std::env::var("MLXCEL_MLA_ROW_INVARIANT").ok().as_deref())
+    })
+}
+
+pub(crate) fn row_invariant_mode_from(value: Option<&str>) -> Option<bool> {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "yes" | "on") => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of [`row_invariant_mode`] on its own thread.
+    pub(crate) static ROW_INVARIANT_TEST_MODE: std::cell::Cell<Option<Option<bool>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Overrides [`row_invariant_mode`] on this thread until dropped.
+#[cfg(test)]
+pub(crate) struct RowInvariantTestMode;
+
+#[cfg(test)]
+impl RowInvariantTestMode {
+    pub(crate) fn set(mode: Option<bool>) -> Self {
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(Some(mode)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RowInvariantTestMode {
+    fn drop(&mut self) {
+        ROW_INVARIANT_TEST_MODE.with(|cell| cell.set(None));
+    }
+}
+
+/// The row-invariant scope of one single-sequence forward over
+/// `shape = [batch, length, ..]`, or `None` when the mode is off. A masked
+/// multi-token forward is a padded prefill, never a verify block.
+///
+/// Used by: `DeepSeekV3Model::forward_rows`, `Xing40Model::forward_rows`,
+/// `DeepSeekV32Model::forward_rows`, `DeepSeekV2Model::forward_rows`.
+pub(crate) fn row_invariant_scope(
+    shape: &[i32],
+    masked: bool,
+) -> Option<mlxcel_core::row_invariant::Scope> {
+    row_invariant_mode().map(|kernel| {
+        mlxcel_core::row_invariant::Scope::enter(mlxcel_core::row_invariant::Mode {
+            kernel,
+            verify_block: !masked && mlxcel_core::row_invariant::is_verify_block(shape),
+        })
+    })
+}
+
+/// The first `keys` cached positions of `window`, in its own storage form:
+/// what the single-token step that appended position `keys - 1` read.
+///
+/// Used by: `DeepSeekV3Attention::forward` (issue #3418) and the DeepSeek
+/// V3.2 `MLAAttention::verify_block_attention` (#3421), whose verify blocks
+/// run each row as that step's single query.
+pub(crate) fn latent_window_prefix(window: &LatentWindow, keys: i32) -> LatentWindow {
+    let cut = |a: &MlxArray| mlxcel_core::utils::slice_axis(a, 2, 0, keys);
+    match window {
+        LatentWindow::Dense { ckv, kpe } => LatentWindow::Dense {
+            ckv: cut(ckv),
+            kpe: cut(kpe),
+        },
+        LatentWindow::Quantized {
+            ckv_q,
+            scales,
+            biases,
+            kpe,
+            bits,
+            group_size,
+        } => LatentWindow::Quantized {
+            ckv_q: cut(ckv_q),
+            scales: cut(scales),
+            biases: cut(biases),
+            kpe: cut(kpe),
+            bits: *bits,
+            group_size: *group_size,
+        },
+    }
 }
 
 /// The mode a model-owned latent-pair cache is built in for a requested

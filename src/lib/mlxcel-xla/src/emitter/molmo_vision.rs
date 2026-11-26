@@ -18,10 +18,13 @@ use super::builder::{Builder, Precision, Ty, Val};
 use super::molmo_vision_config::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
 };
+use super::molmo_vision_f16::{layer_norm_f16, linear_f16, quick_gelu_f16, round_f16};
 use super::molmo_vision_ops::{scalar_broadcast, silu, softmax_last};
 
 /// Contraction precision of this graph on every device. The runtime binds the
 /// same value into the artifact's operator numeric contract (issue #3211).
+/// Contractions accumulate in f32; values round to F16 where eager MLX stores
+/// an F16 tensor (`molmo_vision_f16`, #3390).
 pub(crate) const MOLMO_VISION_PRECISION: Precision = Precision::F32;
 
 struct Args {
@@ -65,7 +68,10 @@ impl Args {
         let packed = self.take();
         let scales = self.take();
         let biases = self.take();
-        builder.dequant_affine(&packed, &scales, &biases, config.bits, config.group_size)
+        // Eager's quantized matmul dequantizes into the F16 activation type.
+        let weight =
+            builder.dequant_affine(&packed, &scales, &biases, config.bits, config.group_size);
+        round_f16(builder, &weight)
     }
 
     fn push_input(&mut self, ty: Ty, name: &str) -> Val {
@@ -78,11 +84,6 @@ impl Args {
     }
 }
 
-fn bias_rows(builder: &mut Builder, value: &Val, bias: &Val) -> Val {
-    let bias = builder.broadcast(bias, &[1], value.ty.shape.clone());
-    builder.add(value, &bias)
-}
-
 fn quant_linear(
     builder: &mut Builder,
     args: &mut Args,
@@ -91,37 +92,8 @@ fn quant_linear(
     bias: bool,
 ) -> Val {
     let weight = args.take_quant(builder, config);
-    let projected = builder.linear_seq(value, &weight);
-    if bias {
-        bias_rows(builder, &projected, &args.take())
-    } else {
-        projected
-    }
-}
-
-fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsilon: f32) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let zero = builder.const_f32(0.0);
-    let width_scalar = builder.const_f32(width as f32);
-    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
-    let sum = builder.reduce_add(value, 1, &zero);
-    let mean = builder.divide(&sum, &width_rows);
-    let mean = builder.broadcast(&mean, &[0], vec![rows, width]);
-    let centered = builder.subtract(value, &mean);
-    let squared = builder.multiply(&centered, &centered);
-    let squared_sum = builder.reduce_add(&squared, 1, &zero);
-    let variance = builder.divide(&squared_sum, &width_rows);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
-    let variance = builder.add(&variance, &epsilon);
-    let inv_std = builder.rsqrt(&variance);
-    let inv_std = builder.broadcast(&inv_std, &[0], vec![rows, width]);
-    let normalized = builder.multiply(&centered, &inv_std);
-    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
-    let normalized = builder.multiply(&normalized, &weight);
-    builder.add(&normalized, &bias)
+    let bias = bias.then(|| args.take());
+    linear_f16(builder, value, &weight, bias.as_ref())
 }
 
 fn self_attention(
@@ -169,6 +141,8 @@ fn self_attention(
     );
     let context = builder.transpose(&context, &[0, 2, 1, 3]);
     let context = builder.reshape(&context, vec![rows, config.hidden]);
+    // Eager runs attention in f32 and casts the context back to F16.
+    let context = round_f16(builder, &context);
     quant_linear(builder, args, config, &context, true)
 }
 
@@ -179,17 +153,19 @@ fn encoder_layer(
     hidden: &Val,
 ) -> Val {
     let epsilon = f32::from_bits(config.layer_norm_eps_bits);
-    let norm = layer_norm(builder, hidden, &args.take(), &args.take(), epsilon);
+    let norm = layer_norm_f16(builder, hidden, &args.take(), &args.take(), epsilon);
     let attention = self_attention(builder, args, config, &norm);
     let residual = builder.add(hidden, &attention);
-    let norm = layer_norm(builder, &residual, &args.take(), &args.take(), epsilon);
+    let residual = round_f16(builder, &residual);
+    let norm = layer_norm_f16(builder, &residual, &args.take(), &args.take(), epsilon);
     let expanded = quant_linear(builder, args, config, &norm, true);
     // Molmo's remote code builds its CLIP ViT with
     // `image_mlp_activations="quick_gelu"`, as the eager encoder evaluates it
     // (#2548; tanh before).
-    let activated = super::numeric_ops::quick_gelu(builder, &expanded);
+    let activated = quick_gelu_f16(builder, &expanded);
     let contracted = quant_linear(builder, args, config, &activated, true);
-    builder.add(&residual, &contracted)
+    let output = builder.add(&residual, &contracted);
+    round_f16(builder, &output)
 }
 
 fn mask_padding_crops(
@@ -356,7 +332,11 @@ fn emit_molmo_vision_impl(config: &MolmoVisionConfig, diagnostics: bool) -> Stri
     );
     let rows = config.max_crops * config.patches_per_crop;
     let pixels_2d = builder.reshape(&pixels, vec![rows, config.patch_width]);
+    // Eager casts the pixels to the F16 patch-embedding weight before the
+    // matmul and stores an F16 product.
+    let pixels_2d = round_f16(&mut builder, &pixels_2d);
     let patches = builder.linear_seq(&pixels_2d, &patch_embedding);
+    let patches = round_f16(&mut builder, &patches);
     let patches = builder.reshape(
         &patches,
         vec![config.max_crops, config.patches_per_crop, config.hidden],
@@ -375,11 +355,12 @@ fn emit_molmo_vision_impl(config: &MolmoVisionConfig, diagnostics: bool) -> Stri
         vec![config.max_crops, config.positions, config.hidden],
     );
     let hidden = builder.add(&hidden, &position_embedding);
+    let hidden = round_f16(&mut builder, &hidden);
     let hidden = builder.reshape(
         &hidden,
         vec![config.max_crops * config.positions, config.hidden],
     );
-    let mut hidden = layer_norm(
+    let mut hidden = layer_norm_f16(
         &mut builder,
         &hidden,
         &pre_ln_weight,

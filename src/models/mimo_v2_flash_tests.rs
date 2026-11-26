@@ -730,3 +730,25 @@ fn the_prefill_projects_only_the_sampled_row() {
     assert_row(&tail, last, "second piece of a chunked prefill");
     LanguageModel::release_sequence_state_by_id(&model, seq);
 }
+
+/// One expert whose plane differs in shape from expert 0's is a load error
+/// naming its key and both shapes, not an MLX `[stack]` abort (issue #3320).
+#[test]
+fn stacking_refuses_a_mismatched_expert_plane() {
+    let mut weights = WeightMap::new();
+    for (e, cols) in [(0usize, 8i32), (1, 6)] {
+        weights.insert(
+            format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+            mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+        );
+    }
+    let err = crate::models::mimo_v2_weights::stack_experts(weights, 1)
+        .err()
+        .expect("a mismatched expert must be refused");
+    assert!(
+        err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+            && err.contains("[4, 6]")
+            && err.contains("[4, 8]"),
+        "{err}"
+    );
+}

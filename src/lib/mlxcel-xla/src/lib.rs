@@ -100,8 +100,17 @@ mod molmo2;
 mod molmo2_vision_runtime;
 #[cfg(feature = "iree")]
 mod molmo_vision_runtime;
+// Plain shard file names from an untrusted safetensors index (#3338), shared by
+// the loader and the emitter-side checkpoint cross-check.
+#[cfg(any(feature = "iree", test))]
+mod shard_path;
 // Always compiled: the emitter reads its workgroup-shape constants, and the
 // module itself has no IREE dependency. Without the runtime only the tests use it.
+mod hf_json;
+mod llava_text_defaults;
+pub use llava_text_defaults::{
+    apply_llava_text_config_defaults, is_llava_text_defaults_wrapper, llava_text_field_missing,
+};
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod native_qmv;
 #[cfg(feature = "iree")]
@@ -110,6 +119,16 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod qwen3_vl_runtime;
+#[cfg(feature = "iree")]
+mod ssm_model_check;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod state_ffi;
+// The spec, length checks and `.npy` codec are pure Rust and unit-tested
+// without IREE; only `run_ssm_probe` needs the runtime.
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod ssm_probe;
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod tuning;
@@ -125,7 +144,10 @@ pub use numeric_oracle::{
     NumericTensor, TensorSummary, run_bounded_numeric_oracle,
 };
 #[cfg(feature = "micro-oracle")]
-pub use numeric_probe::{run_core_operator_probes, run_dense_matmul_probe};
+pub use numeric_probe::{
+    ProductionProbeOperator, ProductionProbeSpec, SscpConvolutionGeometry, pack_affine_q4_lanes,
+    production_probe_spec, run_core_operator_probes, run_dense_matmul_probe, run_production_probe,
+};
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
 // execution) and under `test` (so its backend-neutral Scheduler bookkeeping is
@@ -229,9 +251,22 @@ pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 /// Test support only (issue #2923): batch-KV allocation instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{batch_kv_allocation_counters, reset_batch_kv_allocation_counters};
+/// Test support only (issue #3340): per-slot recurrent-state allocation
+/// instrumentation.
+#[cfg(feature = "test-support")]
+pub use iree::{batch_state_allocation_counters, reset_batch_state_allocation_counters};
 /// Test support only (issue #3028): decode-step scalar reuse instrumentation.
 #[cfg(feature = "test-support")]
 pub use iree::{decode_scalar_counters, reset_decode_scalar_counters};
+#[cfg(feature = "iree")]
+pub use ssm_model_check::{
+    SsmDecodeSession, SsmModelCompileTimes, SsmModelPrefill, SsmModelSession, SsmModelState,
+    compile_ssm_model_graphs,
+};
+#[cfg(feature = "iree")]
+pub use ssm_probe::{
+    SsmProbeInputs, SsmProbeOutputs, SsmProbeSpec, npy_f32_bytes, parse_npy_f32, run_ssm_probe,
+};
 /// Test support only (issue #3060): choose the single-sequence decode argument
 /// ABI for engines loaded from this thread (`Some(true)` ABI-level scalars,
 /// `Some(false)` the legacy buffer views, `None` the default scalar ABI). The
@@ -397,6 +432,7 @@ pub use gemma3n_audio_weights::{
     Gemma3nAudioCheckpointError, Gemma3nAudioCheckpointTensorSpec, gemma3n_audio_checkpoint_specs,
     validate_gemma3n_audio_checkpoint,
 };
+pub use hf_json::parse_hf_config_json;
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
@@ -419,29 +455,89 @@ pub const NOT_WIRED: &str = "the OpenXLA inference session was built without the
      mlxcel-xla with `--features iree` (and IREE_DIST pointing at an extracted iree \
      dist) to enable StableHLO / IREE execution of prefill / decode_step";
 
-/// Read the model's EOS token ids from `generation_config.json` (a single int or
-/// a list). Only parsed under `iree`, where `serde_json` is available and the
-/// decode loop actually runs; otherwise empty (execution errors out anyway).
-#[cfg(feature = "iree")]
-pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
-    let p = model_path.join("generation_config.json");
-    let Ok(s) = std::fs::read_to_string(p) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
-        return Vec::new();
-    };
-    match v.get("eos_token_id") {
-        Some(serde_json::Value::Number(n)) => {
-            n.as_i64().map(|x| vec![x as i32]).unwrap_or_default()
-        }
-        Some(serde_json::Value::Array(a)) => a
-            .iter()
-            .filter_map(serde_json::Value::as_i64)
-            .map(|x| x as i32)
-            .collect(),
+/// One `eos_token_id` field (a single int or a list) as token ids. Entries that
+/// are not integers fitting an `i32` are skipped, like the eager loader's
+/// `parse_eos_token_ids`.
+fn eos_ids_of(value: Option<&serde_json::Value>) -> Vec<i32> {
+    let to_id = |v: &serde_json::Value| v.as_i64().and_then(|n| i32::try_from(n).ok());
+    match value {
+        Some(n @ serde_json::Value::Number(_)) => to_id(n).into_iter().collect(),
+        Some(serde_json::Value::Array(a)) => a.iter().filter_map(to_id).collect(),
         _ => Vec::new(),
     }
+}
+
+/// Resolve the EOS ids from the parsed `generation_config.json` and
+/// `config.json` (either may be absent or malformed, passed as `None`).
+///
+/// Returns the order-preserving, de-duplicated union of `generation_config.json`
+/// `eos_token_id`, `config.json` `eos_token_id`, and `config.json`
+/// `text_config.eos_token_id` (vision-language checkpoints nest the language
+/// model there). Union rather than first-wins, like the eager loader's
+/// `read_eos_token_ids` (#2384): a generation config listing only one of the
+/// model's stop ids must not hide the others. Empty when no source declares an
+/// id. Checkpoints such as `qwen2.5-vl-3b-instruct-4bit` ship no
+/// `generation_config.json`, so reading only that file let the XLA loop run past
+/// EOS while the eager path stopped (#3292).
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+pub(crate) fn resolve_eos_ids(
+    generation_config: Option<&serde_json::Value>,
+    config: Option<&serde_json::Value>,
+) -> Vec<i32> {
+    let mut ids: Vec<i32> = Vec::new();
+    for source in [
+        generation_config.and_then(|v| v.get("eos_token_id")),
+        config.and_then(|v| v.get("eos_token_id")),
+        config.and_then(|v| v.get("text_config")?.get("eos_token_id")),
+    ] {
+        for id in eos_ids_of(source) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// The EOS ids the model directory's `generation_config.json` and `config.json`
+/// declare (see [`resolve_eos_ids`]). A missing or malformed file counts as
+/// absent.
+///
+/// This is what a session stops on when its caller supplies nothing. The root
+/// crate passes the eager loader's full stop set (which also resolves the
+/// tokenizer's `eos_token`) through `set_eos_token_ids`, using these ids as the
+/// declared set it merges into.
+#[must_use]
+pub fn config_eos_token_ids(model_path: &Path) -> Vec<i32> {
+    let read_json = |name: &str| -> Option<serde_json::Value> {
+        let s = std::fs::read_to_string(model_path.join(name)).ok()?;
+        // Tolerant of HF's bare `Infinity` (Mamba2), which would otherwise
+        // silently drop the config's EOS ids (issue #3339).
+        parse_hf_config_json(&s).ok()
+    };
+    resolve_eos_ids(
+        read_json("generation_config.json").as_ref(),
+        read_json("config.json").as_ref(),
+    )
+}
+
+/// Whether `config.json` text (`text`) describes a model whose OpenXLA graphs
+/// thread recurrent state, i.e. `Config::has_recurrent_state()` (issue #3341).
+///
+/// The server keeps such a model out of every prefix-hash cache: a saved
+/// token prefix cannot restore its recurrent state. A config the emitter does
+/// not support is `Err`; the caller then falls back to its own family list.
+#[cfg(any(feature = "iree", test))]
+pub fn config_json_has_recurrent_state(text: &str) -> Result<bool, String> {
+    emitter::Config::from_json_str(text).map(|config| config.has_recurrent_state())
+}
+
+/// Read the model's EOS token ids (see [`config_eos_token_ids`]). Only
+/// populated under `iree`, where the decode loop actually runs; otherwise empty
+/// (execution errors out anyway).
+#[cfg(feature = "iree")]
+pub(crate) fn read_eos(model_path: &Path) -> Vec<i32> {
+    config_eos_token_ids(model_path)
 }
 
 #[cfg(not(feature = "iree"))]
@@ -576,11 +672,19 @@ impl XlaInferenceSession {
         self.context_capacity
     }
 
-    /// The model's EOS token ids (from `generation_config.json`), so the drive
-    /// loop and the seam can stop on them.
+    /// The model's EOS token ids, so the drive loop and the seam can stop on
+    /// them. Read from the checkpoint at load ([`config_eos_token_ids`]) unless
+    /// the caller replaced them with [`Self::set_eos_token_ids`].
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.eos_token_ids
+    }
+
+    /// Replace the stop ids, so a caller that resolves EOS more completely than
+    /// this crate can (the root crate also reads the tokenizer's `eos_token`)
+    /// stops where the eager backend does.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        self.eos_token_ids = ids;
     }
 
     /// Conditionally load the Gemma3n audio split artifacts against this exact
@@ -661,6 +765,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<(Vec<i32>, GreedyTiming), String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
         }
@@ -694,6 +799,15 @@ impl XlaInferenceSession {
                 decode_ms,
             },
         ))
+    }
+
+    /// Start a new request: drop the previous request's recurrent state before
+    /// any validation can refuse this one, so a `decode_step` after a refused
+    /// request cannot continue the earlier sequence (issue #3339). A no-op for a
+    /// model without recurrent state.
+    fn begin_request(&mut self) {
+        #[cfg(feature = "iree")]
+        self.engine.invalidate_sequence_state();
     }
 
     /// Advance greedy decode from `first` (a prefill's argmax) and collect the
@@ -732,6 +846,7 @@ impl XlaInferenceSession {
     /// This mirrors the batched slot-seed convention and is distinct from the
     /// prefix-prefill-plus-decode generation loop.
     pub fn prefill_first_token(&mut self, prompt_tokens: &[i32]) -> Result<i32, String> {
+        self.begin_request();
         if prompt_tokens.is_empty() {
             return Err("prefill_first_token requires a non-empty prompt".to_string());
         }
@@ -811,6 +926,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -831,6 +947,7 @@ impl XlaInferenceSession {
         max_new_tokens: usize,
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -855,6 +972,7 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
         on_token: F,
     ) -> Result<Vec<i32>, String> {
+        self.begin_request();
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
@@ -879,6 +997,7 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(feature = "iree")]
     fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String> {
+        self.begin_request();
         if token_ids.len() > self.context_capacity {
             return Err(format!(
                 "prefill length {} exceeds context_capacity={}",
@@ -1177,5 +1296,87 @@ mod greedy_contract_tests {
         .expect("scripted drive");
         assert_eq!(out, vec![7, 8]);
         assert_eq!(seen, vec![7, 8]);
+    }
+}
+
+// EOS resolution (issue #3292) is pure JSON logic, so it runs without `iree`.
+#[cfg(test)]
+mod eos_resolution_tests {
+    use super::{config_eos_token_ids, resolve_eos_ids};
+    use serde_json::{Value, json};
+
+    fn resolve(generation: Option<Value>, config: Option<Value>) -> Vec<i32> {
+        resolve_eos_ids(generation.as_ref(), config.as_ref())
+    }
+
+    #[test]
+    fn generation_config_ids_come_first_then_config_json_ids() {
+        let got = resolve(
+            Some(json!({"eos_token_id": [1, 2]})),
+            Some(json!({"eos_token_id": 9, "text_config": {"eos_token_id": 8}})),
+        );
+        assert_eq!(got, vec![1, 2, 9, 8]);
+    }
+
+    #[test]
+    fn generation_config_without_eos_falls_back_to_config_json() {
+        let got = resolve(
+            Some(json!({"do_sample": false})),
+            Some(json!({"eos_token_id": 151645})),
+        );
+        assert_eq!(got, vec![151645]);
+    }
+
+    #[test]
+    fn config_json_alone_accepts_int_and_list() {
+        assert_eq!(resolve(None, Some(json!({"eos_token_id": 7}))), vec![7]);
+        assert_eq!(
+            resolve(None, Some(json!({"eos_token_id": [7, 8]}))),
+            vec![7, 8]
+        );
+    }
+
+    #[test]
+    fn text_config_is_used_when_top_level_has_none() {
+        let got = resolve(None, Some(json!({"text_config": {"eos_token_id": [3, 4]}})));
+        assert_eq!(got, vec![3, 4]);
+    }
+
+    #[test]
+    fn repeated_ids_across_sources_are_kept_once() {
+        let got = resolve(
+            Some(json!({"eos_token_id": [5, 6]})),
+            Some(json!({"eos_token_id": [6, 5], "text_config": {"eos_token_id": 5}})),
+        );
+        assert_eq!(got, vec![5, 6]);
+    }
+
+    #[test]
+    fn neither_file_configures_no_eos() {
+        assert!(resolve(None, None).is_empty());
+        assert!(resolve(Some(json!({})), Some(json!({"text_config": {}}))).is_empty());
+    }
+
+    #[test]
+    fn out_of_range_and_non_integer_entries_are_skipped() {
+        let got = resolve(
+            None,
+            Some(json!({"eos_token_id": [1, "x", 4294967296i64, 2]})),
+        );
+        assert_eq!(got, vec![1, 2]);
+    }
+
+    #[test]
+    fn model_directory_reader_treats_missing_or_malformed_files_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(config_eos_token_ids(dir.path()).is_empty());
+        std::fs::write(dir.path().join("generation_config.json"), "{ not json")
+            .expect("write generation config");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"eos_token_id": 151645, "text_config": {"eos_token_id": 151643}}"#,
+        )
+        .expect("write config");
+        assert_eq!(config_eos_token_ids(dir.path()), vec![151645, 151643]);
     }
 }

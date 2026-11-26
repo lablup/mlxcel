@@ -40,6 +40,7 @@
 //!   text and VLM) targets.
 
 pub(crate) mod adaptive;
+mod classic_fallback;
 pub mod generator;
 pub mod round_loop_batched;
 pub mod target;
@@ -52,6 +53,7 @@ mod tests;
 pub use generator::{MtpAcceptanceSummary, MtpGenerator, MtpSessionState, MtpStepOutput};
 pub use round_loop_batched::{MtpBatchedGenerator, MtpBatchedRunOutput};
 pub use target::{
-    MtpBatchedVerifyForwardOutput, MtpBatchedVerifyOutput, MtpTarget, MtpVerifyOutput,
+    MtpBatchedVerifyForwardOutput, MtpBatchedVerifyOutput, MtpClassicStep, MtpTarget,
+    MtpVerifyOutput,
 };
 pub use walk::{speculative_walk, speculative_walk_batched};

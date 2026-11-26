@@ -71,8 +71,11 @@ impl<M: LanguageModel> Engine<M> {
     /// #2567): the pool trim leaves that state at the speculative token.
     /// `false` for a sequence that is not open.
     pub fn can_unwind_lookahead(&self, id: SequenceId) -> bool {
-        let model_owned =
-            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
+        let model_owned = self
+            .model
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice();
         let needs_model_rewind = model_owned || !self.model.kv_cache_captures_sequence_state();
         if needs_model_rewind && !self.model.supports_decode_lookahead_rewind() {
             return false;
@@ -82,7 +85,7 @@ impl<M: LanguageModel> Engine<M> {
                 matches!(
                     set.backend,
                     SequenceStateBackend::DenseKvCache | SequenceStateBackend::PagedKvCache
-                ) || (model_owned && set.backend == SequenceStateBackend::ModelOwned)
+                ) || (model_owned && set.backend.keeps_state_outside_kv_slice())
             }
             None => false,
         }

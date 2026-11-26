@@ -65,6 +65,8 @@ pub(crate) enum XlaCache {
     Qmv4,
     /// The auxiliary ABI smoke module.
     AuxSmoke,
+    /// The single-layer SSM mixer probe (issue #3337).
+    SsmProbe,
     /// The bounded numeric-oracle probes.
     #[cfg_attr(not(feature = "micro-oracle"), allow(dead_code))]
     NumericProbes,
@@ -84,6 +86,7 @@ impl XlaCache {
             Self::Gemma3nAudio => "gemma3n-audio",
             Self::Qmv4 => "qmv4",
             Self::AuxSmoke => "aux-smoke",
+            Self::SsmProbe => "ssm-probe",
             Self::NumericProbes => "numeric-probes",
         }
     }

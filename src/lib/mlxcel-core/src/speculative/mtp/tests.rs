@@ -1217,3 +1217,7 @@ fn session_stats_rate_excludes_the_prefill_bonus() {
     );
     assert_eq!(only_bonus.decode_tok_per_sec, 0.0);
 }
+
+// Classic-decode fallback (issue #3425), kept in its own file for size.
+#[path = "classic_fallback_tests.rs"]
+mod classic_fallback;

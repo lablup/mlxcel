@@ -47,7 +47,8 @@ set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.h
     ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.h
     ${CMAKE_CURRENT_SOURCE_DIR}/gelu_tanh_f32.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/mla_absorbed_decode.h)
+    ${CMAKE_CURRENT_SOURCE_DIR}/mla_absorbed_decode.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/inkling2_kernels.h)
 
 set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.cpp
@@ -61,7 +62,10 @@ set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/kv_inplace_write.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/gelu_tanh_f32.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/mla_absorbed_decode.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/mla_absorbed_decode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/inkling2_kernels.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/inkling2_grouped_experts.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/row_invariant_matvec.cpp)
 
 set(MLXCEL_TURBO_KERNEL_METAL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.metal

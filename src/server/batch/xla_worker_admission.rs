@@ -756,7 +756,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             ModelRequest::PromptCacheWarmup { .. } => {
                 // Only the BatchScheduler owns a prompt cache; the XLA worker
                 // has no snapshot state to warm, so the job is dropped without
-                // touching admission state.
+                // touching admission state. Recurrent models never get a store
+                // here at all: see `server::xla_prompt_cache_guard` (#3341).
             }
             ModelRequest::Shutdown => {
                 self.shutdown = true;

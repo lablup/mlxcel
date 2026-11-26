@@ -85,7 +85,7 @@ export function libraryColumns(context: LibraryColumnsContext): DataTableColumn<
     if (a.kind === 'download' || b.kind === 'download') return a.kind === b.kind ? 0 : a.kind === 'download' ? -1 : 1;
     return compareEntries(sort)(a.entry, b.entry);
   };
-  // alpha.19 sorts the page itself even in controlled mode, so every sortable column gets the
+  // ui-common 0.2 (alpha.19 through alpha.21) sorts the page itself even in controlled mode, so every sortable column gets the
   // same pinned comparator the pagination used rather than a bare value accessor.
   const sortable: Pick<DataTableColumn<LibraryRow>, 'sortable' | 'sortComparator'> = { sortable: true, sortComparator: rowComparator };
   const modelActions = (entry: CatalogEntry): React.ReactNode => {

@@ -128,6 +128,9 @@ pub struct CliServerSettings {
     pub prompt_cache: bool,
     /// Run the server's one-token warmup before the first request.
     pub warmup: bool,
+    /// `--reasoning-effort`, normalized: sent with every chat request (issue
+    /// #3378). `None` leaves the template default.
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for CliServerSettings {
@@ -158,6 +161,7 @@ impl Default for CliServerSettings {
             draft_block_size: None,
             prompt_cache: true,
             warmup: false,
+            reasoning_effort: None,
         }
     }
 }
@@ -263,7 +267,11 @@ pub fn chat_request_body(messages: Value, settings: &CliServerSettings) -> Value
     body.insert("messages".to_string(), messages);
     body.insert("stream".to_string(), json!(true));
     body.extend(settings.request_fields());
-    Value::Object(body)
+    let mut body = Value::Object(body);
+    if let Some(level) = settings.reasoning_effort.as_deref() {
+        crate::server::in_process::reasoning_effort::apply_to_chat_body(&mut body, level);
+    }
+    body
 }
 
 /// The `/v1/completions` body for a `--no-chat-template` prompt.

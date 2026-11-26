@@ -402,6 +402,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::MiniMaxM3VL => Some(load_minimax_m3_vl(model_path)?),
         ModelType::MuseGlimmerVLM => Some(load_muse_glimmer_vlm(model_path)?),
         ModelType::InklingVLM => Some(load_inkling_vlm(model_path)?),
+        ModelType::Inkling2VLM => Some(load_inkling2_vlm(model_path)?),
         ModelType::LlavaBunnyVLM => Some(load_llava_bunny_vlm(model_path)?),
         ModelType::AyaVisionVLM => Some(load_aya_vision_vlm(model_path)?),
         ModelType::PaliGemmaVLM => Some(load_paligemma_vlm(model_path)?),
@@ -516,7 +517,8 @@ fn load_llama_family_from_weights(
             .ok_or_else(|| anyhow::anyhow!("Missing text_config for Mistral4"))?;
         let args: models::mistral4::Mistral4Config = serde_json::from_value(text_config.clone())
             .map_err(|err| anyhow::anyhow!("Failed to parse text_config: {}", err))?;
-        models::mistral4::sanitize_weights(weights, &args, "");
+        models::mistral4::sanitize_weights(weights, &args, "")
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
         let model = models::Mistral4Model::from_weights(weights, &args)
             .map_err(|err| anyhow::anyhow!("{}", err))?;
         return Ok(LoadedModel::Mistral4(model));

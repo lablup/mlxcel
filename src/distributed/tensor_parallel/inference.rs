@@ -219,6 +219,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV2 => "deepseek_v2",
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
+        // Hy4 is not TP-enabled; this arm keeps the dispatch table total.
+        ModelType::HyV4 => "hy_v4",
         ModelType::DeepSeekV4 => "deepseek_v4",
         ModelType::Xing40 => "xing4_0",
         ModelType::Dots1 => "dots1",
@@ -395,6 +397,8 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Lfm2VL => "lfm2",
         // Inkling uses model-owned short-convolution state and has no TP port.
         ModelType::Inkling | ModelType::InklingVLM => "inkling",
+        // Inkling 2 keeps per-visit model-owned state and has no TP port.
+        ModelType::Inkling2VLM => "inkling2",
         // PLaMo 2.1 VL's text backbone is PLaMo 2; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Plamo2 | ModelType::Plamo2VLM => "plamo2",

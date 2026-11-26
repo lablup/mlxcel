@@ -91,6 +91,12 @@
 //!   one warning), B = 1 only, and gated on the block-versus-chain
 //!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
 //!   arms. The per-target plumbing lives in [`super::dflash_target`].
+//! - **DSpark / Inkling 2** (issue #3374): text-only requests on
+//!   [`crate::LoadedModel::Inkling2VLM`], paired with the DSpark drafter
+//!   bundled in the checkpoint's own `mtp.safetensors` (`--model-draft` is the
+//!   target directory). Greedy only, B = 1 only, gated on the exactness probe
+//!   (`Inkling2Model::dflash_exactness_allows`); image requests keep classic
+//!   decode through the multimodal gate.
 //! - **DFlash / Muse Glimmer** (issue #1343): text-only requests on
 //!   [`crate::LoadedModel::MuseGlimmerVLM`], paired with the Muse Glimmer
 //!   assistant drafter (`muse_glimmer_assistant`) through the same
@@ -1114,6 +1120,10 @@ pub(crate) enum BurstOutcome {
 /// without cloning.
 pub(crate) struct BurstContext<'a> {
     pub(crate) model: &'a LoadedModel,
+    /// The B=1 sequence's scheduler-owned layer state (issue #3254), which a
+    /// speculative target of a scheduler-owned family runs over. `None` for
+    /// every other family and for batched bursts.
+    pub(crate) layer_state: Option<&'a mut [mlxcel_core::cache::LayerState]>,
     pub(crate) tokenizer: &'a crate::tokenizer::MlxcelTokenizer,
     pub(crate) drafter_slot: &'a mut WorkerDrafterSlot,
     pub(crate) dispatch: &'a crate::server::SpeculativeDispatch,
@@ -1144,6 +1154,7 @@ impl<'a> BurstContext<'a> {
     fn reborrow(&mut self) -> BurstContext<'_> {
         BurstContext {
             model: self.model,
+            layer_state: self.layer_state.as_deref_mut(),
             tokenizer: self.tokenizer,
             drafter_slot: &mut *self.drafter_slot,
             dispatch: self.dispatch,
@@ -1185,7 +1196,7 @@ impl<'a> BurstContext<'a> {
 /// does NOT need a manual bind here — and adding one would
 /// double-bind. See `run_dflash_burst` below.
 fn run_mtp_burst(
-    ctx: BurstContext<'_>,
+    mut ctx: BurstContext<'_>,
     seq: &mut SequenceInfo,
     block_size: u32,
 ) -> Result<BurstSuccess, BurstOutcome> {
@@ -1439,9 +1450,18 @@ fn run_mtp_burst(
         // (Qwen attention caches are plain growing KVCaches), so no
         // block-size-derived constructor parameter.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
+            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
                 qwen,
-                Some(seq.seq_id),
+                seq.seq_id,
+                Some(layer_state),
             )
             .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
@@ -1458,11 +1478,21 @@ fn run_mtp_burst(
             )
         }
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
-                vlm,
-                Some(seq.seq_id),
-            )
-            .with_prefill_start_offset(prefill_start_offset);
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
+            let adapter =
+                crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
+                    vlm,
+                    seq.seq_id,
+                    Some(layer_state),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1726,6 +1756,7 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
+        LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
         _ => return None,
     })
 }
@@ -1756,6 +1787,9 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         }
         LoadedModel::Laguna(_) => {
             <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Inkling2VLM(_) => {
+            <crate::vision::Inkling2VlModel as DFlashTargetModel>::supports_batched()
         }
         _ => return None,
     })
@@ -1858,7 +1892,8 @@ fn run_dflash_burst(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
              LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
+             assistant drafter), Laguna (Laguna DFlash drafter), or Inkling 2 (its bundled \
+             DSpark drafter); falling back to \
              classic decode",
             model_variant_label(ctx.model),
         );
@@ -1960,6 +1995,7 @@ fn run_dflash_burst(
                 ctx.drafter_slot,
                 cancel,
                 &logprobs_config,
+                (ctx.prefill_chunk_size, ctx.prefill_boundary),
             )?
         };
     }
@@ -1975,6 +2011,7 @@ fn run_dflash_burst(
         LoadedModel::Lfm2VL(m) => drive!(m),
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
+        LoadedModel::Inkling2VLM(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -3116,6 +3153,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
         LoadedModel::Laguna(_) => "Laguna",
+        LoadedModel::Inkling2VLM(_) => "Inkling2VLM",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
         _ => "other",

@@ -83,6 +83,7 @@
 //! Used by: routes/chat (streaming path)
 
 use super::formats::{self, HarmonyRoute};
+use super::inkling;
 
 /// Split output from [`StreamFilter::feed`] / [`StreamFilter::flush`].
 ///
@@ -201,6 +202,9 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
             Some(("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
         }
         "◁think▷" | "◁/think▷" => Some(("◁think▷", "◁/think▷")),
+        "<think:opensource>" | "</think:opensource>" => {
+            Some(("<think:opensource>", "</think:opensource>"))
+        }
         "<ifm|think>" | "</ifm|think>" => Some(("<ifm|think>", "</ifm|think>")),
         "<ifm|think_fast>" | "</ifm|think_fast>" => Some(("<ifm|think_fast>", "</ifm|think_fast>")),
         "<ifm|think_faster>" | "</ifm|think_faster>" => {
@@ -446,6 +450,12 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // markers stay under the longest delimiter.
     ("◁/think▷", DelimiterAction::ExitThinking),
     ("◁think▷", DelimiterAction::EnterThinking),
+    // Tencent Hy4 (#2354): `<think:opensource>...</think:opensource>`. The
+    // template primes the open, and the model may emit it again. The tags
+    // part from `<think>` / `</think>` at `:` against `>`, so neither is a
+    // prefix of the other and the partial-match window resolves both.
+    ("</think:opensource>", DelimiterAction::ExitThinking),
+    ("<think:opensource>", DelimiterAction::EnterThinking),
     // IFM K2-Horizon (#3299): one pair per `reasoning_effort`, and the
     // template primes the open, so the model emits only the close. `<if` and
     // `</if` start no other entry, and no pair's marker is a prefix of
@@ -464,6 +474,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|content_thinking|>", DelimiterAction::EnterThinking),
     ("<|message_model|>", DelimiterAction::Strip),
     ("<|content_text|>", DelimiterAction::Strip),
+    // Inkling tool call (#3228). A recipient between `<|message_model|>` and
+    // this marker is held and consumed by `scan_inkling_header`; the call's
+    // `<|end_message|>` returns to content through the row above.
+    (
+        "<|content_invoke_tool_json|>",
+        DelimiterAction::EnterToolCall,
+    ),
     // Gemma 4 tool-call delimiters — must precede Hermes `<tool_call>` to avoid
     // a spurious Hermes hit on the Gemma 4 open tag.
     ("<|tool_call>", DelimiterAction::EnterToolCall),
@@ -603,6 +620,9 @@ enum FilterState {
 /// any remaining buffered content.
 pub struct StreamFilter {
     state: FilterState,
+    /// A consumed structural delimiter or a prompt-primed reasoning channel
+    /// means this is structured output, rather than an untouched raw reply.
+    saw_structure: bool,
     buffer: String,
     /// Per-feed byte-length queue used to count how many token positions
     /// (i.e. `feed()` calls) contributed to the bytes currently in `buffer`.
@@ -801,6 +821,7 @@ impl StreamFilter {
 
         Self {
             state: FilterState::Content,
+            saw_structure: false,
             buffer: String::new(),
             fragment_lengths: std::collections::VecDeque::new(),
             max_delim_len,
@@ -847,6 +868,7 @@ impl StreamFilter {
     pub fn new_primed_open_thinking() -> Self {
         let mut s = Self::new();
         s.state = FilterState::Thinking;
+        s.saw_structure = true;
         s.muse_boundary = false;
         s
     }
@@ -890,6 +912,19 @@ impl StreamFilter {
     /// anything inside `ToolCall` is discarded (tool-call deltas are emitted
     /// via the parser path, not here).
     pub fn flush(&mut self) -> FilterOutput {
+        self.flush_inner(false)
+    }
+
+    /// Flush for a raw-completion display that must preserve plain text byte
+    /// for byte. Retain trailing whitespace only when no structural delimiter
+    /// was consumed and the prompt did not prime a reasoning channel. Reasoning,
+    /// tool calls, and structured messages keep the usual cleanup policy.
+    /// Chat callers should continue using [`Self::flush`].
+    pub fn flush_preserving_plain_whitespace(&mut self) -> FilterOutput {
+        self.flush_inner(true)
+    }
+
+    fn flush_inner(&mut self, preserve_plain_whitespace: bool) -> FilterOutput {
         if self.buffer.is_empty()
             && self.held_ws.is_empty()
             && self.harmony_reasoning.held.is_empty()
@@ -925,7 +960,14 @@ impl StreamFilter {
         // Whitespace still held never reached visible text, so it is trailing
         // whitespace the non-streamed answer (and Harmony body) trims.
         self.take_post_close_gap(&mut acc);
-        self.drop_held_ws(&mut acc);
+        if preserve_plain_whitespace && !self.saw_structure {
+            acc.content.push_str(&self.held_ws);
+            acc.consumed_positions += self.held_ws_positions;
+            self.held_ws.clear();
+            self.held_ws_positions = 0;
+        } else {
+            self.drop_held_ws(&mut acc);
+        }
         self.drop_held_reasoning_ws(&mut acc);
         self.fragment_lengths.clear();
         acc.into_output()
@@ -1018,6 +1060,7 @@ impl StreamFilter {
 
             match self.find_earliest_delimiter(end_of_stream) {
                 Some((pos, delim_len, action)) => {
+                    self.saw_structure = true;
                     // Text before the delimiter is attributed to the current
                     // state so thinking fragments surface as reasoning and
                     // regular fragments surface as content.
@@ -1350,6 +1393,12 @@ impl StreamFilter {
             earliest = choose_earlier(earliest, candidate);
         }
 
+        if let Some(MuseHeader::Delimiter(pos, len, action)) =
+            self.scan_inkling_header(end_of_stream)
+        {
+            earliest = choose_earlier(earliest, (pos, len, action));
+        }
+
         if let Some(HarmonyHeader::Delimiter(pos, len, action)) =
             self.scan_harmony_header(end_of_stream)
         {
@@ -1374,6 +1423,14 @@ impl StreamFilter {
         if !end_of_stream
             && let Some(header) = self.unterminated_header_start()
             && earliest.is_some_and(|(pos, _, _)| pos > header)
+        {
+            return None;
+        }
+        // A pending Inkling header starts with `<|message_model|>`, which is
+        // itself a `Strip` row: consuming it would stream the recipient.
+        if !end_of_stream
+            && let Some(MuseHeader::Pending(header)) = self.scan_inkling_header(false)
+            && earliest.is_some_and(|(pos, _, _)| pos >= header)
         {
             return None;
         }
@@ -1478,8 +1535,13 @@ impl StreamFilter {
             Some(MuseHeader::Pending(start)) => Some(start),
             _ => None,
         };
+        let inkling = match self.scan_inkling_header(false) {
+            Some(MuseHeader::Pending(start)) => Some(start),
+            _ => None,
+        };
         harmony
             .into_iter()
+            .chain(inkling)
             .chain(muse_boundary)
             .chain(muse_assistant)
             .chain(self.pending_harmony_role_header())
@@ -1507,6 +1569,50 @@ impl StreamFilter {
                 return Some(pos);
             }
             from = pos + HARMONY_ASSISTANT.len();
+        }
+        None
+    }
+
+    /// Scan for an Inkling recipient header,
+    /// `<|message_model|>NAME<|content_invoke_tool_json|>` (#3228). The name
+    /// is not content, so a `<|message_model|>` followed by recipient-shaped
+    /// text is held until its kind marker arrives: an invoke marker makes the
+    /// whole header one `EnterToolCall` delimiter, and any other marker drops
+    /// the name with the header. Text that outgrows
+    /// [`inkling::MAX_RECIPIENT_BYTES`], or is still open at end of stream, is
+    /// not a header and streams as before (the fixed rows strip the marker).
+    fn scan_inkling_header(&self, end_of_stream: bool) -> Option<MuseHeader> {
+        if self.harmony_active || self.atem_depth > 0 {
+            return None;
+        }
+        let mut from = 0;
+        while let Some(rel) = self.buffer[from..].find(inkling::MESSAGE) {
+            let pos = from + rel;
+            let after = pos + inkling::MESSAGE.len();
+            let tail = &self.buffer[after..];
+            match tail.find("<|") {
+                // No recipient: the fixed rows handle the kind marker.
+                Some(0) => {}
+                Some(rel) if inkling::is_recipient(&tail[..rel]) => {
+                    let marker = &tail[rel..];
+                    if marker.starts_with(inkling::INVOKE) {
+                        let len = inkling::MESSAGE.len() + rel + inkling::INVOKE.len();
+                        return Some(MuseHeader::Delimiter(
+                            pos,
+                            len,
+                            DelimiterAction::EnterToolCall,
+                        ));
+                    }
+                    if !end_of_stream && inkling::INVOKE.starts_with(marker) {
+                        return Some(MuseHeader::Pending(pos));
+                    }
+                }
+                None if !end_of_stream && tail.len() <= inkling::MAX_RECIPIENT_BYTES => {
+                    return Some(MuseHeader::Pending(pos));
+                }
+                _ => {}
+            }
+            from = after;
         }
         None
     }

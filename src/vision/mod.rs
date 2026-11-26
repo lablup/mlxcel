@@ -66,6 +66,7 @@ pub mod granite_vision;
 pub mod hunyuan_vl;
 pub mod idefics2;
 pub mod indic_ocr;
+pub mod inkling2_vl;
 pub mod inkling_vl;
 pub mod internvl;
 pub mod jina_vlm;
@@ -140,6 +141,7 @@ pub use granite4_vision::Granite4VisionVLModel;
 pub use hunyuan_vl::HunyuanVlModel;
 pub use idefics2::Idefics2Model;
 pub use inkling_vl::InklingVlModel;
+pub use inkling2_vl::Inkling2VlModel;
 pub use internvl::InternVLChatVLM;
 pub use jina_vlm::JinaVlmModel;
 pub use kimi_k3_vl::{KimiK3Projector, KimiK3VLModel};
@@ -540,6 +542,29 @@ impl LanguageModel for VisionLanguageModel {
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         self.text_model.sequence_state_layout()
+    }
+
+    // A scheduler-owned text model keeps its state in the pool entry
+    // (issue #3254), so the wrapper forwards the whole surface: the table,
+    // the state builder, the snapshot vocabulary and the forward.
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        self.text_model.layer_state_kinds()
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        self.text_model.make_layer_state()
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        self.text_model.layer_state_snapshot_spec()
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        self.text_model.forward_layer_state(request, rows)
     }
 
     fn supports_padded_prefill(&self) -> bool {

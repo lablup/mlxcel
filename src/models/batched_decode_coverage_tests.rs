@@ -70,6 +70,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "HunyuanVlModel@src/vision/hunyuan_vl.rs",
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "IQuestLoopCoderWrapper@src/models/iquestloopcoder_model.rs",
+    "Inkling2Model@src/models/inkling2/runtime.rs",
     "InklingModel@src/models/inkling/runtime.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
@@ -159,6 +160,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
+    "Inkling2VlModel@src/vision/inkling2_vl.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
     "InternVLChatVLM@src/vision/internvl.rs",
     "JinaVlmModel@src/vision/jina_vlm.rs",
@@ -193,6 +195,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
     "Granite4VisionVLModel@src/vision/granite4_vision.rs",
+    "HyV4Model@src/models/hy_v4.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
@@ -623,8 +626,11 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
     if method_body(block, "supports_batching").is_some_and(literal_false) {
         return Ok(None);
     }
-    let has_batched_override =
-        block.contains("fn forward_batched(") || block.contains("fn forward_batched_with_ids(");
+    // A scheduler-owned family's batched forward is `forward_layer_state`,
+    // which takes the rows' pool state (issue #3254).
+    let has_batched_override = block.contains("fn forward_batched(")
+        || block.contains("fn forward_batched_with_ids(")
+        || block.contains("fn forward_layer_state(");
     match method_body(block, "batched_decode_kind") {
         Some(body) if body.contains("BatchedDecodeKind::Native") => {
             if has_batched_override {

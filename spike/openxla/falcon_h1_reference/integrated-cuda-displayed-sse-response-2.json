@@ -1,0 +1,649 @@
+{
+  "request": 2,
+  "mode": "sse",
+  "started": 1795592210.35376,
+  "ended": 1795592211.370572,
+  "body": {
+    "choices": [
+      {
+        "text": " 100% of the country's GDP.\n\n**Q2: What is the significance of the 1990s in the context of Germany's economic development?**  \n",
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 5,
+      "completion_tokens": 40,
+      "total_tokens": 45
+    },
+    "sse_events": [
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " ",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "1",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "0",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "0",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "%",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " the",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " country",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "'",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "s",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " GDP",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "**",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "Q",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592210,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "2",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ":",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " What",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " is",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " the",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " significance",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " the",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " ",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "1",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "9",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "9",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "0",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "s",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " in",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " the",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " context",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Germany",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "'",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "s",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " economic",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " development",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "?**",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "  \n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "",
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-f92085b1-8f05-4d9d-8b34-4f9cd6c6549f",
+        "object": "text_completion",
+        "created": 1795592211,
+        "model": "falcon-h1",
+        "system_fingerprint": null,
+        "choices": [],
+        "usage": {
+          "prompt_tokens": 5,
+          "completion_tokens": 40,
+          "total_tokens": 45
+        }
+      }
+    ]
+  }
+}

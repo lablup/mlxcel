@@ -166,7 +166,7 @@ pub fn resolve_precision(device: &str) -> Precision {
 /// cannot lower there (issue #612). Every other device / precision pair lowers: bf16
 /// is fine on CUDA and the CPU (`local-task` / `local-sync`) targets, and f16 / f32
 /// lower everywhere. Pure (no env), so the guard logic is unit-testable directly.
-fn precision_lowers_on(device: &str, precision: Precision) -> bool {
+pub(crate) fn precision_lowers_on(device: &str, precision: Precision) -> bool {
     !(device == "metal" && precision == Precision::Bf16)
 }
 
@@ -213,6 +213,24 @@ pub fn resolve_precision_checked_with_override(
 pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
     let raw = std::env::var("MLXCEL_XLA_PRECISION").ok();
     resolve_precision_checked_with_override(device, raw.as_deref())
+}
+
+/// [`resolve_precision_checked_with_override`] for a config whose default is
+/// pinned to F32 on every device (`pin_f32`: MLA, and recurrent state since
+/// issue #3340). Only a recognised explicit override (`f16`, `bf16`, `f32`,
+/// as in [`precision_env_override`]) replaces the pin; an unset or unrecognised
+/// value keeps F32. Without the pin this is the ordinary checked resolver.
+pub fn resolve_pinned_precision_with_override(
+    device: &str,
+    pin_f32: bool,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
+    let explicit = raw_override.is_some_and(|raw| matches!(raw.trim(), "f16" | "bf16" | "f32"));
+    if pin_f32 && !explicit {
+        Ok(Precision::F32)
+    } else {
+        resolve_precision_checked_with_override(device, raw_override)
+    }
 }
 
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
@@ -1129,6 +1147,21 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Reinterpret the bits of `x` as `elt` (`stablehlo.bitcast_convert`), for
+    /// same-width types such as `f32` <-> `ui32`.
+    pub fn bitcast_convert(&mut self, x: &Val, elt: &'static str) -> Val {
+        let ty = Ty::new(x.ty.shape.clone(), elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.bitcast_convert {} : ({}) -> {}",
+            r,
+            x.name,
+            x.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     // --- quantized-weight dequant (issue #516) -----------------------------
 
     /// Bitwise AND of two same-shaped integer tensors (`stablehlo.and`). Masks the
@@ -1196,7 +1229,7 @@ impl Builder {
     /// ```
     ///
     /// where `per_u32 = 32 / bits`. The RESIDENT device weight stays packed
-    /// (4/8-bit + f16 scales/biases), the memory-bandwidth lever the OpenXLA path
+    /// (4/8-bit + f16 or bf16 scales/biases), the memory-bandwidth lever the OpenXLA path
     /// carries to an int-native target; whether IREE folds the unpack+dequant into
     /// the following matmul is target-dependent (the #513 / ADR-0004 open question).
     pub fn dequant_affine(
@@ -1224,8 +1257,16 @@ impl Builder {
         let q = self.and(&shifted, &mask_c);
         let q_flat = self.reshape(&q, vec![out, in_]);
         let q_f32 = self.convert(&q_flat, "f32");
-        // scale/bias: [out, n_groups] f16 -> f32, each group repeated across its
-        // group_size input columns -> [out, in], then w = q*scale + bias.
+        // scale/bias: [out, n_groups] f16 or bf16 -> f32 (both widen exactly, so
+        // the bf16 form issue #603 adds matches the host bf16 dequant bit for
+        // bit), each group repeated across its group_size input columns ->
+        // [out, in], then w = q*scale + bias.
+        assert!(
+            matches!(scales.ty.elt, "f16" | "bf16") && scales.ty.elt == biases.ty.elt,
+            "affine metadata must be a matching f16 or bf16 pair, got {} / {}",
+            scales.ty.elt,
+            biases.ty.elt
+        );
         let s_f32 = self.convert(scales, "f32");
         let b_f32 = self.convert(biases, "f32");
         let s_b = self.broadcast_groups(&s_f32, group_size, in_);
@@ -1632,6 +1673,13 @@ impl Builder {
     pub fn logical_not(&mut self, a: &Val) -> Val {
         self.unary("not", a)
     }
+    pub fn abs(&mut self, a: &Val) -> Val {
+        self.unary("abs", a)
+    }
+    /// `log(1 + a)`, accurate for small `a` (the stable softplus tail).
+    pub fn log_plus_one(&mut self, a: &Val) -> Val {
+        self.unary("log_plus_one", a)
+    }
 
     /// Error function from the CHLO extension accepted by StableHLO import.
     /// Gemma3n's sparse GELU uses the exact erf form (the ordinary GeGLU path
@@ -1706,6 +1754,9 @@ impl Builder {
     }
     pub fn reduce_max(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
         self.reduce("maximum", x, dim, init)
+    }
+    pub fn reduce_min(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
+        self.reduce("minimum", x, dim, init)
     }
 
     /// Inclusive prefix sum along one static axis using a left-padded window.
@@ -2018,6 +2069,48 @@ impl Builder {
             r,
             lhs.name,
             rhs.name,
+            dims_list(lhs_contract),
+            dims_list(rhs_contract),
+            lhs.ty.render(),
+            rhs.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// A batched contraction that never demotes its f32 inputs, whatever the
+    /// graph precision. The SSM scan (issue #3337) runs its recurrence
+    /// contractions through this so the state stays f32 on the f16 path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dot_general_keep_f32(
+        &mut self,
+        lhs: &Val,
+        rhs: &Val,
+        lhs_batch: &[usize],
+        rhs_batch: &[usize],
+        lhs_contract: &[usize],
+        rhs_contract: &[usize],
+        out_shape: Vec<usize>,
+    ) -> Val {
+        assert_eq!(lhs.ty.elt, "f32");
+        assert_eq!(rhs.ty.elt, "f32");
+        let ty = Ty::f32(out_shape);
+        let r = self.fresh();
+        let batch = if lhs_batch.is_empty() && rhs_batch.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "batching_dims = {} x {}, ",
+                dims_list(lhs_batch),
+                dims_list(rhs_batch)
+            )
+        };
+        self.line(format!(
+            "{} = stablehlo.dot_general {}, {}, {}contracting_dims = {} x {} : ({}, {}) -> {}",
+            r,
+            lhs.name,
+            rhs.name,
+            batch,
             dims_list(lhs_contract),
             dims_list(rhs_contract),
             lhs.ty.render(),
@@ -2647,6 +2740,51 @@ mod tests {
         );
         assert!(body.contains("stablehlo.multiply"), "q * scale");
         assert!(body.contains("stablehlo.add "), "+ bias");
+    }
+
+    /// bf16 affine metadata (issue #603): the scales/biases args keep their bf16
+    /// type and widen to f32 in the graph before `q*scale + bias`, exactly like
+    /// the f16 form, so the reconstructed weight is the same f32 `[out, in]`.
+    #[test]
+    fn dequant_affine_bf16_metadata_widens_to_f32_in_graph() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "bf16"));
+        let w = b.dequant_affine(&packed, &scales, &biases, 4, 8);
+        let body = b.body();
+        assert_eq!(w.ty.shape, vec![2, 8]);
+        assert_eq!(w.ty.elt, "f32");
+        assert_eq!(
+            body.matches("stablehlo.convert %arg1 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                .count()
+                + body
+                    .matches("stablehlo.convert %arg2 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                    .count(),
+            2,
+            "both bf16 metadata args widen to f32:\n{body}"
+        );
+        assert!(
+            !body.contains("xf16>"),
+            "no f16 type in the bf16 form:\n{body}"
+        );
+
+        // The f16 form is the same graph with only the metadata type changed.
+        let mut f = Builder::new();
+        let s16 = Builder::arg(1, Ty::new(vec![2, 1], "f16"));
+        let b16 = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        f.dequant_affine(&packed, &s16, &b16, 4, 8);
+        assert_eq!(f.body().replace("xf16>", "xbf16>"), body);
+    }
+
+    #[test]
+    #[should_panic(expected = "matching f16 or bf16 pair")]
+    fn dequant_affine_rejects_mismatched_metadata() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        b.dequant_affine(&packed, &scales, &biases, 4, 8);
     }
 
     /// 8-bit affine dequant-in-graph: `per_u32 = 4` lanes (shifts 0,8,16,24; mask

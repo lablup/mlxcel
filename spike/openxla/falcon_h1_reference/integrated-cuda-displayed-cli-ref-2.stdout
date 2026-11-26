@@ -1,0 +1,9 @@
+Runtime device: CPU
+KV cache mode: fp16 (applied to 24 of 24 layers)
+Generating...
+The capital of Germany is 100% of the country's GDP.
+
+**Q2: What is the significance of the 1990s in the context of Germany's economic development?**  
+
+
+[Generated 40 tokens in 0.46s = 87.59 tok/s]

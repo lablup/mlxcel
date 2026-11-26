@@ -18,8 +18,9 @@
 
 use mlxcel_core::weights::WeightMap;
 
-use super::{Ernie45MoeModel, ModelArgs, SwitchLinear};
+use super::{Ernie45MoeModel, MoEBlock, ModelArgs, SwitchLinear};
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
+use mlxcel_core::{dtype, utils::array_to_vec_f32};
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
 /// group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is a plane
@@ -103,8 +104,8 @@ fn ernie4_5_moe_switch_linear_rejects_quantization_params_that_would_abort_gathe
         .expect("a bf16 expert plane must not be gated on quantization params");
 }
 
-fn tiny_routed_args() -> ModelArgs {
-    serde_json::from_value(serde_json::json!({
+fn tiny_routed_config() -> serde_json::Value {
+    serde_json::json!({
         "model_type": "ernie4_5_moe",
         "hidden_size": 8,
         "num_hidden_layers": 2,
@@ -119,8 +120,11 @@ fn tiny_routed_args() -> ModelArgs {
         "moe_k": 2,
         "moe_num_shared_experts": 1,
         "tie_word_embeddings": false
-    }))
-    .unwrap()
+    })
+}
+
+fn tiny_routed_args() -> ModelArgs {
+    serde_json::from_value(tiny_routed_config()).unwrap()
 }
 
 fn tensor(shape: &[i32], phase: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
@@ -182,6 +186,145 @@ fn tiny_routed_weights(args: &ModelArgs) -> WeightMap {
 }
 
 #[test]
+fn correction_bias_changes_selection_not_weights() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 4;
+    let mut weights = tiny_routed_weights(&args);
+    weights.insert(
+        "model.layers.1.mlp.gate.weight".into(),
+        mlxcel_core::from_slice_f32(&[1., 0., 0., 0., 0.5, 0., 0., 0., 0., 0., 0., 0.], &[3, 4]),
+    );
+    weights.insert(
+        "model.layers.1.mlp.e_score_correction_bias".into(),
+        mlxcel_core::from_slice_f32(&[0., 0., 10.], &[3]),
+    );
+    let x = mlxcel_core::from_slice_f32(&[2., 0., 0., 0.], &[1, 4]);
+
+    for softmax in [true, false] {
+        let mut block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+        block.use_softmax = softmax;
+        let (indices, scores) = block.route(&x);
+        let mut selected: Vec<_> = array_to_vec_f32(&indices)
+            .into_iter()
+            .map(|i| i as usize)
+            .zip(array_to_vec_f32(&scores))
+            .collect();
+        selected.sort_by_key(|&(expert, _)| expert);
+        assert_eq!([selected[0].0, selected[1].0], [0, 2]);
+
+        // The raw logits of the selected experts are 2 and 0.
+        let (g0, g2) = if softmax {
+            (2_f32.exp(), 1.)
+        } else {
+            (1. / (1. + (-2_f32).exp()), 0.5)
+        };
+        assert!((selected[0].1 - g0 / (g0 + g2)).abs() < 1e-6);
+        assert!((selected[1].1 - g2 / (g0 + g2)).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn correction_bias_loads_from_moe_statics_and_squeezes() {
+    let mut args = tiny_routed_args();
+    args.moe_num_experts = 4;
+    let mut weights = tiny_routed_weights(&args);
+    let prefix = "model.layers.1";
+    let raw = format!("{prefix}.mlp.moe_statics.e_score_correction_bias");
+    let converted = format!("{prefix}.mlp.e_score_correction_bias");
+    let check = |weights: &WeightMap, expected: &[f32]| {
+        let block = MoEBlock::from_weights(weights, &args, prefix).unwrap();
+        let bias = &block.e_score_correction_bias;
+        assert_eq!(mlxcel_core::array_shape(bias), [4]);
+        assert_eq!(mlxcel_core::array_dtype(bias), dtype::FLOAT32);
+        assert_eq!(array_to_vec_f32(bias), expected);
+    };
+
+    check(&weights, &[0.; 4]);
+    let values = [0.25, -0.5, 1.0, 2.0];
+    weights.insert(
+        raw.clone(),
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&values, &[1, 4]),
+            dtype::BFLOAT16,
+        ),
+    );
+    check(&weights, &values);
+    // The converted key takes precedence when both exist.
+    weights.insert(converted.clone(), mlxcel_core::ones(&[4], dtype::FLOAT16));
+    check(&weights, &[1.; 4]);
+    weights.remove(&raw);
+    check(&weights, &[1.; 4]);
+
+    for shape in [&[2, 4][..], &[3], &[1, 3]] {
+        weights.insert(converted.clone(), mlxcel_core::zeros(shape, dtype::FLOAT32));
+        let err = MoEBlock::from_weights(&weights, &args, prefix)
+            .err()
+            .expect("malformed bias must fail to load");
+        assert!(err.contains(&converted), "{err}");
+    }
+}
+
+#[test]
+fn router_runs_in_f32() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 2;
+    args.moe_num_experts = 2;
+    args.moe_k = 1;
+    let mut weights = tiny_routed_weights(&args);
+    // The f32 dot products are 1 and 1 + 2^-12. Both round to 1 in f16,
+    // even though each input and gate weight is exactly representable in f16.
+    let gate = mlxcel_core::from_slice_f32(&[1., 0., 1., 1. / 4096.], &[2, 2]);
+    for gate_dtype in [dtype::FLOAT16, dtype::BFLOAT16] {
+        let weight = mlxcel_core::astype(&gate, gate_dtype);
+        let x = mlxcel_core::ones(&[1, 2], gate_dtype);
+        let low_precision = mlxcel_core::matmul(&x, &mlxcel_core::transpose(&weight));
+        assert_eq!(array_to_vec_f32(&low_precision), [1., 1.]);
+        weights.insert("model.layers.1.mlp.gate.weight".into(), weight);
+        let block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+        let (indices, scores) = block.route(&x);
+        assert_eq!(mlxcel_core::item_i32(&indices), 1);
+        assert_eq!(mlxcel_core::array_dtype(&scores), dtype::FLOAT32);
+    }
+}
+
+#[test]
+fn quantized_router_runs_in_f32_with_bf16_scales() {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 64;
+    args.moe_num_experts = 2;
+    args.moe_k = 1;
+    let mut weights = tiny_routed_weights(&args);
+    let gate = "model.layers.1.mlp.gate";
+    // Affine 4-bit rows [1, 0, ...] and [1, 1, 0, ...].
+    let mut packed = [0; 16];
+    packed[0] = 0x01;
+    packed[8] = 0x11;
+    weights.insert(
+        format!("{gate}.weight"),
+        mlxcel_core::from_slice_u32(&packed, &[2, 8]),
+    );
+    weights.insert(
+        format!("{gate}.scales"),
+        mlxcel_core::ones(&[2, 1], dtype::BFLOAT16),
+    );
+    weights.insert(
+        format!("{gate}.biases"),
+        mlxcel_core::zeros(&[2, 1], dtype::BFLOAT16),
+    );
+    let block = MoEBlock::from_weights(&weights, &args, "model.layers.1").unwrap();
+    let mut values = [0.; 64];
+    values[0] = 1.;
+    values[1] = 1. / 4096.;
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&values, &[1, 64]),
+        dtype::BFLOAT16,
+    );
+    let (indices, scores) = block.route(&x);
+    assert_eq!(mlxcel_core::item_i32(&indices), 1);
+    assert_eq!(mlxcel_core::array_dtype(&scores), dtype::FLOAT32);
+}
+
+#[test]
 fn ernie_native_batched_decode_matches_three_routed_rows() {
     let args = tiny_routed_args();
     let model = Ernie45MoeModel::from_weights(&tiny_routed_weights(&args), &args).unwrap();
@@ -209,4 +352,188 @@ fn ernie45_moe_last_row_logits_match_the_full_forward() {
         },
         crate::models::last_row_logits_harness::TOKENS,
     );
+}
+
+#[test]
+fn checkpoint_layout_loads_fused_shared_glu_at_stored_width() {
+    let mut args = tiny_routed_args();
+    args.moe_num_shared_experts = 0;
+    let mut weights = tiny_routed_weights(&args);
+    args.moe_num_shared_experts = 2;
+    let h = args.hidden_size as i32;
+    let width = 2 * args.moe_intermediate_size() as i32;
+    for (proj, shape) in [
+        ("gate_proj", [width, h]),
+        ("up_proj", [width, h]),
+        ("down_proj", [h, width]),
+    ] {
+        weights.insert(
+            format!("model.layers.1.mlp.shared_experts.{proj}.weight"),
+            tensor(&shape, 1),
+        );
+    }
+    let model = Ernie45MoeModel::from_weights(&weights, &args).unwrap();
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    let shared = &block.shared_experts.as_ref().unwrap().experts;
+    assert_eq!(shared.len(), 1);
+    let input = mlxcel_core::ones(&[1, h], dtype::FLOAT32);
+    assert_eq!(
+        mlxcel_core::array_shape(&shared[0].gate_proj.forward(&input)),
+        [1, width]
+    );
+    assert_eq!(mlxcel_core::array_shape(&shared[0].forward(&input)), [1, h]);
+}
+
+#[test]
+fn checkpoint_layout_stacks_numbered_experts_in_order() {
+    check_numbered_expert_planes(false);
+}
+
+#[test]
+fn checkpoint_layout_stacks_affine_expert_planes_in_order() {
+    check_numbered_expert_planes(true);
+}
+
+fn check_numbered_expert_planes(quantized: bool) {
+    let mut args = tiny_routed_args();
+    args.hidden_size = 64;
+    args.moe_intermediate_size = Some(64);
+    let mut weights = tiny_routed_weights(&args);
+    let root = "model.layers.1.mlp";
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        weights.remove(&format!("{root}.switch_mlp.{proj}.weight"));
+        for e in (0..args.moe_num_experts).rev() {
+            let key = format!("{root}.experts.{e}.{proj}");
+            let plane = if quantized {
+                weights.insert(
+                    format!("{key}.scales"),
+                    mlxcel_core::full_f32(&[64, 1], e as f32 + 1., dtype::FLOAT32),
+                );
+                weights.insert(
+                    format!("{key}.biases"),
+                    mlxcel_core::full_f32(&[64, 1], -(e as f32), dtype::FLOAT32),
+                );
+                mlxcel_core::from_slice_u32(&[e as u32; 64 * 8], &[64, 8])
+            } else {
+                mlxcel_core::full_f32(&[64, 64], e as f32, dtype::FLOAT32)
+            };
+            weights.insert(format!("{key}.weight"), plane);
+        }
+    }
+    let model = Ernie45MoeModel::from_weights(&weights, &args).unwrap();
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    let experts = &block.switch_mlp;
+    for proj in [&experts.gate_proj, &experts.up_proj, &experts.down_proj] {
+        let check = |array: &mlxcel_core::MlxArray, cols, expected: [f32; 3]| {
+            assert_eq!(mlxcel_core::array_shape(array), [3, 64, cols]);
+            let first = mlxcel_core::slice(array, &[0, 0, 0], &[3, 1, 1]);
+            assert_eq!(array_to_vec_f32(&first), expected);
+        };
+        match proj {
+            SwitchLinear::Regular { weight, .. } => {
+                assert!(!quantized);
+                check(weight, 64, [0., 1., 2.]);
+            }
+            SwitchLinear::Quantized {
+                weight,
+                scales,
+                biases,
+                ..
+            } => {
+                assert!(quantized);
+                assert_eq!(mlxcel_core::array_dtype(weight), dtype::UINT32);
+                check(weight, 8, [0., 1., 2.]);
+                check(scales, 1, [1., 2., 3.]);
+                check(biases, 1, [0., -1., -2.]);
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpoint_layout_drops_mtp_and_preserves_numbered_shared_and_stacked_routed() {
+    let mut config = tiny_routed_config();
+    config["moe_num_shared_experts"] = 2.into();
+    let mut weights = tiny_routed_weights(&serde_json::from_value(config.clone()).unwrap());
+    let mtp = [
+        "model.mtp_block.0.mlp.gate_proj.weight",
+        "model.mtp_linear_proj.0.weight",
+        "model.mtp_hidden_norm.0.weight",
+        "model.mtp_emb_norm.0.weight",
+    ];
+    for key in mtp {
+        weights.insert(key.into(), tensor(&[1], 1));
+    }
+    let model = crate::loading::config_backed::try_load_config_backed_model_from_weights(
+        crate::models::ModelType::Ernie45Moe,
+        &config.to_string(),
+        &mut weights,
+    )
+    .unwrap();
+    let Some(crate::LoadedModel::Ernie45Moe(model)) = model else {
+        panic!("expected ERNIE text MoE")
+    };
+    let super::MLPVariant::MoE(block) = &model.layers[1].mlp else {
+        panic!("expected routed layer")
+    };
+    assert_eq!(block.shared_experts.as_ref().unwrap().experts.len(), 2);
+    assert_eq!(block.switch_mlp.gate_proj.num_experts(), 3);
+    for key in mtp {
+        assert!(!weights.contains_key(key), "retained {key}");
+    }
+}
+
+#[test]
+fn checkpoint_layout_refuses_malformed_numbered_experts() {
+    let args = tiny_routed_args();
+    let root = "model.layers.1.mlp";
+    let numbered = |dtype_of: &dyn Fn(usize) -> i32, count: usize| {
+        let mut weights = tiny_routed_weights(&args);
+        weights.remove(&format!("{root}.switch_mlp.gate_proj.weight"));
+        for e in 0..count {
+            let plane = mlxcel_core::full_f32(&[6, 8], e as f32, dtype::FLOAT32);
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.weight"),
+                mlxcel_core::astype(&plane, dtype_of(e)),
+            );
+        }
+        weights
+    };
+    let load_err = |weights: &WeightMap| {
+        Ernie45MoeModel::from_weights(weights, &args)
+            .err()
+            .expect("malformed numbered experts must fail to load")
+    };
+
+    // A plane in another dtype reaches the shared stacking helper, whose error must surface.
+    let mixed = numbered(
+        &|e| {
+            if e == 2 {
+                dtype::FLOAT16
+            } else {
+                dtype::FLOAT32
+            }
+        },
+        3,
+    );
+    let err = load_err(&mixed);
+    assert!(
+        err.contains(&format!("{root}.experts.2.gate_proj.weight")) && err.contains("dtype"),
+        "{err}"
+    );
+
+    let short = numbered(&|_| dtype::FLOAT32, 2);
+    let err = load_err(&short);
+    assert!(
+        err.contains(&format!("{root}.experts.2.gate_proj.weight")),
+        "{err}"
+    );
+
+    let long = numbered(&|_| dtype::FLOAT32, 4);
+    let err = load_err(&long);
+    assert!(err.contains("expected 3 experts"), "{err}");
 }

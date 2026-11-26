@@ -49,6 +49,7 @@ mod lookup;
 pub mod metrics;
 pub mod policy;
 pub mod snapshot_sizing;
+pub(crate) mod state_snapshot;
 pub mod store;
 mod trie;
 mod types;
@@ -72,7 +73,7 @@ pub use decoded_tail::decoded_tail_snapshot_enabled;
 pub use entry::{CacheEntry, DetachedKvSet, ModelSnapshotEntry, SnapshotOrigin};
 pub use hybrid_ssm::{
     HYBRID_SSM_MODEL_TYPES, detect_hybrid_ssm, detect_hybrid_ssm_from_path,
-    is_hybrid_ssm_model_type,
+    disable_apc_for_hybrid_ssm, is_hybrid_ssm_model_type, recurrent_prefix_sharing_family,
 };
 pub use key::{
     ANONYMOUS_SESSION_SENTINEL, MultimodalDigest, PromptCacheKey, PromptCacheKeyDigest,

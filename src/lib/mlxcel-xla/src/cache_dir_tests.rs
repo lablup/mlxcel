@@ -60,7 +60,11 @@ fn the_default_location_is_created_owner_only_and_reused() {
     let root = tmp.path().join("mlxcel");
     let euid = current_euid();
     let dir = resolve_cache_dir(Some(root.clone()), true, XlaCache::Vmfb, euid).expect("dir");
-    assert_eq!(dir, root.join("xla").join("vmfb"));
+    // `ensure_private_dir` spells the leaf through the canonical parent of the
+    // root, so on macOS a `/var/folders/...` tempdir comes back as
+    // `/private/var/folders/...`.
+    let canonical_tmp = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+    assert_eq!(dir, canonical_tmp.join("mlxcel").join("xla").join("vmfb"));
     assert_eq!(mode(&dir), 0o700);
     assert_eq!(
         resolve_cache_dir(Some(root), true, XlaCache::Vmfb, euid).expect("dir"),

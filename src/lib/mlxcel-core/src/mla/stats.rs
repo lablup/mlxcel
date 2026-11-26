@@ -106,6 +106,17 @@ fn counter(path: MlaDecodePath) -> &'static AtomicU64 {
 /// measured region, never used to order anything.
 #[inline]
 pub fn record(path: MlaDecodePath) {
+    // Inside [`as_one_call`] the first path is held and recorded once when
+    // the scope ends.
+    if ONE_CALL.with(|slot| match slot.get() {
+        Some(held) => {
+            slot.set(Some(held.or(Some(path))));
+            true
+        }
+        None => false,
+    }) {
+        return;
+    }
     counter(path).fetch_add(1, Ordering::Relaxed);
     // `try_with` so a record from a thread-local destructor during thread
     // teardown cannot panic; the global count above still lands.
@@ -116,7 +127,39 @@ pub fn record(path: MlaDecodePath) {
     });
 }
 
+/// Run `f` as one MLA attention call: whatever `f` records counts once, on
+/// the first path it took. Nested inside another such scope, `f` folds into
+/// the outer one.
+///
+/// A verify block that runs every row as its decode step's single query
+/// (issue #3418) is one attention call per layer, as a block-wide step is;
+/// without this a width-K block would read as K decode steps (#3421).
+///
+/// Used by: the per-row verify branches of `DeepSeekV3Attention::forward`,
+/// the DeepSeek V3.2 `MLAAttention::verify_block_attention` and the DeepSeek
+/// V2 `MLAAttention::forward_absorbed`.
+pub fn as_one_call<R>(f: impl FnOnce() -> R) -> R {
+    if ONE_CALL.with(Cell::get).is_some() {
+        return f();
+    }
+    struct Finish;
+    impl Drop for Finish {
+        fn drop(&mut self) {
+            let held = ONE_CALL.with(|slot| slot.replace(None)).flatten();
+            if let Some(path) = held {
+                record(path);
+            }
+        }
+    }
+    ONE_CALL.with(|slot| slot.set(Some(None)));
+    let _finish = Finish;
+    f()
+}
+
 thread_local! {
+    /// `Some` inside [`as_one_call`], holding the first path recorded there.
+    static ONE_CALL: Cell<Option<Option<MlaDecodePath>>> = const { Cell::new(None) };
+
     /// Calls recorded on this thread since it started. Never reset: [`scoped`]
     /// subtracts a before-reading from an after-reading, so nested scopes and
     /// a global [`take`] in between do not disturb each other.
@@ -341,6 +384,36 @@ mod tests {
                 absorbed_fused: CALLS,
                 ..Default::default()
             }
+        );
+        let _ = take();
+    }
+
+    #[test]
+    fn as_one_call_records_the_first_path_once() {
+        let _guard = crate::mla::testkit::serial();
+        let (rows, counts) = scoped(|| {
+            as_one_call(|| {
+                record(MlaDecodePath::AbsorbedFused);
+                as_one_call(|| record(MlaDecodePath::AbsorbedComposed));
+                record(MlaDecodePath::AbsorbedFused);
+                3
+            })
+        });
+        assert_eq!(rows, 3);
+        assert_eq!(
+            counts,
+            MlaDispatchCounts {
+                absorbed_fused: 1,
+                ..Default::default()
+            }
+        );
+        let ((), after) = scoped(|| record(MlaDecodePath::Decompressed));
+        assert_eq!(after.total(), 1, "the scope is closed again");
+        let ((), empty) = scoped(|| as_one_call(|| ()));
+        assert_eq!(
+            empty.total(),
+            0,
+            "a scope that records nothing adds nothing"
         );
         let _ = take();
     }

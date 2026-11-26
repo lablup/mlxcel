@@ -885,6 +885,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, default_value_t = false)]
     pub(crate) show_reasoning: bool,
 
+    /// Reasoning effort handed to the chat template, for checkpoints whose
+    /// template reads one (Inkling 2).
+    ///
+    /// Inkling 2 takes a named level (`none`, `minimal`, `low`, `medium`,
+    /// `high`, `xhigh`, `max`) or a number in [0.0, 0.99]; without the flag the
+    /// template default (0.9) applies. A template that does not read a reasoning
+    /// level ignores the flag and renders the same prompt. The template decides
+    /// which values are valid and its own message is shown for a bad one. Has no
+    /// effect with `--no-chat-template`.
+    #[arg(long, value_name = "LEVEL", value_parser = parse_reasoning_effort)]
+    pub(crate) reasoning_effort: Option<String>,
+
     /// Print the recommended quantization mode for this model on the current hardware.
     ///
     /// Detects Apple Silicon generation and available memory, estimates model
@@ -1324,6 +1336,12 @@ fn parse_unit_interval(s: &str) -> Result<f32, String> {
 fn parse_image_soft_tokens(s: &str) -> Result<usize, String> {
     let v: usize = s.parse().map_err(|e| format!("not a number: {e}"))?;
     mlxcel::vision::processors::gemma4::validate_image_soft_tokens(v)
+}
+
+/// Normalize `--reasoning-effort` (trimmed, lowercase) at parse time so an
+/// empty value is rejected before any model is loaded.
+fn parse_reasoning_effort(s: &str) -> Result<String, String> {
+    mlxcel::server::in_process::reasoning_effort::parse_reasoning_effort(s)
 }
 
 /// Block-diffusion generation options.
@@ -3344,10 +3362,10 @@ pub(crate) struct ServeArgs {
     /// a long system prompt but diverge afterwards never reuse KV. With the
     /// non-consuming paged adoption a partial match shares the prefix blocks
     /// without copying or destroying the stored entry, so APC is on by
-    /// default. When enabled on a hybrid SSM/attention model (jamba, mamba,
-    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
-    /// automatically disabled at runtime since SSM state cannot be
-    /// decomposed into hashable blocks.
+    /// default. When enabled on a recurrent or hybrid SSM / linear-attention
+    /// model (Mamba, Jamba, Nemotron-H, Qwen3-Next, Qwen 3.5, Granite 4.0-H,
+    /// Falcon-H1, PLaMo 2, ...), APC is automatically disabled at runtime
+    /// since recurrent state cannot be decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED`.
     #[arg(
@@ -3756,6 +3774,7 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM",
     "ERNIE",
     "Hunyuan",
+    "Tencent",
     "Bailing",
     "Arcee",
     "Klear",
@@ -3771,7 +3790,9 @@ const FAMILY_ORDER: &[&str] = &[
     "LFM2",
     "Inkling",
     "PLaMo",
+    "Aleph Alpha",
     "RWKV",
+    "Z1T",
     "BitNet",
     "Speech-to-text",
     "Text-to-speech",

@@ -162,6 +162,8 @@ pub fn trace(
     max_tokens: usize,
     batch_rows: Option<usize>,
 ) -> Result<ImageTrace> {
+    // By-id forwards of a scheduler-owned family go through a pool (#3254).
+    let model = &mlxcel::models::pooled_model::Pooled::new(model);
     let image = image::open(&arm.image_path)
         .with_context(|| format!("loading image {}", arm.image_path))?;
     let prompt = render_prompt(model_dir, tokenizer, &arm.prompt, arm.enable_thinking);
@@ -235,12 +237,14 @@ pub fn trace(
 }
 
 fn trace_batched_continuation(
-    model: &mlxcel::LoadedModel,
+    model: &mlxcel::models::pooled_model::Pooled<&mlxcel::LoadedModel>,
     targets: &[i32],
     first: &MlxArray,
     image_caches: Vec<mlxcel_core::layers::KVCache>,
     seq_ids: &[SequenceId],
 ) -> Result<UniquePtr<MlxArray>> {
+    // `model` is the caller's pooled driver: row 0 continues the sequence
+    // the image prefill wrote.
     let mut caches = vec![image_caches];
     // Text-only companions have distinct prompt lengths and explicit fresh
     // identities. Binding after the image row drains no image state: that was

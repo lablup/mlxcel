@@ -15,7 +15,7 @@
 use super::scheduler_model_owned_lookahead_tests::{enqueue, finish, scheduler, tick};
 use super::scheduler_model_owned_pad_trim_tests::tiny_gemma3;
 use super::*;
-use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
+use mlxcel_core::generate::ModelStateSnapshot;
 
 use crate::server::config::DecodeStorageBackend;
 use crate::server::model_provider::GenerateEvent;
@@ -28,11 +28,13 @@ fn model_offsets(sched: &BatchScheduler, seq_id: SequenceId) -> (i32, i32) {
         mlxcel_core::utils::array_to_vec_f32(value)[0] as i32
     }
 
-    let snapshot = sched
-        .engine
-        .model()
-        .snapshot_sequence_state(seq_id, 1)
-        .expect("Gemma 3 snapshots a live sequence");
+    let snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+        sched.engine.model(),
+        sched.engine.pool(),
+        seq_id,
+        1,
+    )
+    .expect("Gemma 3 snapshots a live sequence");
     (
         scalar(&snapshot, "layer0.rotating.offset"),
         scalar(&snapshot, "layer1.standard.offset"),

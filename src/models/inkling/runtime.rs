@@ -57,7 +57,7 @@ impl LanguageModel for InklingModel {
     /// table (issue #2790). Every layer keeps an FP16 `KVCache` beside its conv states.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.layers.len(), |_| {
-            crate::models::model_owned::LayerKv::Fp16Only
+            mlxcel_core::cache::LayerStateKind::Full
         })
     }
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -141,8 +141,36 @@ impl LanguageModel for InklingModel {
         mlxcel_core::cache::SequenceStateLayout::model_owned(self.layers.len())
     }
 
+    /// Pad positions are not verify rows: the prompt-lookup gate admits
+    /// Inkling on [`Self::supports_speculative_verify_rewind`] instead.
     fn supports_padded_prefill(&self) -> bool {
         false
+    }
+
+    /// With the row-invariant products on, a verify block equals the
+    /// single-token chain and records the convolution windows
+    /// [`Self::rewind_decode_appends`] drops its rejected tail from, so
+    /// prompt-lookup verify rounds can run (issue #3422). Off, a block is
+    /// neither recorded nor byte-exact, and the gate keeps refusing.
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.row_kernel_enabled()
+    }
+
+    /// Drop the newest `n` rows of the last verify block of `seq_id`, the
+    /// whole block included, from the windows that block recorded; refused
+    /// without mutation when any layer recorded none.
+    fn rewind_decode_appends(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        n: i32,
+    ) -> Result<(), String> {
+        if n <= 0 {
+            return Ok(());
+        }
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                mlxcel_core::inkling_layer::drop_newest_verify_rows(caches, n)
+            })?
     }
     fn prepare_sequence_state(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state
@@ -172,6 +200,10 @@ impl LanguageModel for InklingModel {
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
+    /// A token-only verify block (the engine's speculative append of 2 to 16
+    /// rows, prompt lookup's) runs in the verify scope the MTP verify forward
+    /// takes, so its rows equal decode steps and its convolution windows are
+    /// recorded for [`Self::rewind_decode_appends`] (issue #3422).
     fn forward_with_sequence_id(
         &self,
         input: &MlxArray,
@@ -179,6 +211,9 @@ impl LanguageModel for InklingModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let _verify = (self.row_kernel_enabled()
+            && mlxcel_core::row_invariant::is_verify_block(&mlxcel_core::array_shape(input)))
+        .then(|| self.verify_block_scope());
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
@@ -316,9 +351,12 @@ impl LanguageModel for InklingModel {
         }
         let trim = |state: &mut [InklingLayerCache]| {
             for cache in state {
-                // This hook removes speculative or padded TAIL tokens. The
-                // recurrent conv state cannot be positionally rewound, so
-                // clear it exactly as the other recurrent model families do.
+                // This hook serves padded prefill only: it removes padded
+                // TAIL tokens, and the recurrent conv state cannot be
+                // positionally rewound, so it is cleared as the other
+                // recurrent families do. Prompt-lookup verify rounds rewind
+                // through `rewind_decode_appends`, and MTP through
+                // `keep_verified_prefix_for_sequence`.
                 cache.kv.trim(excess);
                 for state in &mut cache.conv {
                     *state = None;

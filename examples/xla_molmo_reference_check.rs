@@ -19,6 +19,10 @@
 //! the root crate's full libtest harness and emits flushed progress plus
 //! periodic heartbeats around every potentially long eager materialization.
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     mlxcel::multimodal::host_preprocessor::run_pinned_molmo_eager_mlx_iree_boundaries();
 }

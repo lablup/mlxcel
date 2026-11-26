@@ -70,12 +70,10 @@ async function importFile(text: Promise<string>): Promise<void> {
   Object.defineProperty(input, 'files', { configurable: true, value: [file] });
   await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve(); });
 }
-// Browsers move focus to <body> once the focused control becomes disabled; jsdom keeps
-// it there and ignores blur() on a disabled element, so park focus on a removed sink.
-function focusFixup(): void {
-  if (!document.activeElement?.matches(':disabled')) throw new Error('Trigger is not a disabled focused control');
-  const sink = document.createElement('button'); document.body.append(sink); sink.focus(); sink.remove();
-  expect(document.activeElement).toBe(document.body);
+// Browsers move focus to <body> once the focused control becomes disabled. jsdom 31 applies
+// the same focus fixup, asynchronously, so let it run before the dialog takes focus.
+async function focusFixup(): Promise<void> {
+  await act(async () => { await vi.waitFor(() => expect(document.activeElement).toBe(document.body)); });
 }
 function render(node: React.ReactNode): void { act(() => root?.render(node)); }
 
@@ -151,7 +149,7 @@ describe('replace with saved history confirmation', () => {
   async function open(): Promise<HTMLInputElement> {
     const loading = deferred<ChatConversation[]>(); repository.load.mockReturnValue(loading.promise);
     const trigger = checkbox(); await press(trigger);
-    expect(trigger.disabled).toBe(true); focusFixup();
+    expect(trigger.disabled).toBe(true); await focusFixup();
     await act(async () => { loading.resolve(saved); await loading.promise; }); await settle();
     expect(dialog('chat-replace-saved-dialog')?.open).toBe(true);
     return trigger;
@@ -248,7 +246,7 @@ describe('replace with imported history confirmation', () => {
   beforeEach(() => { render(<Harness />); });
   it('keeps memory and returns focus to the import field on Escape', async () => {
     const reading = deferred<string>(); await importFile(reading.promise);
-    expect(fileInput().disabled).toBe(true); focusFixup();
+    expect(fileInput().disabled).toBe(true); await focusFixup();
     await act(async () => { reading.resolve(exportConversations(imported)); await reading.promise; }); await settle();
     expect(dialog('chat-replace-import-dialog')?.open).toBe(true);
     await escape('chat-replace-import-dialog');

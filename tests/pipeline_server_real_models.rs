@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 
 use common::{repo_binary_path, repo_model_dir};
 
+#[path = "pipeline_server_real_models/inkling.rs"]
+mod inkling;
+
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("local addr").port();

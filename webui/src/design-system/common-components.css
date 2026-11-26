@@ -13,8 +13,8 @@
 .ds-button:disabled, .ds-icon-button:disabled, .ds-button[aria-disabled="true"], .ds-icon-button[aria-disabled="true"] { opacity: 0.56; }
 .ds-button:focus-visible, .ds-icon-button:focus-visible { outline: none; box-shadow: var(--mx-focus-ring); }
 /* Enabled primary and danger keep their own hover fill; the product's generic hover tint (8% selection) would leave white text unreadable. */
-.ds-button-primary:hover:where(:not(:disabled)) { background: var(--mx-button-primary-fill-active); }
-.ds-button-danger:hover:where(:not(:disabled)) { background: var(--mx-button-danger-fill-active); }
+.ds-button-primary:hover:where(:not(:disabled, [aria-disabled="true"])) { background: var(--mx-button-primary-fill-active); }
+.ds-button-danger:hover:where(:not(:disabled, [aria-disabled="true"])) { background: var(--mx-button-danger-fill-active); }
 .ds-button .astryx-spinner { width: 14px; height: 14px; }
 /* Danger icon button: an outlined control with the glyph in the error color. */
 .ds-icon-button.ds-icon-button-danger { color: var(--color-error); }
@@ -31,7 +31,8 @@
 
 /* ProgressBar: the product gradient fill; an indeterminate bar (no measured width) slides a 48% fill. */
 .ds-progress .astryx-progress-bar-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2f6cff, #7b61ff); }
-.ds-progress .astryx-progress-bar-fill:not([style]) { display: block; width: 48%; animation: slide var(--mx-motion-slow) ease-in-out infinite alternate; }
+/* Indeterminate: the track carries no aria-valuenow (since Astryx 0.7.11 both fills carry a style). */
+.ds-progress [role="progressbar"]:not([aria-valuenow]) .astryx-progress-bar-fill { display: block; width: 48%; animation: slide var(--mx-motion-slow) ease-in-out infinite alternate; }
 
 /* EmptyState: compact inside the product's bordered section. */
 .ds-empty .astryx-empty-state { padding: 0; min-height: 0; width: 100%; gap: var(--mx-space-2); }
@@ -50,7 +51,7 @@
 
 /* Select: the product field over Astryx Selector. */
 .ds-common-select .astryx-field { gap: var(--mx-space-2); }
-.ds-common-select .astryx-field-label { color: var(--color-text-primary); font-size: 0.9rem; font-weight: 650; }
+.ds-common-select .ds-common-select-label { color: var(--color-text-primary); font-size: 0.9rem; font-weight: 650; }
 .ds-common-select .astryx-selector { min-width: 0; min-height: 36px; font: inherit; }
 .ds-common-select [role="combobox"] { min-width: 0; font: inherit; }
 .ds-common-select [role="combobox"] span, .astryx-selector-option span { white-space: normal; overflow-wrap: anywhere; }

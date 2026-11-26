@@ -1,0 +1,1 @@
+env-var-docs: OK, 398 MLXCEL_* names in 3087 *.rs files under src/, 265 documented on docs/environment-variables.md, 133 allowlisted.

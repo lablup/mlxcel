@@ -39,7 +39,8 @@
 // window.
 //
 // Used by: `cpp/mlx_cxx_bridge.cpp` (`mla_absorbed_decode_fused`,
-// `mla_absorbed_decode_fused_quantized`), the single-query branch of
+// `mla_absorbed_decode_fused_quantized` and their `_supported` probes), the
+// single-query branch of
 // `mlxcel_core::mla::decode::absorbed_attention` and
 // `mlxcel_core::mla::decode::fused_absorbed_decode_quantized`.
 
@@ -76,6 +77,17 @@ mlx::core::array mla_absorbed_decode(
     const mlx::core::array& kpe,
     float scale);
 
+// Whether the partial pass evaluates at this geometry on this device. A
+// Metal pipeline's thread limit is fixed when the pipeline compiles, from the
+// kernel's register use, and the partial pass always launches 1024 threads
+// (32 simdgroups x 32 lanes, which its output exchange depends on). On an M1
+// Ultra the pipeline at `R = 512` is capped at 768, so MLX throws at eval and
+// the decode step fails. The answer comes from launching the real kernel once
+// on a one-key window at `(dtype, R, P)` and evaluating it; it is cached per
+// geometry for the process. False wherever `mla_absorbed_decode_available()`
+// is false or the geometry is outside the shape contract.
+bool mla_absorbed_decode_supported(mlx::core::Dtype dtype, int R, int P);
+
 // Whether the quantized variant runs on this backend; same rule as
 // `mla_absorbed_decode_available()`, against its own port table.
 bool mla_absorbed_decode_quantized_available();
@@ -102,6 +114,18 @@ bool mla_absorbed_decode_quantized_available();
 // Throws when there is no port on this backend or an input is outside the
 // contract; `mla::decode::fused_absorbed_decode_quantized` checks both first
 // and treats a throw as "take the composed path".
+// `mla_absorbed_decode_supported` for the quantized partial pass, whose
+// pipeline also depends on the rope window's dtype `kpe_dtype`, the scale and
+// bias dtype `scales_dtype`, the group size and the bit width.
+bool mla_absorbed_decode_quantized_supported(
+    mlx::core::Dtype dtype,
+    mlx::core::Dtype kpe_dtype,
+    mlx::core::Dtype scales_dtype,
+    int R,
+    int P,
+    int group_size,
+    int bits);
+
 mlx::core::array mla_absorbed_decode_quantized(
     const mlx::core::array& q_abs,
     const mlx::core::array& q_pe,

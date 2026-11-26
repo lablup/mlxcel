@@ -42,6 +42,9 @@ pub(crate) use production::{
     AffineExecution, CheckpointSourceObserver, CheckpointWeights, DeclaredOperator,
     ProductionBackend, production_operator_contract,
 };
+// The production-MLX micro-oracles declare their own operators (issue #3212).
+#[cfg(feature = "micro-oracle")]
+pub(crate) use production::{InputPolicy, OperandOrigin};
 
 const SCHEMA: &str = "mlxcel-xla-operator-numeric-v1";
 

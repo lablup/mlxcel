@@ -228,7 +228,8 @@ fn build_pixtral_family_context(model_path: &Path) -> Result<PixtralFamilyContex
         let text_args: models::mistral4::Mistral4Config =
             serde_json::from_value(mistral4_text_config)
                 .map_err(|e| anyhow::anyhow!("Failed to parse text_config as Mistral4: {}", e))?;
-        models::mistral4::sanitize_weights(&mut weights, &text_args, "");
+        models::mistral4::sanitize_weights(&mut weights, &text_args, "")
+            .map_err(|e| anyhow::anyhow!("Failed to sanitize Mistral4 weights: {}", e))?;
         models::Mistral4Model::from_weights(&weights, &text_args)
             .map(LoadedModel::Mistral4)
             .map_err(|e| anyhow::anyhow!("Failed to load Mistral4 text model: {}", e))?

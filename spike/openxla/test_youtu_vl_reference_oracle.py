@@ -128,6 +128,19 @@ class YoutuVlOracleContractTests(unittest.TestCase):
         self.assertTrue(report["passed"], report)
         self.assertIsNone(report["first_divergence"])
 
+    def test_recorded_mlx_tf32_is_accepted_only_as_zero_on_the_actual(self) -> None:
+        self.actual_manifest["mlx_enable_tf32"] = "0"
+        self.rewrite(self.actual, self.actual_manifest)
+        report = oracle.compare_capture_roots(self.reference, self.actual)
+        self.assertTrue(report["passed"], report)
+        self.actual_manifest["mlx_enable_tf32"] = "1"
+        self.rewrite(self.actual, self.actual_manifest)
+        self.assert_contract_error("mlx_enable_tf32")
+        self.actual_manifest["mlx_enable_tf32"] = "0"
+        self.reference_manifest["mlx_enable_tf32"] = "0"
+        self.rewrite(self.reference, self.reference_manifest)
+        self.assert_contract_error("top-level schema")
+
     def test_checkpoint_identity_and_canonical_hash_are_pinned(self) -> None:
         self.actual_manifest["checkpoint"]["revision"] = "main"
         self.rewrite(self.actual, self.actual_manifest)

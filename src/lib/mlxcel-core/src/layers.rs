@@ -3373,14 +3373,20 @@ impl QkvProjection {
         UniquePtr<MlxArray>,
     ) {
         match self {
+            // `linear_whole_block` is the layer's own forward outside a
+            // row-invariant scope, and the row-invariant product inside one
+            // (issue #3421).
             Self::Fused(proj) => {
-                let qkv = proj.forward(x);
+                let qkv = crate::row_invariant::linear_whole_block(proj, x);
                 let q = ffi::slice_last_dim(&qkv, 0, q_size);
                 let k = ffi::slice_last_dim(&qkv, q_size, q_size + kv_size);
                 let v = ffi::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
                 (q, k, v)
             }
-            Self::Split { q, k, v } => (q.forward(x), k.forward(x), v.forward(x)),
+            Self::Split { q, k, v } => {
+                let project = |layer| crate::row_invariant::linear_whole_block(layer, x);
+                (project(q), project(k), project(v))
+            }
         }
     }
 }
