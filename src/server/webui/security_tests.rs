@@ -248,3 +248,50 @@ fn exact_origin_update_moves_port_zero_aliases_to_bound_port() {
         vec!["127.0.0.1:54321", "[::1]:54321", "localhost:54321"]
     );
 }
+
+fn sorted_origins(policy: &WebUiSecurityPolicy) -> Vec<String> {
+    let mut origins: Vec<String> = policy
+        .allowed_origins
+        .read()
+        .unwrap()
+        .iter()
+        .map(|origin| origin.to_str().unwrap().to_string())
+        .collect();
+    origins.sort();
+    origins
+}
+
+#[test]
+fn exact_origin_update_moves_loopback_origins_to_bound_port() {
+    let policy = loopback_policy(0);
+    policy
+        .update_exact_origin(origin("http://127.0.0.1:54321"))
+        .unwrap();
+    assert_eq!(
+        sorted_origins(&policy),
+        vec![
+            "http://127.0.0.1:54321",
+            "http://[::1]:54321",
+            "http://localhost:54321"
+        ]
+    );
+}
+
+#[test]
+fn exact_origin_update_adds_no_alias_for_a_non_loopback_bind() {
+    // A wildcard or LAN bind starts with only its own authority; the
+    // post-bind update must not invent loopback or any other names.
+    for bind in ["0.0.0.0", "192.168.1.5"] {
+        let policy = WebUiSecurityPolicy::new(
+            vec![format!("{bind}:0")],
+            vec![HeaderValue::from_str(&format!("https://{bind}:0")).unwrap()],
+        )
+        .unwrap();
+        let bound = format!("https://{bind}:54321");
+        policy
+            .update_exact_origin(HeaderValue::from_str(&bound).unwrap())
+            .unwrap();
+        assert_eq!(sorted_hosts(&policy), vec![format!("{bind}:54321")]);
+        assert_eq!(sorted_origins(&policy), vec![bound]);
+    }
+}
