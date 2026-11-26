@@ -1700,6 +1700,29 @@ fn is_image_limit_error(err: &ImageError) -> bool {
     matches!(err, ImageError::Limits(_))
 }
 
+/// One vision feature cache key per request image, in request order.
+///
+/// The cached value is the vision tower's output, which for Gemma 4 depends on
+/// the soft-token budget as well as the image bytes. Fold the budget into the
+/// key so the same image requested at two budgets cannot serve one's features
+/// for the other.
+pub(crate) fn vision_cache_keys(
+    images: &[Vec<u8>],
+    image_soft_tokens: Option<usize>,
+) -> Vec<Option<crate::vision::feature_cache::CacheKey>> {
+    images
+        .iter()
+        .map(|bytes| {
+            Some(crate::vision::feature_cache::CacheKey::from_hash(
+                crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens(
+                    bytes,
+                    image_soft_tokens,
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// `image_soft_tokens` is the request-scoped Gemma 4 image soft-token budget
 /// (`None` = use the checkpoint's configured budget). It is already validated
 /// against the supported ladder at the request boundary. Every non-Gemma-4
@@ -1950,21 +1973,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
         let prepared = if let Some(caches) = vision_caches.filter(|c| c.enabled()) {
-            // The cached value is the vision tower's output, which for Gemma 4
-            // depends on the soft-token budget as well as the image bytes.
-            // Fold the budget into the key so the same image requested at two
-            // budgets cannot serve one's features for the other.
-            let image_cache_keys: Vec<Option<crate::vision::feature_cache::CacheKey>> = images
-                .iter()
-                .map(|bytes| {
-                    Some(crate::vision::feature_cache::CacheKey::from_hash(
-                        crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens(
-                            bytes,
-                            image_soft_tokens,
-                        ),
-                    ))
-                })
-                .collect();
+            let image_cache_keys = vision_cache_keys(images, image_soft_tokens);
             prepare_vlm_embeddings_with_cache(
                 model,
                 prompt_tokens,

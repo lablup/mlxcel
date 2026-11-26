@@ -20,7 +20,7 @@ use super::{
     expand_gemma4_video_tokens, expand_inkling_audio_prompt,
     expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
     insert_inkling_video_prompt, prepared_embedding_refs, qwen_media_order_from_prompt,
-    qwen_video_group_prefixes, shift_molmo_v1_image_input_idx_for_bos,
+    qwen_request_cache_key, qwen_video_group_prefixes, shift_molmo_v1_image_input_idx_for_bos,
     should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
@@ -1044,4 +1044,42 @@ fn qwen_video_group_prefixes_reject_non_finite_and_negative_seconds() {
         let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
         assert!(err.to_string().contains("finite non-negative seconds"));
     }
+}
+
+/// Qwen-VL caches the vision output of the whole request (every image of the
+/// request concatenated) under one key, so that key must be a function of
+/// every image's key, in order (#3265). A key taken from the first image alone
+/// lets `[A, C]` be served the features stored for `[A]` or `[A, B]`.
+#[test]
+fn qwen_vl_cache_key_covers_every_image() {
+    use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
+
+    let k = |bytes: &[u8]| Some(CacheKey::from_hash(image_hash_from_bytes(bytes)));
+    let request_key = |keys: &[Option<CacheKey>]| qwen_request_cache_key(Some(keys));
+
+    let a_c = request_key(&[k(b"A"), k(b"C")]);
+    let a_b = request_key(&[k(b"A"), k(b"B")]);
+    let a = request_key(&[k(b"A")]);
+    assert!(a_c.is_some() && a_b.is_some() && a.is_some());
+    assert_ne!(a_c, a_b, "[A, C] and [A, B] must not share a request key");
+    assert_ne!(a, a_c, "[A] and [A, C] must not share a request key");
+    assert_ne!(a, a_b, "[A] and [A, B] must not share a request key");
+    // Order matters: the features are concatenated in request order.
+    assert_ne!(request_key(&[k(b"C"), k(b"A")]), a_c);
+    // Same images in the same order: the same entry, so a repeated request
+    // still hits.
+    assert_eq!(request_key(&[k(b"A"), k(b"C")]), a_c);
+}
+
+/// When any image lacks an explicit key, no request key is derived from the
+/// partial list; the caller falls back to hashing the whole pixel tensor.
+#[test]
+fn qwen_vl_cache_key_needs_every_image_key() {
+    use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
+
+    let a = Some(CacheKey::from_hash(image_hash_from_bytes(b"A")));
+    assert_eq!(qwen_request_cache_key(Some(&[a.clone(), None])), None);
+    assert_eq!(qwen_request_cache_key(Some(&[None, a])), None);
+    assert_eq!(qwen_request_cache_key(Some(&[])), None);
+    assert_eq!(qwen_request_cache_key(None), None);
 }

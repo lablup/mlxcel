@@ -360,6 +360,43 @@ pub fn resolve_request_image_soft_tokens(parts: &[ImageUrl]) -> Result<Option<us
     Ok(resolved)
 }
 
+/// Request fields that set an image's preprocessed geometry per request in
+/// mlx-vlm's server schema (`ImageProcessingRequest`, Neywa-Labs/mlx-vlm#2529).
+///
+/// mlxcel does not take them: its per-request image budget is
+/// `max_soft_tokens` / `detail` on the `image_url` part, and the operator
+/// bounds are `--image-min-tokens` / `--image-max-tokens`. A request that
+/// carries image or video input and one of these fields is refused rather than
+/// served at the server's geometry as if the field had been read (#3265).
+pub(crate) const IMAGE_GEOMETRY_FIELDS: [&str; 5] = [
+    "min_pixels",
+    "max_pixels",
+    "resize_shape",
+    "resized_height",
+    "resized_width",
+];
+
+/// The [`IMAGE_GEOMETRY_FIELDS`] present in a route's unrecognized-field
+/// capture, at its root or inside a nested `extra_body` object (the root wins),
+/// for a translator to carry into the chat request so the shared refusal in
+/// `prepare_chat_request_with_cache_and_video_allowlist` sees them.
+pub(crate) fn image_geometry_fields(
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let nested = extra
+        .get("extra_body")
+        .and_then(serde_json::Value::as_object);
+    IMAGE_GEOMETRY_FIELDS
+        .iter()
+        .filter_map(|field| {
+            extra
+                .get(*field)
+                .or_else(|| nested.and_then(|nested| nested.get(*field)))
+                .map(|value| ((*field).to_string(), value.clone()))
+        })
+        .collect()
+}
+
 /// Video URL reference. Same wire shape as [`ImageUrl`] for
 /// symmetry with the OpenAI vision content blocks.
 ///
@@ -1339,6 +1376,50 @@ impl ChatCompletionRequest {
     /// `max_soft_tokens`, or when parts disagree. Routes surface this as a 400.
     pub fn image_soft_tokens(&self) -> Result<Option<usize>, String> {
         resolve_request_image_soft_tokens(&self.image_parts())
+    }
+
+    /// Refuse a per-request image geometry field ([`IMAGE_GEOMETRY_FIELDS`]) on
+    /// a request that carries image or video input.
+    ///
+    /// Checks the merged extra-body map (flattened root keys and the nested
+    /// `extra_body`). A text-only request is not refused, so a client that
+    /// sends these keys on every request keeps working for text. A JSON `null`
+    /// counts as absent.
+    ///
+    /// # Errors
+    /// Returns `Err` naming every such field present. Routes surface this as a
+    /// 400.
+    pub fn reject_unsupported_image_geometry_fields(&self) -> Result<(), String> {
+        let carries_visual_input = self.messages.iter().any(|message| {
+            matches!(
+                &message.content,
+                MessageContent::Parts(parts) if parts.iter().any(|part| matches!(
+                    part,
+                    ContentPart::ImageUrl { .. } | ContentPart::VideoUrl { .. }
+                ))
+            )
+        });
+        if !carries_visual_input {
+            return Ok(());
+        }
+        let Some(extra) = self.merged_extra_body() else {
+            return Ok(());
+        };
+        let present: Vec<&str> = IMAGE_GEOMETRY_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| extra.get(*field).is_some_and(|value| !value.is_null()))
+            .collect();
+        if present.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "unsupported image geometry field(s): {}. mlxcel does not take a per-request \
+             pixel bound or resize; set the per-request image budget with `max_soft_tokens` \
+             or `detail` on the image_url part, or start the server with \
+             `--image-min-tokens` / `--image-max-tokens`",
+            present.join(", ")
+        ))
     }
 
     /// Extract all audio inputs from messages

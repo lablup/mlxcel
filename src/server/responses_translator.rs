@@ -332,7 +332,8 @@ pub fn responses_request_to_chat_with_mcp(
         cache_prompt: None,
         user,
         reasoning_effort: request.reasoning.as_ref().and_then(|r| r.effort.clone()),
-        extra_body_fields: serde_json::Map::new(),
+        // Carried so the shared image-geometry refusal sees them (#3265).
+        extra_body_fields: crate::server::types::request::image_geometry_fields(&request.extra),
         response_format,
         params: sampling,
     };
@@ -962,6 +963,7 @@ mod tests {
             service_tier: None,
             context_management: None,
             sampling: SamplingParams::default(),
+            extra: serde_json::Map::new(),
         }
     }
 

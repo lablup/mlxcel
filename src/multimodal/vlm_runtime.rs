@@ -53,7 +53,9 @@ use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_t
 use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
-use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
+use crate::vision::feature_cache::{
+    CacheKey, ModelVisionCaches, image_hash_from_pixels, request_hash_from_image_keys,
+};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
@@ -827,13 +829,18 @@ where
     ))
 }
 
-/// Pick the first explicit (non-None) cache key from a caller-supplied slice.
+/// Request-scoped cache key built from the caller's per-image keys.
 ///
-/// Used by Qwen-VL families which pack every image into a single pixel tensor
-/// per request: a request-scoped cache key is sufficient and we prefer the
-/// caller's key when they provided one (e.g. a filesystem path).
-fn first_explicit_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
-    keys.and_then(|slice| slice.iter().find_map(|k| k.clone()))
+/// Used by Qwen-VL families, which pack every image of a request into a single
+/// pixel tensor and cache the vision output of the whole request under one
+/// key, so the key has to cover every image in order (#3265). Returns `Some`
+/// only when the caller supplied a key for every image; otherwise `None`, and
+/// the caller falls back to the pixel hash of the whole tensor, which already
+/// covers all images.
+fn qwen_request_cache_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
+    let keys = keys.filter(|keys| !keys.is_empty())?;
+    let keys: Option<Vec<CacheKey>> = keys.iter().cloned().collect();
+    Some(CacheKey::from_hash(request_hash_from_image_keys(&keys?)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1120,7 +1127,7 @@ pub fn compute_qwen_vl_media_embeddings(
         None
     };
     let qwen_cache_key = if active_caches.is_some() {
-        first_explicit_key(image_cache_keys)
+        qwen_request_cache_key(image_cache_keys)
             .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
     } else {
         None

@@ -22,7 +22,7 @@ use super::{
     materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
     require_single_server_audio_clip, resolve_end_of_turn_token_id,
     resolve_worker_effective_max_kv_size, resolve_xtc_newline_token_ids,
-    tokenize_inkling_ordered_media_prompt,
+    tokenize_inkling_ordered_media_prompt, vision_cache_keys,
 };
 use crate::SamplingConfig;
 use crate::audio::AudioFamilyPolicy;
@@ -1659,4 +1659,48 @@ fn prepare_qwen_vl_video_embeddings_passes_timing_for_qwen25_and_none_for_qwen3(
         vec![Vec::<f32>::new()],
         "a timestamped family must not receive positional video timing"
     );
+}
+
+/// The request-to-key path for the vision feature cache (#3265): the per-image
+/// key the server hands the runtime must partition on the request's
+/// soft-token budget, and that budget is what `detail` resolves to. The
+/// hash-level partition is pinned in `feature_cache.rs`; this pins the path
+/// from the request's `detail` through `resolve_request_image_soft_tokens`.
+#[test]
+fn vision_cache_keys_partition_on_detail() {
+    use crate::server::types::request::{ImageUrl, resolve_request_image_soft_tokens};
+
+    let image = encode_png_bytes();
+    let key_for = |detail: Option<&str>| {
+        let mut part = ImageUrl::new("data:image/png;base64,AAAA");
+        part.detail = detail.map(str::to_string);
+        let budget = resolve_request_image_soft_tokens(&[part]).expect("valid detail");
+        let keys = vision_cache_keys(std::slice::from_ref(&image), budget);
+        assert_eq!(keys.len(), 1);
+        keys.into_iter()
+            .next()
+            .unwrap()
+            .expect("server keys are explicit")
+    };
+
+    let low = key_for(Some("low"));
+    let high = key_for(Some("high"));
+    let none = key_for(None);
+    assert_ne!(
+        low, high,
+        "detail low and high must not share a cache entry"
+    );
+    assert_ne!(
+        low, none,
+        "detail low and no detail must not share a cache entry"
+    );
+    assert_ne!(
+        high, none,
+        "detail high and no detail must not share a cache entry"
+    );
+    // `auto` asks for the checkpoint default, which is what no detail means.
+    assert_eq!(key_for(Some("auto")), none);
+    // The key is a function of the image bytes too.
+    let other = vision_cache_keys(&[b"other".to_vec()], None);
+    assert_ne!(other[0].clone().unwrap(), none);
 }

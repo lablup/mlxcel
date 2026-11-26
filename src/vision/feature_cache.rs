@@ -129,6 +129,42 @@ pub fn image_hash_from_bytes_with_soft_tokens(
     digest
 }
 
+/// SHA-256 digest of an ordered list of per-image cache keys.
+///
+/// The request-scoped key for a family that encodes every image of a request
+/// in one vision forward pass and caches the concatenated output under one
+/// entry (Qwen-VL). The cached value depends on every image and on their order,
+/// so the key must too: taking the first image's key alone lets `[A, C]` be
+/// served the features stored for `[A]` or `[A, B]`.
+///
+/// Framed like [`image_hash_from_bytes_with_soft_tokens`]: a domain tag, the
+/// key count, and per key a variant tag, so a `Path` key cannot collide with a
+/// `Hash` key and no list of keys can collide with a longer or shorter one.
+/// `Path` bytes are length-prefixed.
+pub fn request_hash_from_image_keys(keys: &[CacheKey]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mlxcel:request-image-keys:v1");
+    hasher.update((keys.len() as u64).to_le_bytes());
+    for key in keys {
+        match key {
+            CacheKey::Hash(digest) => {
+                hasher.update([0u8]);
+                hasher.update(digest);
+            }
+            CacheKey::Path(path) => {
+                let bytes = path.as_os_str().as_encoded_bytes();
+                hasher.update([1u8]);
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+        }
+    }
+    let out = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
 /// SHA-256 digest of an MLX pixel tensor's raw bytes.
 ///
 /// Used when the image already lives on the MLX side (e.g. the request handler

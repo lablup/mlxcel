@@ -197,6 +197,9 @@ mod plamo2_vl_chat_template_tests;
 mod minicpm_chat_template_tests;
 
 #[cfg(test)]
+mod image_geometry_route_tests;
+
+#[cfg(test)]
 mod llama_compat_tests;
 
 #[cfg(test)]

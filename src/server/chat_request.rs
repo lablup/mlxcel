@@ -82,7 +82,8 @@ use tokio_util::sync::CancellationToken;
 use crate::multimodal::video::video_frames_lead_text;
 
 use super::chat_template::{
-    ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
+    ChatMessage, ChatTemplateProcessor, NumberedImageTags, flatten_template_text,
+    template_rejection_message,
 };
 use super::chat_template_kwargs::{
     ChatTemplateKwargs, extract_request_kwargs, merge_server_and_request, strip_rolling_checkpoint,
@@ -1077,7 +1078,11 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
         // shape. The typed `ChatMessage` path only carries role + flattened
         // text, which would otherwise drop image/audio/video positions before
         // processor-aware templates can render their placeholder tokens.
-        let mut raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
+        let mut raw_messages = build_raw_json_messages_with_thinking(
+            request,
+            preserve_thinking,
+            processor.numbered_image_tags(),
+        );
         drop_unsupported_media_items(&mut raw_messages, processor);
         // Under a prefill the continuation message is not rendered by the
         // template: it is appended after the generation prompt below.
@@ -1088,7 +1093,11 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
         }
         // Build the stripped ChatMessages in parallel so the fallback path can
         // use them without re-running strip_rolling_checkpoint.
-        let stripped = build_chat_messages_with_thinking(request, preserve_thinking);
+        let stripped = build_chat_messages_with_thinking(
+            request,
+            preserve_thinking,
+            processor.numbered_image_tags(),
+        );
         match processor.apply_raw_with_kwargs(&raw_messages, effective_tools, &merged_kwargs) {
             Ok(rendered) => {
                 let history = render_history_prefix.then(|| {
@@ -1129,7 +1138,11 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
             }
         }
     } else {
-        let mut messages = build_chat_messages_with_thinking(request, preserve_thinking);
+        let mut messages = build_chat_messages_with_thinking(
+            request,
+            preserve_thinking,
+            processor.numbered_image_tags(),
+        );
         if prefill.is_some() {
             messages.pop();
         }
@@ -1195,6 +1208,12 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     // there is no reason to spend a download or a decode on it first.
     let image_soft_tokens = request
         .image_soft_tokens()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    // Same boundary for a per-request pixel bound or resize (#3265): nothing
+    // downstream reads one, so refuse it here rather than answer at the
+    // server's geometry as if it had been applied.
+    request
+        .reject_unsupported_image_geometry_fields()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 
     // Audio acquisition is owned by this request-preparation future. Before
@@ -1573,14 +1592,22 @@ pub(crate) fn render_next_turn_history(
     // differently when the following assistant turn carries it.
     let render = |req: &ChatCompletionRequest, history: bool| -> Result<String> {
         if has_tool_fields(req) || has_reasoning_fields(req) {
-            let raw = build_raw_json_messages_with_thinking(req, preserve_thinking);
+            let raw = build_raw_json_messages_with_thinking(
+                req,
+                preserve_thinking,
+                processor.numbered_image_tags(),
+            );
             if history {
                 processor.apply_raw_history_with_kwargs(&raw, effective_tools, &merged_kwargs)
             } else {
                 processor.apply_raw_with_kwargs(&raw, effective_tools, &merged_kwargs)
             }
         } else {
-            let msgs = build_chat_messages_with_thinking(req, preserve_thinking);
+            let msgs = build_chat_messages_with_thinking(
+                req,
+                preserve_thinking,
+                processor.numbered_image_tags(),
+            );
             if history {
                 processor.apply_history_with_kwargs(&msgs, effective_tools, &merged_kwargs)
             } else {
@@ -1999,7 +2026,7 @@ fn message_has_effective_input(message: &Message) -> bool {
 /// stripping.
 #[cfg(test)]
 pub(super) fn build_raw_json_messages(request: &ChatCompletionRequest) -> serde_json::Value {
-    build_raw_json_messages_with_thinking(request, true)
+    build_raw_json_messages_with_thinking(request, true, None)
 }
 
 /// Content of the placeholder user turn the system-prompt root is rendered
@@ -2095,9 +2122,9 @@ fn system_root_prefix(rendered: Option<String>, history: &str) -> Option<String>
 fn build_raw_json_messages_with_thinking(
     request: &ChatCompletionRequest,
     preserve_thinking: bool,
+    image_tags: Option<NumberedImageTags>,
 ) -> serde_json::Value {
-    let preserve_media_order = !request.audio_inputs().is_empty();
-    let mut ordered_media = preserve_media_order.then(OrderedMediaOrdinals::default);
+    let mut ordered_media = OrderedMediaOrdinals::for_request(request, image_tags);
     // Decide which assistant messages (by index) need their think blocks
     // stripped. Empty set means "keep everything."
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
@@ -2244,10 +2271,81 @@ fn has_template_media_parts(request: &ChatCompletionRequest) -> bool {
 /// into rendering and fail templates such as LLaVA's, which select
 /// `content.type == "image"`. Keep only an ordered semantic marker at this
 /// boundary.
+///
+/// Phi-3V and Phi-4MM (#3265) reuse the same conversation-wide image ordinal:
+/// their templates render `content` as a string, so with `image_tags` set the
+/// image parts of a message become that family's `<|image_N|>` tags at the head
+/// of the message instead of private sentinels.
 #[derive(Default)]
 struct OrderedMediaOrdinals {
     image: usize,
     audio: usize,
+    image_tags: Option<NumberedImageTags>,
+}
+
+impl OrderedMediaOrdinals {
+    /// The ordered representation a request needs, if any: private sentinels
+    /// for a request with audio, numbered tags for a Phi-3V / Phi-4MM image
+    /// request, and the typed content parts (`None`) for everything else.
+    fn for_request(
+        request: &ChatCompletionRequest,
+        image_tags: Option<NumberedImageTags>,
+    ) -> Option<Self> {
+        if !request.audio_inputs().is_empty() {
+            return Some(Self::default());
+        }
+        let image_tags = image_tags?;
+        request
+            .messages
+            .iter()
+            .any(|message| {
+                matches!(
+                    &message.content,
+                    MessageContent::Parts(parts)
+                        if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+                )
+            })
+            .then_some(Self {
+                image_tags: Some(image_tags),
+                ..Self::default()
+            })
+    }
+
+    /// One message's text with a tag for each of its images that the text
+    /// does not already carry.
+    ///
+    /// Numbers images across the conversation as Neywa-Labs/mlx-vlm#2492 does:
+    /// the message's images are `offset + 1 ..= offset + count`, where
+    /// `offset` counts the images of earlier messages. A tag in that range the
+    /// text already contains is explicit and is left where the caller wrote
+    /// it; each missing one is written at the head of the message, in order,
+    /// which is where the runtime put every tag for a single-turn prompt
+    /// before, so a single-turn prompt renders as it did.
+    fn numbered_image_text(&mut self, style: NumberedImageTags, parts: &[ContentPart]) -> String {
+        let text: String = parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let images = parts
+            .iter()
+            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            .count();
+        let offset = self.image;
+        self.image += images;
+        let mut tagged = String::with_capacity(text.len());
+        for ordinal in offset + 1..=offset + images {
+            let tag = style.tag(ordinal);
+            if !text.contains(&tag) {
+                tagged.push_str(&tag);
+                tagged.push_str(style.separator());
+            }
+        }
+        tagged.push_str(&text);
+        tagged
+    }
 }
 
 fn template_content(
@@ -2259,6 +2357,9 @@ fn template_content(
     // helper, so the ordered representation deliberately has no video
     // sentinel.
     if let Some(ordinals) = ordered_media {
+        if let (Some(style), MessageContent::Parts(parts)) = (ordinals.image_tags, content) {
+            return serde_json::Value::String(ordinals.numbered_image_text(style, parts));
+        }
         return match content {
             MessageContent::Text(text) => serde_json::Value::String(text.clone()),
             MessageContent::Parts(parts) => {
@@ -2375,7 +2476,7 @@ fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
 /// kwargs.
 #[cfg(test)]
 pub(super) fn build_chat_messages(request: &ChatCompletionRequest) -> Vec<ChatMessage> {
-    build_chat_messages_with_thinking(request, true)
+    build_chat_messages_with_thinking(request, true, None)
 }
 
 /// Security (H-1): produce the same "System: … User: … Assistant: …" fallback
@@ -2413,9 +2514,9 @@ fn render_simple_fallback(messages: &[ChatMessage]) -> String {
 fn build_chat_messages_with_thinking(
     request: &ChatCompletionRequest,
     preserve_thinking: bool,
+    image_tags: Option<NumberedImageTags>,
 ) -> Vec<ChatMessage> {
-    let preserve_media_order = !request.audio_inputs().is_empty();
-    let mut ordered_media = preserve_media_order.then(OrderedMediaOrdinals::default);
+    let mut ordered_media = OrderedMediaOrdinals::for_request(request, image_tags);
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
         std::collections::HashSet::new()
     } else {
