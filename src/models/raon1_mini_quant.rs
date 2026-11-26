@@ -32,9 +32,12 @@
 //! loader serves the original checkpoint (bf16 linears, MXFP8 experts) and
 //! both exports.
 
+use std::collections::HashSet;
+
 use super::raon1_mini_config::Raon1MiniConfig;
 use crate::models::modelopt_mixed_precision as mixed;
 use crate::models::switch_layers::{drain_numbered_expert_planes, infer_block_float_layout};
+use mlxcel_core::dtype;
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use serde_json::Value;
@@ -123,10 +126,22 @@ fn check_mlx_quantization(q: &Value) -> Result<(), String> {
                 ));
             }
         }
-        if entry.get("global_scale").is_some_and(|g| !g.is_boolean()) {
-            return Err(format!(
-                "MLX quantization entry {path}: global_scale must be a boolean"
-            ));
+        match entry.get("global_scale") {
+            Some(g) if !g.is_boolean() => {
+                return Err(format!(
+                    "MLX quantization entry {path}: global_scale must be a boolean"
+                ));
+            }
+            // The loader hands a flagged tensor scale to `gather_qmm` only; on
+            // a dense linear it would be renamed and never applied.
+            Some(Value::Bool(true)) if !path.contains(".switch_mlp.") => {
+                return Err(format!(
+                    "MLX quantization entry {path}: \"global_scale\": true marks a per-expert \
+                     switch_mlp scale; a dense linear's per-tensor scale is listed in \
+                     raon_global_scaled_linears instead"
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -165,8 +180,11 @@ impl Raon1MiniConfig {
 /// would read past the scales buffer on the GPU. A missing `scales` is left
 /// to the layout detection (a bf16 linear has none).
 ///
-/// Used by: `linear` (dense MLP, shared experts, `lm_head`) and
-/// `RaonMoe::from_weights` (the routed `switch_mlp` stacks).
+/// Used by: `check_quantized_planes` (every plane of an export, at the end
+/// of `sanitize_export`), `linear` (dense MLP, shared experts, `lm_head`) and
+/// `RaonMoe::from_weights` (the routed `switch_mlp` stacks, including the
+/// original checkpoint's MXFP8 experts, which are stacked after
+/// `sanitize_export`).
 pub(crate) fn check_scales_match_weight(weights: &WeightMap, prefix: &str) -> Result<(), String> {
     let scales_key = format!("{prefix}.scales");
     let Some(scales) = weights.get(&scales_key) else {
@@ -250,7 +268,61 @@ pub(super) fn sanitize_export(
             }
         }
     }
-    check_global_scaled_linears(weights, config)
+    check_global_scaled_linears(weights, config)?;
+    check_dense_global_scales(weights)?;
+    check_quantized_planes(weights)
+}
+
+/// Every quantized plane in the checkpoint, RDA and MLA projections
+/// included, has scales matching its weight (`check_scales_match_weight`).
+fn check_quantized_planes(weights: &WeightMap) -> Result<(), String> {
+    let mut prefixes: Vec<&str> = weights
+        .keys()
+        .filter_map(|k| k.strip_suffix(".scales"))
+        .collect();
+    prefixes.sort_unstable();
+    prefixes
+        .into_iter()
+        .try_for_each(|prefix| check_scales_match_weight(weights, prefix))
+}
+
+/// A dense linear's tensor scale multiplies its whole output, so it must be
+/// one float element; a vector would broadcast across the output and an
+/// integer one would truncate the product. A scale the shared loader
+/// resolved for `gather_qmm` (`native_global_scale`) on a dense path would
+/// never be read.
+fn check_dense_global_scales(weights: &WeightMap) -> Result<(), String> {
+    let native = format!(
+        ".{}",
+        crate::models::switch_layers::NATIVE_GLOBAL_SCALE_LEAF
+    );
+    let mut keys: Vec<&String> = weights.keys().collect();
+    keys.sort_unstable();
+    for key in keys {
+        if key.contains(".switch_mlp.") {
+            continue;
+        }
+        if key.ends_with(&native) {
+            return Err(format!(
+                "{key}: a per-expert NVFP4 tensor scale flagged on a dense linear is never \
+                 applied; list the linear in raon_global_scaled_linears instead"
+            ));
+        }
+        if key.ends_with(".global_scale") {
+            let scale = &weights[key];
+            let shape = mlxcel_core::array_shape(scale);
+            let numel: i64 = shape.iter().map(|&d| i64::from(d)).product();
+            let dt = mlxcel_core::array_dtype(scale);
+            let float = [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16].contains(&dt);
+            if numel != 1 || !float {
+                return Err(format!(
+                    "{key}: shape {shape:?}, dtype code {dt}; a per-tensor global_scale must be \
+                     one float32, float16 or bfloat16 element"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every per-tensor `global_scale` outside the expert stacks is one of the
@@ -264,7 +336,7 @@ fn check_global_scaled_linears(
     let Some(listed) = config.extra.get("raon_global_scaled_linears") else {
         return Ok(());
     };
-    let listed: Vec<&str> = listed
+    let listed: HashSet<&str> = listed
         .as_array()
         .ok_or("raon1_mini: raon_global_scaled_linears must be a list of module paths")?
         .iter()
@@ -292,3 +364,7 @@ fn check_global_scaled_linears(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "raon1_mini_quant_tests.rs"]
+mod tests;
