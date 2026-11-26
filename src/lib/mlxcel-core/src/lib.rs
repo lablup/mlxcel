@@ -5003,6 +5003,48 @@ mod cuda_test_serialization_tests;
 #[path = "fused_norm_parity_tests.rs"]
 mod fused_norm_parity_tests;
 
+// Experimental cuda-oxide route behind the fused residual-add RMSNorm kernel
+// (#2833). Present only in a build made with
+// MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 (Linux, `cuda`), which is when the
+// build script sets this cfg and stages the artifact; every other build
+// compiles none of it.
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_abi;
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_artifact;
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_fused_norm;
+
+// Manifest, schema and digest validation of the cuda-oxide artifact. No GPU.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_artifact_tests.rs"]
+mod cuda_oxide_artifact_tests;
+
+// The #2832 case matrix and input generator, ported from the standalone
+// harness, plus the route guard the GPU tests below share.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_fixtures.rs"]
+mod cuda_oxide_fused_norm_fixtures;
+
+// The #2832 numerical matrix (130 cases) through the MLX adapter, against the
+// existing fused CUDA kernel and the graph path, with the route marker
+// asserted for every case. GB10 only: the artifact targets sm_121.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_matrix_tests.rs"]
+mod cuda_oxide_fused_norm_matrix_tests;
+
+// Scheduling and lifetime of the cuda-oxide node inside MLX lazy evaluation:
+// lazy chains, graph replay, captured child graphs, allocator reuse, threads.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_exec_tests.rs"]
+mod cuda_oxide_fused_norm_exec_tests;
+
+// What the cuda-oxide route refuses and how: fallback before enqueue, a warm
+// PTX cache that must not mask a bad artifact, and evaluation-time failures.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_fallback_tests.rs"]
+mod cuda_oxide_fused_norm_fallback_tests;
+
 #[cfg(test)]
 #[path = "mamba1_scan_parity_tests.rs"]
 mod mamba1_scan_parity_tests;

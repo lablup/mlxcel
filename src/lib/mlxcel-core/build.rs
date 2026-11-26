@@ -33,6 +33,11 @@ mod mlx_pin;
 #[path = "build_support/ptx_cache_test_hooks.rs"]
 mod ptx_cache_test_hooks;
 
+// Build gate and artifact staging for the experimental cuda-oxide fused
+// RMSNorm route (#2833). Unit-tested by `mlxcel-mlx-pin`.
+#[path = "build_support/cuda_oxide_fused_norm.rs"]
+mod cuda_oxide_fused_norm;
+
 // Native Windows CUDA toolkit layout and delay-load link arguments (#58).
 // Shared by path with the root build script, which emits the same link
 // arguments for mlxcel's own binaries. A `rocm` build compiles it too, for the
@@ -94,6 +99,18 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(mlxcel_ptx_cache_test_hooks)");
     if ptx_cache_test_hooks {
         println!("cargo:rustc-cfg=mlxcel_ptx_cache_test_hooks");
+    }
+
+    // Experimental cuda-oxide fused RMSNorm route (#2833), off unless the
+    // build sets MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM. When on, the committed
+    // PTX is checked against its manifests and staged under OUT_DIR for the
+    // crate to embed; a mismatch fails the build here. An environment
+    // variable rather than a Cargo feature, so toggling it keeps OUT_DIR and
+    // the MLX build in it (see build_support/cuda_oxide_fused_norm.rs).
+    let cuda_oxide_fused_norm = stage_cuda_oxide_fused_norm(&manifest_dir, &out_dir);
+    println!("cargo:rustc-check-cfg=cfg(mlxcel_cuda_oxide_fused_norm)");
+    if cuda_oxide_fused_norm {
+        println!("cargo:rustc-cfg=mlxcel_cuda_oxide_fused_norm");
     }
 
     // Resolve once for both CMake and the bridge. On macOS a plain Cargo
@@ -345,6 +362,23 @@ fn main() {
         }
     }
 
+    // The cuda-oxide adapter is an MLX primitive, so unlike the launchers
+    // above it includes MLX's CUDA backend headers, which need the CUDA
+    // toolkit headers and the fmt headers MLX builds against. Added only for
+    // an opted-in build, so every other build compiles exactly what it did.
+    if cuda_oxide_fused_norm {
+        bridge
+            .define("MLXCEL_CUDA_OXIDE_FUSED_NORM", None)
+            .file("../mlxcelverse/kernels/fused_norm_oxide.cpp")
+            .include(cuda_toolkit_include_dir());
+        // MLX fetches fmt unless it was configured with USE_SYSTEM_FMT, in
+        // which case the system include path already has it.
+        let fetched_fmt = mlx_dst.join("build/_deps/fmt-src/include");
+        if fetched_fmt.is_dir() {
+            bridge.include(fetched_fmt);
+        }
+    }
+
     bridge.compile("mlx_cxx_bridge");
 
     // Link against MLX
@@ -430,6 +464,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/qwen4_qsa_source.h");
     println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
     println!("cargo:rerun-if-changed=build_support/ptx_cache_test_hooks.rs");
+    println!("cargo:rerun-if-changed=build_support/cuda_oxide_fused_norm.rs");
     println!("cargo:rerun-if-changed=build_support/windows_cuda.rs");
     println!("cargo:rerun-if-changed=build_support/windows_rocm.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
@@ -484,6 +519,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.cpp");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_oxide.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_oxide.cpp");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append.cpp");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append_hip.h");
@@ -518,6 +555,54 @@ fn main() {
 /// after a successful build, `_deps/.mlx-build-commit` records the commit.
 /// If the marker is missing or doesn't match, we purge the entire `_deps/`.
 ///
+/// Decide whether this build carries the cuda-oxide fused RMSNorm adapter
+/// (#2833) and, if so, verify and stage its artifact.
+///
+/// Returns false, and does nothing else, unless the build sets
+/// `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM`. An invalid value, a build that is not
+/// Linux CUDA, or a PTX that does not match its manifests stops the build.
+fn stage_cuda_oxide_fused_norm(manifest_dir: &std::path::Path, out_dir: &std::path::Path) -> bool {
+    use cuda_oxide_fused_norm as oxide;
+
+    println!("cargo:rerun-if-env-changed={}", oxide::BUILD_ENV);
+    let value = env::var(oxide::BUILD_ENV).ok();
+    let requested =
+        oxide::requested(value.as_deref()).unwrap_or_else(|error| panic!("mlxcel-core: {error}"));
+    if !requested {
+        return false;
+    }
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if let Err(error) = oxide::check_supported(&target_os, cfg!(feature = "cuda")) {
+        panic!("mlxcel-core: {error}");
+    }
+    let spike_dir = manifest_dir.join("../../../spike/cuda-oxide-fused-norm");
+    let stage_dir = out_dir.join("cuda_oxide_fused_norm");
+    match oxide::verify_and_stage(&spike_dir, &stage_dir) {
+        Ok(sources) => {
+            for source in sources {
+                println!("cargo:rerun-if-changed={}", source.display());
+            }
+        }
+        Err(error) => panic!("mlxcel-core: cuda-oxide fused RMSNorm artifact: {error}"),
+    }
+    true
+}
+
+/// The CUDA toolkit's header directory on Linux, for the one bridge source
+/// that includes MLX's CUDA backend headers. Same lookup order as the `nvcc`
+/// choice in `build_mlx`: `CUDA_HOME`, then `/usr/local/cuda`.
+fn cuda_toolkit_include_dir() -> PathBuf {
+    let root = env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda".to_string());
+    let include = PathBuf::from(root).join("include");
+    if !include.join("cuda.h").is_file() {
+        panic!(
+            "mlxcel-core: MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM needs the CUDA toolkit headers, but {} has no cuda.h; set CUDA_HOME",
+            include.display()
+        );
+    }
+    include
+}
+
 /// `expected_commit` is the value resolved from `../mlxcelverse/CMakeLists.txt` in
 /// `main`, so this decision is made against the tag CMake would actually fetch.
 fn purge_stale_mlx_cache(out_dir: &std::path::Path, expected_commit: &str) {

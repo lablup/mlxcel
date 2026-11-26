@@ -1759,57 +1759,6 @@ impl Builder {
         self.reduce("minimum", x, dim, init)
     }
 
-    /// Inclusive prefix sum along one static axis using a left-padded window.
-    ///
-    /// This is the StableHLO cumsum lowering used by Gemma3n cumulative group
-    /// normalization. It avoids a quadratic triangular constant and keeps the
-    /// reduction in f32 on both CPU and CUDA.
-    pub fn reduce_window_prefix_add(&mut self, x: &Val, dim: usize) -> Val {
-        assert_eq!(x.ty.elt, "f32");
-        assert!(dim < x.ty.shape.len());
-        let rank = x.ty.shape.len();
-        let width = x.ty.shape[dim];
-        assert!(width > 0);
-        let zero = self.const_f32(0.0);
-        let window = (0..rank)
-            .map(|axis| if axis == dim { width } else { 1 })
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let strides = std::iter::repeat_n("1", rank)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let padding = (0..rank)
-            .map(|axis| {
-                if axis == dim {
-                    format!("[{}, 0]", width - 1)
-                } else {
-                    "[0, 0]".to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let r = self.fresh();
-        let suffix = r.trim_start_matches('%');
-        self.line(format!(
-            "{r} = \"stablehlo.reduce_window\"({x}, {zero}) ({{\n\
-             ^bb0(%rw_l_{suffix}: tensor<f32>, %rw_r_{suffix}: tensor<f32>):\n  \
-             %rw_sum_{suffix} = stablehlo.add %rw_l_{suffix}, %rw_r_{suffix} : tensor<f32>\n  \
-             stablehlo.return %rw_sum_{suffix} : tensor<f32>\n\
-             }}) {{window_dimensions = array<i64: {window}>, \
-             window_strides = array<i64: {strides}>, \
-             padding = dense<[{padding}]> : tensor<{rank}x2xi64>}} : \
-             ({ty}, tensor<f32>) -> {ty}",
-            x = x.name,
-            zero = zero.name,
-            ty = x.ty.render(),
-        ));
-        Val {
-            name: r,
-            ty: x.ty.clone(),
-        }
-    }
-
     /// On-device argmax over a `[V]` vector -> scalar `i32` index (the first
     /// index of the max, numpy/jax semantics). Mirrors the JAX/IREE-emitted
     /// argmax reducer in `spike/openxla/artifacts/fp32_decode_argmax.stablehlo.mlir`:
