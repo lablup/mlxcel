@@ -53,8 +53,9 @@ impl Default for HunyuanVlProcessor {
 impl HunyuanVlProcessor {
     fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.spatial_merge_size) as u32;
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
+        // Python's `round` in the reference rounds half to even.
+        let mut h = ((orig_h as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
+        let mut w = ((orig_w as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
 
         if (h * w) as usize > self.max_pixels {
             let beta = ((orig_h as f64 * orig_w as f64) / self.max_pixels as f64).sqrt();
@@ -153,6 +154,22 @@ impl ImageProcessor for HunyuanVlProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expected values are the reference `smart_resize` (transformers 5.24.1
+    /// `hunyuan_vl` and mlx-vlm, which agree), whose Python `round` breaks a
+    /// tie towards the even neighbour.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let proc = HunyuanVlProcessor::default();
+        // 720 / 32 = 22.5 -> 22; 1680 / 32 = 52.5 -> 52.
+        assert_eq!(proc.smart_resize(720, 1280), (704, 1280));
+        assert_eq!(proc.smart_resize(1050, 1680), (1056, 1664));
+        // Non-ties, an odd tie (1200 / 32 = 37.5 -> 38) and both clamps.
+        assert_eq!(proc.smart_resize(1080, 1920), (1088, 1920));
+        assert_eq!(proc.smart_resize(1200, 1920), (1216, 1920));
+        assert_eq!(proc.smart_resize(3024, 4032), (1760, 2336));
+        assert_eq!(proc.smart_resize(336, 336), (512, 512));
+    }
 
     #[test]
     fn grid_and_rows_and_count() {
