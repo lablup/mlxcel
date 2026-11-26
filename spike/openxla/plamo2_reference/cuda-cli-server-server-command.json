@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/tmp/epic564-issue-3347/target/test-fast/mlxcel-server",
+    "-m",
+    "/tmp/epic564-models/plamo-2-1b",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "55427",
+    "--max-batch-size",
+    "4",
+    "--ctx-size",
+    "2048"
+  ],
+  "base_url": "http://127.0.0.1:55427"
+}

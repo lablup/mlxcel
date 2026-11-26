@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use mlxcel_xla::{IreeLlama, IreeRaggedLlama};
 use serde::Deserialize;
 
-/// Logits tolerance for the hybrid fixture.
-const TOL: f32 = 5e-3;
+/// Logits tolerance for the hybrid fixture. Removing the dt clamp moves the
+/// fixture's first-step logits by 4e-3 to 4e-2, so this must stay well below.
+const TOL: f32 = 3e-4;
 /// Window-probe tolerance. The closest variant pair (`age <= W` against
 /// `age <= W + 1`) differs by about 5.9e-3 at the first step while the f32
 /// graphs sit within 1e-5 of the float64 reference, so this separates them.
@@ -62,7 +63,7 @@ fn max_abs(got: &[f32], want: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn check_logits(got: &[f32], want: &[f32], context: &str) {
+fn check_logits(got: &[f32], want: &[f32], context: &str) -> f32 {
     let error = max_abs(got, want);
     assert!(error < TOL, "{context}: max_abs={error}");
     let argmax = |xs: &[f32]| {
@@ -73,6 +74,7 @@ fn check_logits(got: &[f32], want: &[f32], context: &str) {
             .0
     };
     assert_eq!(argmax(got), argmax(want), "{context}");
+    error
 }
 
 /// Greedy single-sequence tokens through the sample prefill and decode graphs.
@@ -143,16 +145,26 @@ fn plamo2_synthetic_parity() {
     let vocab = ragged.vocab();
     let prompts: Vec<&[i32]> = cases.iter().map(|c| c.prompt.as_slice()).collect();
     let got = ragged_logits(&mut ragged, &prompts, 8, vocab);
+    let mut worst: f32 = 0.0;
     for (slot, case) in cases.iter().enumerate() {
         for (step, want) in case.logits.iter().enumerate() {
-            check_logits(&got[slot][step], want, &format!("slot {slot} step {step}"));
+            worst = worst.max(check_logits(
+                &got[slot][step],
+                want,
+                &format!("slot {slot} step {step}"),
+            ));
         }
     }
     // Re-admission replaces both KV and recurrent state in an already used slot.
     for (slot, case) in cases.iter().rev().enumerate() {
         let got = ragged.prefill_slot_logits(slot, &case.prompt).unwrap();
-        check_logits(&got, &case.logits[0], &format!("recycle slot {slot}"));
+        worst = worst.max(check_logits(
+            &got,
+            &case.logits[0],
+            &format!("recycle slot {slot}"),
+        ));
     }
+    eprintln!("hybrid: single-sequence tokens exact; worst ragged |logit delta| {worst:.3e}");
 }
 
 /// Largest deviation of `got` from a reference trajectory.

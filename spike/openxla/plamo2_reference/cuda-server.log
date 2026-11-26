@@ -1,0 +1,24 @@
+2026-11-26T10:13:53.655036Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-11-26T10:13:53.655325Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0 mla_latent_quant=auto
+2026-11-26T10:13:53.655781Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=2048 ctx_size_per_slot=512 context_slots=4 kv_unified=false n_parallel=4 prefill_chunk_size=2048 prefill_chunk_size_contended=512 max_kv_size=None
+2026-11-26T10:13:53.655899Z  INFO mlxcel::server::startup: Runtime device: CPU
+2026-11-26T10:13:53.799583Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-11-26T10:13:53.802134Z  INFO mlxcel::server::xla_prompt_cache_guard: OpenXLA recurrent model (plamo2): prompt cache and APC disabled, because a saved token prefix cannot restore recurrent state model_type=plamo2
+2026-11-26T10:13:53.802481Z  INFO mlxcel::server::startup: Warming up model...
+2026-11-26T10:13:53.803030Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting (OpenXLA continuous batching, B_max=4, capacities=[256], device=cuda), loading model... capacities=[256] capacity_pinned_by_operator=true image_floor=None
+2026-11-26T10:14:08.708786Z  INFO mlxcel::server::model_provider::model_worker: OpenXLA capacity buckets compiled capacities=[256]
+2026-11-26T10:14:08.709136Z  INFO mlxcel::server::model_provider::model_worker: OpenXLA model plamo-2-1b loaded in 14.906s (B_max=4, capacities=[256], device=cuda) worker_model_id=plamo-2-1b load_seconds=14.906001172
+2026-11-26T10:14:08.709143Z  INFO mlxcel::server::batch::xla_worker: OpenXLA serve worker starting (continuous batching, B_max=4, sampling, stop strings)
+2026-11-26T10:14:09.470650Z  INFO mlxcel::server::startup: Warmup complete
+2026-11-26T10:14:09.472121Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:55427
+2026-11-26T10:14:09.472126Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-11-26T10:14:09.472128Z  INFO mlxcel::server::startup: Endpoints:
+2026-11-26T10:14:09.472130Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-11-26T10:14:09.472131Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-11-26T10:14:09.472133Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-11-26T10:14:09.472134Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-11-26T10:14:09.472135Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-11-26T10:14:09.472137Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-11-26T10:14:09.472138Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-11-26T10:14:09.472139Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-11-26T10:14:09.472141Z  INFO mlxcel::server::startup:   GET  /health               - Health check
