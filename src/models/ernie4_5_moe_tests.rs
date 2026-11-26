@@ -486,3 +486,54 @@ fn checkpoint_layout_drops_mtp_and_preserves_numbered_shared_and_stacked_routed(
         assert!(!weights.contains_key(key), "retained {key}");
     }
 }
+
+#[test]
+fn checkpoint_layout_refuses_malformed_numbered_experts() {
+    let args = tiny_routed_args();
+    let root = "model.layers.1.mlp";
+    let numbered = |dtype_of: &dyn Fn(usize) -> i32, count: usize| {
+        let mut weights = tiny_routed_weights(&args);
+        weights.remove(&format!("{root}.switch_mlp.gate_proj.weight"));
+        for e in 0..count {
+            let plane = mlxcel_core::full_f32(&[6, 8], e as f32, dtype::FLOAT32);
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.weight"),
+                mlxcel_core::astype(&plane, dtype_of(e)),
+            );
+        }
+        weights
+    };
+    let load_err = |weights: &WeightMap| {
+        Ernie45MoeModel::from_weights(weights, &args)
+            .err()
+            .expect("malformed numbered experts must fail to load")
+    };
+
+    // A plane in another dtype reaches the shared stacking helper, whose error must surface.
+    let mixed = numbered(
+        &|e| {
+            if e == 2 {
+                dtype::FLOAT16
+            } else {
+                dtype::FLOAT32
+            }
+        },
+        3,
+    );
+    let err = load_err(&mixed);
+    assert!(
+        err.contains(&format!("{root}.experts.2.gate_proj.weight")) && err.contains("dtype"),
+        "{err}"
+    );
+
+    let short = numbered(&|_| dtype::FLOAT32, 2);
+    let err = load_err(&short);
+    assert!(
+        err.contains(&format!("{root}.experts.2.gate_proj.weight")),
+        "{err}"
+    );
+
+    let long = numbered(&|_| dtype::FLOAT32, 4);
+    let err = load_err(&long);
+    assert!(err.contains("expected 3 experts"), "{err}");
+}

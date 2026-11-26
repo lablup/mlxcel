@@ -791,7 +791,7 @@ impl Ernie45MoeModel {
                         args.moe_num_experts
                     ));
                 }
-                drain_numbered_expert_planes(weights, &experts, proj, &stacked);
+                drain_numbered_expert_planes(weights, &experts, proj, &stacked)?;
                 for leaf in ["weight", "scales", "biases"] {
                     if let Some(plane) = weights.get(&format!("{stacked}.{leaf}")) {
                         // Release the source planes before stacking the next projection.
