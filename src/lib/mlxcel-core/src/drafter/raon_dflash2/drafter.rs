@@ -20,7 +20,8 @@
 //! `draft_block` appends the newly committed target features to the
 //! context and proposes the next block, `reset` clears the context between
 //! generations. The draft is the selector's greedy chain, so it is
-//! deterministic and needs no sampler.
+//! deterministic and needs no sampler; under sampling the round loop
+//! samples the verify rows instead (`dflash::sampled_verify`).
 
 use crate::drafter::{Drafter, DrafterError, DrafterKind};
 use crate::ffi::{self, MlxArray};
@@ -178,9 +179,11 @@ impl Drafter for RaonDFlash2Drafter {
         true
     }
 
-    /// The DFlash round loop accepts by a per-position argmax; a sampling
-    /// request is served by classic decode, which keeps its distribution.
-    fn greedy_only(&self) -> bool {
+    /// The draft is the selector's greedy chain, a function of the context
+    /// alone, so a sampling request is served by sampling each verify row
+    /// and comparing, which keeps plain sampling's distribution
+    /// (`dflash::sampled_verify`).
+    fn supports_sampled_verify(&self) -> bool {
         true
     }
 

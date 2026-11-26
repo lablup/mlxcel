@@ -436,6 +436,9 @@ pub struct DFlashGenerator {
     /// first-bonus emission, which has no walk). Used by tests to pin
     /// the upstream `accept_lens` parity.
     accept_lens: Vec<u32>,
+    /// History before the first bonus (the prompt when the sampler reads
+    /// history), for the sampled verify rows (issue #3436).
+    token_history: Vec<i32>,
 }
 
 impl DFlashGenerator {
@@ -462,7 +465,15 @@ impl DFlashGenerator {
             mask_token_id,
             generated_tokens: Vec::new(),
             accept_lens: Vec::new(),
+            token_history: Vec::new(),
         }
+    }
+
+    /// The history plain decode starts from (the prompt when the sampler
+    /// reads history), which a sampled verify row extends with the first
+    /// bonus, the emitted tokens and the accepted drafts (issue #3436).
+    pub fn set_token_history(&mut self, history: Vec<i32>) {
+        self.token_history = history;
     }
 
     /// Convenience constructor that uses the [`DEFAULT_BLOCK_SIZE`] and
@@ -831,6 +842,8 @@ impl DFlashGenerator {
                 width_controller = None;
                 super::width_policy::ExpectedThroughputWidth::new(block_size_cfg)
             });
+        let sampled_verify =
+            super::sampled_verify::uses_sampled_verify(self.drafter.as_ref(), &self.sampler);
         let mut bonus = first_bonus;
         // Committed target hidden rows the drafter has not consumed yet: the
         // last drafted round's accepted rows, then one row per classic step.
@@ -996,6 +1009,29 @@ impl DFlashGenerator {
                 bs - 1,
                 bs,
             );
+            // A deterministic draft under sampling: the target tokens are
+            // the sampler's draws, so the walk keeps plain sampling's
+            // distribution (issue #3436).
+            let target_tokens = if sampled_verify {
+                let history: Vec<i32> = if self.sampler.needs_token_history() {
+                    self.token_history
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(first_bonus))
+                        .chain(self.generated_tokens.iter().copied())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                super::sampled_verify::sample_verify_rows(
+                    verify_logits,
+                    &draft_tokens,
+                    &self.sampler,
+                    &history,
+                )
+            } else {
+                target_tokens
+            };
             diagnostics.target_argmax_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // Per-position log-probability data, aligned 1:1 with

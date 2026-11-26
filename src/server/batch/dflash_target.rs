@@ -833,6 +833,8 @@ where
         block_size,
         mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
     );
+    // A sampled verify row reads the history classic decode would (#3436).
+    generator.set_token_history(token_history.to_vec());
     let result = generator.run(
         target,
         target as &dyn LanguageModel,

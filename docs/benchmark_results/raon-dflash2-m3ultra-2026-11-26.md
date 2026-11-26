@@ -12,6 +12,8 @@ Every drafted run printed exactly the text of plain decode, on all three prompts
 
 The startup probe (`Raon1MiniModel::dflash_exactness_allows`, three synthetic draws through `mtp_exactness_gate`) passed at every width, so the drafter engaged without `MLXCEL_MTP_ALLOW_INEXACT`.
 
+Sampled drafting (each verify row sampled with plain decode's sampler and accepted while it equals the draft) on the code prompt at `--temp 0.7 --top-p 0.95 --seed 7`, 200 tokens, one run each: plain 32.64 tok/s, width 5 49.32 tok/s (1.51x, acceptance 0.500, 2.97 emitted per verify). The distribution itself is pinned by the `drafter::dflash::sampled_verify` tests on the round loop (a Markov target's joint distribution at widths 2 and 4, and a presence penalty that sees the accepted drafts), not by these runs.
+
 ## Throughput, default kernels
 
 tok/s, round 1 / round 2. Speedup is the mean of the two rounds over plain decode.

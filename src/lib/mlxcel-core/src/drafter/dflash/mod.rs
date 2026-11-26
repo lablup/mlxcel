@@ -76,6 +76,8 @@ pub mod round_loop;
 /// DFlash speculative-decoding round-loop driver, B > 1 with continuous
 /// batching and per-row GDN-aware rollback (sub-13).
 pub mod round_loop_batched;
+/// Sampled acceptance for a deterministic draft (issue #3436).
+pub mod sampled_verify;
 /// Acceptance-aware verify width for the B = 1 round loop (issue #3410).
 pub mod width_policy;
 

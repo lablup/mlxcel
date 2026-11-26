@@ -1349,6 +1349,14 @@ pub trait Drafter {
         false
     }
 
+    /// Whether the draft is a function of the context alone (no sampler
+    /// draws), so the DFlash round loop may accept it under sampling by
+    /// sampling each verify row and comparing (issue #3436; see
+    /// `dflash::sampled_verify`). The default keeps the argmax walk.
+    fn supports_sampled_verify(&self) -> bool {
+        false
+    }
+
     /// Whether this drafter can only draft under an argmax sampler.
     ///
     /// The LFM2 DSpark drafter (issue #1339) chains its block through a

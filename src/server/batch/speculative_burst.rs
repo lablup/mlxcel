@@ -1819,6 +1819,10 @@ pub(crate) fn dflash_burst_would_engage(
         && dflash_target_exactness_allows(model, block_size as usize) == Some(true)
         && !(drafter_slot.drafter_ref().is_some_and(|d| d.greedy_only())
             && !sampler_is_greedy(&seq.sampling))
+        && !(drafter_slot
+            .drafter_ref()
+            .is_some_and(|d| d.supports_sampled_verify())
+            && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling))
 }
 
 /// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
@@ -1946,6 +1950,22 @@ fn run_dflash_burst(
             seq.seq_id,
             seq.sampling.temperature,
             seq.sampling.top_k,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+    // A drafter that samples its verify rows (Raon DFlash2, issue #3436)
+    // cannot carry a stateful Mirostat chain across them.
+    if ctx
+        .drafter_slot
+        .drafter_ref()
+        .is_some_and(|d| d.supports_sampled_verify())
+        && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling)
+    {
+        tracing::warn!(
+            "DFlash speculative dispatch declined for seq {}: the request samples with \
+             Mirostat, whose state the sampled verify rows cannot carry; serving it with \
+             classic decode",
+            seq.seq_id,
         );
         return Err(BurstOutcome::DeclineToClassic);
     }

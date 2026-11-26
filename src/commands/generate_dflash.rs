@@ -294,11 +294,13 @@ fn run_raon1_mini(
              block); got --draft-block-size {block_size}"
         ));
     }
-    refuse_sampling(sampling_config)?;
-    if !token_bias.is_empty() {
+    // The draft is deterministic, so sampling (and penalties, and a token
+    // bias) runs through the sampled verify rows; only a stateful Mirostat
+    // chain cannot (issue #3436).
+    if !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(sampling_config) {
         return Err(anyhow!(
-            "--draft-kind dflash cannot honour a token bias (--lang-bias): the verify argmax \
-             applies none. Drop --draft-model to decode classically with the bias."
+            "--draft-kind dflash on Raon-1 mini samples each verify row independently and \
+             cannot carry Mirostat's state; drop --mirostat or --draft-model."
         ));
     }
     if !model.dflash_exactness_allows(block_size) {
@@ -468,6 +470,7 @@ where
         block_size as u32,
         mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
     );
+    generator.set_token_history(token_history);
     let output = generator
         .run(
             target,
