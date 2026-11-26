@@ -1,0 +1,33 @@
+     Running tests/xla_falcon_h1.rs (target/test-fast/deps/xla_falcon_h1-bfd5e09d2af4c884)
+
+running 1 test
+test falcon_h1_original_checkpoint_long_positions ... prefix   32 step 0 position   31: max_abs=5.015297e-1 argmax_match=true
+prefix  512 step 0 position  511: max_abs=1.749840e0 argmax_match=false
+prefix 2048 step 0 position 2047: max_abs=2.609066e0 argmax_match=false
+prefix 3584 step 0 position 3583: max_abs=3.047027e0 argmax_match=false
+prefix   32 step 1 position   32: max_abs=3.323946e-1 argmax_match=true
+prefix  512 step 1 position  512: max_abs=1.511594e0 argmax_match=false
+prefix 2048 step 1 position 2048: max_abs=2.988812e0 argmax_match=true
+prefix 3584 step 1 position 3584: max_abs=4.744942e0 argmax_match=false
+prefix   32 step 2 position   33: max_abs=2.769232e-1 argmax_match=true
+prefix  512 step 2 position  513: max_abs=4.407190e0 argmax_match=true
+prefix 2048 step 2 position 2049: max_abs=4.093261e0 argmax_match=true
+prefix 3584 step 2 position 3585: max_abs=3.211207e0 argmax_match=false
+prefix   32 step 3 position   34: max_abs=1.572971e-1 argmax_match=true
+prefix  512 step 3 position  514: max_abs=4.222429e0 argmax_match=false
+prefix 2048 step 3 position 2050: max_abs=4.687659e0 argmax_match=true
+prefix 3584 step 3 position 3586: max_abs=2.946403e0 argmax_match=false
+
+thread 'falcon_h1_original_checkpoint_long_positions' (3081466) panicked at tests/xla_falcon_h1.rs:184:5:
+Falcon-H1 long-position logits diverge on local-task (tolerance 0.002): ["prefix 32 step 0", "prefix 512 step 0", "prefix 2048 step 0", "prefix 3584 step 0", "prefix 32 step 1", "prefix 512 step 1", "prefix 2048 step 1", "prefix 3584 step 1", "prefix 32 step 2", "prefix 512 step 2", "prefix 2048 step 2", "prefix 3584 step 2", "prefix 32 step 3", "prefix 512 step 3", "prefix 2048 step 3", "prefix 3584 step 3"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    falcon_h1_original_checkpoint_long_positions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 37.17s
+
+error: test failed, to rerun pass `--test xla_falcon_h1`

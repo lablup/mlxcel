@@ -3,7 +3,8 @@
 
 //! Raw Hugging Face Falcon-H1 dimensions and muP semantics.
 use super::config::{
-    Config, MixerKind, QuantConfig, SsmConfig, SsmKind, WeightScheme, check_layer_count,
+    Config, MixerKind, QuantConfig, RopeScaling, SsmConfig, SsmKind, WeightScheme,
+    check_layer_count,
 };
 use super::recurrent_config::json_f32;
 use serde_json::Value;
@@ -149,15 +150,23 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
             .checked_mul(uint("mlp_expansion_factor", Some(4))?)
             .ok_or("falcon_h1 MLP width overflow")?,
     };
+    // HF folds a legacy `rope_scaling` block into `rope_parameters`, so both
+    // must be the identity; anything else would be silently served unscaled.
     let rope_params = get("rope_parameters");
-    if rope_params.is_some_and(|params| {
-        params
-            .get("rope_type")
-            .and_then(Value::as_str)
-            .unwrap_or("default")
-            != "default"
-    }) {
-        return Err("falcon_h1 only default rope_parameters are supported".into());
+    for (key, params) in [
+        ("rope_parameters", rope_params),
+        ("rope_scaling", get("rope_scaling")),
+    ] {
+        if params.is_some_and(|params| {
+            params
+                .get("rope_type")
+                .or_else(|| params.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                != "default"
+        }) {
+            return Err(format!("falcon_h1 only default {key} are supported"));
+        }
     }
     let rope_theta = rope_params
         .and_then(|p| p.get("rope_theta"))
@@ -177,6 +186,8 @@ pub(super) fn from_json(v: &Value, quantization: Option<QuantConfig>) -> Result<
         head_dim,
         eps,
         rope_theta,
+        // The Llama-3.2 base below carries Llama3 scaling; Falcon-H1 is plain.
+        rope: RopeScaling::Plain,
         vocab: uint("vocab_size", None)?,
         tie_word_embeddings: boolean("tie_word_embeddings", false)?,
         qkv_bias: boolean("attention_bias", false)?,
