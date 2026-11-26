@@ -1153,6 +1153,11 @@ pub fn fused_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     if fused_add_rmsnorm_enabled()
         && fused_add_rms_norm_eligible(delta, residual, norm.raw_norm_weight())
     {
+        // Experimental (#2833): lets `MLXCEL_CUDA_OXIDE_FUSED_NORM=1` put the
+        // cuda-oxide implementation behind the launcher below. Compiled only
+        // into a build that opted in; one atomic load after the first call.
+        #[cfg(mlxcel_cuda_oxide_fused_norm)]
+        crate::cuda_oxide_fused_norm::ensure_from_env();
         let mut normed = UniquePtr::null();
         let mut new_residual = UniquePtr::null();
         ffi::fused_add_rms_norm(

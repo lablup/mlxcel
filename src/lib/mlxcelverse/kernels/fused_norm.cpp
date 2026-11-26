@@ -16,6 +16,9 @@
 #include "fused_norm_hip.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#ifdef MLXCEL_CUDA_OXIDE_FUSED_NORM
+#include "fused_norm_oxide.h"
+#endif
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -442,6 +445,25 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     const int threads = fused_norm_threads(dim);
 #endif
 
+#ifdef MLXCEL_CUDA_OXIDE_FUSED_NORM
+    // Experimental cuda-oxide route (#2833), present only in a build with the
+    // `cuda-oxide-fused-norm` feature and taken only once a validated artifact
+    // is installed (`MLXCEL_CUDA_OXIDE_FUSED_NORM=1`). The adapter decides
+    // here, before anything is enqueued, and answers `nullopt` for every
+    // configuration it does not serve, which then takes the port below
+    // unchanged.
+    if (auto oxide = try_oxide_fused_add_rms_norm(
+            x,
+            residual,
+            weight,
+            eps,
+            weight_bias,
+            static_cast<std::size_t>(x.size() / dim),
+            dim,
+            threads)) {
+        return std::move(*oxide);
+    }
+#endif
 
     // Refuses when this backend has no port, naming the entry point and the
     // fallback from the table rather than whichever port was tried. Callers gate
