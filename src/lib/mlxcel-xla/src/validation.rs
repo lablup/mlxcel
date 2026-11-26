@@ -622,9 +622,40 @@ pub(crate) static FALCON_H1: ArchFixture = ArchFixture {
     ],
 };
 
+pub(crate) static PLAMO2: ArchFixture = ArchFixture {
+    arch: "plamo2",
+    config_json: include_str!("../assets/plamo2/config.json"),
+    graphs: &[
+        GraphFixture {
+            kind: GraphKind::Decode { sample: true },
+            golden_name: "decode.mlir",
+            golden: include_str!("../assets/plamo2/decode.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: true },
+            golden_name: "prefill.mlir",
+            golden: include_str!("../assets/plamo2/prefill.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::Prefill { sample: false },
+            golden_name: "prefill_logits.mlir",
+            golden: include_str!("../assets/plamo2/prefill_logits.mlir"),
+        },
+        GraphFixture {
+            kind: GraphKind::DecodeRagged {
+                b_max: 4,
+                sample: false,
+            },
+            golden_name: "decode_ragged_logits_b4.mlir",
+            golden: include_str!("../assets/plamo2/decode_ragged_logits_b4.mlir"),
+        },
+    ],
+};
+
 pub(crate) static REGISTERED: &[&ArchFixture] = &[
     &NEMOTRON_H,
     &FALCON_H1,
+    &PLAMO2,
     &LLAMA_3_2_1B,
     &COHERE,
     &COHERE2,

@@ -178,6 +178,7 @@ fn fused_qkv_name(cfg: &Config, prefix: &str) -> String {
     match cfg.weight_scheme {
         crate::emitter::WeightScheme::Molmo => format!("{prefix}{}", s.q_proj),
         crate::emitter::WeightScheme::Molmo2 => format!("{prefix}self_attn.att_proj.weight"),
+        crate::emitter::WeightScheme::Plamo2 => format!("{prefix}{}", s.q_proj),
         _ => format!("{prefix}self_attn.qkv_proj.weight"),
     }
 }
@@ -207,6 +208,9 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
         .expect("a recurrent layer implies an SsmConfig");
     let m = if cfg.falcon_h1.is_some() {
         format!("{p}mamba.")
+    } else if cfg.plamo2.is_some() {
+        // The PLaMo 2 block norms are pushed with the layer's MLP norms.
+        format!("{p}mixer.")
     } else {
         out.push(WeightSpec::Whole(format!("{p}norm.weight")));
         format!("{p}mixer.")
@@ -233,6 +237,20 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
             push_proj(out, format!("{m}dt_proj.weight"), quant);
             out.push(WeightSpec::Whole(format!("{m}dt_proj.bias")));
             for name in ["A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+        }
+        crate::emitter::SsmKind::Plamo2 { .. } => {
+            push_proj(out, format!("{m}bcdt_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            for name in [
+                "dt_norm_weight",
+                "B_norm_weight",
+                "C_norm_weight",
+                "A_log",
+                "D",
+                "dt_bias",
+            ] {
                 out.push(WeightSpec::Whole(format!("{m}{name}")));
             }
         }
@@ -304,7 +322,8 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         let has_ffn = cfg.layer_has_ffn(i);
         let has_attn = cfg.attn_layer_index(i).is_some();
-        let has_post = !cfg.parallel_block && has_ffn && has_attn;
+        let plamo2_mamba = cfg.layer_mixer(i) == crate::emitter::MixerKind::Plamo2Mamba;
+        let has_post = !cfg.parallel_block && has_ffn && (has_attn || plamo2_mamba);
         let nemotron = cfg.weight_scheme == crate::emitter::WeightScheme::NemotronH;
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
@@ -458,8 +477,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
             }
         }
-        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
-        if cfg.qk_norm.is_some() {
+        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k. Only an
+        // attention layer has them (a PLaMo 2 Mamba block has none).
+        if cfg.qk_norm.is_some() && has_attn {
             out.push(WeightSpec::Whole(format!("{p}{}", s.q_norm)));
             out.push(WeightSpec::Whole(format!("{p}{}", s.k_norm)));
         }
@@ -582,7 +602,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 }
             }
         }
-        if cfg.falcon_h1.is_some() {
+        if cfg.falcon_h1.is_some() || plamo2_mamba {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
         }
         if cfg.phi4_lora.is_some() {
@@ -1801,6 +1821,10 @@ mod tests {
             (
                 "falcon_h1",
                 include_str!("../assets/falcon_h1/config.json").into(),
+            ),
+            (
+                "plamo2",
+                include_str!("../assets/plamo2/config.json").into(),
             ),
         ];
         for (family, json) in &families {

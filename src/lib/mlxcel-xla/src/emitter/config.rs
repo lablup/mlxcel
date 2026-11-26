@@ -201,6 +201,9 @@ pub enum WeightScheme {
     NemotronH,
     /// Falcon-H1 parallel attention and Mamba2 blocks.
     FalconH1,
+    /// PLaMo 2 hybrid (`model.layers.layers.{i}`, `mixer.*`, four offset
+    /// norms per block, fused `qkv_proj` and `gate_up_proj`).
+    Plamo2,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -298,6 +301,12 @@ pub enum SsmKind {
     /// Mamba1's diagonal recurrence. Falcon-Mamba enables weightless RMSNorm
     /// on the projected dt, B, and C tensors.
     Mamba1 { dt_rank: usize, bcdt_norm: bool },
+    /// PLaMo 2's Mamba2 variant: `in_proj` yields per-head interleaved `z`/`x`
+    /// only, the conv runs over `x` alone (`conv_dim = d_inner`), and B, C and
+    /// a `dt_rank`-wide dt come from a post-conv `bcdt_proj`, each RMS-normed
+    /// with a learned weight, before `dt_proj` maps dt to the heads. The state
+    /// is Mamba2's `[H, P, N]` (issue #3347).
+    Plamo2 { dt_rank: usize },
 }
 
 /// Selective state-space mixer parameters (epic #564).
@@ -369,6 +378,7 @@ impl SsmConfig {
         match self.kind {
             SsmKind::Mamba2 => self.d_inner() + self.conv_dim + self.n_heads,
             SsmKind::Mamba1 { .. } => 2 * self.d_inner(),
+            SsmKind::Plamo2 { .. } => 2 * self.d_inner(),
         }
     }
 
@@ -428,6 +438,19 @@ impl SsmConfig {
                     .checked_mul(2)
                     .and_then(|bc| bc.checked_add(dt_rank))
                     .ok_or_else(|| overflow("Mamba1 x_proj_dim = dt_rank + 2*state_size"))?;
+                d_inner
+            }
+            SsmKind::Plamo2 { dt_rank } => {
+                if dt_rank == 0 {
+                    return Err("SsmConfig Plamo2 dt_rank must be positive".into());
+                }
+                d_inner
+                    .checked_mul(2)
+                    .ok_or_else(|| overflow("Plamo2 in_proj_dim = 2*d_inner"))?;
+                self.state_size
+                    .checked_mul(2)
+                    .and_then(|bc| bc.checked_add(dt_rank))
+                    .ok_or_else(|| overflow("Plamo2 bcdt_proj_dim = 2*state_size + dt_rank"))?;
                 d_inner
             }
         };
@@ -764,6 +787,8 @@ pub struct Config {
     pub ssm: Option<SsmConfig>,
     /// Raw-HF Falcon-H1 branch multipliers and gated normalization.
     pub falcon_h1: Option<super::falcon_h1_config::FalconH1Config>,
+    /// PLaMo 2 norm offsets, Q/K head scales and full-attention layers.
+    pub plamo2: Option<super::plamo2_config::Plamo2Config>,
     /// The mixer of each layer (`len == n_layers`); `[Attention; n_layers]` for
     /// every attention-only family. Read through [`Config::layer_mixer`].
     pub layer_mixers: Vec<MixerKind>,
@@ -834,6 +859,7 @@ impl Config {
             quant_scale_dtype: super::QuantScaleDtype::F16,
             ssm: None,
             falcon_h1: None,
+            plamo2: None,
             layer_mixers: vec![MixerKind::Attention; 16],
         }
     }
@@ -997,6 +1023,9 @@ impl Config {
         // built by its own reader.
         if model_type == Some("falcon_h1") {
             return super::falcon_h1_config::from_json(&v, quantization);
+        }
+        if model_type == Some("plamo2") {
+            return super::plamo2_config::from_json(&v, quantization);
         }
         if model_type == Some("nemotron_h") {
             return super::nemotron_h_config::from_json(&v, quantization);
@@ -2020,6 +2049,7 @@ impl Config {
             quant_scale_dtype: super::QuantScaleDtype::F16,
             ssm: None,
             falcon_h1: None,
+            plamo2: None,
             layer_mixers: vec![MixerKind::Attention; n_layers],
         })
     }
@@ -2146,6 +2176,9 @@ impl Config {
     /// global; OLMo3 period 4; Cohere2 period `sliding_window_pattern`). A
     /// non-windowed config has no local layer, so its emitted graphs are unchanged.
     pub fn is_sliding_layer(&self, li: usize) -> bool {
+        if let Some(plamo2) = &self.plamo2 {
+            return self.sliding_window.is_some() && !plamo2.full_attention.contains(&li);
+        }
         self.sliding_window.is_some() && !(li + 1).is_multiple_of(self.sliding_pattern.max(1))
     }
 
