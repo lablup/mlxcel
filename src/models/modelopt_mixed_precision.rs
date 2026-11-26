@@ -122,12 +122,29 @@ fn mixed_precision_declaration(config: &Value) -> Option<&Value> {
         .find(|qc| is_mixed_precision_declaration(qc))
 }
 
+/// Families whose loaders read a linear's block-float layout from its tensor
+/// shapes, so a repacked MXFP8 plane loads as `mxfp8` g32. Every other family
+/// threads its config's NVFP4 16 / 4 into `UnifiedLinear::from_weights`, which
+/// reconciles an MXFP8 plane's widths to an MXFP4 reading at group size 64
+/// that MLX cannot run; its MXFP8 layers stay a named load error.
+const MXFP8_LAYER_FAMILIES: [&str; 1] = ["raon1_mini"];
+
+/// Whether `config` (top level or `text_config`) names a family in
+/// [`MXFP8_LAYER_FAMILIES`].
+fn loads_mxfp8_layers(config: &Value) -> bool {
+    std::iter::once(config)
+        .chain(config.get("text_config"))
+        .filter_map(|root| root.get("model_type").and_then(Value::as_str))
+        .any(|family| MXFP8_LAYER_FAMILIES.contains(&family))
+}
+
 /// Rewrite the MXFP8 layers of a mixed-precision export into MLX's `mxfp8`
 /// plane, in place and byte for byte: `{p}.weight` (uint8 E4M3 `[out, in]`)
 /// is viewed as uint32 `[out, in / 4]`, `{p}.weight_scale` (uint8 E8M0
 /// `[out, in / 32]`) becomes `{p}.scales`, and `{p}.input_scale` is dropped.
 /// A no-op for a config that declares no mixed-precision export; a listed
-/// layer whose `weight` is not in the map is skipped (a filtered load).
+/// layer whose `weight` is not in the map is skipped (a filtered load). An
+/// MXFP8 layer of a family outside [`MXFP8_LAYER_FAMILIES`] fails by name.
 ///
 /// Used by: `sanitize_modelopt_nvfp4_weights` (`src/models/sanitize.rs`),
 /// which every text family's ModelOpt load goes through; Raon1Mini's
@@ -136,15 +153,24 @@ pub(crate) fn repack_mixed_precision_mxfp8_layers(
     weights: &mut WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
-    let Some(qc) = config.and_then(mixed_precision_declaration) else {
+    let Some((config, qc)) = config.and_then(|c| mixed_precision_declaration(c).map(|qc| (c, qc)))
+    else {
         return Ok(());
     };
+    let family_loads_mxfp8 = loads_mxfp8_layers(config);
     for path in mixed_precision_mxfp8_layers(qc)? {
         let w_key = format!("{path}.weight");
         let s_key = format!("{path}.weight_scale");
         let Some(w) = weights.get(&w_key) else {
             continue;
         };
+        if !family_loads_mxfp8 {
+            return Err(format!(
+                "ModelOpt MIXED_PRECISION layer {path} is MXFP8, which this model family does \
+                 not load; only {MXFP8_LAYER_FAMILIES:?} read MXFP8 layers in a mixed-precision \
+                 export"
+            ));
+        }
         let s = weights.get(&s_key).ok_or_else(|| {
             format!("{s_key} is missing; the MXFP8 layer {path} needs its E8M0 block scales")
         })?;

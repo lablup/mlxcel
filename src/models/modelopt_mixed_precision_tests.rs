@@ -115,7 +115,14 @@ fn mxfp8_layer_is_viewed_as_mlx_mxfp8_without_changing_a_byte() {
         "lm_head.input_scale".into(),
         mlxcel_core::from_slice_f32(&[1.0], &[]),
     );
-    let config = json!({"quantization_config": raon_declaration()});
+    // Another family's loader would read the plane as MXFP4 g64, so its
+    // MXFP8 layer is refused by name and the map is left as it was.
+    let other = json!({"model_type": "llama", "quantization_config": raon_declaration()});
+    let err = repack_mixed_precision_mxfp8_layers(&mut weights, Some(&other)).unwrap_err();
+    assert!(err.contains("lm_head is MXFP8"), "{err}");
+    assert_eq!(array_dtype(&weights["lm_head.weight"]), dtype::UINT8);
+
+    let config = json!({"model_type": "raon1_mini", "quantization_config": raon_declaration()});
     repack_mixed_precision_mxfp8_layers(&mut weights, Some(&config)).unwrap();
 
     let w = &weights["lm_head.weight"];
