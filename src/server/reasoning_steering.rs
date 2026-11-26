@@ -35,8 +35,10 @@
 //! 3. The server-default `--chat-template-kwargs` `reasoning_effort`, the
 //!    operator's level for requests that set none (llama-server's
 //!    `--reasoning-effort`).
-//! 4. `enable_thinking: false` (per request, else server default) with no
-//!    level selects `none`: both controls give the same result.
+//! 4. Thinking off with no level selects `none`: both controls give the same
+//!    result. Thinking is resolved as the render resolves it: the request's
+//!    `enable_thinking`, else its portable `reasoning` toggle, else the
+//!    server default.
 //! 5. The config's `default` level.
 //!
 //! No translation: the value must be `none` or one of the config's alpha
@@ -47,7 +49,7 @@ use serde_json::Value;
 
 use super::chat_template::ChatTemplateProcessor;
 use super::chat_template_kwargs::{ChatTemplateKwargs, extract_request_kwargs};
-use super::types::request::ChatCompletionRequest;
+use super::types::request::{ChatCompletionRequest, ReasoningControl};
 use crate::models::reasoning_effort_steering::NONE_LEVEL;
 
 const REASONING_EFFORT: &str = "reasoning_effort";
@@ -90,7 +92,9 @@ pub(crate) fn resolve_model_reasoning_effort(
         });
     let level = match explicit {
         Some(raw) => steering.normalize_level(&raw)?,
-        None if thinking_disabled(&per_request, server_default_kwargs) => NONE_LEVEL.to_string(),
+        None if thinking_disabled(&per_request, control.as_ref(), server_default_kwargs) => {
+            NONE_LEVEL.to_string()
+        }
         None => steering.default.clone(),
     };
     Ok(Some(level))
@@ -104,15 +108,23 @@ fn level_text(value: &Value) -> String {
         .map_or_else(|| value.to_string(), str::to_string)
 }
 
-/// `enable_thinking` is `false` for this request: its own kwarg, else the
-/// server default.
+/// `enable_thinking` is `false` for this request, resolved as the render
+/// resolves it (`resolve_effective_kwargs`): its own kwarg, else the portable
+/// control (`reasoning: true` re-enables thinking over a disabled server
+/// default), else the server default.
 fn thinking_disabled(
     per_request: &ChatTemplateKwargs,
+    control: Option<&ReasoningControl>,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
 ) -> bool {
-    per_request
-        .get(ENABLE_THINKING)
-        .or_else(|| server_default_kwargs.and_then(|kwargs| kwargs.get(ENABLE_THINKING)))
+    if let Some(enabled) = per_request.get(ENABLE_THINKING) {
+        return enabled.as_bool() == Some(false);
+    }
+    if let Some(control) = control {
+        return !control.enabled;
+    }
+    server_default_kwargs
+        .and_then(|kwargs| kwargs.get(ENABLE_THINKING))
         .and_then(Value::as_bool)
         == Some(false)
 }

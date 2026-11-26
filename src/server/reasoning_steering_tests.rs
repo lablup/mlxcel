@@ -183,6 +183,12 @@ fn thinking_off_alone_selects_none() {
         ),
         Ok(Some("high".into()))
     );
+    // So does a portable `reasoning: true`, which the render maps onto
+    // `enable_thinking: true` over the server default.
+    assert_eq!(
+        resolve_with_default(json!({"reasoning": true}), Some(&server_off)),
+        Ok(Some("high".into()))
+    );
 }
 
 #[test]
