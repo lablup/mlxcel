@@ -125,6 +125,18 @@ fn an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc() {
 }
 
 #[test]
+fn an_emitter_loadable_plamo2_gets_no_prompt_cache_or_apc() {
+    let config = include_str!("../lib/mlxcel-xla/assets/plamo2/config.json");
+    assert_eq!(
+        mlxcel_xla::config_json_has_recurrent_state(config),
+        Ok(true)
+    );
+    let dir = model_dir(config);
+    assert_eq!(xla_recurrent_family(dir.path()).as_deref(), Some("plamo2"));
+    assert_refused(dir.path(), "tiny plamo2 hybrid");
+}
+
+#[test]
 fn an_attention_model_keeps_its_store_and_apc() {
     let dir = model_dir(TINY_LLAMA);
     assert!(xla_recurrent_family(dir.path()).is_none());

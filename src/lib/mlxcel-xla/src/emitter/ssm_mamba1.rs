@@ -163,7 +163,9 @@ pub(crate) fn diag_scan_prefill(
 fn kind(c: &SsmConfig) -> (usize, bool) {
     match c.kind {
         SsmKind::Mamba1 { dt_rank, bcdt_norm } => (dt_rank, bcdt_norm),
-        SsmKind::Mamba2 => panic!("Mamba1 mixer requires SsmKind::Mamba1"),
+        SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
+            panic!("Mamba1 mixer requires SsmKind::Mamba1")
+        }
     }
 }
 

@@ -1181,7 +1181,13 @@ fn refuse_unstacked_expert_sidecars(
 /// 32), and those are the only bias-free modes MLX has. `None` for float
 /// scales or any other ratio, which the caller leaves on the affine path to
 /// refuse.
-fn infer_block_float_layout(weight: &MlxArray, scales: &MlxArray) -> Option<(&'static str, i32)> {
+///
+/// Used by: [`resolve_mode`], and Raon1Mini's dense linears and `lm_head`
+/// (`raon1_mini_quant::linear`)
+pub(crate) fn infer_block_float_layout(
+    weight: &MlxArray,
+    scales: &MlxArray,
+) -> Option<(&'static str, i32)> {
     if mlxcel_core::array_dtype(scales) != mlxcel_core::dtype::UINT8 {
         return None;
     }
@@ -1328,7 +1334,8 @@ pub(crate) fn refuse_mismatched_expert_parts(
 /// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), Nemotron-H
 /// (`NemotronHModel::sanitize_weights`), Gemma 4's
 /// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), ERNIE 4.5 text
-/// (`Ernie45MoeModel::prepare_checkpoint_weights`), and Kolibri-1 (`kolibri1_weights::sanitize_weights`)
+/// (`Ernie45MoeModel::prepare_checkpoint_weights`), Kolibri-1 (`kolibri1_weights::sanitize_weights`),
+/// and Raon1Mini's ModelOpt NVFP4 experts (`raon1_mini_quant::sanitize_export`)
 pub(crate) fn drain_numbered_expert_planes(
     weights: &mut WeightMap,
     experts_root: &str,
@@ -2188,7 +2195,7 @@ impl SwitchGLU {
     /// Kimi K3, from a `compressed-tensors` `mxfp4-pack-quantized` export
     /// (uint32 packed codes and uint8 E8M0 scales, no biases).
     ///
-    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4), Raon1Mini (mxfp8).
+    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4).
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,

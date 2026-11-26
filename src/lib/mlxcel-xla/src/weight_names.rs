@@ -198,6 +198,32 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             post_attention_layernorm: "pre_ff_layernorm.weight",
             ..scheme_names(WeightScheme::Llama)
         },
+        // PLaMo 2 (issue #3347): `model.layers.layers.{i}` blocks with four
+        // offset norms around a `mixer` (attention or Mamba) and a fused MLP.
+        // The q/k/v and gate/up names are row-sliced from the fused
+        // `mixer.qkv_proj` / `mlp.gate_up_proj` (`weights::fused_qkv_name`).
+        WeightScheme::Plamo2 => SchemeNames {
+            embed: "model.embed_tokens.weight",
+            final_norm: "model.norm.weight",
+            lm_head: "lm_head.weight",
+            layer_stem: "model.layers.layers.",
+            down: "mlp.down_proj.weight",
+            gate: "mlp.gate_up_proj.weight",
+            input_layernorm: "pre_mixer_norm.weight",
+            post_attention_layernorm: "post_mixer_norm.weight",
+            up: "mlp.gate_up_proj.weight",
+            k_proj: "mixer.qkv_proj.weight",
+            o_proj: "mixer.o_proj.weight",
+            q_proj: "mixer.qkv_proj.weight",
+            v_proj: "mixer.qkv_proj.weight",
+            k_bias: "unused.k_bias",
+            q_bias: "unused.q_bias",
+            v_bias: "unused.v_bias",
+            q_norm: "mixer.q_weight",
+            k_norm: "mixer.k_weight",
+            pre_ff_norm: "pre_mlp_norm.weight",
+            post_ff_norm: "post_mlp_norm.weight",
+        },
         WeightScheme::NemotronH => SchemeNames {
             down: "mixer.down_proj.weight",
             up: "mixer.up_proj.weight",

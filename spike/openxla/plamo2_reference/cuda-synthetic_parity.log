@@ -1,0 +1,6 @@
+running 1 test
+hybrid: single-sequence tokens exact; worst ragged |logit delta| 1.001e-5
+test plamo2_synthetic_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.54s
+
