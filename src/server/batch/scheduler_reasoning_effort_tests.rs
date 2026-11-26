@@ -15,8 +15,14 @@
 //! The scheduler hands each request's model-side reasoning effort to its
 //! sequence (#3435), on the tiny random Raon-1 mini with one steered layer:
 //! admission sets it before prefill, an unknown level fails only that
-//! request, and two concurrent requests at different efforts decode the same
-//! greedy tokens as each run alone.
+//! request, two concurrent requests at different efforts decode the same
+//! greedy tokens as each run alone, and a preempted sequence keeps its level
+//! under its new id.
+//!
+//! The dropped-queued-adoption carry (`drop_queued_adoption`) is not driven
+//! here: it only picks requests holding paged blocks, and Raon-1 mini's
+//! model-owned layout has no paged layout, so the reclaim never selects one
+//! of its requests. The carry there guards a future paged steering model.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -165,4 +171,40 @@ fn concurrent_requests_at_different_efforts_decode_as_each_alone() {
     assert_eq!(both[0].len(), MAX_TOKENS);
     assert_eq!(both[0], solo_a, "the low-effort row");
     assert_eq!(both[1], solo_b, "the max-effort row");
+}
+
+#[test]
+fn preemption_carries_the_effort_to_the_new_sequence_id() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let mut sched = scheduler();
+    let rx = enqueue(&mut sched, &PROMPT_A, Some("low"));
+    match sched.decide_action() {
+        BatchSchedulerAction::Prefill(id) => {
+            sched.discard_lookahead();
+            sched.execute_prefill(id);
+        }
+        other => panic!("expected a prefill, got {other:?}"),
+    }
+    let old_id = sched
+        .active_batch
+        .iter_sequences()
+        .next()
+        .expect("the request is running")
+        .seq_id;
+    assert!(sched.preempt_sequence(old_id), "the row left the batch");
+
+    let new_id = sched
+        .prefill_queue
+        .peek()
+        .expect("the victim re-queued")
+        .seq_id;
+    assert_ne!(new_id, old_id);
+    let model = sched.engine.model();
+    assert_eq!(
+        model.sequence_reasoning_effort(new_id).as_deref(),
+        Some("low"),
+        "the re-prefill is steered at the admitted level"
+    );
+    assert_eq!(model.sequence_reasoning_effort(old_id), None);
+    assert_eq!(run(&mut sched, &[rx])[0].len(), MAX_TOKENS);
 }
