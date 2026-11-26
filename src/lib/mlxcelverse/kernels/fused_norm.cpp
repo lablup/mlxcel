@@ -446,21 +446,12 @@ std::vector<mlx::core::array> fused_add_rms_norm(
 #endif
 
 #ifdef MLXCEL_CUDA_OXIDE_FUSED_NORM
-    // Experimental cuda-oxide route (#2833), present only in a build with the
-    // `cuda-oxide-fused-norm` feature and taken only once a validated artifact
-    // is installed (`MLXCEL_CUDA_OXIDE_FUSED_NORM=1`). The adapter decides
-    // here, before anything is enqueued, and answers `nullopt` for every
-    // configuration it does not serve, which then takes the port below
-    // unchanged.
+    // Experimental cuda-oxide route (#2833): only in a build that opted in,
+    // and only once a validated artifact is installed. `nullopt` means the
+    // port below builds the node, unchanged. See `fused_norm_oxide.h`.
+    const auto oxide_rows = static_cast<std::size_t>(x.size() / dim);
     if (auto oxide = try_oxide_fused_add_rms_norm(
-            x,
-            residual,
-            weight,
-            eps,
-            weight_bias,
-            static_cast<std::size_t>(x.size() / dim),
-            dim,
-            threads)) {
+            x, residual, weight, eps, weight_bias, oxide_rows, dim, threads)) {
         return std::move(*oxide);
     }
 #endif

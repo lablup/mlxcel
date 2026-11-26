@@ -348,8 +348,8 @@ fn several_threads_can_drive_the_route_at_once() {
 
     install();
     let before = oxide::route_counters();
-    // Each thread builds its own arrays and evaluates on its own stream, as a
-    // request worker does.
+    // Each thread builds and evaluates its own arrays, as a request worker
+    // does.
     std::thread::scope(|scope| {
         for (i, (c, want)) in cases.iter().zip(&expected).enumerate() {
             scope.spawn(move || {

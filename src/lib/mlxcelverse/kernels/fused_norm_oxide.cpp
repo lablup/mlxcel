@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Compiled only with the `cuda-oxide-fused-norm` cargo feature on a Linux
-// CUDA build; see `fused_norm_oxide.h` for the contract and
-// `mlxcel-core/build.rs` for the gate.
+// Compiled only when the build sets MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1
+// (Linux CUDA); contract in `fused_norm_oxide.h`, gate in `mlxcel-core/build.rs`.
 
 #include "fused_norm_oxide.h"
 
@@ -176,10 +175,8 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
         auto& encoder = cu::get_command_encoder(s);
         auto& device = encoder.device();
 
-        // The route was chosen against device 0's capability. A node that ends
-        // up on a different device is an error here, not a reason to run PTX
-        // built for another target or to switch implementation after the
-        // graph was built.
+        // The route was chosen against device 0's capability. A node evaluated
+        // on a device of another architecture is an error, not a fallback.
         if (device.compute_capability_major() != artifact_->target_major ||
             device.compute_capability_minor() != artifact_->target_minor) {
             throw std::runtime_error(
@@ -283,10 +280,9 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
             }
         }
 
-        // Same registration order as `CustomKernel::eval_gpu`: inputs, outputs,
-        // temporaries, then the node. The encoder derives the node's graph
-        // dependencies from the registered buffers, and `gpu::eval` keeps the
-        // node's inputs and sibling outputs alive until the launch completes.
+        // Registration order of `CustomKernel::eval_gpu`. The encoder derives
+        // the graph dependencies from these buffers; `gpu::eval` keeps inputs
+        // and sibling outputs alive until the launch completes.
         encoder.set_input_array(x);
         encoder.set_input_array(residual);
         encoder.set_input_array(weight);

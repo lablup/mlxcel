@@ -23,10 +23,10 @@
 // `eval_gpu`, never at graph construction), output allocation, the command
 // encoder's dependency tracking and CUDA graph capture, and buffer lifetimes.
 //
-// It is compiled only when mlxcel-core is built with the
-// `cuda-oxide-fused-norm` cargo feature on a Linux CUDA build (the
-// `MLXCEL_CUDA_OXIDE_FUSED_NORM` define); `fused_norm.cpp` references nothing
-// here otherwise. Even then the route is taken only after the Rust side
+// It is compiled only when the mlxcel-core build sets
+// `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1` on Linux CUDA (which defines
+// `MLXCEL_CUDA_OXIDE_FUSED_NORM`); `fused_norm.cpp` references nothing here
+// otherwise. Even then the route is taken only after the Rust side
 // (`mlxcel_core::cuda_oxide_fused_norm`) has validated an artifact against its
 // manifests and installed it, which happens when
 // `MLXCEL_CUDA_OXIDE_FUSED_NORM=1` is set.

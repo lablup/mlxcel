@@ -93,6 +93,7 @@ GPU runs. `$LIB` is the `mlxcel_core` unit-test binary and `$LAYER` the `cuda_ox
 | 7 | `MLXCEL_FUSED_ADD_RMSNORM=1 MLXCEL_CUDA_OXIDE_FUSED_NORM=1 gpu-lock run --tag issue-2833 -- $LAYER --test-threads=1 --nocapture` | 1 passed: 2 cuda-oxide routes, 2 launches, 0 existing-kernel |
 | 8 | row 7 with `MLX_USE_CUDA_GRAPHS=0` | 1 passed: 2 cuda-oxide routes, 2 launches |
 | 9 | row 7 with `MLXCEL_CUDA_OXIDE_FUSED_NORM_DIR=$PWD/spike/cuda-oxide-fused-norm` | 1 passed: 2 cuda-oxide routes, 2 launches |
+| 10 | `gpu-lock run --tag issue-2833 -- $LIB --test-threads=1` (the whole opted-in lib binary, one process) | 2517 passed, 0 failed, 6 ignored, 396.72 s. Run on the commit before the `cuda_oxide_abi.rs` split, which moved code without changing it; rows 1, 2 and 7 were repeated after it. |
 
 The 28 tests of rows 1 and 2 are 12 artifact-validation tests that need no GPU, 7 execution tests, 8 fallback and fault tests, and the matrix. `cargo test -p mlxcel-mlx-pin cuda_oxide` (the build gate: SHA-256 vectors, the switch, staging, tampered PTX, wrong manifest, missing files) passed 8 of 8 without building MLX.
 
@@ -118,7 +119,9 @@ Each test computes its reference with the existing fused kernel on the same inpu
 | `outputs_survive_allocator_reuse` | 40 rounds over five shapes and dtype pairs with outputs dropped each round and the buffer cache cleared every ninth, while one early pair of outputs is held and re-read at the end. |
 | `inputs_and_sibling_outputs_dropped_by_the_caller_stay_alive` | The caller drops the inputs and one of the two outputs before evaluating the other, with `eval` and with `async_eval`. 16 x 8192 bf16. |
 | `non_contiguous_inputs_are_copied_like_the_existing_port_copies_them` | A transposed `x`, a `residual` that is an offset slice of a taller array, a `weight` sliced out of a longer vector. |
-| `several_threads_can_drive_the_route_at_once` | Four threads, each with its own arrays and stream, 25 evaluations each, four dtype pairs. 100 launches. |
+| `several_threads_can_drive_the_route_at_once` | Four threads, each building and evaluating its own arrays, 25 evaluations each, four dtype pairs. 100 launches. Which MLX stream each thread used was not inspected. |
+
+The captured-child-graph case was also inspected, not only compared. `MLX_SAVE_CUDA_GRAPHS_DOT_FILE=<prefix> MLXCEL_CUDA_GRAPHS_DOT_VERBOSE=1 gpu-lock run --tag issue-2833 -- $LIB joins_order_correctly_between_captured_child_graphs --test-threads=1` wrote one dump per committed graph. Each of the 12 cuda-oxide rounds is a single CUDA graph of seven nodes: three child graphs (the matmuls) and four kernel nodes, two of them `fused_add_rms_norm_f32`. Its edges are `0->1, 1->2, 1->3, 1->4, 2->3, 3->4, 3->5, 4->5, 4->6, 5->6` with node 0 the first matmul, node 1 the first join, nodes 2 and 4 the other matmuls and node 3 the second join. So the first join waits for the matmul that produces its input, both later matmuls wait for the join whose outputs they read, and the second join waits for both of its producers.
 
 ### Fallback and faults
 

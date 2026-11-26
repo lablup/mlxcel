@@ -4972,6 +4972,8 @@ mod fused_norm_parity_tests;
 // build script sets this cfg and stages the artifact; every other build
 // compiles none of it.
 #[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_abi;
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
 pub mod cuda_oxide_artifact;
 #[cfg(mlxcel_cuda_oxide_fused_norm)]
 pub mod cuda_oxide_fused_norm;

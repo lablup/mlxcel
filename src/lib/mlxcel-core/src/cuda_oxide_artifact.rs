@@ -35,6 +35,9 @@ use std::path::Path;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+pub use crate::cuda_oxide_abi::{ARG_COUNT, ArgRole, Lane};
+use crate::cuda_oxide_abi::{Argument, argument_roles};
+
 /// The manifest format this adapter reads.
 pub const MANIFEST_ID: &str = "mlxcel.cuda-oxide-fused-norm.manifest/v1";
 /// The ABI schema format this adapter reads.
@@ -55,140 +58,9 @@ pub const ENTRIES: [&str; 5] = [
     "fused_add_rms_norm_f16_wf32",
     "fused_add_rms_norm_bf16_wf32",
 ];
-/// Number of kernel parameters under ABI version 1.
-pub const ARG_COUNT: usize = 13;
 
 const GRID_RULE: &str = "rows";
 const BLOCK_RULE: &str = "fused_norm_threads(dim)";
-
-/// Element type of an activation or weight buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Lane {
-    F32,
-    F16,
-    Bf16,
-}
-
-impl Lane {
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "f32" => Some(Self::F32),
-            "f16" => Some(Self::F16),
-            "bf16" => Some(Self::Bf16),
-            _ => None,
-        }
-    }
-
-    /// How the kernel sees one element: 16-bit lanes travel as bit patterns.
-    fn pointee(self) -> &'static str {
-        match self {
-            Self::F32 => "f32",
-            Self::F16 | Self::Bf16 => "u16",
-        }
-    }
-
-    /// The MLX dtype of a buffer with this element type.
-    #[must_use]
-    pub fn mlx_dtype(self) -> i32 {
-        match self {
-            Self::F32 => crate::dtype::FLOAT32,
-            Self::F16 => crate::dtype::FLOAT16,
-            Self::Bf16 => crate::dtype::BFLOAT16,
-        }
-    }
-
-    /// Wire code of `mlxcel_oxide_fused_norm_install` (`fused_norm_oxide.cpp`).
-    pub(crate) fn code(self) -> i32 {
-        match self {
-            Self::F32 => 0,
-            Self::F16 => 1,
-            Self::Bf16 => 2,
-        }
-    }
-}
-
-/// What one kernel parameter carries. The discriminants are the wire format of
-/// `mlxcel_oxide_fused_norm_install` and mirror `Role` in
-/// `fused_norm_oxide.cpp`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum ArgRole {
-    XPtr = 0,
-    XLen = 1,
-    ResidualPtr = 2,
-    ResidualLen = 3,
-    WeightPtr = 4,
-    WeightLen = 5,
-    Eps = 6,
-    WeightBias = 7,
-    Dim = 8,
-    NormedPtr = 9,
-    NormedLen = 10,
-    NewResidualPtr = 11,
-    NewResidualLen = 12,
-}
-
-/// Which buffer a pointer or length parameter belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Buffer {
-    Activation,
-    Weight,
-}
-
-/// What the ABI requires of a parameter with a given role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Expect {
-    Pointer {
-        buffer: Buffer,
-        write: bool,
-        length: ArgRole,
-    },
-    Length,
-    Scalar(&'static str),
-}
-
-impl ArgRole {
-    fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "x_ptr" => Self::XPtr,
-            "x_len" => Self::XLen,
-            "residual_ptr" => Self::ResidualPtr,
-            "residual_len" => Self::ResidualLen,
-            "weight_ptr" => Self::WeightPtr,
-            "weight_len" => Self::WeightLen,
-            "eps" => Self::Eps,
-            "weight_bias" => Self::WeightBias,
-            "dim" => Self::Dim,
-            "normed_ptr" => Self::NormedPtr,
-            "normed_len" => Self::NormedLen,
-            "new_residual_ptr" => Self::NewResidualPtr,
-            "new_residual_len" => Self::NewResidualLen,
-            _ => return None,
-        })
-    }
-
-    fn expect(self) -> Expect {
-        let pointer = |buffer, write, length| Expect::Pointer {
-            buffer,
-            write,
-            length,
-        };
-        match self {
-            Self::XPtr => pointer(Buffer::Activation, false, Self::XLen),
-            Self::ResidualPtr => pointer(Buffer::Activation, false, Self::ResidualLen),
-            Self::WeightPtr => pointer(Buffer::Weight, false, Self::WeightLen),
-            Self::NormedPtr => pointer(Buffer::Activation, true, Self::NormedLen),
-            Self::NewResidualPtr => pointer(Buffer::Activation, true, Self::NewResidualLen),
-            Self::XLen
-            | Self::ResidualLen
-            | Self::WeightLen
-            | Self::NormedLen
-            | Self::NewResidualLen => Expect::Length,
-            Self::Eps | Self::WeightBias => Expect::Scalar("f32"),
-            Self::Dim => Expect::Scalar("u32"),
-        }
-    }
-}
 
 /// One entry point of the module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,23 +120,6 @@ pub enum ArtifactError {
     Manifest { entry: String, detail: String },
     #[error("cuda-oxide ABI schema for {entry} disagrees with its manifest: {detail}")]
     Schema { entry: String, detail: String },
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Argument {
-    ordinal: usize,
-    name: String,
-    cuda_param_type: String,
-    width_bits: u32,
-    kind: String,
-    #[serde(default)]
-    pointee: Option<String>,
-    #[serde(default)]
-    access: Option<String>,
-    #[serde(default)]
-    unit: Option<String>,
-    #[serde(default)]
-    length_argument: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -549,79 +404,4 @@ pub fn validate(
         compiler_revision,
         entries,
     })
-}
-
-/// Map the manifest's argument list to roles, refusing anything the packing in
-/// `fused_norm_oxide.cpp` would get wrong: a missing or repeated parameter, a
-/// width other than the one the role is packed with, a buffer of another
-/// element type, or a pointer whose length parameter is not its own.
-fn argument_roles(
-    arguments: &[Argument],
-    activation: Lane,
-    weight: Lane,
-) -> Result<[ArgRole; ARG_COUNT], String> {
-    if arguments.len() != ARG_COUNT {
-        return Err(format!(
-            "{} kernel parameters, the adapter packs {ARG_COUNT}",
-            arguments.len()
-        ));
-    }
-    let mut roles = Vec::with_capacity(ARG_COUNT);
-    for (index, arg) in arguments.iter().enumerate() {
-        if arg.ordinal != index {
-            return Err(format!(
-                "parameter {index} has ordinal {} (not in order)",
-                arg.ordinal
-            ));
-        }
-        let role = ArgRole::from_name(&arg.name)
-            .ok_or_else(|| format!("unknown parameter {:?}", arg.name))?;
-        if roles.contains(&role) {
-            return Err(format!("parameter {:?} appears twice", arg.name));
-        }
-        roles.push(role);
-    }
-    for (arg, role) in arguments.iter().zip(&roles) {
-        let wrong = |what: &str| format!("parameter {:?} {what}", arg.name);
-        let is = |ty: &str, bits: u32, kind: &str| {
-            arg.cuda_param_type == ty && arg.width_bits == bits && arg.kind == kind
-        };
-        match role.expect() {
-            Expect::Pointer {
-                buffer,
-                write,
-                length,
-            } => {
-                let lane = match buffer {
-                    Buffer::Activation => activation,
-                    Buffer::Weight => weight,
-                };
-                if !is("u64", 64, "device_pointer") {
-                    return Err(wrong("is not a 64-bit device pointer"));
-                }
-                if arg.pointee.as_deref() != Some(lane.pointee()) {
-                    return Err(wrong("points at another element type"));
-                }
-                if arg.access.as_deref() != Some(if write { "write" } else { "read" }) {
-                    return Err(wrong("has the wrong access"));
-                }
-                if arg.length_argument.and_then(|i| roles.get(i)) != Some(&length) {
-                    return Err(wrong("is not paired with its own length"));
-                }
-            }
-            Expect::Length => {
-                if !is("u64", 64, "length") || arg.unit.as_deref() != Some("elements") {
-                    return Err(wrong("is not a 64-bit element count"));
-                }
-            }
-            Expect::Scalar(ty) => {
-                if !is(ty, 32, "value") {
-                    return Err(wrong("has the wrong scalar type"));
-                }
-            }
-        }
-    }
-    roles
-        .try_into()
-        .map_err(|_| "parameter count changed during validation".to_string())
 }
