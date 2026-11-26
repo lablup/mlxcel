@@ -93,12 +93,9 @@ mod greedy_margin {
             .collect()
     }
 
-    fn render_prompt(
-        model_dir: &Path,
-        tokenizer: &MlxcelTokenizer,
-        user_prompt: &str,
-    ) -> String {
-        let Some(processor) = crate::server::chat_front::load_model_chat_template(model_dir, tokenizer)
+    fn render_prompt(model_dir: &Path, tokenizer: &MlxcelTokenizer, user_prompt: &str) -> String {
+        let Some(processor) =
+            crate::server::chat_front::load_model_chat_template(model_dir, tokenizer)
         else {
             return user_prompt.to_string();
         };
@@ -128,7 +125,7 @@ mod greedy_margin {
         eval(&array);
         mlxcel_core::array_to_raw_bytes(&array)
             .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
             .collect()
     }
 
@@ -212,10 +209,8 @@ mod greedy_margin {
         let preprocessor = crate::load_xla_image_preprocessor(model_dir)
             .map_err(|error| format!("load_xla_image_preprocessor: {error}"))?
             .ok_or("the loaded runtime bundle does not support image input")?;
-        let request = crate::prepare_image_prefill(preprocessor.as_ref(), &prompt_ids, &[
-            image,
-        ])
-        .map_err(|error| format!("prepare_image_prefill: {error}"))?;
+        let request = crate::prepare_image_prefill(preprocessor.as_ref(), &prompt_ids, &[image])
+            .map_err(|error| format!("prepare_image_prefill: {error}"))?;
         let prepared = match &request {
             crate::PreparedImagePrefill::Standard(prepared) => prepared,
             crate::PreparedImagePrefill::DeepStack(_) => {
@@ -225,13 +220,10 @@ mod greedy_margin {
         let sequence_len = prepared.sequence_len;
         let steps = teacher_tokens.len();
         let capacity = sequence_len + steps + 8;
-        let mut engine =
-            mlxcel_xla::XlaPreparedPrefillLogits::load_with_context_capacity(
-                model_dir,
-                &device,
-                capacity,
-            )
-            .map_err(|error| format!("load IREE runtime bundle: {error}"))?;
+        let mut engine = mlxcel_xla::XlaPreparedPrefillLogits::load_with_context_capacity(
+            model_dir, &device, capacity,
+        )
+        .map_err(|error| format!("load IREE runtime bundle: {error}"))?;
         let prefill = engine
             .prefill_logits(prepared)
             .map_err(|error| format!("prefill_logits: {error}"))?;
@@ -274,15 +266,16 @@ mod greedy_margin {
         let image_binding =
             std::env::var("MLXCEL_GEMMA3_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
         let image_path = Path::new(&image_binding);
-        let user_prompt =
-            std::env::var("MLXCEL_GREEDY_MARGIN_PROMPT").unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
+        let user_prompt = std::env::var("MLXCEL_GREEDY_MARGIN_PROMPT")
+            .unwrap_or_else(|_| DEFAULT_PROMPT.to_string());
         let steps = std::env::var("MLXCEL_GREEDY_MARGIN_STEPS")
             .ok()
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(DEFAULT_STEPS);
         assert!(steps >= 2 && steps <= MAX_STEPS);
 
-        let (loaded, tokenizer) = crate::load_model(model_dir).expect("load pinned Gemma3 checkpoint");
+        let (loaded, tokenizer) =
+            crate::load_model(model_dir).expect("load pinned Gemma3 checkpoint");
         let eager = eager_greedy_margins(
             &loaded,
             &tokenizer,
@@ -326,7 +319,8 @@ mod greedy_margin {
             let mut sorted_right = right_set;
             sorted_right.sort_unstable();
             assert_eq!(
-                sorted_left, sorted_right,
+                sorted_left,
+                sorted_right,
                 "top-2 candidate sets diverged at step {step}: eager {left_set:?} ({:.6} margin) vs xla {right_set:?} ({:.6} margin)",
                 left.top1_value - left.runner_up_value,
                 right.top1_value - right.runner_up_value

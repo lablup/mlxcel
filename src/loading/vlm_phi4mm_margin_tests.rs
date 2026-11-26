@@ -158,7 +158,11 @@ mod vision_bisect {
         let activated = mlxcel_core::gelu_approx(&projected);
         let output = linear2.forward(&activated);
         let projected_values = array_to_f32(&output, "projected image");
-        (selected_refs(&selected_features), vec![pooled_refs], projected_values)
+        (
+            selected_refs(&selected_features),
+            vec![pooled_refs],
+            projected_values,
+        )
     }
 
     fn selected_refs(features: &[UniquePtr<MlxArray>]) -> Vec<Vec<f32>> {
@@ -187,8 +191,7 @@ mod vision_bisect {
             let mut col_segments: Vec<UniquePtr<MlxArray>> = Vec::new();
             for cw in 0..w_crops {
                 let crop_idx = ch * w_crops + cw;
-                let reshaped =
-                    mlxcel_core::reshape(&features[crop_idx], &[pg, pg, vision_dim]);
+                let reshaped = mlxcel_core::reshape(&features[crop_idx], &[pg, pg, vision_dim]);
                 col_segments.push(reshaped);
             }
             let row = concat_arrays_axis(&col_segments, 1);
@@ -211,10 +214,7 @@ mod vision_bisect {
         mlxcel_core::reshape(&with_separator, &[1, useful_h * (useful_w + 1), vision_dim])
     }
 
-    fn concat_arrays_axis(
-        arrays: &[UniquePtr<MlxArray>],
-        axis: i32,
-    ) -> UniquePtr<MlxArray> {
+    fn concat_arrays_axis(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniquePtr<MlxArray> {
         let mut output = mlxcel_core::copy(&arrays[0]);
         for array in &arrays[1..] {
             output = mlxcel_core::concatenate(&output, array, axis);
@@ -235,8 +235,7 @@ mod vision_bisect {
         let spatial = mlxcel_core::reshape(features, &[og, og, dim]);
         let transposed = mlxcel_core::transpose_axes(&spatial, &[2, 0, 1]);
         let batched = mlxcel_core::reshape(&transposed, &[dim, 1, og, og]);
-        let blocked =
-            mlxcel_core::reshape(&batched, &[dim, 1, tg, pool_size, tg, pool_size]);
+        let blocked = mlxcel_core::reshape(&batched, &[dim, 1, tg, pool_size, tg, pool_size]);
         let mean = mlxcel_core::mean_axis(&blocked, 5, true);
         let mean = mlxcel_core::mean_axis(&mean, 3, true);
         let squeezed = mlxcel_core::reshape(&mean, &[dim, tg, tg]);
@@ -256,7 +255,8 @@ mod vision_bisect {
         let image_path = Path::new(&image_binding);
         let image = image::open(image_path).expect("load the fixture image");
 
-        let (loaded, _tokenizer) = crate::load_model(model_dir).expect("load pinned Phi4MM checkpoint");
+        let (loaded, _tokenizer) =
+            crate::load_model(model_dir).expect("load pinned Phi4MM checkpoint");
         let inner = match &loaded {
             LoadedModel::Phi4MMVLM(inner) => inner,
             _ => panic!("pinned checkpoint did not load as Phi4MMVLM"),
@@ -270,18 +270,16 @@ mod vision_bisect {
         // Stage 1: preprocessing. Deterministic CPU code, so any difference is
         // a preprocessing defect.
         let eager_processed = inner.processor.preprocess(std::slice::from_ref(&image));
-        let xla_processed = components.processor.preprocess(std::slice::from_ref(&image));
+        let xla_processed = components
+            .processor
+            .preprocess(std::slice::from_ref(&image));
         assert_eq!(
             eager_processed.len(),
             xla_processed.len(),
             "the processors produced different image counts"
         );
         let mut first_divergence: Option<String> = None;
-        for (index, (left, right)) in eager_processed
-            .iter()
-            .zip(&xla_processed)
-            .enumerate()
-        {
+        for (index, (left, right)) in eager_processed.iter().zip(&xla_processed).enumerate() {
             assert_eq!(left.crops.len(), right.crops.len());
             if left.image_grid != right.image_grid
                 || left.active_rows != right.active_rows

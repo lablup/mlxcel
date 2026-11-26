@@ -5866,11 +5866,7 @@ mod xla_canonical_diagnostics {
         // CPU oracle agrees there (854), while for the single-pass full
         // prefill it ranks 854 first by a 0.75-logit margin over 236798, a
         // cross-device close-ranking flip that is recorded, not gated.
-        // The pre-#2457 pins (236798/236789) were captured before that PR's
-        // shared-KV layer query-offset fix. Re-captured on main at 551039ee
-        // (MLX pin bff10220): the production-CUDA full prefill and its greedy
-        // continuation still rank 236798 first, so those two pins are
-        // unchanged. The prefix-decode top1 moved to 854 there; re-captured
+        // The prefix-decode top1 moved to 854 there; re-captured
         // again on GB10 at the fc344c98 MLX pin (#3134 advanced it three times
         // since 551039ee), the eager prefix-decode ranks 236798 first by a
         // 0.3125-logit margin over 854 (XLA agrees by 0.375), while the
