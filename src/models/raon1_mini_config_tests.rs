@@ -65,7 +65,22 @@ fn unsupported_configs_fail_by_name() {
         .unwrap(),
     )
     .unwrap();
-    let cases: [(&str, serde_json::Value, &str); 9] = [
+    let cases: [(&str, serde_json::Value, &str); 12] = [
+        (
+            "raon_global_scaled_linears",
+            serde_json::json!(["model.layers.1.moe.switch_mlp.gate_proj"]),
+            "raon_global_scaled_linears",
+        ),
+        (
+            "raon_merged_gate_up",
+            serde_json::json!(true),
+            "raon_merged_gate_up",
+        ),
+        (
+            "quantization",
+            serde_json::json!({"group_size": 16, "bits": 4, "mode": "nvfp4"}),
+            "`quantization` block",
+        ),
         (
             "raon_fused_mhc_decode",
             serde_json::json!(true),

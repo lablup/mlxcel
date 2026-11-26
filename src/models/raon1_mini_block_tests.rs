@@ -17,11 +17,12 @@
 
 use super::Raon1MiniModel;
 use super::tests::{
-    Fixture, HIDDEN, KERNEL, KV_LORA, MLA_HEADS, NOPE, Q_LORA, RDA_DIM, RDA_HEADS, ROPE, V_HEAD,
-    e4m3_bytes, raw_weights, tiny_config, values,
+    EXPERTS, Fixture, HIDDEN, KERNEL, KV_LORA, MLA_HEADS, NOPE, Q_LORA, RDA_DIM, RDA_HEADS, ROPE,
+    V_HEAD, e4m3_bytes, raw_weights, tiny_config, values,
 };
 use crate::models::kimi_k3::{KimiK3MLAAttention, NopeMlaSpec};
 use crate::models::raon_rda::{rda_core, rda_decay, write_ratio};
+use crate::models::raon1_mini_moe::{MoeSpec, RaonMoe};
 use crate::models::raon1_mini_sanitize::stack_mxfp8_experts;
 use crate::models::switch_layers::situ_activation;
 use mlxcel_core::layers::KVCache;
@@ -375,4 +376,71 @@ fn mxfp8_experts_are_viewed_without_changing_a_byte() {
             );
         }
     }
+}
+
+/// The router selects on `sigmoid(logits) + e_score_correction_bias` but
+/// weighs with the unbiased scores, renormalized with `1e-20` and scaled by
+/// `routed_scaling_factor`, as `Raon1MiniMoE` does.
+#[test]
+fn router_selects_on_biased_scores_and_weighs_with_unbiased_ones() {
+    let _guard = guard();
+    let mut f = Fixture::new(41);
+    f.moe("moe", false);
+    let mut weights = f.into_weights();
+    stack_mxfp8_experts(&mut weights, "moe", EXPERTS).unwrap();
+    // x = e_0, so the logits are column 0 of the router. Unbiased, experts 0
+    // and 1 lead; the bias lifts expert 2 above expert 1.
+    let logits = [2.0f32, 1.0, 0.5, -1.0];
+    let mut gate = vec![0.0f32; EXPERTS * HIDDEN];
+    for (e, &l) in logits.iter().enumerate() {
+        gate[e * HIDDEN] = l;
+    }
+    weights.insert(
+        "moe.gate.weight".into(),
+        arr(&gate, &[EXPERTS as i32, HIDDEN as i32]),
+    );
+    weights.insert(
+        "moe.gate.e_score_correction_bias".into(),
+        arr(&[0.0, 0.0, 1.0, 0.0], &[EXPERTS as i32]),
+    );
+    let mut x = vec![0.0f32; HIDDEN];
+    x[0] = 1.0;
+    let x = arr(&x, &[1, HIDDEN as i32]);
+
+    let route = |renormalize: bool, scale: f32| {
+        let spec = MoeSpec {
+            hidden_size: HIDDEN,
+            num_experts: EXPERTS,
+            top_k: 2,
+            renormalize,
+            routed_scaling_factor: scale,
+            situ_beta: 4.0,
+            situ_linear_beta: 25.0,
+            has_shared_expert: true,
+        };
+        let moe = RaonMoe::from_weights(&weights, "moe", spec).expect("moe loads");
+        let (idx, w) = moe.route(&x);
+        assert_eq!(mlxcel_core::array_dtype(&w), dtype::FLOAT32);
+        let mut pairs: Vec<(i32, f32)> = values(&idx)
+            .iter()
+            .map(|&i| i as i32)
+            .zip(values(&w))
+            .collect();
+        pairs.sort_by_key(|p| p.0);
+        pairs
+    };
+
+    let (s0, s2) = (sig(2.0), sig(0.5));
+    let got = route(true, 2.5);
+    assert_eq!(got.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0, 2]);
+    let sum = s0 + s2 + 1e-20;
+    assert!((got[0].1 as f64 - 2.5 * s0 / sum).abs() < 1e-5, "{got:?}");
+    assert!((got[1].1 as f64 - 2.5 * s2 / sum).abs() < 1e-5, "{got:?}");
+
+    // Without renormalization and scaling the weights are the raw scores,
+    // never the biased selection values.
+    let raw = route(false, 1.0);
+    assert_eq!(raw.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0, 2]);
+    assert!((raw[0].1 as f64 - s0).abs() < 1e-6, "{raw:?}");
+    assert!((raw[1].1 as f64 - s2).abs() < 1e-6, "{raw:?}");
 }
