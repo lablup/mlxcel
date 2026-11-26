@@ -1,0 +1,339 @@
+warning: mlxcel-core@0.9.0-beta.2: In file included from cpp/mlx_cxx_bridge.cpp:11:
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.9.0-beta.2:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.9.0-beta.2:       |                                         ^
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp: In lambda function:
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:4028:24: note: parameter passing for argument of type 'std::pair<double, double>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.9.0-beta.2:  4028 |                 ref_rms);
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp: At global scope:
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:4457:24: warning: 'mlx_cxx::{anonymous}::ADD3_LN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:  4457 |     static const char* ADD3_LN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:3694:24: warning: 'mlx_cxx::{anonymous}::MOE_FC1_RELU2_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:  3694 |     static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:3516:24: warning: 'mlx_cxx::{anonymous}::MOE_DOWN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:  3516 |     static const char* MOE_DOWN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:3379:24: warning: 'mlx_cxx::{anonymous}::MOE_GATEUP_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:  3379 |     static const char* MOE_GATEUP_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:2760:24: warning: 'mlx_cxx::{anonymous}::MAMBA1_SCAN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:  2760 |     static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:754:24: warning: 'mlx_cxx::{anonymous}::SSM_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:   754 |     static const char* SSM_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:457:24: warning: 'mlx_cxx::{anonymous}::XIELU_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:   457 |     static const char* XIELU_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_kernels.cpp:159:24: warning: 'mlx_cxx::{anonymous}::BITLINEAR_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.9.0-beta.2:   159 |     static const char* BITLINEAR_HIP_SOURCE = R"(
+warning: mlxcel-core@0.9.0-beta.2:       |                        ^~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp: In function 'void mlx_cxx::nemotron_decode_step(uint64_t, const MlxArray&, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const int>, std::unique_ptr<MlxArray>&, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >)':
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:189:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   189 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.9.0-beta.2:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:188:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.9.0-beta.2:   188 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |          ^~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:189:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   189 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.9.0-beta.2:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:188:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.9.0-beta.2:   188 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |          ^~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:277:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   277 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.9.0-beta.2:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:276:22: note: 'ks' declared here
+warning: mlxcel-core@0.9.0-beta.2:   276 |                 auto ks = k.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |                      ^~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:277:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   277 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.9.0-beta.2:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:276:22: note: 'ks' declared here
+warning: mlxcel-core@0.9.0-beta.2:   276 |                 auto ks = k.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |                      ^~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:281:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   281 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.9.0-beta.2:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:280:22: note: 'vs' declared here
+warning: mlxcel-core@0.9.0-beta.2:   280 |                 auto vs = v.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |                      ^~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:281:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.9.0-beta.2:   281 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.9.0-beta.2:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.9.0-beta.2: cpp/mlx_cxx_nemotron.cpp:280:22: note: 'vs' declared here
+warning: mlxcel-core@0.9.0-beta.2:   280 |                 auto vs = v.shape();
+warning: mlxcel-core@0.9.0-beta.2:       |                      ^~
+warning: mlxcel-core@0.9.0-beta.2: In file included from /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/fast_primitives.h:7,
+warning: mlxcel-core@0.9.0-beta.2:                  from cpp/mlx_cxx_window_sdpa.cpp:32:
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.9.0-beta.2:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.9.0-beta.2:       |                                         ^
+warning: mlxcel-core@0.9.0-beta.2: In file included from ../mlxcelverse/kernels/kv_inplace_write.cpp:23:
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.9.0-beta.2: /tmp/falcon-h1-rope-fix/target/test-fast/build/mlxcel-core-b7f5bda92b52ad32/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.9.0-beta.2:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.9.0-beta.2:       |                                         ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:81,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:11,
+warning: mlxcel-xla@0.9.0-beta.2:                  from csrc/xla_iree.c:34:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_host_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:230:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   230 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_device_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:246:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   246 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/queue.h:13,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/buffer.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/allocator.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/api.h:12,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:12:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_make_f32_from_bits':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:333:15: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   333 |   if (src_exp == src_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |               ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:344:24: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   344 |       if (src_mantissa == src_mantissa_mask && !nan_as_neg_zero) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                        ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:348:49: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   348 |   } else if (have_nan && nan_as_neg_zero && src == src_sign_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                                 ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_truncate_f32_to_bits_rounding_to_nearest_even':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:474:37: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   474 |       if (!have_infinity && dst_exp > dst_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                     ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/api.h:19,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:13:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h: In function 'iree_vm_abi_v_reset':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h:168:57: warning: unused parameter 'value' [-Wunused-parameter]
+warning: mlxcel-xla@0.9.0-beta.2:   168 | static inline void iree_vm_abi_v_reset(iree_vm_abi_v_t* value) {}
+warning: mlxcel-xla@0.9.0-beta.2:       |                                        ~~~~~~~~~~~~~~~~~^~~~~
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:93:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h: At top level:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h:318:14: warning: 'iree_tracing_obscure_ptr' defined but not used [-Wunused-function]
+warning: mlxcel-xla@0.9.0-beta.2:   318 | static void* iree_tracing_obscure_ptr(void* ptr) { return ptr; }
+warning: mlxcel-xla@0.9.0-beta.2:       |              ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:81,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:11,
+warning: mlxcel-xla@0.9.0-beta.2:                  from csrc/xla_aux.c:29:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_host_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:230:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   230 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_device_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:246:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   246 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/queue.h:13,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/buffer.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/allocator.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/api.h:12,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:12:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_make_f32_from_bits':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:333:15: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   333 |   if (src_exp == src_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |               ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:344:24: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   344 |       if (src_mantissa == src_mantissa_mask && !nan_as_neg_zero) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                        ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:348:49: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   348 |   } else if (have_nan && nan_as_neg_zero && src == src_sign_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                                 ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_truncate_f32_to_bits_rounding_to_nearest_even':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:474:37: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   474 |       if (!have_infinity && dst_exp > dst_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                     ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/api.h:19,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:13:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h: In function 'iree_vm_abi_v_reset':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h:168:57: warning: unused parameter 'value' [-Wunused-parameter]
+warning: mlxcel-xla@0.9.0-beta.2:   168 | static inline void iree_vm_abi_v_reset(iree_vm_abi_v_t* value) {}
+warning: mlxcel-xla@0.9.0-beta.2:       |                                        ~~~~~~~~~~~~~~~~~^~~~~
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:93:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h: At top level:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h:318:14: warning: 'iree_tracing_obscure_ptr' defined but not used [-Wunused-function]
+warning: mlxcel-xla@0.9.0-beta.2:   318 | static void* iree_tracing_obscure_ptr(void* ptr) { return ptr; }
+warning: mlxcel-xla@0.9.0-beta.2:       |              ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:81,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:11,
+warning: mlxcel-xla@0.9.0-beta.2:                  from csrc/xla_local_task.h:21,
+warning: mlxcel-xla@0.9.0-beta.2:                  from csrc/xla_local_task.c:32:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_host_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:229:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   229 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:230:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   230 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h: In function 'iree_device_size_floor_div':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:31: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                               ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:245:44: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   245 |   return ((lhs != 0) && ((lhs < 0) != (rhs < 0)))
+warning: mlxcel-xla@0.9.0-beta.2:       |                                            ^
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/alignment.h:246:32: warning: comparison of unsigned expression in '< 0' is always false [-Wtype-limits]
+warning: mlxcel-xla@0.9.0-beta.2:   246 |              ? -((-lhs + ((rhs < 0) ? 1 : -1)) / rhs) - 1
+warning: mlxcel-xla@0.9.0-beta.2:       |                                ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/queue.h:13,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/buffer.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/allocator.h:14,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/hal/api.h:12,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:12:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_make_f32_from_bits':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:333:15: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   333 |   if (src_exp == src_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |               ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:344:24: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   344 |       if (src_mantissa == src_mantissa_mask && !nan_as_neg_zero) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                        ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:348:49: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   348 |   } else if (have_nan && nan_as_neg_zero && src == src_sign_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                                 ^~
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h: In function 'iree_math_truncate_f32_to_bits_rounding_to_nearest_even':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/internal/math.h:474:37: warning: comparison of integer expressions of different signedness: 'uint32_t' {aka 'unsigned int'} and 'int' [-Wsign-compare]
+warning: mlxcel-xla@0.9.0-beta.2:   474 |       if (!have_infinity && dst_exp > dst_exp_mask) {
+warning: mlxcel-xla@0.9.0-beta.2:       |                                     ^
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/api.h:19,
+warning: mlxcel-xla@0.9.0-beta.2:                  from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/runtime/api.h:13:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h: In function 'iree_vm_abi_v_reset':
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/vm/shims.h:168:57: warning: unused parameter 'value' [-Wunused-parameter]
+warning: mlxcel-xla@0.9.0-beta.2:   168 | static inline void iree_vm_abi_v_reset(iree_vm_abi_v_t* value) {}
+warning: mlxcel-xla@0.9.0-beta.2:       |                                        ~~~~~~~~~~~~~~~~~^~~~~
+warning: mlxcel-xla@0.9.0-beta.2: In file included from /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/api.h:93:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h: At top level:
+warning: mlxcel-xla@0.9.0-beta.2: /home/inureyes/.cache/mlxcel/iree-cuda-3.12.0rc20260721/src/runtime/src/iree/base/tracing.h:318:14: warning: 'iree_tracing_obscure_ptr' defined but not used [-Wunused-function]
+warning: mlxcel-xla@0.9.0-beta.2:   318 | static void* iree_tracing_obscure_ptr(void* ptr) { return ptr; }
+warning: mlxcel-xla@0.9.0-beta.2:       |              ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4675:5
+     |
+4675 | /     pub fn prefill_prepared_slot_logits(
+4676 | |         &mut self,
+4677 | |         slot: usize,
+4678 | |         prepared: &PreparedIreePrefill,
+4679 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4812:5
+     |
+4812 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4813 | |         &mut self,
+4814 | |         slot: usize,
+4815 | |         prepared: &PreparedIreePrefill,
+4816 | |         deepstack: &PreparedDeepStack,
+4817 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedDeepStack` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4812:5
+     |
+4812 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4813 | |         &mut self,
+4814 | |         slot: usize,
+4815 | |         prepared: &PreparedIreePrefill,
+4816 | |         deepstack: &PreparedDeepStack,
+4817 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedDeepStack` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared_deepstack.rs:340:1
+     |
+ 340 | pub(crate) struct PreparedDeepStack {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4964:5
+     |
+4964 | /     pub fn prefill_gemma3n_prepared_slot_logits(
+4965 | |         &mut self,
+4966 | |         slot: usize,
+4967 | |         prepared: &PreparedIreePrefill,
+4968 | |         dense_ple: &Gemma3nDensePle,
+4969 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mlxcel-xla` (lib) generated 4 warnings
+    Finished `test-fast` profile [optimized] target(s) in 0.19s
+     Running tests/xla_falcon_h1.rs (target/test-fast/deps/xla_falcon_h1-bfd5e09d2af4c884)
+
+running 3 tests
+test falcon_h1_hf_synthetic_parity ... ok
+test falcon_h1_original_checkpoint_long_positions ... prefix   32 step 0 position   31: max_abs=3.147125e-5 argmax_match=true
+prefix  512 step 0 position  511: max_abs=3.862381e-5 argmax_match=true
+prefix 2048 step 0 position 2047: max_abs=4.959106e-5 argmax_match=true
+prefix 3584 step 0 position 3583: max_abs=9.059906e-5 argmax_match=true
+prefix   32 step 1 position   32: max_abs=3.051758e-5 argmax_match=true
+prefix  512 step 1 position  512: max_abs=2.670288e-5 argmax_match=true
+prefix 2048 step 1 position 2048: max_abs=6.580353e-5 argmax_match=true
+prefix 3584 step 1 position 3584: max_abs=7.438660e-5 argmax_match=true
+prefix   32 step 2 position   33: max_abs=9.727478e-5 argmax_match=true
+prefix  512 step 2 position  513: max_abs=4.196167e-5 argmax_match=true
+prefix 2048 step 2 position 2049: max_abs=4.959106e-5 argmax_match=true
+prefix 3584 step 2 position 3585: max_abs=5.245209e-5 argmax_match=true
+prefix   32 step 3 position   34: max_abs=2.479553e-5 argmax_match=true
+prefix  512 step 3 position  514: max_abs=5.722046e-5 argmax_match=true
+prefix 2048 step 3 position 2050: max_abs=4.386902e-5 argmax_match=true
+prefix 3584 step 3 position 3586: max_abs=5.531311e-5 argmax_match=true
+Falcon-H1 long-position logits match on cuda up to position 3584
+ok
+test falcon_h1_original_checkpoint_oracle_tokens ... Falcon-H1 40 oracle tokens match on cuda
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.96s
+

@@ -1,0 +1,27 @@
+     Running tests/xla_falcon_h1.rs (target/test-fast/deps/xla_falcon_h1-bfd5e09d2af4c884)
+
+running 3 tests
+test falcon_h1_hf_synthetic_parity ... ok
+test falcon_h1_original_checkpoint_long_positions ... prefix   32 step 0 position   31: max_abs=4.005432e-5 argmax_match=true
+prefix  512 step 0 position  511: max_abs=3.814697e-5 argmax_match=true
+prefix 2048 step 0 position 2047: max_abs=6.866455e-5 argmax_match=true
+prefix 3584 step 0 position 3583: max_abs=1.201630e-4 argmax_match=true
+prefix   32 step 1 position   32: max_abs=3.242493e-5 argmax_match=true
+prefix  512 step 1 position  512: max_abs=3.910065e-5 argmax_match=true
+prefix 2048 step 1 position 2048: max_abs=8.106232e-5 argmax_match=true
+prefix 3584 step 1 position 3584: max_abs=9.727478e-5 argmax_match=true
+prefix   32 step 2 position   33: max_abs=1.158714e-4 argmax_match=true
+prefix  512 step 2 position  513: max_abs=6.866455e-5 argmax_match=true
+prefix 2048 step 2 position 2049: max_abs=8.964539e-5 argmax_match=true
+prefix 3584 step 2 position 3585: max_abs=6.961823e-5 argmax_match=true
+prefix   32 step 3 position   34: max_abs=2.479553e-5 argmax_match=true
+prefix  512 step 3 position  514: max_abs=4.768372e-5 argmax_match=true
+prefix 2048 step 3 position 2050: max_abs=7.915497e-5 argmax_match=true
+prefix 3584 step 3 position 3586: max_abs=7.152557e-5 argmax_match=true
+Falcon-H1 long-position logits match on local-task up to position 3584
+ok
+test falcon_h1_original_checkpoint_oracle_tokens ... Falcon-H1 40 oracle tokens match on local-task
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.36s
+
