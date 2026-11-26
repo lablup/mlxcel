@@ -3076,6 +3076,26 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
 }
 
 /// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
+/// Refuse a `--reasoning-effort` level that the checkpoint's
+/// `reasoning_effort_steering` block does not accept, before the model loads.
+/// A model without that block (its template decides) and an absent flag pass.
+fn validate_cli_reasoning_effort(model_path: &Path, level: Option<&str>) -> Result<()> {
+    let Some(level) = level else {
+        return Ok(());
+    };
+    let steering =
+        mlxcel::models::reasoning_effort_steering::ReasoningEffortSteering::from_model_dir(
+            model_path,
+        )
+        .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
+    if let Some(steering) = steering {
+        steering
+            .normalize_level(level)
+            .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
+    }
+    Ok(())
+}
+
 fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
     let user_prompt = args
@@ -3145,6 +3165,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // `--audio` for a family with no audio encoder is refused before anything
     // loads, with the message the server gives (issue #3376).
     refuse_audio_without_encoder(&args.model.model, args.generation.audio.is_some())?;
+
+    // A level the model's steering block does not accept is refused here,
+    // from `config.json`, rather than after the weights load (#3435).
+    validate_cli_reasoning_effort(
+        &args.model.model,
+        args.generation.reasoning_effort.as_deref(),
+    )?;
 
     // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
     // its own timeline loop: `-p` is its system prompt and the output length
