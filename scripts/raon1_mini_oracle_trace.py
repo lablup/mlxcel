@@ -197,7 +197,9 @@ def run_generate(args) -> int:
             torch.tensor([list(ids)]),
             max_new_tokens=max_tokens,
             do_sample=False,
-            presence_penalty=None,
+            # 0.0, not None: None keeps generation_config.json's 1.5, which
+            # `Raon1MiniForCausalLM._get_logits_processor` applies even greedy.
+            presence_penalty=0.0,
             eos_token_id=[259202, 259200],
         )
     generated = out[0, len(ids) :].tolist()
