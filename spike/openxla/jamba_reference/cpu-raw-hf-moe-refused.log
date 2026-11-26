@@ -1,0 +1,5 @@
+Runtime device: CPU
+KV cache mode: fp16 (applied to 4 of 4 layers)
+Generating...
+tok4 tok17Error: checkpoint has no tensor model.layers.0.feed_forward.switch_mlp.gate_proj.weight
+exit=1

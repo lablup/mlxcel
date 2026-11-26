@@ -619,12 +619,18 @@
       "default": "0.00, 0.0 = disabled",
       "description": "repeat alpha presence penalty (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "supported",
-      "issue": 1436,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history).",
-      "divergence": [],
-      "rationale": null,
+      "state": "by_design",
+      "issue": 3457,
+      "test": "src/server/startup_tests.rs::generation_config_presence_penalty_is_the_server_default_unless_the_flag_is_set",
+      "notes": "Applied over the --repeat-last-n window since #1436 (previously the whole history). Since #3457, when the flag is absent the effective server default comes from the checkpoint's generation_config.json presence_penalty (resolve_generation_sampling_defaults, src/server/startup.rs), as --temp / --top-k / --top-p already do; a negative or non-numeric value is ignored. The flag-present behavior, including --presence-penalty 0, matches b10621. mlxcel generate keeps 0.0.",
+      "divergence": [
+        "With the flag absent the effective server default for presence_penalty comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults) rather than the clap default; b10621 always uses its compiled default (#3457)."
+      ],
+      "rationale": {
+        "kind": "policy",
+        "reason": "Transformers generate applies a checkpoint's generation_config.json presence_penalty on every step (Raon-1 ships 1.5), so serving the model at 0.0 silently departs from the behavior its authors validated; mlxcel already resolves the other absent sampling knobs from the same file. An operator who wants the b10621 default passes the flag, which then behaves identically to upstream.",
+        "revisit_if": "the project decides checkpoint generation_config.json defaults should not steer server-wide sampling, for example behind an explicit flag that restores b10621's compiled defaults."
+      },
       "mlxcel": {
         "accepted_spellings": [
           "--presence-penalty"

@@ -176,7 +176,11 @@ pub fn compute_g_lower_bounded(
     let Some(lower_bound) = lower_bound else {
         return compute_g(a_log, a, dt_bias);
     };
-    let a_plus_dt = mlxcel_core::add(a, dt_bias);
+    // Upcast `a` before the add (issue #3457). Metal promotes bf16 + f32 to
+    // f32 on its own, so this is the cast MLX already inserts there and the
+    // output is bit-identical; mlxcel's CUDA overlay types bf16 + f32 as bf16
+    // and rounded the sum before this cast.
+    let a_plus_dt = mlxcel_core::add(&mlxcel_core::astype(a, dtype::FLOAT32), dt_bias);
     let a_plus_dt = mlxcel_core::astype(&a_plus_dt, dtype::FLOAT32);
     let a_log_f32 = mlxcel_core::astype(a_log, dtype::FLOAT32);
     let exp_a_log = mlxcel_core::exp(&a_log_f32);

@@ -1,0 +1,25 @@
+{
+  "head": "76a3dc4c02789888d78b9e7e1dcdd77e34944feb",
+  "binary_source_head": "76a3dc4c02789888d78b9e7e1dcdd77e34944feb",
+  "server_ctx_size": 2048,
+  "checkpoint_revision": "7524370414253301341370beba35e3d549cbf5f3",
+  "model": "/tmp/epic564-models/jamba-3b",
+  "precision": "f32",
+  "device": "cuda",
+  "context_capacity_override": 256,
+  "max_batch_size": 4,
+  "http_mode": "both",
+  "scope": "CLI 40-token oracle and four concurrent completions versus separate 40-token displayed CLI references",
+  "gpu_guard": "caller must hold gpu-lock on GB10 or rocm_gpu_guard on ROCm",
+  "binary_sha256": {
+    "mlxcel": "82103aee68017c905bf72b8d253258575142fccf7ebfd9b90f8433c5ad7d4707",
+    "mlxcel-server": "fc838ea4e491c9f4ae704ccff9b3b362c828cf15cb73dc88ea76d4696d83ebb9"
+  },
+  "environment": {
+    "MLXCEL_BACKEND": "xla",
+    "MLXCEL_XLA_DEVICE": "cuda",
+    "MLXCEL_XLA_PRECISION": "f32",
+    "MLXCEL_XLA_CONTEXT_CAPACITY": "256",
+    "MLXCEL_CACHE_DIR": "/tmp/epic564-plan/3349/cuda-cli-server/cache"
+  }
+}

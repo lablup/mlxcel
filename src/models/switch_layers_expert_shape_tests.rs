@@ -175,3 +175,35 @@ fn stack_individual_experts_reports_the_mismatch() {
         "{err}"
     );
 }
+
+/// A stacked expert plane whose scales cover fewer output rows than the
+/// weight is refused before `gather_qmm` can index past the scales buffer
+/// (issue #3457). The packing itself is self-consistent, so on a tree without
+/// the leading-axes check this loads.
+#[test]
+fn stacked_switch_linear_refuses_scales_with_fewer_rows_than_the_weight() {
+    let prefix = format!("{ROOT}.switch_mlp.down_proj");
+    let stacked = |scale_rows: i32| {
+        let mut weights = WeightMap::new();
+        weights.insert(
+            format!("{prefix}.weight"),
+            mlxcel_core::zeros(&[2, 64, 8], dtype::UINT32),
+        );
+        for leaf in ["scales", "biases"] {
+            weights.insert(
+                format!("{prefix}.{leaf}"),
+                mlxcel_core::zeros(&[2, scale_rows, 1], dtype::FLOAT16),
+            );
+        }
+        weights
+    };
+    let err = match SwitchLinear::from_weights_with_mode(&stacked(32), &prefix, 64, 4, "affine") {
+        Ok(_) => panic!("short stacked scales must be refused"),
+        Err(err) => err,
+    };
+    assert!(err.contains(&format!("{prefix}.scales")), "{err}");
+    assert!(
+        SwitchLinear::from_weights_with_mode(&stacked(64), &prefix, 64, 4, "affine").is_ok(),
+        "matching stacked scales still load"
+    );
+}

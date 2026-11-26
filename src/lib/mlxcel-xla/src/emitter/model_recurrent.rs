@@ -305,7 +305,7 @@ pub(super) fn take_ssm_mixer_weights(
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
             })
         }
-        SsmKind::Mamba1 { dt_rank, .. } => {
+        SsmKind::Mamba1 { dt_rank, bcdt_norm } => {
             let x_proj = take_weight(
                 b,
                 decls,
@@ -324,6 +324,12 @@ pub(super) fn take_ssm_mixer_weights(
                 p("ssm.a_log"),
             );
             let d = take_arg(decls, idx, Ty::f32(vec![di]), p("ssm.d"));
+            let n = ssm.state_size;
+            let bcdt_norm_w = (bcdt_norm == BcdtNorm::Weighted).then(|| BcdtNormW {
+                dt: take_arg(decls, idx, Ty::f32(vec![dt_rank]), p("ssm.dt_norm_w")),
+                b: take_arg(decls, idx, Ty::f32(vec![n]), p("ssm.b_norm_w")),
+                c: take_arg(decls, idx, Ty::f32(vec![n]), p("ssm.c_norm_w")),
+            });
             SsmMixerW::Mamba1(Mamba1MixerW {
                 in_proj,
                 in_proj_b,
@@ -338,6 +344,7 @@ pub(super) fn take_ssm_mixer_weights(
                 out_proj_b: ssm
                     .use_bias
                     .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("ssm.out_proj_b"))),
+                bcdt_norm_w,
             })
         }
         SsmKind::Plamo2 { dt_rank } => {

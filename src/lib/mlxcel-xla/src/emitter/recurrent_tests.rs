@@ -17,7 +17,8 @@
 
 use super::builder::Precision;
 use super::config::{
-    Config, MixerKind, QuantConfig, SsmConfig, SsmKind, StateElem, StateTensorSpec, WeightScheme,
+    BcdtNorm, Config, MixerKind, QuantConfig, SsmConfig, SsmKind, StateElem, StateTensorSpec,
+    WeightScheme,
 };
 use super::model::{
     emit_decode, emit_decode_batched, emit_decode_with, emit_prefill, emit_prefill_embeddings,
@@ -117,8 +118,10 @@ fn mamba2_config_parses_ssm_schedule_and_state_abi() {
 
 #[test]
 fn mamba1_and_falcon_mamba_parse_diagonal_state_abi() {
-    for (model_type, bcdt_norm, norm_eps) in [("mamba", false, 1e-5), ("falcon_mamba", true, 1e-6)]
-    {
+    for (model_type, bcdt_norm, norm_eps) in [
+        ("mamba", BcdtNorm::None, 1e-5),
+        ("falcon_mamba", BcdtNorm::Weightless, 1e-6),
+    ] {
         let text = TINY_MAMBA1
             .replace(
                 r#""model_type": "mamba""#,
@@ -503,7 +506,7 @@ fn mamba2_prefill_and_decode_emit_at_every_precision() {
 /// Write a zero-filled F32 safetensors file whose header declares `shapes`
 /// with consistent data offsets. A shape too large to back with data (the
 /// hostile-dim cases) is declared with empty offsets instead.
-fn write_safetensors(path: &std::path::Path, shapes: &[(String, Vec<usize>)]) {
+pub(super) fn write_safetensors(path: &std::path::Path, shapes: &[(String, Vec<usize>)]) {
     let mut header = serde_json::Map::new();
     let mut offset = 0usize;
     for (name, shape) in shapes {

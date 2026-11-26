@@ -929,6 +929,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         repeat_last_n: args.repeat_last_n,
         repeat_penalty: args.repeat_penalty,
         presence_penalty: args.presence_penalty,
+        presence_penalty_was_set: long_cli_flag_was_set("presence-penalty"),
         frequency_penalty: args.frequency_penalty,
         dry_multiplier: args.dry_multiplier,
         dry_base: args.dry_base,

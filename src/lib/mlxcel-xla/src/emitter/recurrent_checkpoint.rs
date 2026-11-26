@@ -261,7 +261,10 @@ impl Config {
                 self.weight_scheme,
                 WeightScheme::Mamba2 | WeightScheme::NemotronH | WeightScheme::FalconH1
             ),
-            SsmKind::Mamba1 { .. } => self.weight_scheme == WeightScheme::Mamba1,
+            SsmKind::Mamba1 { .. } => matches!(
+                self.weight_scheme,
+                WeightScheme::Mamba1 | WeightScheme::Jamba
+            ),
             SsmKind::Plamo2 { .. } => self.weight_scheme == WeightScheme::Plamo2,
         };
         if !scheme_matches_kind {
@@ -341,6 +344,8 @@ impl Config {
             ));
         }
         let names = crate::weight_names::scheme_names(self.weight_scheme);
+        let jamba = self.weight_scheme == WeightScheme::Jamba;
+        let named_blocks = self.falcon_h1.is_some() || jamba;
         proj(names.embed, self.vocab, h)?;
         vector(names.final_norm, h)?;
         if !self.tie_word_embeddings {
@@ -349,23 +354,10 @@ impl Config {
         for li in 0..self.n_layers {
             let p = format!("{}{li}.", names.layer_stem);
             vector(&format!("{p}{}", names.input_layernorm), h)?;
-            let m = format!(
-                "{p}{}.",
-                if self.falcon_h1.is_some() {
-                    "mamba"
-                } else {
-                    "mixer"
-                }
-            );
-            if self.attn_layer_index(li).is_some() {
-                let m = format!(
-                    "{p}{}.",
-                    if self.falcon_h1.is_some() {
-                        "self_attn"
-                    } else {
-                        "mixer"
-                    }
-                );
+            let m = format!("{p}{}.", if named_blocks { "mamba" } else { "mixer" });
+            let attention = self.attn_layer_index(li).is_some();
+            if attention {
+                let m = format!("{p}{}.", if named_blocks { "self_attn" } else { "mixer" });
                 for (name, out, input) in [
                     ("q_proj", self.n_q * self.head_dim, h),
                     ("k_proj", self.n_kv * self.head_dim, h),
@@ -377,10 +369,16 @@ impl Config {
                         vector(&format!("{m}{name}.bias"), out)?;
                     }
                 }
-                if self.falcon_h1.is_none() {
+                if !named_blocks {
                     continue;
                 }
+            }
+            // Falcon-H1 and Jamba blocks normalize again before their FFN; a
+            // Jamba MoE FFN is checked by the expert branch below.
+            if named_blocks && (attention || jamba) {
                 vector(&format!("{p}pre_ff_layernorm.weight"), h)?;
+            }
+            if named_blocks && (attention || jamba) && !self.is_moe_layer(li) {
                 for (name, out, input) in [
                     ("gate_proj", self.inter, h),
                     ("up_proj", self.inter, h),
@@ -398,7 +396,8 @@ impl Config {
                     .as_ref()
                     .ok_or("a Nemotron-H E block has no MoE configuration")?;
                 let mp = format!("{p}{}.", moe.weight_prefix);
-                proj(&format!("{mp}gate.weight"), moe.n_experts, h)?;
+                let router = crate::weight_names::moe_router_stem(self.weight_scheme);
+                proj(&format!("{mp}{router}.weight"), moe.n_experts, h)?;
                 if matches!(
                     moe.scoring,
                     MoeScoring::Sigmoid {
@@ -467,6 +466,12 @@ impl Config {
                         proj(&format!("{mp}shared_expert_gate.weight"), 1, h)?;
                     }
                 }
+                if !jamba {
+                    continue;
+                }
+            }
+            // A Jamba attention block has no recurrent mixer.
+            if jamba && attention {
                 continue;
             }
             if self.layer_mixer(li) == super::config::MixerKind::None {
@@ -503,7 +508,12 @@ impl Config {
                         vector(&format!("{m}norm.weight"), di)?;
                     }
                 }
-                SsmKind::Mamba1 { dt_rank, .. } => {
+                SsmKind::Mamba1 { dt_rank, bcdt_norm } => {
+                    if bcdt_norm == super::config::BcdtNorm::Weighted {
+                        vector(&format!("{m}dt_layernorm.weight"), dt_rank)?;
+                        vector(&format!("{m}b_layernorm.weight"), ssm.state_size)?;
+                        vector(&format!("{m}c_layernorm.weight"), ssm.state_size)?;
+                    }
                     proj(
                         &format!("{m}x_proj.weight"),
                         dt_rank + 2 * ssm.state_size,

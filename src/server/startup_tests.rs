@@ -688,6 +688,54 @@ fn explicit_server_sampling_knobs_override_generation_config() {
     assert_eq!(defaults.top_k, 11);
 }
 
+/// Raon-1's `generation_config.json` sets `presence_penalty` 1.5, which
+/// Transformers applies on every step; the server takes it as its default
+/// unless `--presence-penalty` was passed (issue #3457).
+#[test]
+fn generation_config_presence_penalty_is_the_server_default_unless_the_flag_is_set() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("generation_config.json"),
+        r#"{"temperature": 0.6, "top_p": 0.95, "presence_penalty": 1.5}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: model_dir.path().to_path_buf(),
+        ..ServerStartupConfig::default()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&startup).presence_penalty,
+        1.5
+    );
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
+    assert_eq!(config.default_presence_penalty, 1.5);
+
+    let explicit_zero = ServerStartupConfig {
+        presence_penalty: 0.0,
+        presence_penalty_was_set: true,
+        ..startup.clone()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&explicit_zero).presence_penalty,
+        0.0
+    );
+
+    let no_field = tempfile::tempdir().unwrap();
+    std::fs::write(
+        no_field.path().join("generation_config.json"),
+        r#"{"temperature": 0.6}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: no_field.path().to_path_buf(),
+        ..ServerStartupConfig::default()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&startup).presence_penalty,
+        0.0
+    );
+}
+
 #[test]
 fn build_server_config_max_batch_size_is_at_least_one() {
     // n_parallel=0 is nonsensical but must not produce a zero batch size

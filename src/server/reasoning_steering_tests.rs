@@ -351,3 +351,28 @@ fn the_cache_signature_separates_efforts_and_leaves_other_models_alone() {
     assert_ne!(low, max);
     assert_eq!(high, fold_model_reasoning_effort(base, Some("high")));
 }
+
+/// A huge level is echoed in the 400 as a short escaped prefix and its byte
+/// count, not in full (issue #3457), whether it arrives as a string or as a
+/// non-string kwarg whose JSON text is matched.
+#[test]
+fn an_oversized_level_is_echoed_truncated() {
+    let big_object: serde_json::Map<String, Value> = (0..2_000)
+        .map(|i| (format!("key{i}"), json!("value")))
+        .collect();
+    for bad in [
+        json!({"reasoning_effort": "x".repeat(10 * 1024)}),
+        json!({"chat_template_kwargs": {"reasoning_effort": Value::Object(big_object)}}),
+    ] {
+        let err = resolve(bad).unwrap_err();
+        assert!(err.len() < 256, "{} bytes: {err}", err.len());
+        assert!(err.contains("none, low, medium, high, xhigh, max"), "{err}");
+        assert!(err.contains("... (") && err.contains(" bytes)"), "{err}");
+    }
+    // A short unknown level is still echoed whole, without the marker.
+    let err = resolve(json!({"reasoning_effort": "minimal"})).unwrap_err();
+    assert!(
+        err.contains("\"minimal\"") && !err.contains(" bytes)"),
+        "{err}"
+    );
+}

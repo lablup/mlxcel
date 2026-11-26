@@ -98,7 +98,11 @@ impl SsmProbeSpec {
             "mamba1" => (
                 SsmKind::Mamba1 {
                     dt_rank: self.dt_rank,
-                    bcdt_norm: self.bcdt_norm,
+                    bcdt_norm: if self.bcdt_norm {
+                        crate::emitter::BcdtNorm::Weightless
+                    } else {
+                        crate::emitter::BcdtNorm::None
+                    },
                 },
                 d_inner,
             ),

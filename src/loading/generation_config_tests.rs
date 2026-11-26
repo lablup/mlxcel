@@ -40,6 +40,7 @@ fn muse_glimmer_generation_defaults_match_pinned_fixture() {
             temperature: Some(1.0),
             top_p: Some(0.95),
             top_k: Some(64),
+            presence_penalty: None,
         }
     );
     assert_eq!(read_eos_token_ids(dir.path()), vec![200001, 200008]);
@@ -264,4 +265,35 @@ fn merged_eos_token_ids_appends_sidecar_ids() {
     assert_eq!(merged_eos_token_ids(Vec::new(), dir.path()), vec![7, 1]);
     let empty = tempfile::tempdir().expect("tempdir");
     assert_eq!(merged_eos_token_ids(vec![3], empty.path()), vec![3]);
+}
+
+#[test]
+fn generation_defaults_read_a_finite_non_negative_presence_penalty() {
+    let dir = write_generation_config(r#"{"presence_penalty": 1.5, "temperature": 0.6}"#);
+    assert_eq!(
+        read_generation_config_defaults(dir.path()).presence_penalty,
+        Some(1.5)
+    );
+
+    let dir = write_generation_config(r#"{"temperature": 0.6}"#);
+    assert_eq!(
+        read_generation_config_defaults(dir.path()).presence_penalty,
+        None
+    );
+
+    // Python's json writes NaN unquoted, which is not JSON; a quoted one is a
+    // string. Neither becomes a penalty, nor does a negative value.
+    for bad in [
+        r#"{"presence_penalty": NaN}"#,
+        r#"{"presence_penalty": "NaN"}"#,
+        r#"{"presence_penalty": -1.0}"#,
+        r#"{"presence_penalty": null}"#,
+    ] {
+        let dir = write_generation_config(bad);
+        assert_eq!(
+            read_generation_config_defaults(dir.path()).presence_penalty,
+            None,
+            "{bad}"
+        );
+    }
 }

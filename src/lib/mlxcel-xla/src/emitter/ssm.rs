@@ -34,7 +34,8 @@ use super::builder::{Builder, Ty, Val};
 use super::config::{SsmConfig, SsmKind};
 #[allow(unused_imports)] // Public within the emitter for #3349/#3356 reuse.
 pub(crate) use super::ssm_mamba1::{
-    Mamba1MixerW, diag_scan_prefill, diag_scan_step, mamba1_mixer_prefill, mamba1_mixer_step,
+    BcdtNormW, Mamba1MixerW, diag_scan_prefill, diag_scan_step, mamba1_mixer_prefill,
+    mamba1_mixer_step,
 };
 pub(crate) use super::ssm_plamo2::{Plamo2MixerW, plamo2_mixer_prefill, plamo2_mixer_step};
 use super::ssm_scan::{SsmPrefillForm, selective_scan_prefill_form};

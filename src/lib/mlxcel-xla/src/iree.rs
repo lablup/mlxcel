@@ -1708,9 +1708,19 @@ const AGGRESSIVE_FUSION_FLAG: &str = "--iree-dispatch-creation-enable-aggressive
 /// on the Dense graph, so the exemption covers the Gemma3n family on every
 /// device. Revisit it on an IREE upgrade by compiling the Gemma3n decode with
 /// the flag (`decode_flags_tests::gemma3n_cuda_decode_compiles`).
+///
+/// issue #3349: a softmax-routed MoE decode stays on the defaults too. Its
+/// router feeds the softmax probabilities to the tuple-reduction top-k
+/// argmax; aggressive fusion pulls both into one dispatch that neither
+/// llvm-cpu (`'vector.store' op write affecting operations on global resources
+/// are restricted to workgroup distributed contexts`) nor CUDA can lower
+/// (IREE 3.12.0rc20260721). The Jamba, Qwen2-MoE and OLMoE ragged decode goldens
+/// all fail that way with the flag and compile without it. Sigmoid routing
+/// (#3411) already uses a single-result argmax and keeps the flag.
 fn decode_compile_flags(cfg: &RuntimeConfig, flags: &[String]) -> Vec<String> {
     let mut decode_flags = flags.to_vec();
     match cfg {
+        RuntimeConfig::Dense(config) if config.has_softmax_moe() => {}
         RuntimeConfig::Dense(_) => decode_flags.push(AGGRESSIVE_FUSION_FLAG.to_string()),
         RuntimeConfig::Gemma3n(_) => {}
     }

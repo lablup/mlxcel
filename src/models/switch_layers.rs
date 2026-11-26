@@ -665,6 +665,56 @@ pub struct QuantizedSwitchLinearRef<'a> {
 }
 
 impl SwitchLinear {
+    /// Check the stack's input width against the config's `in_features`
+    /// (issue #3457), as `UnifiedLinear::check_input_width` does for a
+    /// dense projection: a mismatch would abort inside `gather_qmm` /
+    /// `gather_mm` at the first routed forward pass.
+    ///
+    /// Used by: [`SwitchGLU::check_input_widths`]
+    pub fn check_input_width(&self, label: &str, in_features: usize) -> Result<(), String> {
+        match self {
+            Self::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+                mode,
+                ..
+            } => {
+                let w_shape = mlxcel_core::array_shape(weight);
+                let s_shape = mlxcel_core::array_shape(scales);
+                let b_shape = biases.as_ref().map(|b| mlxcel_core::array_shape(b));
+                let shapes = mlxcel_core::layers::QuantizedTensorShapes {
+                    weight: &w_shape,
+                    scales: &s_shape,
+                    biases: b_shape.as_deref(),
+                };
+                mlxcel_core::layers::validate_quantized_packing(
+                    label,
+                    &shapes,
+                    in_features,
+                    *group_size,
+                    *bits,
+                    mode,
+                )
+                .map_err(|e| format!("{label}.weight: input width check failed: {e}"))
+            }
+            Self::Regular { weight } => {
+                let shape = mlxcel_core::array_shape(weight);
+                let width = shape.last().copied().unwrap_or(0);
+                if usize::try_from(width).ok() == Some(in_features) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{label}.weight: shape {shape:?} has an input width of {width}, but the \
+                         config says {in_features}"
+                    ))
+                }
+            }
+        }
+    }
+
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,
@@ -810,6 +860,16 @@ impl SwitchLinear {
                 // group_size`.
                 let w_shape = mlxcel_core::array_shape(&weight);
                 let s_shape = mlxcel_core::array_shape(&scales);
+                // `gather_qmm` indexes scales by expert and output row, and MLX
+                // checks neither axis, so a short one reads past the scales
+                // buffer (issue #3457).
+                let b_shape = biases.as_ref().map(|b| mlxcel_core::array_shape(b));
+                mlxcel_core::layers::check_scales_leading_axes(
+                    prefix,
+                    &w_shape,
+                    &s_shape,
+                    b_shape.as_deref(),
+                )?;
                 let packed_in = *w_shape.last().unwrap_or(&0);
                 let num_groups = *s_shape.last().unwrap_or(&0);
 
@@ -1704,6 +1764,25 @@ pub struct SwitchGLU {
 }
 
 impl SwitchGLU {
+    /// Check the three stacks' input widths (issue #3457): `gate_proj` and
+    /// `up_proj` take `hidden`, `down_proj` takes `intermediate`. `prefix` is
+    /// the `switch_mlp` key the stacks were loaded from.
+    ///
+    /// Used by: Raon1Mini (`RaonMoe::check_input_widths`)
+    pub fn check_input_widths(
+        &self,
+        prefix: &str,
+        hidden: usize,
+        intermediate: usize,
+    ) -> Result<(), String> {
+        self.gate_proj
+            .check_input_width(&format!("{prefix}.gate_proj"), hidden)?;
+        self.up_proj
+            .check_input_width(&format!("{prefix}.up_proj"), hidden)?;
+        self.down_proj
+            .check_input_width(&format!("{prefix}.down_proj"), intermediate)
+    }
+
     /// Replace the gating nonlinearity. Every constructor starts at
     /// [`SwitchGluActivation::SwiGlu`]; Kimi K3 chains this to select SiTU.
     pub fn with_activation(mut self, activation: SwitchGluActivation) -> Self {

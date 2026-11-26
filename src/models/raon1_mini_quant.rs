@@ -178,7 +178,9 @@ impl Raon1MiniConfig {
 /// last axis, and its qmv / gather_qmm kernels index scales by output row
 /// (and expert), so a short row or expert axis from an untrusted export
 /// would read past the scales buffer on the GPU. A missing `scales` is left
-/// to the layout detection (a bf16 linear has none).
+/// to the layout detection (a bf16 linear has none). The comparison itself
+/// is the shared [`mlxcel_core::layers::check_scales_leading_axes`], which
+/// `UnifiedLinear` and `SwitchLinear` also run.
 ///
 /// Used by: `check_quantized_planes` (every plane of an export, at the end
 /// of `sanitize_export`), `linear` (dense MLP, shared experts, `lm_head`) and
@@ -194,25 +196,15 @@ pub(crate) fn check_scales_match_weight(weights: &WeightMap, prefix: &str) -> Re
     let weight = weights
         .get(&weight_key)
         .ok_or_else(|| format!("{scales_key} has no {weight_key}"))?;
-    let (w, s) = (
-        mlxcel_core::array_shape(weight),
-        mlxcel_core::array_shape(scales),
-    );
-    if w.len() < 2 || w.len() != s.len() || w[..w.len() - 1] != s[..s.len() - 1] {
-        return Err(format!(
-            "{scales_key} {s:?} does not match {weight_key} {w:?} on every axis but the last"
-        ));
-    }
-    let biases_key = format!("{prefix}.biases");
-    if let Some(biases) = weights.get(&biases_key) {
-        let b = mlxcel_core::array_shape(biases);
-        if b != s {
-            return Err(format!(
-                "{biases_key} {b:?} does not match {scales_key} {s:?}"
-            ));
-        }
-    }
-    Ok(())
+    let biases = weights
+        .get(&format!("{prefix}.biases"))
+        .map(|b| mlxcel_core::array_shape(b));
+    mlxcel_core::layers::check_scales_leading_axes(
+        prefix,
+        &mlxcel_core::array_shape(weight),
+        &mlxcel_core::array_shape(scales),
+        biases.as_deref(),
+    )
 }
 
 /// A dense linear whose block-float layout (NVFP4 g16, MXFP8 g32, MXFP4 g32)

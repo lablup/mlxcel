@@ -233,7 +233,9 @@ impl Raon1MiniDecoderLayer {
                 bits,
                 family: "raon1_mini",
             };
-            Mixer::Mla(KimiK3MLAAttention::from_spec(weights, &spec, &attn_prefix)?)
+            let mla = KimiK3MLAAttention::from_spec(weights, &spec, &attn_prefix)?;
+            mla.check_input_widths(&spec, &attn_prefix)?;
+            Mixer::Mla(mla)
         };
 
         let ffn = if config.is_moe_layer(layer_idx) {
@@ -251,19 +253,24 @@ impl Raon1MiniDecoderLayer {
                 .reasoning_effort_steering
                 .as_ref()
                 .is_some_and(|s| s.steers_layer(layer_idx));
-            Ffn::Moe(RaonMoe::from_weights(
-                weights,
-                &format!("{prefix}.moe"),
-                spec,
-                steered,
-            )?)
+            let moe_prefix = format!("{prefix}.moe");
+            let moe = RaonMoe::from_weights(weights, &moe_prefix, spec, steered)?;
+            moe.check_input_widths(
+                &moe_prefix,
+                config.moe_intermediate_size,
+                config.moe_intermediate_size * config.num_shared_experts,
+            )?;
+            Ffn::Moe(moe)
         } else {
-            Ffn::Dense(RaonSituMlp::from_weights(
+            let mlp_prefix = format!("{prefix}.mlp");
+            let mlp = RaonSituMlp::from_weights(
                 weights,
-                &format!("{prefix}.mlp"),
+                &mlp_prefix,
                 config.activation_situ_beta,
                 config.activation_situ_linear_beta,
-            )?)
+            )?;
+            mlp.check_input_widths(&mlp_prefix, config.hidden_size, config.intermediate_size)?;
+            Ffn::Dense(mlp)
         };
 
         let norm = |leaf: &str| -> Result<RMSNorm, String> {
@@ -378,7 +385,9 @@ impl Raon1MiniModel {
             .get("model.norm.weight")
             .ok_or_else(|| "Missing weight: model.norm.weight".to_string())?;
         let lm_head = if weights.contains_key("lm_head.weight") {
-            Some(super::raon1_mini_quant::linear(weights, "lm_head")?)
+            let head = super::raon1_mini_quant::linear(weights, "lm_head")?;
+            head.check_input_width("lm_head", config.hidden_size)?;
+            Some(head)
         } else if config.tie_word_embeddings {
             None
         } else {
