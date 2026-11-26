@@ -293,7 +293,7 @@ impl RaonDeltaAttention {
 
         let decay = self.f_b_proj.forward(&self.f_a_proj.forward(&x));
         let decay = mlxcel_core::reshape(&decay, &per_head);
-        let g = compute_g_lower_bounded(
+        let g = rda_decay(
             &self.a_log,
             &decay,
             &self.dt_bias,
@@ -332,6 +332,33 @@ pub fn rda_core(
     state: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     gated_delta_ops_precise(q, k, v, g, beta, state, None)
+}
+
+/// RDA decay `g = exp(log_alpha)`, float32, with
+/// `s = exp(A_log[h]) * (a.f32 + dt_bias[h, :])` and
+/// `log_alpha = lb * sigmoid(s)`, or `-softplus(s)` when `gate_lower_bound`
+/// is null.
+///
+/// The bounded form is [`compute_g_lower_bounded`]. The unbounded one is not
+/// [`crate::models::gated_delta::compute_g`]: that is
+/// `-exp(A_log) * softplus(a + dt_bias)`, with `exp(A_log)` outside the
+/// softplus, where the reference scales inside it.
+///
+/// Used by: [`RaonDeltaAttention::forward`]
+pub fn rda_decay(
+    a_log: &MlxArray,
+    a: &MlxArray,
+    dt_bias: &MlxArray,
+    gate_lower_bound: Option<f32>,
+) -> UniquePtr<MlxArray> {
+    if gate_lower_bound.is_some() {
+        return compute_g_lower_bounded(a_log, a, dt_bias, gate_lower_bound);
+    }
+    let a_plus_dt = mlxcel_core::add(&mlxcel_core::astype(a, dtype::FLOAT32), dt_bias);
+    let scale = mlxcel_core::exp(&mlxcel_core::astype(a_log, dtype::FLOAT32));
+    let scaled = mlxcel_core::multiply(&scale, &a_plus_dt);
+    let softplus = mlxcel_core::utils::softplus(&scaled);
+    mlxcel_core::exp(&mlxcel_core::negative(&softplus))
 }
 
 /// `(x.f32 / max(||x||, 1e-6)).astype(dt)` over the last axis.

@@ -304,14 +304,17 @@ fn count_attention_layers(text: &Value, num_layers: u64) -> Option<u64> {
 }
 
 /// The MLA layer count of a Kimi Linear / Kimi K3 stack, whose
-/// `linear_attn_config.kda_layers` lists the 1-indexed KDA layers; every other
-/// layer is MLA. KDA layers hold recurrent state, no KV, so only the MLA
-/// layers take the latent rate (#3162). Entries outside `1..=num_layers` and
-/// repeats are ignored. Returns `None` when the config has no such list.
+/// `linear_attn_config.kda_layers` lists the 1-indexed KDA layers, or of a
+/// Raon-1 stack, whose `rda_config.rda_layers` lists its 1-indexed RDA
+/// layers; every other layer is MLA. The recurrent layers hold state, no KV,
+/// so only the MLA layers take the latent rate (#3162, #3225). Entries
+/// outside `1..=num_layers` and repeats are ignored. Returns `None` when the
+/// config has no such list.
 fn kda_hybrid_mla_layers(text: &Value, num_layers: u64) -> Option<u64> {
     let kda = text
-        .get("linear_attn_config")?
-        .get("kda_layers")?
+        .get("linear_attn_config")
+        .and_then(|c| c.get("kda_layers"))
+        .or_else(|| text.get("rda_config").and_then(|c| c.get("rda_layers")))?
         .as_array()?;
     let kda: std::collections::HashSet<u64> = kda
         .iter()
@@ -1475,6 +1478,28 @@ mod tests {
             assert_eq!(e.kind, KvArchKind::MlaCompressed, "{family}");
             assert_eq!(e.total_bytes, 4 * (512 + 64) * 2048 * FP16, "{family}");
         }
+    }
+
+    /// Raon-1 mini caches the latent pair in its seven MLA layers only; the
+    /// 18 `rda_config.rda_layers` hold recurrent state (#3225).
+    #[test]
+    fn raon1_mini_sizes_the_latent_in_its_mla_layers_only() {
+        let cfg = json!({
+            "model_type": "raon1_mini",
+            "num_hidden_layers": 25,
+            "num_attention_heads": 40,
+            "kv_lora_rank": 512,
+            "qk_rope_head_dim": 64,
+            "qk_nope_head_dim": 128,
+            "v_head_dim": 128,
+            "rda_config": {
+                "rda_layers": [1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19, 21, 22, 23],
+                "mla_layers": [4, 8, 12, 16, 20, 24, 25],
+            },
+        });
+        let e = est_v2(&cfg, 2048, KVCacheMode::Fp16, false);
+        assert_eq!(e.kind, KvArchKind::MlaCompressed);
+        assert_eq!(e.total_bytes, 7 * (512 + 64) * 2048 * FP16);
     }
 
     #[test]

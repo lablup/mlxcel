@@ -20,9 +20,8 @@ use super::tests::{
     Fixture, HIDDEN, KERNEL, KV_LORA, MLA_HEADS, NOPE, Q_LORA, RDA_DIM, RDA_HEADS, ROPE, V_HEAD,
     e4m3_bytes, raw_weights, tiny_config, values,
 };
-use crate::models::gated_delta::compute_g_lower_bounded;
 use crate::models::kimi_k3::{KimiK3MLAAttention, NopeMlaSpec};
-use crate::models::raon_rda::{rda_core, write_ratio};
+use crate::models::raon_rda::{rda_core, rda_decay, write_ratio};
 use crate::models::raon1_mini_sanitize::stack_mxfp8_experts;
 use crate::models::switch_layers::situ_activation;
 use mlxcel_core::layers::KVCache;
@@ -74,18 +73,31 @@ fn write_ratio_and_lower_bounded_decay_match_a_hand_computation() {
     let a_log = [0.5f32, -1.0];
     let a = [0.2f32, -0.4, 1.5, 3.0];
     let dt = [0.1f32, 0.0, -0.5, 0.25];
-    let g = values(&compute_g_lower_bounded(
-        &arr(&a_log, &[2, 1]),
-        &arr(&a, &[1, 1, 2, 2]),
-        &arr(&dt, &[2, 2]),
-        Some(-5.0),
-    ));
+    let decay = |bound: Option<f32>| {
+        values(&rda_decay(
+            &arr(&a_log, &[2, 1]),
+            &arr(&a, &[1, 1, 2, 2]),
+            &arr(&dt, &[2, 2]),
+            bound,
+        ))
+    };
+    let g = decay(Some(-5.0));
+    // A null bound is `exp(-softplus(exp(A_log) (a + dt_bias)))`, the scale
+    // inside the softplus as in the reference (not `compute_g`'s outside).
+    let unbounded = decay(None);
+    let softplus = |x: f64| (1.0 + x.exp()).ln();
     for (h, &a_log_h) in a_log.iter().enumerate() {
         for c in 0..2 {
             let i = h * 2 + c;
-            let want = (-5.0 * sig((a_log_h as f64).exp() * (a[i] + dt[i]) as f64)).exp();
+            let s = (a_log_h as f64).exp() * (a[i] + dt[i]) as f64;
+            let want = (-5.0 * sig(s)).exp();
             assert!((g[i] as f64 - want).abs() < 1e-6, "decay {h},{c}: {g:?}");
             assert!(g[i] > (-5f32).exp() && g[i] < 1.0);
+            let want = (-softplus(s)).exp();
+            assert!(
+                (unbounded[i] as f64 - want).abs() < 1e-6,
+                "unbounded decay {h},{c}: {unbounded:?}"
+            );
         }
     }
 }
