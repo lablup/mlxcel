@@ -27,6 +27,8 @@
 //!   changes), the scales renamed `scales`, under `moe.switch_mlp.{proj}`.
 //!   A weight or scale of any other dtype is a load error.
 //!
+//! - The NVFP4 exports (#3437): see `raon1_mini_quant::sanitize_export`.
+//!
 //! Every step is a no-op on its own output, so the pass is idempotent.
 
 use super::raon1_mini_config::Raon1MiniConfig;
@@ -44,6 +46,7 @@ pub fn sanitize_weights(
     config: &Raon1MiniConfig,
 ) -> Result<WeightMap, String> {
     drop_extra_layers(&mut weights, config.num_hidden_layers);
+    super::raon1_mini_quant::sanitize_export(&mut weights, config)?;
     for layer in 0..config.num_hidden_layers {
         let attn = format!("model.layers.{layer}.self_attn");
         if config.is_rda_layer(layer) {

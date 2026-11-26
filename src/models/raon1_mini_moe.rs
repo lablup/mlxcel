@@ -26,8 +26,9 @@
 //!
 //! The combine follows `Raon1MiniMoE.forward` (non-native path): the routed
 //! sum is accumulated in float32 and rounded before the shared expert is
-//! added. The routed experts are the checkpoint's native MXFP8 planes (E4M3
-//! codes, E8M0 scales per 32 inputs), which is MLX's `mxfp8` layout as is.
+//! added. The routed experts are the original checkpoint's native MXFP8
+//! planes (E4M3 codes, E8M0 scales per 32 inputs), which is MLX's `mxfp8`
+//! layout as is, or an NVFP4 export's planes with their per-expert scale.
 
 use crate::models::switch_layers::{SwitchGLU, SwitchGluActivation, situ_activation};
 use mlxcel_core::layers::UnifiedLinear;
@@ -55,7 +56,7 @@ impl RaonSituMlp {
         linear_beta: f32,
     ) -> Result<Self, String> {
         let linear =
-            |leaf: &str| UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), 64, 4);
+            |leaf: &str| super::raon1_mini_quant::linear(weights, &format!("{prefix}.{leaf}"));
         Ok(Self {
             gate_proj: linear("gate_proj")?,
             up_proj: linear("up_proj")?,
@@ -150,17 +151,14 @@ impl RaonMoe {
                 ));
             }
         }
-        let switch_mlp = SwitchGLU::from_weights_with_mode(
-            weights,
-            &switch_prefix,
-            MXFP8_GROUP_SIZE,
-            MXFP8_BITS,
-            "mxfp8",
-        )?
-        .with_activation(SwitchGluActivation::SiTU {
-            beta: spec.situ_beta,
-            linear_beta: Some(spec.situ_linear_beta),
-        });
+        // The layout comes from the planes: MXFP8 g32 (the original
+        // checkpoint) or NVFP4 g16 with a per-expert scale (the exports, #3437).
+        let switch_mlp =
+            SwitchGLU::from_weights(weights, &switch_prefix, MXFP8_GROUP_SIZE, MXFP8_BITS)?
+                .with_activation(SwitchGluActivation::SiTU {
+                    beta: spec.situ_beta,
+                    linear_beta: Some(spec.situ_linear_beta),
+                });
 
         let shared_experts = if spec.has_shared_expert {
             Some(RaonSituMlp::from_weights(
