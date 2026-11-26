@@ -3,6 +3,10 @@
 // Modified by mlxcel (lablup/mlxcel#1566): serialize the per-kernel lazy
 // configuration in JitModule::get_kernel_and_dims.
 //
+// Modified by mlxcel (lablup/mlxcel#2833): a trailing read_disk_cache
+// parameter on JitModule and get_jit_module lets one module skip the PTX disk
+// cache (see jit_module.cpp).
+//
 // Modified from upstream MLX 9a795735 mlx/backend/cuda/jit_module.h
 //
 // Upstream stores each kernel as (CUfunction, configured_flag, max_block_dim)
@@ -108,7 +112,8 @@ class JitModule {
       Device& device,
       const std::string& module_name,
       const KernelBuilder& builder,
-      bool use_disk_cache);
+      bool use_disk_cache,
+      bool read_disk_cache = true);
   ~JitModule();
 
   JitModule(const JitModule&) = delete;
@@ -135,6 +140,10 @@ JitModule& get_jit_module(
     Device& device,
     const std::string& name,
     const KernelBuilder& builder,
-    bool use_disk_cache = true);
+    bool use_disk_cache = true,
+    // [mlxcel #2833] false: neither read nor write the PTX disk cache for this
+    // module. For a precompiled payload the caller has already validated, a
+    // cache hit would load bytes nobody compared to that payload.
+    bool read_disk_cache = true);
 
 } // namespace mlx::core::cu

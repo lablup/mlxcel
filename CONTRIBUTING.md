@@ -145,7 +145,7 @@ This used to be three literals in three files with nothing checking that they ag
 After bumping the pin, re-validate the in-tree fused Metal kernel launchers in `src/lib/mlxcelverse/kernels/`, which are runtime-JIT paths a breaking MLX API change can silently regress:
 
 - `sparse_v_sdpa.cpp`, test `sparse_v_kernel_threshold_zero_matches_graph`.
-- `fused_norm_oxide.cpp` (experimental cuda-oxide route, built only with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1` on Linux CUDA): the one file under `kernels/` that uses MLX's CUDA backend internals (command encoder, JIT module cache, allocator) directly, so a pin bump can break its build without touching any overlay. Rebuild with the variable set and run `cuda_oxide` in `mlxcel-core` on a GB10.
+- `fused_norm_oxide.cpp` (experimental cuda-oxide route, built only with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1` on Linux CUDA): the one file under `kernels/` that uses MLX's CUDA backend internals (command encoder, JIT module cache, allocator) directly, so a pin bump can break its build without touching any overlay. Rebuild with the variable set and run `cuda_oxide` in `mlxcel-core` on a GB10. MLX's `CommandEncoder` has an `#ifndef NDEBUG` member, so the bridge's `NDEBUG` setting must agree with MLX's when this file is compiled; that is safe today because the file only uses members declared before it, so re-check that when a bump reorders or adds members of `CommandEncoder`.
 - `turbo4_delegated_sdpa.cpp::turbo4_delegated_cold_weighted_sum`, test `delegated_fused_kernel_matches_reference_over_200_steps`.
 - `turbo4_delegated_sdpa.cpp::turbo4_delegated_steel_sdpa`, test `delegated_steel_envelope_matches_cold_only_fused_over_200_steps`.
 

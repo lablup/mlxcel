@@ -70,9 +70,13 @@ enum Fallback : int {
     kElementLimit = 4,
     kShape = 5,
     kBlockDim = 6,
+    kGridLimit = 7,
 };
 
 constexpr std::uint64_t kMaxElements = 0xffffffffull;
+// One block per row, so the row count is the grid's x extent, which CUDA caps
+// at 2^31-1.
+constexpr std::uint64_t kMaxGridX = 0x7fffffffull;
 constexpr int kWarp = 32;
 constexpr int kMaxBlock = 1024;
 
@@ -188,6 +192,11 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
                 std::to_string(device.compute_capability_minor()) + ".");
         }
 
+        // The payload was validated against its manifest when it was
+        // installed, so the module bypasses MLX's PTX disk cache: a hit there
+        // would load bytes nobody compared to the validated payload. The
+        // module is still memoized in memory under its content-keyed name.
+        //
         // Load the module and resolve the entry before the encoder or the
         // allocator is touched, so a module that fails to load leaves no
         // half-registered node behind. A failure throws out of the evaluation;
@@ -200,6 +209,7 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
                 return std::make_tuple(
                     true, artifact_->payload, artifact_->symbols);
             },
+            false,
             false);
         CUfunction kernel = mod.get_kernel(entry.symbol);
 
@@ -354,6 +364,11 @@ std::optional<std::vector<mlx::core::array>> try_oxide_fused_add_rms_norm(
     if (static_cast<std::uint64_t>(rows) >
         kMaxElements / static_cast<std::uint64_t>(dim)) {
         return take_existing_port(kElementLimit);
+    }
+    // Refuse before enqueue: a launch past the grid limit fails at
+    // evaluation, where nothing can reroute it.
+    if (static_cast<std::uint64_t>(rows) > kMaxGridX) {
+        return take_existing_port(kGridLimit);
     }
     if (threads < kWarp || threads > kMaxBlock || threads % kWarp != 0) {
         return take_existing_port(kBlockDim);

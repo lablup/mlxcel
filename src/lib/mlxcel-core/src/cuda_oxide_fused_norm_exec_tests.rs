@@ -373,3 +373,89 @@ fn several_threads_can_drive_the_route_at_once() {
         (total, total, 0)
     );
 }
+
+/// Two or more distinct MLX GPU streams, each driven from its own thread (a
+/// request worker's shape: one stream per worker). Every stream builds and
+/// evaluates the route and reads the outputs back, a barrier lines the
+/// iterations up so the launches overlap, and every output must equal the
+/// existing fused kernel's bytes. The counters are process-wide, so the
+/// per-stream share is pinned by each thread running a fixed number of
+/// iterations and the totals being exactly the sum: with `native_routes` at
+/// zero, no stream can have fallen back or skipped its launches.
+#[test]
+fn distinct_gpu_streams_can_drive_the_route_at_once() {
+    use crate::streams::new_stream_on_gpu;
+    use std::sync::Barrier;
+
+    let Some(_route) = RouteGuard::on_target_device() else {
+        return;
+    };
+    const ITERATIONS: usize = 20;
+    const STREAMS: usize = 3;
+    let cases = [
+        case(Lane::F32, Lane::F32, 5, 1024),
+        case(Lane::F16, Lane::F32, 33, 2048),
+        case(Lane::Bf16, Lane::Bf16, 3, 8191),
+    ];
+    oxide::uninstall();
+    let expected: Vec<OutBits> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, c)| run_fused(c, &case_arrays(c, &inputs(c, 80 + i))))
+        .collect();
+
+    install();
+    let before = oxide::route_counters();
+    let barrier = Barrier::new(STREAMS);
+    let indices: Vec<i32> = std::thread::scope(|scope| {
+        let workers: Vec<_> = cases
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .map(|(i, (c, want))| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let stream = new_stream_on_gpu(0).expect("GPU index 0 exists");
+                    crate::ffi::set_default_stream(&stream);
+                    let index = crate::ffi::stream_index(&crate::ffi::default_stream());
+                    let arrays = case_arrays(c, &inputs(c, 80 + i));
+                    for iteration in 0..ITERATIONS {
+                        barrier.wait();
+                        let got = run_fused(c, &arrays);
+                        assert_eq!(
+                            got.normed, want.normed,
+                            "{} stream {index} #{iteration}",
+                            c.name
+                        );
+                        assert_eq!(
+                            got.new_residual, want.new_residual,
+                            "{} stream {index} #{iteration}",
+                            c.name
+                        );
+                    }
+                    index
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().expect("a stream worker panicked"))
+            .collect()
+    });
+
+    let mut distinct = indices.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        STREAMS,
+        "every worker must run on its own stream: {indices:?}"
+    );
+    let ran = delta(before);
+    let total = (STREAMS * ITERATIONS) as u64;
+    assert_eq!(
+        (ran.oxide_routes, ran.launches, ran.native_routes),
+        (total, total, 0),
+        "every stream routes and launches every iteration"
+    );
+}

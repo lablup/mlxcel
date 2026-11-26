@@ -118,6 +118,9 @@ pub enum Fallback {
     Shape,
     /// The block width is not a whole number of warps within 1024 lanes.
     BlockDim,
+    /// More rows than a CUDA grid's x extent holds (2^31-1); one block runs
+    /// per row.
+    GridLimit,
     /// A code this build does not know.
     Unknown,
 }
@@ -158,6 +161,7 @@ pub fn last_fallback() -> Fallback {
         4 => Fallback::ElementLimit,
         5 => Fallback::Shape,
         6 => Fallback::BlockDim,
+        7 => Fallback::GridLimit,
         _ => Fallback::Unknown,
     }
 }

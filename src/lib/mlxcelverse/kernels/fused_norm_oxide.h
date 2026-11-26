@@ -41,7 +41,8 @@
 // `cu::get_command_encoder`, `CommandEncoder::{set_input_array,
 // set_output_array, add_temporary, add_kernel_node_raw, device}`,
 // `cu::malloc_async`, `cu::get_jit_module`, `cu::KernelArgs`, and `copy_gpu`.
-// The CUDA overlay is not modified.
+// The one overlay change is a trailing `read_disk_cache` parameter on
+// `get_jit_module`, which this file passes as false (see `jit_module.cpp`).
 //
 // Used by: `fused_norm.cpp` (`fused_add_rms_norm`), which asks this adapter
 // first and takes the existing port when it answers `nullopt`.

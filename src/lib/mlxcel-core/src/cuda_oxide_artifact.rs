@@ -26,9 +26,10 @@
 //! against the schema instead of being assumed.
 //!
 //! The JIT module name carries the payload digest, the target, the ABI version
-//! and the compiler revision. MLX's PTX disk cache is keyed on that name and is
-//! consulted before the payload is, so a changed artifact gets a new name and
-//! can never be served a stale entry.
+//! and the compiler revision. MLX's in-process module cache is keyed on that name and
+//! is consulted before the payload is, so a changed artifact gets a new name
+//! and can never be served a stale module. The module is created without the
+//! PTX disk cache, so no entry on disk can stand in for the payload either.
 
 use std::path::Path;
 
@@ -193,7 +194,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The JIT module name for an artifact: every field that identifies the
-/// compiled code, so the PTX disk cache cannot return another artifact's entry.
+/// compiled code, so MLX's module cache cannot return another artifact's module.
 #[must_use]
 pub fn module_name(sha256: &str, compiler_revision: &str) -> String {
     let revision = &compiler_revision[..compiler_revision.len().min(12)];

@@ -19,11 +19,12 @@
 //! and records why. A failure once the cuda-oxide node is being evaluated is
 //! an error to the caller: nothing reroutes it to the existing kernel after
 //! the fact. The tests here also run the wrong-manifest and missing-artifact
-//! cases after a successful run in the same process, with the module loaded
-//! and its PTX in MLX's disk cache, because a cache hit skips the payload and
-//! must not be able to stand in for a refused artifact.
+//! cases after a successful run in the same process, with the module loaded,
+//! because a module cache hit skips the payload and must not be able to stand
+//! in for a refused artifact.
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 use crate::cuda_oxide_artifact::{ArtifactError, Lane, TARGET_CAPABILITY, validate};
 use crate::cuda_oxide_artifact_tests::{committed, repin, write_layout};
@@ -171,6 +172,33 @@ fn more_elements_than_the_validated_limit_take_the_existing_kernel() {
 }
 
 #[test]
+fn more_rows_than_a_grid_holds_take_the_existing_kernel() {
+    let Some(_route) = RouteGuard::on_target_device() else {
+        return;
+    };
+    install();
+    // One block runs per row and a CUDA grid's x extent is capped at 2^31-1.
+    // 65536 x 40000 rows of width 1 is 2.6e9 elements: inside the 2^32-1
+    // element limit, past the grid. The arrays are lazy and never evaluated.
+    let dt = Lane::F16.mlx_dtype();
+    let weight = zeros(&[1], dt);
+    let x = zeros(&[65_536, 40_000, 1], dt);
+    let residual = zeros(&[65_536, 40_000, 1], dt);
+    let before = oxide::route_counters();
+    let _lazy = fused_lazy(&x, &residual, &weight, 1e-6, 0.0);
+    let moved = delta(before);
+    assert_eq!((moved.oxide_routes, moved.native_routes), (0, 1));
+    assert_eq!(oxide::last_fallback(), Fallback::GridLimit);
+
+    // 65536 x 32767 = 2,147,352,576 rows is inside the grid limit.
+    let x = zeros(&[65_536, 32_767, 1], dt);
+    let residual = zeros(&[65_536, 32_767, 1], dt);
+    let before = oxide::route_counters();
+    let _lazy = fused_lazy(&x, &residual, &weight, 1e-6, 0.0);
+    assert_eq!(delta(before).oxide_routes, 1);
+}
+
+#[test]
 fn a_cpu_default_device_never_takes_the_route() {
     let Some(_route) = RouteGuard::on_target_device() else {
         return;
@@ -216,8 +244,8 @@ fn a_warm_cache_cannot_mask_a_wrong_manifest_or_a_missing_artifact() {
     let c = case(Lane::Bf16, Lane::Bf16);
     let existing = assert_takes_existing_kernel(&c, 3, Fallback::NotInstalled);
 
-    // Warm both caches: the module is loaded in this process and its PTX is in
-    // MLX's disk cache under the embedded artifact's module name.
+    // Warm the in-process module cache: the module is loaded under the
+    // embedded artifact's module name.
     install();
     let arrays = case_arrays(&c, &inputs(&c, 3));
     let before = oxide::route_counters();
@@ -263,7 +291,7 @@ fn a_warm_cache_cannot_mask_a_wrong_manifest_or_a_missing_artifact() {
     assert_takes_existing_kernel(&c, 3, Fallback::NotInstalled);
 
     // A rebuilt artifact, consistently re-pinned, is accepted under a new
-    // module name: it cannot be served the first artifact's cache entry, and
+    // module name: it cannot be served the first artifact's cached module, and
     // it does launch.
     let dir = tempfile::tempdir().expect("tempdir");
     let mut rebuilt_ptx = ptx.clone();
@@ -282,6 +310,120 @@ fn a_warm_cache_cannot_mask_a_wrong_manifest_or_a_missing_artifact() {
         (delta(before).launches, delta(before).native_routes),
         (1, 0)
     );
+}
+
+/// The per-device directories of the PTX disk cache this process uses:
+/// `MLX_PTX_CACHE_DIR` when set, else the overlay's per-user
+/// `<tmp>/mlx-<euid>/<mlx version>/ptx`, each with its `sm<cc>-nvrtc<v>`
+/// subdirectories. Empty when no cache directory exists, in which case MLX
+/// is not caching and there is nothing to find or plant.
+fn ptx_cache_device_dirs() -> Vec<PathBuf> {
+    let subdirs = |root: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(OsStr::to_str)
+                        .is_some_and(|n| n.starts_with("sm"))
+            })
+            .collect()
+    };
+    if let Some(dir) = std::env::var_os("MLX_PTX_CACHE_DIR").filter(|v| !v.is_empty()) {
+        return subdirs(PathBuf::from(dir));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let user_root = std::env::temp_dir().join(format!("mlx-{}", unsafe { libc::geteuid() }));
+    std::fs::read_dir(user_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|version| subdirs(version.path().join("ptx")))
+        .collect()
+}
+
+/// The cache files MLX holds under `module_name`, across every device dir.
+fn cache_files_of(module_name: &str) -> Vec<PathBuf> {
+    ptx_cache_device_dirs()
+        .into_iter()
+        .flat_map(|dir| ["ptx", "txt"].map(|ext| dir.join(format!("{module_name}.{ext}"))))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// Removes the files it was given on drop, so a failing assertion does not
+/// leave a planted cache entry behind.
+struct Planted(Vec<PathBuf>);
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[test]
+fn a_planted_cache_entry_is_never_loaded_for_the_module() {
+    let Some(_route) = RouteGuard::on_target_device() else {
+        return;
+    };
+    let c = case(Lane::F32, Lane::F32);
+    let arrays = case_arrays(&c, &inputs(&c, 5));
+    let existing = assert_takes_existing_kernel(&c, 5, Fallback::NotInstalled);
+    // After a kernel has run, so a cold cache root already has its `sm*`
+    // directory.
+    let dirs = ptx_cache_device_dirs();
+    if dirs.is_empty() {
+        eprintln!("skipping: MLX has no PTX disk cache directory in this process");
+        return;
+    }
+    let (ptx, documents) = committed();
+    let entries = validate(&ptx, &documents).expect("valid").entries;
+
+    // Plant a different payload under the module's name in every device dir,
+    // in the layout MLX would read: a `.ptx` and the `.txt` kernel map. A
+    // module that consulted the cache would load it (or fail on it and
+    // rewrite the entry); a module that does not leaves it byte for byte.
+    let name = format!(
+        "mlxcel_oxide_fused_norm_test_planted_cache_{}",
+        std::process::id()
+    );
+    let decoy_ptx = b"// a different payload planted under the module name\n".to_vec();
+    let decoy_map = b"mlxcel_decoy_entry\tmlxcel_decoy_entry\n".to_vec();
+    let mut planted = Planted(Vec::new());
+    for dir in &dirs {
+        for (ext, bytes) in [("ptx", &decoy_ptx), ("txt", &decoy_map)] {
+            let path = dir.join(format!("{name}.{ext}"));
+            std::fs::write(&path, bytes).expect("plant the decoy");
+            planted.0.push(path);
+        }
+    }
+
+    oxide::install_unchecked(&ptx, &name, TARGET_CAPABILITY, &entries)
+        .expect("the adapter accepts the description");
+    let before = oxide::route_counters();
+    assert_eq!(
+        run_fused(&c, &arrays).normed,
+        existing,
+        "the validated payload runs, not the planted one"
+    );
+    assert_eq!(
+        (delta(before).launches, delta(before).native_routes),
+        (1, 0)
+    );
+    for (i, path) in planted.0.iter().enumerate() {
+        let want = if i % 2 == 0 { &decoy_ptx } else { &decoy_map };
+        assert_eq!(
+            &std::fs::read(path).expect("the decoy is still there"),
+            want,
+            "{} was read or rewritten",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -314,12 +456,17 @@ fn an_evaluation_time_failure_is_an_error_not_a_retry() {
         "the route is chosen at build time"
     );
     assert!(try_eval(&normed).is_err(), "the load failure must surface");
-    // A second node finds the first attempt's entry in the PTX disk cache.
-    // MLX discards an entry that fails to load and republishes it once; the
-    // payload is the same, so the failure surfaces again.
+    // A second node builds the module again from the same payload, so the
+    // failure surfaces again.
     let (normed, _new_residual) =
         fused_lazy(&arrays.x, &arrays.residual, &arrays.weight, c.eps, 0.0);
     assert!(try_eval(&normed).is_err(), "and keep surfacing");
+    // The module bypasses MLX's PTX disk cache, so a payload that cannot load
+    // leaves no entry behind in the per-user cache.
+    assert!(
+        cache_files_of("mlxcel_oxide_fused_norm_test_unloadable_payload").is_empty(),
+        "a cuda-oxide module must not be published to the PTX disk cache"
+    );
     let moved = delta(before);
     assert_eq!(
         (moved.launches, moved.native_routes),
