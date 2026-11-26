@@ -25,10 +25,6 @@ ignore = [
     # adoption depends on upstream `tokenizers` switching. No runtime vulnerability
     # — pure macro-expansion crate used at build time.
     { id = "RUSTSEC-2024-0436", reason = "Transitive via tokenizers; archived but no runtime impact; awaiting upstream switch to pastey" },
-    # `chrono 0.4.45`: direct dependency, declared unmaintained (RUSTSEC-2026-0543)
-    # with no safe upgrade. An unmaintained notice, not a vulnerability; moving the
-    # call sites to `time` is tracked separately.
-    { id = "RUSTSEC-2026-0543", reason = "Direct dependency declared unmaintained with no safe upgrade; no known vulnerability; migration to time tracked separately" },
 ]
 
 # ============================================================================

@@ -279,7 +279,10 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
 uuid = { version = "1.23", features = ["v4"] }
-chrono = "0.4"
+# Calendar fields for the server's timestamp strings (`src/server/clock.rs`),
+# replacing the unmaintained `chrono` (RUSTSEC-2026-0543, #3266). Unix values
+# come from `std::time`. Tests add `parsing` (see dev-dependencies).
+time = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The `cors` feature is deliberately absent: #1432 replaced the tower-http
@@ -433,6 +436,9 @@ criterion = "0.8"
 # WebSocket client for the `/v1/realtime` tests and the VoiceChat file client
 # example (#1376). Same version axum's `ws` feature already pulls in.
 tokio-tungstenite = "0.30"
+# `clock::is_rfc3339`, the RFC 3339 check the WebUI contract tests apply to
+# emitted stamps (#3266).
+time = { version = "0.3", features = ["parsing"] }
 
 [[bench]]
 name = "audio_fft"

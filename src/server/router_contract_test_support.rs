@@ -122,9 +122,7 @@ fn valid_dynamic(value: &Value, kind: Dynamic) -> bool {
                     .iter()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
         }),
-        Dynamic::Timestamp => value
-            .as_str()
-            .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()),
+        Dynamic::Timestamp => value.as_str().is_some_and(crate::server::clock::is_rfc3339),
         Dynamic::Revision => value.as_u64().is_some_and(|n| n > 0),
         Dynamic::Sequence => value.as_u64().is_some(),
     }

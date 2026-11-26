@@ -33,7 +33,7 @@ pub(crate) fn runtime_snapshot(
     state: Option<&AppState>,
 ) -> RuntimeSnapshot {
     let state = state.filter(|state| state.model_provider.is_loaded());
-    let sampled_at = chrono::Utc::now().to_rfc3339();
+    let sampled_at = crate::server::clock::rfc3339_now();
     let mut measurements = BTreeMap::new();
     for (key, unit, scope, reason) in [
         (

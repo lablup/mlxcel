@@ -1213,7 +1213,7 @@ impl ModelProvider {
         Ok(Self {
             request_tx,
             model_id,
-            created_at: chrono::Utc::now().timestamp(),
+            created_at: crate::server::clock::unix_seconds_now(),
             loaded: Arc::new(AtomicBool::new(false)),
             snapshot_reuse_capable: Arc::new(AtomicBool::new(false)),
             chat_unavailable,
@@ -1252,7 +1252,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
@@ -1343,7 +1343,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
@@ -1638,7 +1638,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
@@ -1767,7 +1767,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
 
         // Create channel for requests
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();

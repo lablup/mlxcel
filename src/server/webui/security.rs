@@ -445,7 +445,7 @@ fn webui_error(
                 field_errors: None,
                 operation_id: None,
             },
-            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+            request_id: format!("req_{}", crate::server::clock::unix_micros_now()),
         }),
     )
         .into_response();

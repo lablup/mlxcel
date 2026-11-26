@@ -28,6 +28,7 @@ pub mod chat_template;
 pub mod chat_template_json;
 pub mod chat_template_kwargs;
 pub mod cli_input;
+pub(crate) mod clock;
 pub(crate) mod completion_control;
 mod config;
 pub mod conversation_store;

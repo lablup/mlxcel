@@ -117,6 +117,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Rust takes 55 compatible lockfile updates, the WebUI takes jsdom 31, Vite 8.3.8, Vitest 5.1 and typescript-eslint 8.73, the download site takes its minor updates, and pnpm moves from 12.16.1 to 12.23.0 in every pin (#3412). Held back: hf-hub 1.0 (still requires hf-xet), TypeScript 7 (typescript-eslint requires below 6.1) and Playwright 1.65.1 (its Firefox crashes the engine smoke).
 - `url` moves to 2.5.9 for RUSTSEC-2026-0592, and the `chrono` unmaintained notice is recorded in `deny.toml` (#3264).
+- `chrono` is replaced by `time` for calendar fields and `std::time` for Unix values. Every server timestamp keeps its shape byte for byte, and the RUSTSEC-2026-0543 ignore is gone from `deny.toml` (#3266).
 
 ### CI/CD
 

@@ -246,7 +246,7 @@ fn safe_remove_name(repo_id: &str, seq: u64) -> CString {
     CString::new(format!(
         "{}-{}-{}-{safe}",
         std::process::id(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        crate::server::clock::unix_nanos_now_or_zero(),
         seq
     ))
     .expect("generated quarantine name has no NUL")

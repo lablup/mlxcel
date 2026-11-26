@@ -129,7 +129,7 @@ fn b10621_ollama_entry(state: &AppState) -> serde_json::Value {
 /// GET /models, GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     // b10621 stamps the current time on every call rather than a load time.
-    let created = chrono::Utc::now().timestamp();
+    let created = crate::server::clock::unix_seconds_now();
     let mut data = vec![b10621_model_info(&state, created)];
 
     // mlxcel extension entries: a separately loaded embedding model

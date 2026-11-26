@@ -265,7 +265,7 @@ pub async fn create_response(
 
     let priority = parse_priority_header(&headers);
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
-    let created_at = chrono::Utc::now().timestamp() as f64;
+    let created_at = crate::server::clock::unix_seconds_now() as f64;
 
     if let Some(setup) = mcp_setup {
         return super::responses_mcp::create_mcp_response(
@@ -523,7 +523,7 @@ async fn non_stream_create_response(
         );
     }
 
-    let completed_at = chrono::Utc::now().timestamp() as f64;
+    let completed_at = crate::server::clock::unix_seconds_now() as f64;
     let (status, incomplete_reason) = final_status(auto.as_ref(), &result.finish_reason);
     let mut response = build_response_object(OutboundContext {
         response_id: response_id.clone(),

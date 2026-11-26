@@ -396,7 +396,7 @@ impl UiEvent {
             event_type: payload.event_type().to_string(),
             payload,
             event_id: format!("evt_{server_instance_id}_{sequence:08}"),
-            emitted_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            emitted_at: crate::server::clock::rfc3339_seconds_z_now(),
         }
     }
 }
