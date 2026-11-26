@@ -80,6 +80,7 @@ fn make_test_config(num_hidden_layers: usize, tie_word_embeddings: bool) -> Gemm
         attention_k_eq_v: false,
         final_logit_softcapping: None,
         use_double_wide_mlp: false,
+        per_layer_config: None,
         quantization: None,
     };
     Gemma4AssistantConfig {
@@ -859,4 +860,107 @@ fn text_config_rejects_a_sliding_window_a_draft_mask_cannot_take() {
         assert!(err.contains("Gemma 4 assistant"), "{err}");
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
+}
+
+// `per_layer_config` (#3215, Blaizzy/mlx-vlm#2719): the drafter config
+// resolves the full-attention shapes with the rule the target config uses.
+
+/// A 12-layer drafter text config in a sliding pattern of 6, `16 x 256`
+/// sliding KV geometry, with `extra` merged over it.
+fn per_layer_drafter_config(extra: serde_json::Value) -> Result<Gemma4AssistantConfig, String> {
+    let layer_types: Vec<&str> = (0..12)
+        .map(|layer| {
+            if (layer + 1) % 6 == 0 {
+                "full_attention"
+            } else {
+                "sliding_attention"
+            }
+        })
+        .collect();
+    let mut text_config = serde_json::json!({
+        "model_type": "gemma4_text",
+        "hidden_size": 64,
+        "num_hidden_layers": 12,
+        "intermediate_size": 128,
+        "num_attention_heads": 32,
+        "head_dim": 256,
+        "rms_norm_eps": 1e-6,
+        "vocab_size": 16,
+        "num_key_value_heads": 16,
+        "rope_parameters": {
+            "full_attention": {"rope_theta": 1000000.0, "rope_type": "proportional"},
+            "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+        },
+        "sliding_window": 64,
+        "sliding_window_pattern": 6,
+        "max_position_embeddings": 256,
+        "layer_types": layer_types,
+        "attention_k_eq_v": false
+    });
+    let object = text_config.as_object_mut().expect("text config object");
+    for (key, value) in extra.as_object().expect("extra object") {
+        object.insert(key.clone(), value.clone());
+    }
+    let config: Gemma4AssistantConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "gemma4_assistant",
+        "text_config": text_config
+    }))
+    .expect("drafter config parses");
+    config.normalize()
+}
+
+#[test]
+fn per_layer_config_sets_global_shapes() {
+    let entry = serde_json::json!({"head_dim": 512, "num_key_value_heads": 4});
+    let config = per_layer_drafter_config(serde_json::json!({
+        "per_layer_config": {"05": entry.clone(), "11": entry}
+    }))
+    .expect("normalize");
+    let text = config.text_config();
+    assert_eq!(
+        (text.global_head_dim, text.num_global_key_value_heads),
+        (Some(512), Some(4))
+    );
+    // `attention_k_eq_v` is off, so the block alone selects the global
+    // KV-head count on the full-attention layers.
+    assert_eq!(
+        (text.head_dim_for_layer(5), text.num_kv_heads_for_layer(5)),
+        (512, 4)
+    );
+    assert_eq!(
+        (text.head_dim_for_layer(11), text.num_kv_heads_for_layer(11)),
+        (512, 4)
+    );
+    assert_eq!(
+        (text.head_dim_for_layer(0), text.num_kv_heads_for_layer(0)),
+        (256, 16)
+    );
+
+    // The legacy keys resolve the same shapes, and keep the base KV-head
+    // count without `attention_k_eq_v`, as before.
+    let legacy = per_layer_drafter_config(serde_json::json!({
+        "global_head_dim": 512,
+        "num_global_key_value_heads": 4
+    }))
+    .expect("normalize");
+    let text = legacy.text_config();
+    assert_eq!(
+        (text.global_head_dim, text.num_global_key_value_heads),
+        (Some(512), Some(4))
+    );
+    assert_eq!(
+        (text.head_dim_for_layer(5), text.num_kv_heads_for_layer(5)),
+        (512, 16)
+    );
+
+    // A block the drafter cannot represent fails `normalize` with the
+    // upstream message.
+    let error = per_layer_drafter_config(serde_json::json!({
+        "per_layer_config": {"05": {"head_dim": 512, "num_key_value_heads": 4}}
+    }))
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "per_layer_config gives full-attention layers different shapes; this is not supported"
+    );
 }

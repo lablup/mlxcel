@@ -228,7 +228,14 @@ fn standard_elems(dims: &AttnDims) -> u64 {
 /// (`global_head_dim`, with `num_global_key_value_heads` defaulting to the
 /// sliding layers' KV-head count) and the shared dims otherwise, so Gemma 3n
 /// and any config without the fields keep the previous figure.
+///
+/// A transformers 5.15+ Gemma 4 config writes that geometry as
+/// `per_layer_config` instead (#3215), which is resolved first, through the
+/// rule the model loader uses.
 fn global_attention_elems(text: &Value, dims: &AttnDims) -> u64 {
+    if let Some(elems) = per_layer_config_elems(text, dims) {
+        return elems;
+    }
     match get_u64(text, &["global_head_dim"]).filter(|d| *d > 0) {
         Some(head_dim) => {
             let heads = get_u64(text, &["num_global_key_value_heads"])
@@ -238,6 +245,36 @@ fn global_attention_elems(text: &Value, dims: &AttnDims) -> u64 {
         }
         None => standard_elems(dims),
     }
+}
+
+/// K+V element count for a full-attention layer whose geometry comes from a
+/// Gemma 4 `per_layer_config`, or `None` when the config has no such block.
+///
+/// `None` as well when the block does not resolve (an entry on a sliding
+/// layer, differing shapes, another family's schema under the same key): the
+/// caller then keeps the figure it computed before this block was read. The
+/// memory preflight is not where a config is rejected; the loader reports
+/// the block with the upstream message.
+fn per_layer_config_elems(text: &Value, dims: &AttnDims) -> Option<u64> {
+    let per_layer = text.get("per_layer_config")?.as_object()?;
+    let layer_types: Vec<&str> = text
+        .get("layer_types")?
+        .as_array()?
+        .iter()
+        .map(|layer_type| layer_type.as_str().unwrap_or_default())
+        .collect();
+    let (head_dim, kv_heads) =
+        mlxcel_core::gemma4_per_layer::gemma4_global_attention_from_per_layer_config(
+            Some(per_layer),
+            &layer_types,
+            usize::try_from(dims.head_dim).ok()?,
+            usize::try_from(dims.num_kv_heads).ok()?,
+        )
+        .ok()??;
+    Some(
+        2u64.saturating_mul(kv_heads as u64)
+            .saturating_mul(head_dim as u64),
+    )
 }
 
 /// Count the attention (KV-holding) layers of a hybrid model, trying each
@@ -1180,6 +1217,54 @@ mod tests {
         let global = 10 * 2 * 4 * 512 * 8192 * FP16;
         assert_eq!(e.total_bytes, sliding + global);
         assert_eq!(e.marginal_bytes_per_token, 10 * 2 * 4 * 512 * FP16);
+    }
+
+    /// The 31B geometry as transformers 5.15+ writes it (#3215): no
+    /// `global_head_dim` / `num_global_key_value_heads`, one
+    /// `per_layer_config` entry per full-attention layer.
+    fn gemma4_31b_per_layer_text() -> Value {
+        let mut cfg = gemma4_31b_text();
+        let text = cfg["text_config"].as_object_mut().expect("text_config");
+        text.remove("global_head_dim");
+        text.remove("num_global_key_value_heads");
+        let per_layer: serde_json::Map<String, Value> = (0..60)
+            .filter(|i| (i + 1) % 6 == 0)
+            .map(|i| {
+                (
+                    format!("{i:02}"),
+                    json!({"head_dim": 512, "num_key_value_heads": 4}),
+                )
+            })
+            .collect();
+        text.insert("per_layer_config".to_string(), Value::Object(per_layer));
+        cfg
+    }
+
+    #[test]
+    fn gemma4_per_layer_config_matches_legacy_kv_size() {
+        let legacy = est(&gemma4_31b_text(), 8192);
+        let per_layer = est(&gemma4_31b_per_layer_text(), 8192);
+        assert_eq!(per_layer.total_bytes, legacy.total_bytes);
+        assert_eq!(
+            per_layer.marginal_bytes_per_token,
+            legacy.marginal_bytes_per_token
+        );
+        assert_eq!(per_layer.marginal_bytes_per_token, 10 * 2 * 4 * 512 * FP16);
+        assert_eq!(per_layer.detail, legacy.detail);
+
+        // A block the loader would reject does not fail the preflight: the
+        // estimate is the one the config had before the block was read.
+        let mut rejected = gemma4_31b_per_layer_text();
+        rejected["text_config"]["per_layer_config"]["00"] = json!({"head_dim": 512});
+        let mut without = gemma4_31b_per_layer_text();
+        without["text_config"]
+            .as_object_mut()
+            .expect("text_config")
+            .remove("per_layer_config");
+        assert_eq!(
+            est(&rejected, 8192).total_bytes,
+            est(&without, 8192).total_bytes
+        );
     }
 
     #[test]

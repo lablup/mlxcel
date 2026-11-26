@@ -41,6 +41,32 @@ pub(crate) fn fast_rope_rows_like_decode(
     mlxcel_core::concatenate_many(&rows, 2)
 }
 
+/// [`fast_rope_rows_like_decode`] with a precomputed frequency table in place
+/// of a base, for a Qwen 3.5 checkpoint whose `rope_parameters` declare YaRN
+/// (#3215). `freqs` is the float32 `[dims / 2]` divisor table
+/// `fast_rope_with_freqs` takes; the caller has already applied the YaRN
+/// attention factor to `x`.
+pub(crate) fn fast_rope_rows_like_decode_with_freqs(
+    x: &MlxArray,
+    dims: i32,
+    freqs: &MlxArray,
+    offset: i32,
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(x);
+    let (b, h, l, d) = (shape[0], shape[1], shape[2], shape[3]);
+    let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+        .map(|row| {
+            let one = mlxcel_core::slice(x, &[0, 0, row, 0], &[b, h, row + 1, d]);
+            mlxcel_core::fast_rope_with_freqs(&one, dims, false, 1.0, offset + row, freqs)
+        })
+        .collect();
+    let rows: Vec<&MlxArray> = rows
+        .iter()
+        .map(|row| row.as_ref().expect("fast_rope result is non-null"))
+        .collect();
+    mlxcel_core::concatenate_many(&rows, 2)
+}
+
 #[cfg(test)]
 pub(crate) mod capture {
     use mlxcel_core::{MlxArray, UniquePtr};

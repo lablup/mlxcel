@@ -137,6 +137,10 @@ impl Qwen3VLConfig {
 pub(crate) struct InterleavedMRoPE {
     inv_freq: Vec<f32>,
     mrope_section: Vec<i32>,
+    /// Multiplies cos and sin in [`Self::forward`], so the rotated lanes of
+    /// Q and K carry it and nothing else does. `1.0` (no multiply) except
+    /// for a table built by [`Self::with_inv_freq`].
+    attention_factor: f32,
 }
 
 impl InterleavedMRoPE {
@@ -148,6 +152,30 @@ impl InterleavedMRoPE {
         Self {
             inv_freq,
             mrope_section,
+            attention_factor: 1.0,
+        }
+    }
+
+    /// An MRoPE over explicit inverse frequencies, with an attention factor
+    /// that scales cos and sin.
+    ///
+    /// For a YaRN `rope_parameters` block (Blaizzy/mlx-vlm#2649): `inv_freq`
+    /// is the reciprocal of the YaRN divisor table and `attention_factor` the
+    /// transformers attention factor, which upstream's
+    /// `Qwen3_5RotaryEmbedding` applies to cos and sin the same way.
+    /// [`Self::apply_metal`] does not read the factor; its one caller,
+    /// Qwen4-Exp, never builds this variant.
+    ///
+    /// Used by: Qwen 3.5 VLM (`Qwen35Model::set_mrope`)
+    pub(crate) fn with_inv_freq(
+        inv_freq: Vec<f32>,
+        mrope_section: Vec<i32>,
+        attention_factor: f32,
+    ) -> Self {
+        Self {
+            inv_freq,
+            mrope_section,
+            attention_factor,
         }
     }
 
@@ -170,6 +198,7 @@ impl InterleavedMRoPE {
         Self {
             inv_freq: mlxcel_core::utils::array_to_vec_f32(&frequencies),
             mrope_section,
+            attention_factor: 1.0,
         }
     }
 
@@ -272,6 +301,12 @@ impl InterleavedMRoPE {
         let cos = mlxcel_core::cos(&emb);
         let sin = mlxcel_core::sin(&emb);
 
+        if self.attention_factor != 1.0 {
+            return (
+                mlxcel_core::multiply_scalar(&cos, self.attention_factor),
+                mlxcel_core::multiply_scalar(&sin, self.attention_factor),
+            );
+        }
         (cos, sin)
     }
 

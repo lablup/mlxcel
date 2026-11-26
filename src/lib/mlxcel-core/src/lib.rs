@@ -4305,7 +4305,8 @@ pub fn fast_rope_batched(
 ///
 /// Used by: Llama3 batched decode with a `rope_scaling` table (#1355), and
 /// through it Qwen2 / Qwen2.5 and every VLM whose text backbone is the shared
-/// Llama decoder; Ministral3 batched decode with YaRN frequencies.
+/// Llama decoder; Ministral3 batched decode with YaRN frequencies; Qwen 3.5
+/// batched decode with a YaRN `rope_parameters` table (#3215).
 pub fn fast_rope_batched_with_freqs(
     x: &MlxArray,
     dims: i32,
@@ -4723,6 +4724,10 @@ pub mod rope_proportional;
 // transformers 5 `rope_parameters` lift shared by every config struct that
 // reads the flat `rope_theta` / `rope_scaling` keys (#2443).
 pub mod rope_parameters;
+
+// Gemma 4 `per_layer_config` (transformers 5.15+), resolved once for the
+// target config in the model crate and the MTP drafter config here (#3215).
+pub mod gemma4_per_layer;
 
 // How many positions the sequence currently being prefilled will span, so a
 // model whose RoPE table is chosen from the whole prompt length can still make

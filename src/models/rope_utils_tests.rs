@@ -590,3 +590,221 @@ fn yarn_orig_ctx_falls_back_to_the_training_context_then_4096() {
     );
     assert_eq!(short, defaulted);
 }
+
+// YaRN `truncate` (#3215, ml-explore/mlx-lm#1931).
+
+/// One YaRN geometry of the sweep the `truncate` tests share.
+#[derive(Debug, Clone, Copy)]
+struct YarnCase {
+    dims: usize,
+    factor: f32,
+    base: f32,
+    original_ctx: f32,
+    beta_fast: f32,
+    beta_slow: f32,
+}
+
+/// The Qwen 3.5 geometry (64 rotary dims at a base of 1e7).
+const QWEN35_YARN_CASE: YarnCase = YarnCase {
+    dims: 64,
+    factor: 2.0,
+    base: 1e7,
+    original_ctx: 262144.0,
+    beta_fast: 32.0,
+    beta_slow: 1.0,
+};
+
+/// The dims, factors and bases the issue names, over three original
+/// contexts (24 cases), then the Qwen 3.5 geometry, a zero-width band and a
+/// band that starts below pair 0.
+fn yarn_cases() -> Vec<YarnCase> {
+    let mut cases = Vec::new();
+    for dims in [64, 128] {
+        for factor in [4.0, 32.0] {
+            for base in [1e4, 1.5e5] {
+                for original_ctx in [4096.0, 32768.0, 262144.0] {
+                    cases.push(YarnCase {
+                        dims,
+                        factor,
+                        base,
+                        original_ctx,
+                        beta_fast: 32.0,
+                        beta_slow: 1.0,
+                    });
+                }
+            }
+        }
+    }
+    cases.push(QWEN35_YARN_CASE);
+    cases.push(YarnCase {
+        beta_fast: 8.0,
+        beta_slow: 8.0,
+        ..QWEN35_YARN_CASE
+    });
+    cases.push(YarnCase {
+        original_ctx: 16.0,
+        ..QWEN35_YARN_CASE
+    });
+    cases
+}
+
+/// Bands the two YaRN builders in the tree resolve differently, so only the
+/// bit-identity test walks them: an inverted band (`beta_fast < beta_slow`)
+/// and a band wholly above the table. This module steps at `low` in both,
+/// as it did before `truncate` was read; `gpt_oss_common::yarn_rope_freqs`
+/// and upstream's `clip` invert the ramp instead.
+fn yarn_edge_cases() -> Vec<YarnCase> {
+    vec![
+        YarnCase {
+            beta_fast: 1.0,
+            beta_slow: 32.0,
+            ..QWEN35_YARN_CASE
+        },
+        YarnCase {
+            original_ctx: 1e30,
+            ..QWEN35_YARN_CASE
+        },
+    ]
+}
+
+fn yarn_spec(case: YarnCase, truncate: Option<bool>) -> RopeScalingSpec {
+    RopeScalingSpec {
+        rope_type: Some("yarn".to_string()),
+        factor: Some(case.factor),
+        original_max_position_embeddings: Some(case.original_ctx),
+        beta_fast: Some(case.beta_fast),
+        beta_slow: Some(case.beta_slow),
+        truncate,
+        ..RopeScalingSpec::default()
+    }
+}
+
+fn yarn_table(case: YarnCase, truncate: Option<bool>) -> Vec<f32> {
+    let (freqs, _) = super::yarn_rope_setup(&yarn_spec(case, truncate), case.dims, case.base, None)
+        .unwrap_or_else(|reason| panic!("{case:?} must build a table: {reason}"));
+    to_vec(&freqs)
+}
+
+/// The table as this module built it before `truncate` was read: the
+/// correction band floored and ceiled to `usize`, and an integer ramp. Kept
+/// verbatim as the oracle for `yarn_truncate_default_is_bit_identical`.
+fn yarn_table_before_truncate(case: YarnCase) -> Vec<f32> {
+    let YarnCase {
+        dims,
+        factor,
+        base,
+        original_ctx,
+        beta_fast,
+        beta_slow,
+    } = case;
+    let low = super::yarn_find_correction_dim(beta_fast, dims, base, original_ctx).floor() as i64;
+    let high = super::yarn_find_correction_dim(beta_slow, dims, base, original_ctx).ceil() as i64;
+    let (low, high) = (
+        low.max(0) as usize,
+        (high.max(0) as usize).min(dims.saturating_sub(1)),
+    );
+
+    (0..dims / 2)
+        .map(|i| {
+            let exp = (2 * i) as f32 / dims as f32;
+            let fe = base.powf(exp);
+            let fi = factor * fe;
+            let ramp = if i < low {
+                1.0
+            } else if i > high {
+                0.0
+            } else {
+                let t = (i - low) as f32 / (high - low).max(1) as f32;
+                1.0 - t.clamp(0.0, 1.0)
+            };
+            // The extrapolation mix is 1 with no `--yarn-ext-factor` installed.
+            let mix = ramp;
+            (fi * fe) / (fi * mix + fe * (1.0 - mix))
+        })
+        .collect()
+}
+
+#[test]
+fn yarn_truncate_default_is_bit_identical() {
+    for case in yarn_cases().into_iter().chain(yarn_edge_cases()) {
+        let before: Vec<u32> = yarn_table_before_truncate(case)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        for truncate in [None, Some(true)] {
+            let after: Vec<u32> = yarn_table(case, truncate)
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+            assert_eq!(after, before, "{case:?} truncate {truncate:?}");
+        }
+    }
+}
+
+#[test]
+fn yarn_truncate_false_matches_gpt_oss_builder() {
+    use crate::models::gpt_oss_common::{YarnRopeParams, yarn_rope_freqs};
+
+    let mut changed = 0;
+    for case in yarn_cases() {
+        let fractional = yarn_table(case, Some(false));
+        let (reference, _) = yarn_rope_freqs(&YarnRopeParams {
+            dims: case.dims,
+            base: case.base,
+            factor: case.factor,
+            original_max_position_embeddings: case.original_ctx,
+            beta_fast: case.beta_fast,
+            beta_slow: case.beta_slow,
+            mscale: 1.0,
+            mscale_all_dim: 0.0,
+            truncate: false,
+        });
+        assert_eq!(fractional.len(), reference.len(), "{case:?}");
+        for (pair, (ours, theirs)) in fractional.iter().zip(&reference).enumerate() {
+            assert!(
+                (ours - theirs).abs() <= 1e-6 * theirs.abs(),
+                "{case:?} pair {pair}: {ours} != {theirs}"
+            );
+        }
+        if fractional != yarn_table(case, Some(true)) {
+            changed += 1;
+        }
+    }
+    // `truncate: false` is not a no-op: the fractional band moves the ramp on
+    // every geometry the issue names (the 24 leading cases).
+    assert!(changed >= 24, "only {changed} tables changed");
+}
+
+#[test]
+fn reads_truncate_flag() {
+    let block = |truncate: &str| {
+        spec(&format!(
+            r#"{{"rope_type": "yarn", "factor": 4.0, "truncate": {truncate}}}"#
+        ))
+    };
+    assert_eq!(block("false").truncate, Some(false));
+    assert_eq!(block("true").truncate, Some(true));
+    // A string is not a flag: it reads as absent, which is upstream's `true`.
+    assert_eq!(block(r#""false""#).truncate, None);
+    assert_eq!(block("0").truncate, None);
+    assert_eq!(block("null").truncate, None);
+    assert_eq!(
+        spec(r#"{"rope_type": "yarn", "factor": 4.0}"#).truncate,
+        None
+    );
+
+    // The flag reaches the table through `resolve`, the path a checkpoint takes.
+    let table = |truncate: &str| {
+        let declared = spec(&format!(
+            r#"{{"rope_type": "yarn", "factor": 4.0, "truncate": {truncate},
+                "original_max_position_embeddings": 4096}}"#
+        ));
+        to_vec(
+            RopeScalingKind::resolve(Some(&declared), 128, 10_000.0, None, "probe")
+                .freqs()
+                .expect("table"),
+        )
+    };
+    assert_ne!(table("false"), table("true"));
+    assert_eq!(table(r#""false""#), table("true"));
+}

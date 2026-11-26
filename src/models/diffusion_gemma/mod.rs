@@ -227,6 +227,9 @@ impl ModelArgs {
     pub fn text_args(&self) -> Result<TextConfig, String> {
         let mut config: TextConfig = serde_json::from_value(self.text_config.clone())
             .map_err(|e| format!("DiffusionGemma: failed to parse text_config: {e}"))?;
+        config
+            .apply_per_layer_config()
+            .map_err(|e| format!("DiffusionGemma: {e}"))?;
         config.attention_k_eq_v = true;
         config.enable_moe_block = true;
         config.num_kv_shared_layers = 0;

@@ -569,6 +569,8 @@ fn sanitize_gemma4_audio_weights(weights: &mut mlxcel_core::weights::WeightMap) 
 pub(crate) fn load_gemma4_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let args: models::gemma4::ModelArgs = parse_vlm_config(&config_str, "Gemma4 config")?;
+    args.validate_text_config()
+        .map_err(|e| anyhow::anyhow!("Gemma4 config: {e}"))?;
     let (mut weights, weight_backing) = models::load_gemma4_vlm_weights_with_backing(model_path)
         .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 VLM weights: {}", e))?;
     // ModelOpt NVFP4 exports nest weights under `model.` and pack the text
