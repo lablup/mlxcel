@@ -154,6 +154,10 @@ pub fn stack_mxfp8_experts(
         }
         let mut codes = Vec::with_capacity(num_experts);
         let mut scales = Vec::with_capacity(num_experts);
+        // MLX `stack` throws on mismatched shapes, and a throw across the
+        // cxx bridge (no `Result` there) aborts the process, so every expert
+        // must match expert 0 before the stack is built.
+        let mut first_shapes: Option<(Vec<i32>, Vec<i32>)> = None;
         for e in 0..num_experts {
             let w_key = format!("{moe}.experts.{e}.{proj}.weight");
             let s_key = format!("{moe}.experts.{e}.{proj}.weight_scale_inv");
@@ -164,6 +168,18 @@ pub fn stack_mxfp8_experts(
                 .remove(&s_key)
                 .ok_or_else(|| format!("Missing weight: {s_key}"))?;
             let (w, s) = check_mxfp8_pair(&w_key, w, &s_key, s)?;
+            let shapes = (mlxcel_core::array_shape(&w), mlxcel_core::array_shape(&s));
+            match &first_shapes {
+                None => first_shapes = Some(shapes),
+                Some(first) if *first != shapes => {
+                    return Err(format!(
+                        "{w_key} {:?} / {s_key} {:?}: expert {e} does not match expert 0 \
+                         ({:?} / {:?}); every routed expert must share one shape",
+                        shapes.0, shapes.1, first.0, first.1
+                    ));
+                }
+                Some(_) => {}
+            }
             codes.push(w);
             scales.push(s);
         }

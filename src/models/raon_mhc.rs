@@ -165,6 +165,11 @@ impl RaonMhc {
         post_factor: f32,
         act_dtype: i32,
     ) -> Result<Self, String> {
+        if streams < 2 {
+            return Err(format!(
+                "{prefix}: raon_mhc needs at least 2 streams, got {streams}"
+            ));
+        }
         let n = streams;
         let m = (n - 1) * (n - 1);
         let width = n * hidden_size;

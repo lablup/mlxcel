@@ -107,3 +107,58 @@ fn unsupported_configs_fail_by_name() {
         assert!(err.contains(needle), "{key}: {err}");
     }
 }
+
+/// `config.json` is untrusted: sizes that would truncate in an `as i32`
+/// cast, overflow a shape product, or size an allocation from the config
+/// alone fail by name before any weight is read.
+#[test]
+fn oversized_or_zero_geometry_fails_by_name() {
+    let base: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/models/raon1_mini_config_fixture.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let huge = serde_json::json!(u64::MAX);
+    let cases: [(&[&str], serde_json::Value, &str); 7] = [
+        (&["num_hidden_layers"], huge.clone(), "cover layer 26"),
+        (
+            &["raon_mhc_streams"],
+            serde_json::json!(100_000),
+            "raon_mhc_streams",
+        ),
+        (
+            &["num_attention_heads"],
+            serde_json::json!(1u64 << 40),
+            "overflows",
+        ),
+        (&["vocab_size"], serde_json::json!(1u64 << 32), "vocab_size"),
+        (
+            &["rda_config", "head_dim"],
+            serde_json::json!(0),
+            "rda_config.head_dim",
+        ),
+        (&["kv_lora_rank"], serde_json::json!(0), "kv_lora_rank"),
+        (&["rda_config", "num_heads"], huge, "overflows"),
+    ];
+    for (path, value, needle) in cases {
+        let mut config = base.clone();
+        let mut slot = &mut config;
+        for key in path {
+            slot = &mut slot[*key];
+        }
+        *slot = value;
+        let err = Raon1MiniConfig::from_json_str(&config.to_string()).unwrap_err();
+        assert!(err.contains(needle), "{path:?}: {err}");
+    }
+
+    // A layer count far above the listed entries is refused by the
+    // partition check without sizing anything from the count.
+    assert!(
+        validate_layer_partition(&[1, 2], &[3], usize::MAX)
+            .unwrap_err()
+            .contains("cover layer 4")
+    );
+}

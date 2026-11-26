@@ -321,6 +321,25 @@ fn mxfp8_experts_are_viewed_without_changing_a_byte() {
     let err = stack_mxfp8_experts(&mut widened, "moe", 1).unwrap_err();
     assert!(err.contains("uint8"), "{err}");
 
+    // Experts of different widths are refused by name: MLX `stack` would
+    // throw across the cxx bridge and abort the process instead.
+    let mut ragged = WeightMap::new();
+    for (e, width) in [(0usize, 64i32), (1, 96)] {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            let key = format!("moe.experts.{e}.{proj}");
+            ragged.insert(
+                format!("{key}.weight"),
+                mlxcel_core::zeros(&[4, width], dtype::UINT8),
+            );
+            ragged.insert(
+                format!("{key}.weight_scale_inv"),
+                mlxcel_core::zeros(&[4, width / 32], dtype::UINT8),
+            );
+        }
+    }
+    let err = stack_mxfp8_experts(&mut ragged, "moe", 2).unwrap_err();
+    assert!(err.contains("does not match expert 0"), "{err}");
+
     // The native mxfp8 matmul equals dequantize-then-matmul on these rows.
     let x = arr(&super::tests::noise(2 * cols, 5), &[2, cols as i32]);
     let w0 = mlxcel_core::slice(packed, &[0, 0, 0], &[1, rows as i32, (cols / 4) as i32]);

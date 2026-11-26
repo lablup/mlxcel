@@ -309,6 +309,7 @@ impl Raon1MiniConfig {
                 self.num_experts_per_token, self.num_experts
             ));
         }
+        self.validate_geometry()?;
         validate_layer_partition(
             &self.rda_config.rda_layers,
             &self.rda_config.mla_layers,
@@ -317,27 +318,115 @@ impl Raon1MiniConfig {
     }
 }
 
+impl Raon1MiniConfig {
+    /// Every dimension the loader turns into an MLX shape, as the `i32` MLX
+    /// uses, with the products it forms. A `usize` above `i32::MAX` would
+    /// otherwise truncate in an `as i32` cast and could match a crafted
+    /// tensor, and an overflowing product panics (debug) or wraps (release)
+    /// before any weight is read. Zero widths are refused too: a zero RDA
+    /// `head_dim` makes the query scale `inf`, and `raon_mhc_streams` above
+    /// [`MAX_MHC_STREAMS`] would size the `[n, n]` chart from the config
+    /// alone.
+    fn validate_geometry(&self) -> Result<(), String> {
+        let fail = |msg: String| Err(format!("raon1_mini: {msg}"));
+        let positive = [
+            ("vocab_size", self.vocab_size),
+            ("hidden_size", self.hidden_size),
+            ("intermediate_size", self.intermediate_size),
+            ("moe_intermediate_size", self.moe_intermediate_size),
+            ("kv_lora_rank", self.kv_lora_rank),
+            ("qk_nope_head_dim", self.qk_nope_head_dim),
+            ("v_head_dim", self.v_head_dim),
+            ("rda_config.num_heads", self.rda_num_heads()),
+            ("rda_config.head_dim", self.rda_head_dim()),
+        ];
+        if let Some((name, _)) = positive.iter().find(|(_, v)| *v == 0) {
+            return fail(format!("{name} must be positive"));
+        }
+        if self.raon_mhc_streams > MAX_MHC_STREAMS {
+            return fail(format!(
+                "raon_mhc_streams {} is above the supported {MAX_MHC_STREAMS}",
+                self.raon_mhc_streams
+            ));
+        }
+        let n = self.raon_mhc_streams;
+        let products: [(&str, &[usize]); 12] = [
+            ("vocab_size", &[self.vocab_size]),
+            ("num_experts", &[self.num_experts]),
+            ("q_lora_rank", &[self.q_lora_rank]),
+            ("intermediate_size", &[self.intermediate_size]),
+            ("moe_intermediate_size", &[self.moe_intermediate_size]),
+            (
+                "rda_config.conv_kernel_size",
+                &[self.rda_config.conv_kernel_size],
+            ),
+            ("raon_mhc_streams * hidden_size", &[n, self.hidden_size]),
+            ("(raon_mhc_streams - 1)^2 selector rows", &[n - 1, n - 1, 1]),
+            (
+                "3 * rda num_heads * head_dim",
+                &[3, self.rda_num_heads(), self.rda_head_dim()],
+            ),
+            (
+                "num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim)",
+                &[
+                    self.num_attention_heads,
+                    self.qk_nope_head_dim.saturating_add(self.qk_rope_head_dim),
+                ],
+            ),
+            (
+                "num_attention_heads * v_head_dim",
+                &[self.num_attention_heads, self.v_head_dim],
+            ),
+            (
+                "kv_lora_rank + qk_rope_head_dim",
+                &[self.kv_lora_rank.saturating_add(self.qk_rope_head_dim)],
+            ),
+        ];
+        for (name, factors) in products {
+            let product = factors
+                .iter()
+                .try_fold(1usize, |acc, &f| acc.checked_mul(f))
+                .filter(|&p| p <= i32::MAX as usize);
+            if product.is_none() {
+                return fail(format!("{name} overflows an MLX (i32) dimension"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Upper bound on `raon_mhc_streams` (the release uses 4). The mHC chart is
+/// `[n, n]` and the selector `[2n + (n-1)^2, n * hidden]`, so the stream
+/// count is bounded before any of them is built.
+pub const MAX_MHC_STREAMS: usize = 64;
+
 /// `rda_layers` and `mla_layers` (1-based) must partition `1..=layers`.
+///
+/// Memory and time are bounded by the entries the JSON actually lists, not
+/// by `num_layers`: an untrusted `num_hidden_layers` of `usize::MAX` must
+/// fail by name rather than size a bitmap or scan from it.
 pub fn validate_layer_partition(
     rda_layers: &[usize],
     mla_layers: &[usize],
     num_layers: usize,
 ) -> Result<(), String> {
-    let mut seen = vec![false; num_layers + 1];
+    let listed = rda_layers.len() + mla_layers.len();
+    let mut seen = std::collections::HashSet::with_capacity(listed);
     for &layer in rda_layers.iter().chain(mla_layers) {
         if layer == 0 || layer > num_layers {
             return Err(format!(
                 "raon1_mini: rda_config layer {layer} is outside 1..={num_layers} (the lists are 1-based)"
             ));
         }
-        if seen[layer] {
+        if !seen.insert(layer) {
             return Err(format!(
                 "raon1_mini: rda_config layer {layer} is listed twice in rda_layers / mla_layers"
             ));
         }
-        seen[layer] = true;
     }
-    if let Some(missing) = (1..=num_layers).find(|&l| !seen[l]) {
+    // The entries are now distinct and in range, so fewer than `num_layers`
+    // of them leave a gap within `1..=listed + 1`.
+    if let Some(missing) = (1..=num_layers.min(listed + 1)).find(|l| !seen.contains(l)) {
         return Err(format!(
             "raon1_mini: rda_config rda_layers and mla_layers do not cover layer {missing} of 1..={num_layers}"
         ));
