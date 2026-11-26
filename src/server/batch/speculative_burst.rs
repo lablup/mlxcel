@@ -1757,6 +1757,7 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
         LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
+        LoadedModel::Raon1Mini(m) => m.exactness_allows(bs),
         _ => return None,
     })
 }
@@ -1790,6 +1791,9 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         }
         LoadedModel::Inkling2VLM(_) => {
             <crate::vision::Inkling2VlModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Raon1Mini(_) => {
+            <crate::models::Raon1MiniModel as DFlashTargetModel>::supports_batched()
         }
         _ => return None,
     })
@@ -1892,8 +1896,8 @@ fn run_dflash_burst(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
              LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), Laguna (Laguna DFlash drafter), or Inkling 2 (its bundled \
-             DSpark drafter); falling back to \
+             assistant drafter), Laguna (Laguna DFlash drafter), Inkling 2 (its bundled \
+             DSpark drafter), or Raon-1 mini (DFlash2 drafter); falling back to \
              classic decode",
             model_variant_label(ctx.model),
         );
@@ -1996,6 +2000,7 @@ fn run_dflash_burst(
                 cancel,
                 &logprobs_config,
                 (ctx.prefill_chunk_size, ctx.prefill_boundary),
+                Some(seq.seq_id),
             )?
         };
     }
@@ -2012,6 +2017,7 @@ fn run_dflash_burst(
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
         LoadedModel::Inkling2VLM(m) => drive!(m),
+        LoadedModel::Raon1Mini(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -3156,6 +3162,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Inkling2VLM(_) => "Inkling2VLM",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
+        LoadedModel::Raon1Mini(_) => "Raon1Mini",
         _ => "other",
     }
 }

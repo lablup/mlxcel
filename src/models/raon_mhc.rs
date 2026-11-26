@@ -226,7 +226,11 @@ impl RaonMhc {
         let ms = mlxcel_core::mean_axis(&mlxcel_core::square(&flat_f32), -1, true);
         let eps = mlxcel_core::full_f32(&[1], self.selector_eps, dtype::FLOAT32);
         let inv = mlxcel_core::rsqrt(&mlxcel_core::add(&ms, &eps));
-        let proj = mlxcel_core::matmul(&flat, &self.selector_t);
+        // One row at a time inside a speculative verify block, so each row
+        // equals its decode step (issue #3436); a plain matmul elsewhere.
+        let proj = mlxcel_core::row_invariant::per_row(&flat, |x| {
+            mlxcel_core::matmul(x, &self.selector_t)
+        });
         let proj = mlxcel_core::multiply(&mlxcel_core::astype(&proj, dtype::FLOAT32), &inv);
 
         let part = |start: i32, end: i32| mlxcel_core::slice(&proj, &[0, 0, start], &[b, l, end]);

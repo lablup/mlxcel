@@ -77,6 +77,7 @@
 
 pub mod laguna_dflash;
 pub mod masks;
+pub mod raon_dflash2;
 
 use crate::ffi::MlxArray;
 use crate::generate::LanguageModel;
@@ -1396,6 +1397,14 @@ pub trait Drafter {
         false
     }
 
+    /// Whether this drafter is the Raon-1 mini DFlash2 speculator (issue
+    /// #3436). Same role as [`Self::is_laguna_dflash`]: its `fc` reads the
+    /// four mHC streams of five Raon layers, so the target gate pairs it with
+    /// a Raon-1 mini target only.
+    fn is_raon_dflash2(&self) -> bool {
+        false
+    }
+
     /// Produce a draft block of proposal tokens.
     ///
     /// Semantics are kind-specific:
@@ -1577,6 +1586,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             let model_type = peek_drafter_model_type(path)?;
             if model_type.as_deref() == Some(dflash::MUSE_ASSISTANT_MODEL_TYPE) {
                 let drafter = dflash::MuseAssistantDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
+            if raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(path) {
+                let drafter = raon_dflash2::RaonDFlash2Drafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
             if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {

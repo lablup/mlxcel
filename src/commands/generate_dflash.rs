@@ -24,9 +24,10 @@
 //! 0 the emitted tokens are the target's own greedy continuation, so the
 //! output is token-identical to `mlxcel generate` without `--draft-model`.
 //!
-//! Targets: Laguna ([`LoadedModel::Laguna`]) and Inkling 2
+//! Targets: Laguna ([`LoadedModel::Laguna`]), Inkling 2
 //! ([`LoadedModel::Inkling2VLM`], its bundled DSpark drafter, issue #3374;
-//! an image prompt is prefilled from its merged embeddings). Qwen 3.5 DFlash
+//! an image prompt is prefilled from its merged embeddings) and Raon-1 mini
+//! ([`LoadedModel::Raon1Mini`], its DFlash2 drafter, issue #3436). Qwen 3.5 DFlash
 //! keeps its server-only status (its offline arm was never wired).
 
 use std::path::Path;
@@ -44,7 +45,10 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenBiasMap, sample_token_optimized
 
 /// Whether the offline DFlash path serves `model`.
 pub(super) fn offline_dflash_target_supported(model: &LoadedModel) -> bool {
-    matches!(model, LoadedModel::Laguna(_) | LoadedModel::Inkling2VLM(_))
+    matches!(
+        model,
+        LoadedModel::Laguna(_) | LoadedModel::Inkling2VLM(_) | LoadedModel::Raon1Mini(_)
+    )
 }
 
 /// Run the DFlash round loop offline. Returns the emitted tokens (first
@@ -100,8 +104,25 @@ pub(super) fn run_offline_dflash(
             token_bias,
             vlm_embeddings,
         ),
+        LoadedModel::Raon1Mini(model) => {
+            if vlm_embeddings.is_some() {
+                return Err(anyhow!(
+                    "Raon-1 mini is a text model; --draft-kind dflash takes a text prompt"
+                ));
+            }
+            run_raon1_mini(
+                model,
+                draft_model_path,
+                prompt_tokens,
+                max_tokens,
+                sampling_config,
+                block_size,
+                token_bias,
+            )
+        }
         _ => Err(anyhow!(
-            "--draft-kind dflash is only wired offline for Laguna and Inkling 2 targets (the \
+            "--draft-kind dflash is only wired offline for Laguna, Inkling 2 and Raon-1 mini \
+             targets (the \
              Qwen 3.5 DFlash pairing runs through mlxcel-server); omit --draft-model to run \
              classic decode"
         )),
@@ -229,6 +250,61 @@ fn run_laguna(
         wrapper.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
     drive_round_loop(
         wrapper,
+        drafter,
+        &mut caches,
+        verify_out,
+        prompt_tokens,
+        max_tokens,
+        sampling_config,
+        block_size,
+        token_bias,
+        prefill_start,
+    )
+}
+
+/// Raon-1 mini drafting with KRAFTON's DFlash2 speculator (issue #3436). The
+/// burst runs at the model-default reasoning effort (`--reasoning-effort`),
+/// which `generate` set on the model before this call.
+fn run_raon1_mini(
+    model: &mlxcel::models::Raon1MiniModel,
+    draft_model_path: &Path,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampling_config: &SamplingConfig,
+    block_size: usize,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    let target_lm: &dyn LanguageModel = model;
+    let (drafter, capture_layer_ids) = load_paired_drafter(
+        draft_model_path,
+        target_lm,
+        |d| d.is_raon_dflash2(),
+        || {
+            format!(
+                "the target is a Raon-1 mini checkpoint and the drafter at {draft_model_path:?} \
+                 is not its DFlash2 speculator; point --draft-model at \
+                 KRAFTON/Raon-1-mini-dflash2, or drop it to run classic decode."
+            )
+        },
+    )?;
+    refuse_sampling(sampling_config)?;
+    if !token_bias.is_empty() {
+        return Err(anyhow!(
+            "--draft-kind dflash cannot honour a token bias (--lang-bias): the verify argmax \
+             applies none. Drop --draft-model to decode classically with the bias."
+        ));
+    }
+    if !model.dflash_exactness_allows(block_size) {
+        return Err(inexact_error("Raon-1 mini", block_size));
+    }
+    println!("Raon DFlash2 drafter loaded and bound (block_size = {block_size}).");
+    let prefill_start = Instant::now();
+    let mut caches = model.make_speculative_caches(None);
+    let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let verify_out =
+        model.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+    drive_round_loop(
+        model,
         drafter,
         &mut caches,
         verify_out,

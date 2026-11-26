@@ -64,6 +64,19 @@ impl RaonDeltaCache {
     }
 }
 
+/// The state of one RDA layer after one position of a recorded forward
+/// ([`RaonDeltaAttention::forward_recording`]).
+pub struct RdaStep {
+    pub conv: UniquePtr<MlxArray>,
+    pub ssm: Option<UniquePtr<MlxArray>>,
+}
+
+/// A projection through the row-invariant products of a speculative verify
+/// scope; the layer's own forward outside one (`row_invariant::linear`).
+fn row_linear(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
+    mlxcel_core::row_invariant::linear(layer, x)
+}
+
 /// Geometry of one RDA layer.
 #[derive(Debug, Clone, Copy)]
 pub struct RdaSpec {
@@ -236,6 +249,31 @@ impl RaonDeltaAttention {
         (out, new_state)
     }
 
+    /// [`Self::short_conv`] one position at a time in the single-token form,
+    /// recording each position's raw window in `steps`. Leaves the last
+    /// window in `cache.conv`.
+    fn short_conv_steps(
+        &self,
+        qkv: &MlxArray,
+        cache: &mut RaonDeltaCache,
+        steps: &mut Vec<RdaStep>,
+    ) -> UniquePtr<MlxArray> {
+        let t = mlxcel_core::array_shape(qkv)[1];
+        let outs: Vec<_> = (0..t)
+            .map(|i| {
+                let row = mlxcel_core::utils::slice_axis(qkv, 1, i, i + 1);
+                let (out, conv) = self.short_conv(&row, cache.conv.as_deref());
+                steps.push(RdaStep {
+                    conv: mlxcel_core::array_handle_clone(&conv),
+                    ssm: None,
+                });
+                cache.conv = Some(conv);
+                out
+            })
+            .collect();
+        mlxcel_core::concatenate_many(&outs.iter().map(|o| &**o).collect::<Vec<_>>(), 1)
+    }
+
     /// One RDA layer over `x` (`[B, T, hidden]`). `token_mask` (`[B, T]`,
     /// 1 for real tokens, 0 for padding) zeroes padded rows before every
     /// projection, so they enter neither the conv window nor the state.
@@ -244,6 +282,21 @@ impl RaonDeltaAttention {
         x: &MlxArray,
         cache: &mut RaonDeltaCache,
         token_mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_recording(x, cache, token_mask, None)
+    }
+
+    /// [`Self::forward`], with the conv window and the recurrence run one
+    /// position at a time when `steps` is given: each position is then the
+    /// single-token decode step bit for bit, and `steps[t]` holds the state
+    /// after position `t`, so a speculative verify can rewind to any accepted
+    /// prefix (issue #3436).
+    pub fn forward_recording(
+        &self,
+        x: &MlxArray,
+        cache: &mut RaonDeltaCache,
+        token_mask: Option<&MlxArray>,
+        mut steps: Option<&mut Vec<RdaStep>>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let (b, t) = (shape[0], shape[1]);
@@ -261,12 +314,18 @@ impl RaonDeltaAttention {
             None => mlxcel_core::copy(x),
         };
 
-        let q = self.q_proj.forward(&x);
-        let k = self.k_proj.forward(&x);
-        let v = self.v_proj.forward(&x);
+        let q = row_linear(&self.q_proj, &x);
+        let k = row_linear(&self.k_proj, &x);
+        let v = row_linear(&self.v_proj, &x);
         let qkv = mlxcel_core::concatenate_many(&[&*q, &*k, &*v], -1);
-        let (qkv, conv_state) = self.short_conv(&qkv, cache.conv.as_deref());
-        cache.conv = Some(conv_state);
+        let qkv = match steps.as_deref_mut() {
+            Some(steps) => self.short_conv_steps(&qkv, cache, steps),
+            None => {
+                let (qkv, conv_state) = self.short_conv(&qkv, cache.conv.as_deref());
+                cache.conv = Some(conv_state);
+                qkv
+            }
+        };
 
         let per_head = [b, t, h, d];
         let part = |i: i32| {
@@ -281,8 +340,8 @@ impl RaonDeltaAttention {
         );
         let k = l2_normalize_round(&part(1), dt);
 
-        let beta_raw = mlxcel_core::astype(&self.b_proj.forward(&x), dtype::FLOAT32);
-        let delta = mlxcel_core::astype(&self.w_proj.forward(&x), dtype::FLOAT32);
+        let beta_raw = mlxcel_core::astype(&row_linear(&self.b_proj, &x), dtype::FLOAT32);
+        let delta = mlxcel_core::astype(&row_linear(&self.w_proj, &x), dtype::FLOAT32);
         let ratio = write_ratio(&beta_raw, &delta);
         let v = mlxcel_core::multiply(
             &mlxcel_core::astype(&part(2), dtype::FLOAT32),
@@ -291,7 +350,7 @@ impl RaonDeltaAttention {
         let v = mlxcel_core::astype(&v, dt);
         let beta = mlxcel_core::astype(&mlxcel_core::sigmoid(&beta_raw), dt);
 
-        let decay = self.f_b_proj.forward(&self.f_a_proj.forward(&x));
+        let decay = row_linear(&self.f_b_proj, &row_linear(&self.f_a_proj, &x));
         let decay = mlxcel_core::reshape(&decay, &per_head);
         let g = rda_decay(
             &self.a_log,
@@ -300,17 +359,22 @@ impl RaonDeltaAttention {
             self.spec.gate_lower_bound,
         );
 
-        let (out, ssm) = rda_core(&q, &k, &v, &g, &beta, cache.ssm.as_deref());
-        cache.ssm = Some(ssm);
+        let out = match steps {
+            Some(steps) => rda_core_steps(&q, &k, &v, &g, &beta, cache, steps),
+            None => {
+                let (out, ssm) = rda_core(&q, &k, &v, &g, &beta, cache.ssm.as_deref());
+                cache.ssm = Some(ssm);
+                out
+            }
+        };
         cache.offset += t;
 
         let out_f32 = mlxcel_core::astype(&out, dtype::FLOAT32);
         let normed = mlxcel_core::fast_rms_norm(&out_f32, &self.o_norm, self.spec.norm_eps);
-        let gate = mlxcel_core::reshape(&self.g_proj.forward(&x), &per_head);
+        let gate = mlxcel_core::reshape(&row_linear(&self.g_proj, &x), &per_head);
         let gate = mlxcel_core::sigmoid(&mlxcel_core::astype(&gate, dtype::FLOAT32));
         let gated = mlxcel_core::astype(&mlxcel_core::multiply(&normed, &gate), dt);
-        self.o_proj
-            .forward(&mlxcel_core::reshape(&gated, &[b, t, p]))
+        row_linear(&self.o_proj, &mlxcel_core::reshape(&gated, &[b, t, p]))
     }
 }
 
@@ -332,6 +396,38 @@ pub fn rda_core(
     state: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     gated_delta_ops_precise(q, k, v, g, beta, state, None)
+}
+
+/// [`rda_core`] one position at a time, completing `steps[len - T..]` with
+/// each position's state. The last state stays in `cache.ssm`.
+fn rda_core_steps(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    g: &MlxArray,
+    beta: &MlxArray,
+    cache: &mut RaonDeltaCache,
+    steps: &mut [RdaStep],
+) -> UniquePtr<MlxArray> {
+    let t = mlxcel_core::array_shape(q)[1];
+    let first = steps.len() - t as usize;
+    let at = |x: &MlxArray, i: i32| mlxcel_core::utils::slice_axis(x, 1, i, i + 1);
+    let outs: Vec<_> = (0..t)
+        .map(|i| {
+            let (out, ssm) = rda_core(
+                &at(q, i),
+                &at(k, i),
+                &at(v, i),
+                &at(g, i),
+                &at(beta, i),
+                cache.ssm.as_deref(),
+            );
+            steps[first + i as usize].ssm = Some(mlxcel_core::array_handle_clone(&ssm));
+            cache.ssm = Some(ssm);
+            out
+        })
+        .collect();
+    mlxcel_core::concatenate_many(&outs.iter().map(|o| &**o).collect::<Vec<_>>(), 1)
 }
 
 /// RDA decay `g = exp(log_alpha)`, float32, with
