@@ -68,16 +68,16 @@ impl Raon1MiniLayerCache {
     ) -> Result<(), String> {
         match self {
             Raon1MiniLayerCache::Delta(state) => {
-                state.conv = restore_optional(snapshot, format!("{prefix}.rda.conv"));
-                state.ssm = restore_optional(snapshot, format!("{prefix}.rda.ssm"));
-                if state.conv.is_some() != state.ssm.is_some() {
-                    return Err(format!(
-                        "Raon-1 mini restore {prefix}: RDA snapshot has only one of its conv \
-                         window and recurrent state"
-                    ));
-                }
-                state.offset = restore_i32(snapshot, format!("{prefix}.rda.offset"))
+                let conv = restore_optional(snapshot, format!("{prefix}.rda.conv"));
+                let ssm = restore_optional(snapshot, format!("{prefix}.rda.ssm"));
+                let offset = restore_i32(snapshot, format!("{prefix}.rda.offset"))
                     .unwrap_or(snapshot.token_len() as i32);
+                check_rda_state(conv.as_deref(), ssm.as_deref(), offset, snapshot, prefix)?;
+                // Validated before assigning, so a failure leaves the fresh
+                // state untouched and the scheduler prefills cold.
+                state.conv = conv;
+                state.ssm = ssm;
+                state.offset = offset;
                 Ok(())
             }
             Raon1MiniLayerCache::Attn(cache) => {
@@ -85,6 +85,57 @@ impl Raon1MiniLayerCache {
             }
         }
     }
+}
+
+/// Refuse an RDA snapshot that is missing its state or has a state of the
+/// wrong shape: a layer a snapshot of a started sequence does not carry, a
+/// conv window that is not `[B, K-1, 3P]`, a recurrent state that is not
+/// `[B, H, D, D]` with the conv window's batch, or an offset other than the
+/// tokens the snapshot is keyed by.
+fn check_rda_state(
+    conv: Option<&mlxcel_core::MlxArray>,
+    ssm: Option<&mlxcel_core::MlxArray>,
+    offset: i32,
+    snapshot: &ModelStateSnapshot,
+    prefix: &str,
+) -> Result<(), String> {
+    let fail = |what: String| Err(format!("Raon-1 mini restore {prefix}: {what}"));
+    let (conv, ssm) = match (conv, ssm) {
+        (Some(conv), Some(ssm)) => (conv, ssm),
+        (None, None) if snapshot.token_len() == 0 => return Ok(()),
+        (None, None) => {
+            return fail(format!(
+                "RDA snapshot of {} tokens has neither a conv window nor a recurrent state",
+                snapshot.token_len()
+            ));
+        }
+        _ => {
+            return fail(
+                "RDA snapshot has only one of its conv window and recurrent state".to_string(),
+            );
+        }
+    };
+    let (conv_shape, ssm_shape) = (
+        mlxcel_core::array_shape(conv),
+        mlxcel_core::array_shape(ssm),
+    );
+    if conv_shape.len() != 3 || ssm_shape.len() != 4 || conv_shape.contains(&0) {
+        return fail(format!(
+            "RDA conv window {conv_shape:?} or recurrent state {ssm_shape:?} has the wrong rank"
+        ));
+    }
+    if conv_shape[0] != ssm_shape[0] || ssm_shape[2] != ssm_shape[3] {
+        return fail(format!(
+            "RDA conv window {conv_shape:?} and recurrent state {ssm_shape:?} disagree"
+        ));
+    }
+    if usize::try_from(offset).ok() != Some(snapshot.token_len()) {
+        return fail(format!(
+            "RDA snapshot offset {offset} is not its {} tokens",
+            snapshot.token_len()
+        ));
+    }
+    Ok(())
 }
 
 /// The snapshot of one sequence's layer states at `token_len` tokens, or the
@@ -121,6 +172,17 @@ pub(super) fn restore_layers(
         ));
     }
     for (idx, layer) in layers.iter_mut().enumerate() {
+        // `restore_standard` accepts a layer with no stored tensors as a
+        // fresh one, so a snapshot that lost an MLA layer is caught here.
+        if snapshot.token_len() > 0
+            && matches!(layer, Raon1MiniLayerCache::Attn(_))
+            && snapshot.tensor(&format!("layer{idx}.mla.keys")).is_none()
+        {
+            return Err(format!(
+                "Raon-1 mini restore layer{idx}: snapshot of {} tokens has no latent cache",
+                snapshot.token_len()
+            ));
+        }
         layer.restore_from(snapshot, &format!("layer{idx}"))?;
     }
     Ok(())

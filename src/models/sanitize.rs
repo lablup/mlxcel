@@ -1267,7 +1267,7 @@ fn repack_nvfp4_weights_with_route(
 ///
 /// A block scale the loader already decoded to a float dtype (the Gemma 4
 /// selective loader) is not canonical here and keeps the host transcode.
-fn nvfp4_device_transcode(
+pub(super) fn nvfp4_device_transcode(
     weight: &mlxcel_core::MlxArray,
     scale: &mlxcel_core::MlxArray,
     scale2: &mlxcel_core::MlxArray,

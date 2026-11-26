@@ -328,6 +328,15 @@ fn decode_fusion_setting_parses_its_values() {
     );
     // A name that is no fast path keeps the default instead of turning one off.
     assert_eq!(DecodeFusion::parse(Some("mhc,typo")), DecodeFusion::ALL);
+    // Malformed values (a misspelled `off`, a trailing comma, a bogus entry)
+    // warn and fall back to every fast path, they do not turn one off.
+    for value in ["of", "mhc,", "selector,bogus", "", ",", "off,mhc"] {
+        assert_eq!(
+            DecodeFusion::parse(Some(value)),
+            DecodeFusion::ALL,
+            "{value:?}"
+        );
+    }
 }
 
 /// The one-row selector product (issue #3458) at the real width in bf16: a

@@ -2684,6 +2684,29 @@ fn nvfp4_device_transcode_matches_the_host_transcode_byte_for_byte() {
     assert_eq!(bytes(&host, "layer.scales").2, vec![0x7F; 16]);
 }
 
+/// The device route is taken for a canonical `uint8` scale triplet and
+/// declined for a float scale plane, so the byte-for-byte test above cannot
+/// pass with the route silently disabled (a regression to the 63 to 70 s
+/// host transcode).
+#[test]
+fn nvfp4_device_transcode_is_taken_for_uint8_scales_and_declined_for_f16() {
+    let _env = env_lock();
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let weight = mlxcel_core::from_bytes(&[0x21u8; 16 * 8], &[16, 8], dtype::UINT8);
+    let scale2 = mlxcel_core::from_slice_f32(&[0.37], &[]);
+    let uint8_scales = mlxcel_core::from_bytes(&[0x40u8; 16], &[16, 1], dtype::UINT8);
+    let taken = super::sanitize::nvfp4_device_transcode(&weight, &uint8_scales, &scale2)
+        .expect("a canonical uint8 scale triplet takes the device route");
+    assert_eq!(mlxcel_core::array_dtype(&taken.0), dtype::UINT32);
+    assert_eq!(mlxcel_core::array_shape(&taken.0), vec![16, 2]);
+
+    let f16_scales = mlxcel_core::astype(&uint8_scales, dtype::FLOAT16);
+    assert!(
+        super::sanitize::nvfp4_device_transcode(&weight, &f16_scales, &scale2).is_none(),
+        "float scales keep the host transcode"
+    );
+}
+
 /// A triplet outside the canonical layout (here a block-scale plane one
 /// block short) is not taken by the device route.
 #[test]

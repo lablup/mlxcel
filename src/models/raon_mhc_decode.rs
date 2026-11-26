@@ -111,8 +111,9 @@ impl DecodeFusion {
         mhc: false,
     };
 
-    /// The setting `value` names; unset, `all` or a value naming no fast
-    /// path keeps the default.
+    /// The setting `value` names; unset or `all` keeps the default. A value
+    /// naming an unknown fast path (or an empty list entry) also selects every
+    /// fast path, with a warning naming the value.
     pub fn parse(value: Option<&str>) -> Self {
         let Some(value) = value.map(|v| v.trim().to_ascii_lowercase()) else {
             return Self::ALL;
@@ -120,12 +121,22 @@ impl DecodeFusion {
         if matches!(value.as_str(), "off" | "0" | "false" | "none") {
             return Self::OFF;
         }
+        if value == "all" {
+            return Self::ALL;
+        }
         let mut chosen = Self::OFF;
         for name in value.split(',').map(str::trim) {
             match name {
                 "selector" => chosen.selector = true,
                 "mhc" => chosen.mhc = true,
-                _ => return Self::ALL,
+                _ => {
+                    tracing::warn!(
+                        value = %value,
+                        "unrecognized MLXCEL_RAON_DECODE_FUSION value; \
+                         falling back to all fast paths (accepted: all, off, selector, mhc)"
+                    );
+                    return Self::ALL;
+                }
             }
         }
         chosen
