@@ -98,6 +98,11 @@ fn config_rules_are_enforced() {
     s.alpha.insert("low".into(), -0.1);
     assert!(s.validate(25).unwrap_err().contains("non-negative"));
 
+    // Finite in f64 but infinite once the forward casts it to f32.
+    let mut s = published();
+    s.alpha.insert("low".into(), 1e39);
+    assert!(s.validate(25).unwrap_err().contains("finite (in float32)"));
+
     let mut s = published();
     s.layers.clear();
     assert!(s.validate(25).unwrap_err().contains("must not be empty"));

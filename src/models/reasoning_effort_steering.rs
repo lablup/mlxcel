@@ -104,7 +104,7 @@ impl ReasoningEffortSteering {
     }
 
     /// The config rules: `default` is an alpha key and not `none`, every
-    /// alpha is finite and non-negative, and `layers` is a non-empty list
+    /// alpha is finite in float32 and non-negative, and `layers` is a non-empty list
     /// of distinct indices below `num_layers`.
     ///
     /// # Errors
@@ -122,9 +122,11 @@ impl ReasoningEffortSteering {
             ));
         }
         for (level, alpha) in &self.alpha {
-            if !alpha.is_finite() || *alpha < 0.0 {
+            // The forward runs at `alpha as f32`, so a value finite in f64
+            // but beyond f32 range (1e39) would steer by infinity.
+            if !alpha.is_finite() || !(*alpha as f32).is_finite() || *alpha < 0.0 {
                 return fail(format!(
-                    "alpha for {level:?} must be finite and non-negative, got {alpha}"
+                    "alpha for {level:?} must be finite (in float32) and non-negative, got {alpha}"
                 ));
             }
             if level.trim() != level || level.to_ascii_lowercase() != *level || level.is_empty() {
