@@ -91,6 +91,10 @@ pub enum ResponsesTranslateError {
     PreviousNotFinished { id: String, status: &'static str },
     #[error("metadata is limited to 16 entries; received {0}")]
     MetadataTooLarge(usize),
+    #[error("metadata keys are limited to 64 characters")]
+    MetadataKeyTooLong,
+    #[error("metadata values are limited to 512 characters")]
+    MetadataValueTooLong,
     #[error("truncation='{0}' is not supported in Phase 1; only 'disabled' is accepted")]
     TruncationUnsupported(String),
     #[error("max_output_tokens must be > 0")]
@@ -160,6 +164,16 @@ pub fn responses_request_to_chat_with_mcp(
         && meta.len() > 16
     {
         return Err(ResponsesTranslateError::MetadataTooLarge(meta.len()));
+    }
+    if let Some(meta) = request.metadata.as_ref() {
+        for (key, value) in meta {
+            if key.chars().count() > 64 {
+                return Err(ResponsesTranslateError::MetadataKeyTooLong);
+            }
+            if value.chars().count() > 512 {
+                return Err(ResponsesTranslateError::MetadataValueTooLong);
+            }
+        }
     }
     if let Some(trunc) = request.truncation.as_deref()
         && !trunc.is_empty()
@@ -979,6 +993,28 @@ mod tests {
         req.metadata = Some(m);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
         matches!(err, ResponsesTranslateError::MetadataTooLarge(17));
+    }
+
+    #[test]
+    fn metadata_key_over_64_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".repeat(65), "v".to_string())]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataKeyTooLong));
+
+        req.metadata = Some(HashMap::from([("k".repeat(64), "v".to_string())]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
+    }
+
+    #[test]
+    fn metadata_value_over_512_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(513))]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataValueTooLong));
+
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(512))]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
     }
 
     #[test]
