@@ -24,13 +24,14 @@
 
 use super::recurrent_batch::*;
 use crate::models::switch_layers::{
-    SwitchLinear, gather_sort, scatter_unsort, validate_expert_quantization_params,
+    INV_GLOBAL_SCALE_LEAF, SwitchLinear, drain_numbered_expert_planes, gather_sort, scatter_unsort,
+    validate_expert_quantization_params,
 };
 use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{relu_squared, silu, slice_axis, stack_arrays};
+use mlxcel_core::utils::{relu_squared, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -2348,7 +2349,7 @@ impl NemotronHModel {
 
         tracing::info!("[NemotronH] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
-        let weights = Self::sanitize_weights(weights, &config);
+        let weights = Self::sanitize_weights(weights, &config)?;
 
         tracing::info!("[NemotronH] Building model...");
         let model = Self::from_weights(config.clone(), weights, block_types)?;
@@ -2357,7 +2358,13 @@ impl NemotronHModel {
         Ok((model, config))
     }
 
-    pub fn sanitize_weights(mut weights: WeightMap, config: &NemotronHConfig) -> WeightMap {
+    /// Returns `Err` when the per-expert planes of one MoE projection disagree
+    /// in shape or dtype, with the message `drain_numbered_expert_planes`
+    /// builds for the offending expert key.
+    pub fn sanitize_weights(
+        mut weights: WeightMap,
+        config: &NemotronHConfig,
+    ) -> Result<WeightMap, String> {
         // Filter out multi-token prediction (mtp.*) weights (NemotronSuper)
         weights.retain(|k, _| !k.starts_with("mtp."));
 
@@ -2375,33 +2382,24 @@ impl NemotronHModel {
             }
         }
 
-        // Stack expert weights
-        let n_routed = config.n_routed_experts.unwrap_or(0);
-        if n_routed > 0 {
-            for l in 0..config.num_hidden_layers {
-                let prefix = format!("backbone.layers.{}.mixer", l);
-
-                for (m, n) in [("down_proj", "fc2"), ("up_proj", "fc1")] {
-                    let first_expert_key = format!("{}.experts.0.{}.weight", prefix, m);
-                    if weights.contains_key(&first_expert_key) {
-                        let mut expert_tensors: Vec<UniquePtr<MlxArray>> = Vec::new();
-                        for e in 0..n_routed {
-                            if let Some(w) =
-                                weights.remove(&format!("{}.experts.{}.{}.weight", prefix, e, m))
-                            {
-                                expert_tensors.push(w);
-                            }
-                        }
-                        if !expert_tensors.is_empty() {
-                            let stacked = stack_arrays(&expert_tensors, 0);
-                            weights.insert(format!("{}.switch_mlp.{}.weight", prefix, n), stacked);
-                        }
-                    }
+        // The ModelOpt repack leaves block scales and a tensor scale beside
+        // each packed weight. Stack them together to preserve the NVFP4 layout.
+        if config.n_routed_experts.unwrap_or(0) > 0 {
+            for layer in 0..config.num_hidden_layers {
+                let mixer = format!("backbone.layers.{layer}.mixer");
+                let experts = format!("{mixer}.experts");
+                for (proj, fc) in [("up_proj", "fc1"), ("down_proj", "fc2")] {
+                    drain_numbered_expert_planes(
+                        &mut weights,
+                        &experts,
+                        proj,
+                        &format!("{mixer}.switch_mlp.{fc}"),
+                    )?;
                 }
             }
         }
 
-        weights
+        Ok(weights)
     }
 
     pub fn from_weights(
@@ -2622,7 +2620,7 @@ impl NemotronHModel {
                     let fc1 = switch_linear("fc1")?;
                     let fc2 = switch_linear("fc2")?;
                     for fc in ["fc1", "fc2"] {
-                        for leaf in ["weight", "scales", "biases"] {
+                        for leaf in ["weight", "scales", "biases", INV_GLOBAL_SCALE_LEAF] {
                             weights.remove(&format!("{mixer_prefix}.switch_mlp.{fc}.{leaf}"));
                         }
                     }
