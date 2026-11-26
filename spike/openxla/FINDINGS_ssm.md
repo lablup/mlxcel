@@ -398,8 +398,10 @@ Prefill cost at capacity 4096 (real_len 3584, f32, fresh cache per arm):
 |---------|-------------|------------------:|-----------------:|
 | `cuda` | single-layer probe, warm run (median) | 0.073 s | 0.089 s (+22%) |
 | `cuda` | single-layer probe, uncached compile | 1.59 to 1.70 s | 1.62 to 2.14 s (within noise) |
+| `cuda` | same probe, before arm at main `d43915fa`, warm run (median) | 0.076 s | 0.096 s (+26%) |
+| `cuda` | same probe, before arm at main `d43915fa`, uncached compile | 1.51 to 1.67 s | 1.75 to 1.88 s |
 | `hip` | single-layer probe run | 0.089 to 0.092 s | 0.094 to 0.096 s (+4%) |
 | `hip` | whole-model 3584-token prefill | 3.514 to 3.520 s (1019 tok/s) | 3.626 to 3.645 s (986 tok/s, +3.2%) |
 | `hip` | whole-model uncached prefill compile | 2.52 s | 3.51 s |
 
-Correctness is unchanged on both backends: the probe error against HF is identical, the two `hip` arms differ by at most 1.07e-4 on last-token logits with the same argmax, and decode logits are bitwise identical. The extra shifted-add passes over `[nc,H,q,q]` cost about 22% of a single SSM layer's prefill on CUDA and about 3% of a whole-model prefill on ROCm; decode is unaffected. The device-agnostic form is kept. If prefill throughput on CUDA becomes a target, gating the shifted-add form to `metal` and restoring `reduce_window` elsewhere is the known alternative.
+Correctness is unchanged on both backends: the probe error against HF is identical, the two `hip` arms differ by at most 1.07e-4 on last-token logits with the same argmax, and decode logits are bitwise identical. The extra shifted-add passes over `[nc,H,q,q]` cost about 22 to 26% of a single SSM layer's prefill on CUDA (the main `d43915fa` rows were run after the merge-base pair; the Mamba2 scan and the probe are unchanged between the two bases, and the review's estimate of up to 7x the memory traffic on those passes does not show up as 7x wall time) and about 3% of a whole-model prefill on ROCm; decode is unaffected. The device-agnostic form is kept. If prefill throughput on CUDA becomes a target, gating the shifted-add form to `metal` and restoring `reduce_window` elsewhere is the known alternative.
