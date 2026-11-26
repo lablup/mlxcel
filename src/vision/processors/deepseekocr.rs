@@ -24,10 +24,12 @@
 //! the projected features out as a 2D mosaic with a per-row `image_newline`
 //! column and only tiles images larger than a tile. [`DeepSeekOcrVariant::V2`]
 //! (DeepSeek-OCR 2) emits flat feature runs (no newline column) and tiles every
-//! image by default.
+//! image by default. Unlimited-OCR runs the V1 layout with a higher crop limit
+//! ([`DeepSeekOcrProcessor::unlimited_ocr`]).
 //!
 //! Reference: mlx-vlm `mlx_vlm/models/deepseekocr/processing_deepseekocr.py`
-//! (<https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/deepseekocr/processing_deepseekocr.py>).
+//! (<https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/deepseekocr/processing_deepseekocr.py>)
+//! and, for Unlimited-OCR, `mlx_vlm/models/unlimited_ocr/processing_unlimitedocr.py`.
 
 use image::imageops::FilterType;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -110,7 +112,42 @@ impl DeepSeekOcrProcessor {
             crop_enabled: true,
         }
     }
+
+    /// Unlimited-OCR preset: the DeepSeek-OCR V1 layout with a crop grid of
+    /// 2 to [`UNLIMITED_OCR_MAX_CROPS`] tiles instead of DeepSeek-OCR's 9, or
+    /// to [`UNLIMITED_OCR_PAGE_LAYOUT_MAX_CROPS`] for an Unlimited-OCR-2
+    /// (DASH) checkpoint.
+    ///
+    /// This is mlx-vlm's `UnlimitedOCRProcessor`: `max_crops` defaults to
+    /// `16 if page_layout else 32`, and `from_pretrained` turns `page_layout`
+    /// on when `config.json` carries `sparse_attention_config.training_stage`
+    /// `"dash"`. `baidu/Unlimited-OCR` itself crops with
+    /// `dynamic_preprocess(.., max_num=32)` and declares `max_patches: 32` in
+    /// its `preprocessor_config.json`. A 1600x1200 page then gets a 4x3 grid
+    /// (1503 image tokens) where the DeepSeek-OCR limit gives 3x2 (893).
+    pub fn unlimited_ocr(full_config: &serde_json::Value) -> Self {
+        let page_layout = full_config
+            .get("sparse_attention_config")
+            .and_then(|s| s.get("training_stage"))
+            .and_then(|v| v.as_str())
+            == Some("dash");
+        Self {
+            max_tiles: if page_layout {
+                UNLIMITED_OCR_PAGE_LAYOUT_MAX_CROPS
+            } else {
+                UNLIMITED_OCR_MAX_CROPS
+            },
+            ..Self::default()
+        }
+    }
 }
+
+/// Largest crop grid (tile count) for Unlimited-OCR v1.
+pub const UNLIMITED_OCR_MAX_CROPS: usize = 32;
+
+/// Largest crop grid for Unlimited-OCR-2, whose processor runs the per-page
+/// `<PAGE>` layout.
+pub const UNLIMITED_OCR_PAGE_LAYOUT_MAX_CROPS: usize = 16;
 
 impl DeepSeekOcrProcessor {
     /// Placeholder-token count for a `(w_crop, h_crop)` grid producing `n_tiles`
@@ -329,5 +366,60 @@ mod tests {
         let p = DeepSeekOcrProcessor::v2();
         // A square image picks a 1x1 grid (product 1 is now allowed).
         assert_eq!(p.closest_grid(1000, 1000), (1, 1));
+    }
+
+    /// `(grid, image tokens)` the processor picks for a `w x h` page.
+    fn grid_and_tokens(p: &DeepSeekOcrProcessor, w: u32, h: u32) -> ((i32, i32), i32) {
+        let (c, r) = p.closest_grid(w, h);
+        ((c, r), p.placeholder_count(c, r, c * r))
+    }
+
+    /// Unlimited-OCR crops up to 32 tiles (mlx-vlm `UnlimitedOCRProcessor`,
+    /// `baidu/Unlimited-OCR` `dynamic_preprocess(max_num=32)`). The grids and
+    /// counts are the ones mlx-vlm e8035ae3 produces for the same sizes.
+    #[test]
+    fn unlimited_ocr_crops_up_to_32_tiles() {
+        let p = DeepSeekOcrProcessor::unlimited_ocr(
+            &serde_json::json!({"model_type": "unlimited-ocr"}),
+        );
+        assert_eq!(p.max_tiles, 32);
+        assert_eq!(p.min_tiles, 2);
+        assert!(p.crop_enabled);
+        assert!(p.variant == DeepSeekOcrVariant::V1);
+        assert_eq!(grid_and_tokens(&p, 1600, 1200), ((4, 3), 1503));
+        assert_eq!(grid_and_tokens(&p, 1000, 3000), ((2, 6), 1533));
+        assert_eq!(grid_and_tokens(&p, 1920, 1080), ((7, 4), 3113));
+        assert_eq!(grid_and_tokens(&p, 2480, 3508), ((4, 6), 2733));
+        // Sizes whose closest grid already fits in 9 tiles do not move.
+        assert_eq!(grid_and_tokens(&p, 1920, 1280), ((3, 2), 893));
+        assert_eq!(grid_and_tokens(&p, 1240, 1754), ((2, 3), 903));
+    }
+
+    /// An Unlimited-OCR-2 (DASH) config selects mlx-vlm's `page_layout`
+    /// limit of 16 tiles.
+    #[test]
+    fn unlimited_ocr_2_crops_up_to_16_tiles() {
+        let config = serde_json::json!({
+            "model_type": "unlimited-ocr",
+            "sparse_attention_config": {"training_stage": "dash"},
+        });
+        let p = DeepSeekOcrProcessor::unlimited_ocr(&config);
+        assert_eq!(p.max_tiles, 16);
+        assert_eq!(grid_and_tokens(&p, 1920, 1080), ((5, 3), 1803));
+        assert_eq!(grid_and_tokens(&p, 1600, 1200), ((4, 3), 1503));
+        // Any other training stage keeps the v1 limit.
+        let other = serde_json::json!({"sparse_attention_config": {"training_stage": "sft"}});
+        assert_eq!(DeepSeekOcrProcessor::unlimited_ocr(&other).max_tiles, 32);
+    }
+
+    /// DeepSeek-OCR keeps its reference limit of 9 tiles (mlx-vlm
+    /// `dynamic_preprocess(max_num=9)`, `deepseek-ai/DeepSeek-OCR` likewise).
+    #[test]
+    fn deepseekocr_keeps_9_tiles() {
+        let p = DeepSeekOcrProcessor::default();
+        assert_eq!(p.max_tiles, 9);
+        assert_eq!(grid_and_tokens(&p, 1600, 1200), ((3, 2), 893));
+        assert_eq!(grid_and_tokens(&p, 1000, 3000), ((1, 3), 603));
+        assert_eq!(grid_and_tokens(&p, 1920, 1080), ((4, 2), 1093));
     }
 }

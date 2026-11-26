@@ -2147,6 +2147,33 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// Unlimited-OCR's serving template: the messages' text, joined by one space,
+/// with nothing after the last message.
+///
+/// This is mlx-vlm's `UnlimitedOCRProcessor.default_chat_template`, which is
+/// what mlx-vlm renders whatever the checkpoint ships, and it matches
+/// `baidu/Unlimited-OCR`'s own prompts (`<image>document parsing.`) and its
+/// `format_messages`, which strips the rendered prompt. The
+/// `mlx-community/Unlimited-OCR-4bit` conversion instead ships DeepSeek-OCR's
+/// template, `{{message['content']}} ` with a space after every message, so
+/// the prompt ended in a space token (id 223) the reference never feeds: 898
+/// prompt tokens for mlx-vlm's 897 on a 1920x1280 page, and the model then
+/// opened its answer with an invented date line. Typed content renders its
+/// `text` parts; the page images reach the prompt as tokens after BOS, the
+/// position mlx-vlm's single `<image>` marker takes.
+const UNLIMITED_OCR_CHAT_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- if not loop.last %}{{- ' ' }}{%- endif %}",
+    "{%- endfor %}"
+);
+
 /// PLaMo 2.1 VL's serving template (issue #1380).
 ///
 /// `pfnet/plamo-2.1-2b-vl` ships no chat template: its processor joins the
@@ -2224,11 +2251,14 @@ const MINICPM_CHATML_TEMPLATE: &str = concat!(
 /// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
 /// every request at the task-marker parse.
 /// Families whose built-in template replaces any template the checkpoint
-/// ships (see the Nemotron-Parse note in the loader above).
+/// ships (see the Nemotron-Parse note in the loader above). Unlimited-OCR is
+/// here because its MLX conversion ships DeepSeek-OCR's template, whose
+/// trailing space the reference never renders (see
+/// [`UNLIMITED_OCR_CHAT_TEMPLATE`]).
 fn builtin_template_overrides_checkpoint(model_path: &Path) -> bool {
     matches!(
         crate::models::get_model_type(model_path),
-        Ok(crate::models::ModelType::NemotronParseVLM)
+        Ok(crate::models::ModelType::NemotronParseVLM | crate::models::ModelType::UnlimitedOcrVLM)
     )
 }
 
@@ -2241,6 +2271,7 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
         crate::models::ModelType::Plamo2VLM => Some(PLAMO2_VL_CHAT_TEMPLATE),
+        crate::models::ModelType::UnlimitedOcrVLM => Some(UNLIMITED_OCR_CHAT_TEMPLATE),
         crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
             Some(MINICPM_CHATML_TEMPLATE)
         }
