@@ -125,6 +125,7 @@ fn all_five_qwen_vl_wrappers_execute_mixed_native_batched_decode() {
         video_token_id: 30,
         vision_start_token_id: 28,
         spatial_merge_size: 1,
+        video_tokens_per_second: 2.0,
     };
     assert_native_qwen_vl_contract(&qwen25, |id, state, len| {
         set_qwen2_state(&qwen25.text_model, id, state, len)

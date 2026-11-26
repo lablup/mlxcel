@@ -1184,6 +1184,15 @@ fn vlm_prefix_sharing_gate_pins_safety_conditions() {
     assert!(!vlm_prefix_sharing_allowed(false, false, false, false));
     // Video is excluded because its bytes are not folded into the digest.
     assert!(!vlm_prefix_sharing_allowed(true, true, true, false));
+    // Nor is per-clip timing: Qwen2.5-VL places video tokens by each clip's
+    // `second_per_grid` (Blaizzy/mlx-vlm#2760), so the same frames at another
+    // sampled fps are a different prefix. An opted-in multimodal video request
+    // stays ineligible until the digest carries that timing.
+    let video_with_per_clip_timing = vlm_prefix_sharing_allowed(true, true, true, false);
+    assert!(
+        !video_with_per_clip_timing,
+        "video prefix sharing must stay off while second_per_grid is not in the digest"
+    );
     // Phi4MM's request-scoped adapter mode is not part of cache snapshots yet.
     assert!(!vlm_prefix_sharing_allowed(true, true, false, true));
     // The one eligible case: opted in, multimodal, no video.

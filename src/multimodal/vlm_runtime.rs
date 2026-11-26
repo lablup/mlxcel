@@ -1032,12 +1032,20 @@ fn qwen_video_group_prefixes(
 /// (`video_timestamps`) requires `video_timestamps` whenever the request has
 /// videos; passing `None` there is an error rather than a silent fall back to
 /// the timeless flat layout. Families without timestamps ignore it.
+///
+/// `video_second_per_grid` is `temporal_patch_size / sampled fps` per clip,
+/// indexed like `videos`; it is reordered into prompt order here and handed
+/// to the runtime, which uses it only where the reference model spaces video
+/// positions by real time (Qwen2.5-VL, Blaizzy/mlx-vlm#2760). `None` means no
+/// video is timed, which is what an images-only caller passes.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_qwen_vl_media_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
     prompt_tokens: &mut Vec<i32>,
     images: &[DynamicImage],
     videos: &[Vec<DynamicImage>],
     video_timestamps: Option<&QwenVideoTimestamps<'_>>,
+    video_second_per_grid: Option<&[f32]>,
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
 ) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
@@ -1118,14 +1126,37 @@ pub fn compute_qwen_vl_media_embeddings(
         None
     };
 
+    // Per-clip timing arrives in the caller's `videos` order; the runtime
+    // wants one entry per video grid in prompt order.
+    let prompt_order_second_per_grid = match video_second_per_grid {
+        Some(second_per_grid) => {
+            if second_per_grid.len() != videos.len() {
+                anyhow::bail!(
+                    "Qwen-VL video timing covers {} video(s), but request has {}",
+                    second_per_grid.len(),
+                    videos.len()
+                );
+            }
+            media_order
+                .iter()
+                .filter_map(|ordinal| match *ordinal {
+                    QwenMediaOrdinal::Video(idx) => Some(second_per_grid[idx]),
+                    QwenMediaOrdinal::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+        }
+        None => Vec::new(),
+    };
+
     let input_ids_arr = prompt_ids_array(prompt_tokens);
-    let embeddings = qwen.input_embeddings_with_cache(
+    let embeddings = qwen.input_embeddings_with_video_timing(
         &input_ids_arr,
         &pixel_values,
         &grid_thw,
+        &prompt_order_second_per_grid,
         qwen_cache_key.as_ref(),
         active_caches,
-    );
+    )?;
     Ok((embeddings, stats))
 }
 
@@ -1348,6 +1379,7 @@ where
                 prompt_tokens,
                 images,
                 &[],
+                None,
                 None,
                 image_cache_keys,
                 active_caches,
