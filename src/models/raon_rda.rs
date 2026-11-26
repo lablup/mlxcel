@@ -40,7 +40,7 @@
 //! Used by: Raon1Mini; kept free of Raon-1-mini config types so Raon-1 nano
 //! (#3438) can load it unchanged.
 
-use crate::models::gated_delta::{compute_g_lower_bounded, gated_delta_ops};
+use crate::models::gated_delta::{compute_g_lower_bounded, gated_delta_ops_precise};
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::utils::silu;
 use mlxcel_core::weights::WeightMap;
@@ -300,7 +300,7 @@ impl RaonDeltaAttention {
             self.spec.gate_lower_bound,
         );
 
-        let (out, ssm) = gated_delta_ops(&q, &k, &v, &g, &beta, cache.ssm.as_deref(), None);
+        let (out, ssm) = rda_core(&q, &k, &v, &g, &beta, cache.ssm.as_deref());
         cache.ssm = Some(ssm);
         cache.offset += t;
 
@@ -312,6 +312,26 @@ impl RaonDeltaAttention {
         self.o_proj
             .forward(&mlxcel_core::reshape(&gated, &[b, t, p]))
     }
+}
+
+/// The delta-rule recurrence of one RDA layer: `q`, `k`, `v`, `beta` in the
+/// activation dtype, the decay `g` (`[B, T, H, D]`) and the state in float32.
+/// Returns the output in the activation dtype and the float32 state.
+///
+/// The reference keeps the log decay and the state in fp32, so this takes
+/// the precise kernel: the standard one rounds `g` to bf16, where a decay of
+/// 0.998 becomes 0.996, and that error compounds once per token.
+///
+/// Used by: [`RaonDeltaAttention::forward`]
+pub fn rda_core(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    g: &MlxArray,
+    beta: &MlxArray,
+    state: Option<&MlxArray>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    gated_delta_ops_precise(q, k, v, g, beta, state, None)
 }
 
 /// `(x.f32 / max(||x||, 1e-6)).astype(dt)` over the last axis.

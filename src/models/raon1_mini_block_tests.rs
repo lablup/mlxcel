@@ -22,7 +22,7 @@ use super::tests::{
 };
 use crate::models::gated_delta::compute_g_lower_bounded;
 use crate::models::kimi_k3::{KimiK3MLAAttention, NopeMlaSpec};
-use crate::models::raon_rda::write_ratio;
+use crate::models::raon_rda::{rda_core, write_ratio};
 use crate::models::raon1_mini_sanitize::stack_mxfp8_experts;
 use crate::models::switch_layers::situ_activation;
 use mlxcel_core::layers::KVCache;
@@ -88,6 +88,45 @@ fn write_ratio_and_lower_bounded_decay_match_a_hand_computation() {
             assert!(g[i] > (-5f32).exp() && g[i] < 1.0);
         }
     }
+}
+
+/// The RDA recurrence keeps the float32 decay. One write at t = 0 and
+/// `beta = 0` after it leave `y_t = g^t`, so a decay of 0.998 read as bf16
+/// (0.99609375) shows as 0.781 instead of 0.881 by t = 63; the reference
+/// computes the decay and the state in fp32.
+#[test]
+fn rda_core_keeps_the_float32_decay_and_state_over_a_long_sequence() {
+    let _guard = guard();
+    let (t, d) = (64usize, 128usize);
+    let g_value = 0.998f32;
+    let mut unit = vec![0.0f32; t * d];
+    for step in 0..t {
+        unit[step * d] = 1.0;
+    }
+    let bf = |a: UniquePtr<MlxArray>| mlxcel_core::astype(&a, dtype::BFLOAT16);
+    let q = bf(arr(&unit, &[1, t as i32, 1, d as i32]));
+    let k = bf(arr(&unit, &[1, t as i32, 1, d as i32]));
+    let v = bf(arr(&vec![1.0f32; t * d], &[1, t as i32, 1, d as i32]));
+    let mut beta = vec![0.0f32; t];
+    beta[0] = 1.0;
+    let beta = bf(arr(&beta, &[1, t as i32, 1]));
+    let g = arr(&vec![g_value; t * d], &[1, t as i32, 1, d as i32]);
+
+    let (y, state) = rda_core(&q, &k, &v, &g, &beta, None);
+    assert_eq!(mlxcel_core::array_dtype(&state), dtype::FLOAT32);
+    let y = values(&y);
+    for step in [1usize, 16, 63] {
+        let want = (g_value as f64).powi(step as i32);
+        let got = y[step * d] as f64;
+        assert!((got - want).abs() < 4e-3, "y[{step}] = {got}, want {want}");
+    }
+    let s = values(&state);
+    let want = (g_value as f64).powi(t as i32 - 1);
+    assert!(
+        (s[0] as f64 - want).abs() < 1e-5,
+        "state = {}, want {want}",
+        s[0]
+    );
 }
 
 /// NoPE MLA attends without positions, so the last query's output is the
