@@ -376,3 +376,30 @@ MLXCEL_XLA_PRECISION=f16 MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=metal target/relea
   -m $M -p "In computer science, a linked list is" -n 40 > out/cli.txt
 $PY spike/openxla/near_tie_check.py --oracle out/oracle.json --model $M --text-file out/cli.txt --mlxcel-cli
 ```
+
+## CUDA and ROCm re-validation of the shifted-add prefix sum (PR #3434)
+
+The #3343 fix changes the prefill graph on every backend, so the CUDA and ROCm gates were re-run at PR head `f3c771e3` (merge-base `66bf600a`), both with IREE `3.12.0rc20260721` at `dc9601f`, oracle venv torch 2.12.1+cpu and transformers 5.12.1, and the default precision (the recurrent pin resolves f32). Checkpoints: `AntonV/mamba2-130m-hf` @ `05e8773f`, `nvidia/Nemotron-H-4B-Base-8K` @ `faba3b73`, `tiiuae/Falcon-H1-Tiny-90M-Instruct` @ `e6389502`. Every gate passed and matched the earlier records; there is no divergence to report. Full tables are in the PR comments ([ROCm](https://github.com/lablup/mlxcel/pull/3434#issuecomment-7179065910), [CUDA](https://github.com/lablup/mlxcel/pull/3434#issuecomment-7196616607)).
+
+| model | gate | `cuda` (GB10, sm_121) | `hip` (gfx1151) |
+|-------|------|-----------------------|-----------------|
+| Mamba2 130M | `ssm_gate.sh` (tiny mixer, 11 cases) | 11/11, worst `y` 1.24e-6, `h` 1.19e-6 | 11/11, worst `y` 1.43e-6, `h` 1.19e-6 |
+| | real-dimension probe (four cases) | `y` identical to the #3342 table; `h` moves in the last bits (padded 1.58e-7 to 3.95e-7) | not run separately (covered by the gate and the model checks) |
+| | `validate_arch.sh --batch 4 --requests 8 --maxcap 24` | exit 0 (90.62 tok/s batched) | exit 0 (125.9 tok/s batched) |
+| | CLI 40 tokens vs HF fp32 oracle | 40/40 | 5/5 prompts token-exact |
+| | `xla_batch_bench` (cancel, buckets, B=8 rows of #3340) | not run | all PASS |
+| | server, 4 concurrent `/v1/completions` | 8/8 equal CLI (non-streaming and SSE) | 4/4 equal CLI |
+| Nemotron-H 4B | oracle check, batch bench, CLI, server | 40/40, reference-exact, 40/40, 8/8 | `validate_arch.sh` exit 0 (40/40), CLI 40/40, server 4/4 |
+| Falcon-H1 Tiny 90M | `xla_falcon_h1`, `falcon_h1_cli_server_check.py` | 2/2, 40/40 and 8/8 | 2/2, 40/40 and 8/8 |
+
+Prefill cost at capacity 4096 (real_len 3584, f32, fresh cache per arm):
+
+| backend | measurement | before `66bf600a` | after `f3c771e3` |
+|---------|-------------|------------------:|-----------------:|
+| `cuda` | single-layer probe, warm run (median) | 0.073 s | 0.089 s (+22%) |
+| `cuda` | single-layer probe, uncached compile | 1.59 to 1.70 s | 1.62 to 2.14 s (within noise) |
+| `hip` | single-layer probe run | 0.089 to 0.092 s | 0.094 to 0.096 s (+4%) |
+| `hip` | whole-model 3584-token prefill | 3.514 to 3.520 s (1019 tok/s) | 3.626 to 3.645 s (986 tok/s, +3.2%) |
+| `hip` | whole-model uncached prefill compile | 2.52 s | 3.51 s |
+
+Correctness is unchanged on both backends: the probe error against HF is identical, the two `hip` arms differ by at most 1.07e-4 on last-token logits with the same argmax, and decode logits are bitwise identical. The extra shifted-add passes over `[nc,H,q,q]` cost about 22% of a single SSM layer's prefill on CUDA and about 3% of a whole-model prefill on ROCm; decode is unaffected. The device-agnostic form is kept. If prefill throughput on CUDA becomes a target, gating the shifted-add form to `metal` and restoring `reduce_window` elsewhere is the known alternative.
