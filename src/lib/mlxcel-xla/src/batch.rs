@@ -1927,7 +1927,12 @@ impl XlaPreparedPrefillLogits {
         pos: &[i32],
         cache_len: &[i32],
     ) -> Result<Vec<f32>, String> {
-        self.engine.decode_ragged_logits(tokens, pos, cache_len)
+        self.engine.decode_ragged_logits_with_modes(
+            &vec![0; self.engine.b_max()],
+            tokens,
+            pos,
+            cache_len,
+        )
     }
 }
 
