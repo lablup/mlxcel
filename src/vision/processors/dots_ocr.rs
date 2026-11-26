@@ -60,16 +60,21 @@ impl DotsOcrProcessor {
         let mut rh = round(h as f64);
         let mut rw = round(w as f64);
         let pixels = (rh as usize) * (rw as usize);
+        // Out of bounds the reference scales the original size, not the
+        // rounded one: `beta = sqrt(h * w / max_pixels)`, then
+        // `floor(h / beta / factor)` (`ceil(h * beta / factor)` under
+        // `min_pixels`).
+        let (h, w) = (h as f64, w as f64);
         if pixels > self.max_pixels {
-            let scale = (self.max_pixels as f64 / pixels as f64).sqrt();
+            let beta = (h * w / self.max_pixels as f64).sqrt();
             let floor = |x: f64| (((x / factor).floor()).max(1.0) * factor) as u32;
-            rh = floor(rh as f64 * scale);
-            rw = floor(rw as f64 * scale);
+            rh = floor(h / beta);
+            rw = floor(w / beta);
         } else if pixels < self.min_pixels {
-            let scale = (self.min_pixels as f64 / pixels as f64).sqrt();
+            let beta = (self.min_pixels as f64 / (h * w)).sqrt();
             let ceil = |x: f64| (((x / factor).ceil()).max(1.0) * factor) as u32;
-            rh = ceil(rh as f64 * scale);
-            rw = ceil(rw as f64 * scale);
+            rh = ceil(h * beta);
+            rw = ceil(w * beta);
         }
         (rh, rw)
     }
@@ -187,5 +192,21 @@ mod tests {
             }
         }
         assert_eq!(r, hp * wp);
+    }
+
+    /// Over `max_pixels` the reference (transformers 5.24.1 `qwen2_vl`
+    /// `smart_resize` with the dots.ocr bounds) scales the original size by
+    /// `beta = sqrt(h * w / max_pixels)`; no input has an even `x.5` edge, so
+    /// tie rounding (#3463) does not enter.
+    #[test]
+    fn smart_resize_rescales_out_of_bounds_images_from_the_original_size() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(4000, 6000), (2716, 4088));
+        assert_eq!(p.smart_resize(2880, 5120), (2520, 4480));
+        assert_eq!(p.smart_resize(3472, 4624), (2884, 3864));
+        // In bounds, or clamped to the same multiple either way: unchanged.
+        assert_eq!(p.smart_resize(3000, 4000), (2884, 3864));
+        assert_eq!(p.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p.smart_resize(40, 60), (56, 84));
     }
 }
