@@ -1121,6 +1121,42 @@ pub(crate) struct NopeMlaSpec {
 }
 
 impl KimiK3MLAAttention {
+    /// Each linear's input width against `spec` (issue #3457): `q_a_proj` /
+    /// `q_proj`, `kv_a_proj_with_mqa` and `g_proj` take `hidden_size`,
+    /// `q_b_proj` takes `q_lora_rank`, `o_proj` takes
+    /// `num_attention_heads * v_head_dim`. `embed_q` / `unembed_out` are
+    /// derived from `kv_b_proj` at sanitize and are not checked here.
+    ///
+    /// Used by: Raon1Mini (`raon1_mini.rs`); Kimi K3 does not call it yet
+    pub(crate) fn check_input_widths(
+        &self,
+        spec: &NopeMlaSpec,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let hidden = spec.hidden_size;
+        match &self.q_proj {
+            QueryProjection::Plain(q_proj) => {
+                q_proj.check_input_width(&format!("{prefix}.q_proj"), hidden)?;
+            }
+            QueryProjection::LoRA {
+                q_a_proj, q_b_proj, ..
+            } => {
+                q_a_proj.check_input_width(&format!("{prefix}.q_a_proj"), hidden)?;
+                let rank = spec.q_lora_rank.unwrap_or_default();
+                q_b_proj.check_input_width(&format!("{prefix}.q_b_proj"), rank)?;
+            }
+        }
+        self.kv_a_proj_with_mqa
+            .check_input_width(&format!("{prefix}.kv_a_proj_with_mqa"), hidden)?;
+        if let Some(g_proj) = &self.g_proj {
+            g_proj.check_input_width(&format!("{prefix}.g_proj"), hidden)?;
+        }
+        self.o_proj.check_input_width(
+            &format!("{prefix}.o_proj"),
+            spec.num_heads * spec.v_head_dim,
+        )
+    }
+
     /// The layer's MLA shape, for the latent cache view.
     fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
         super::mla_batched::mla_geometry(

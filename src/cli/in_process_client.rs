@@ -216,6 +216,7 @@ impl CliServerSettings {
         }
         if let Some(v) = extra.presence_penalty {
             startup.presence_penalty = v;
+            startup.presence_penalty_was_set = true;
         }
         if let Some(v) = extra.xtc_probability {
             startup.xtc_probability = v;

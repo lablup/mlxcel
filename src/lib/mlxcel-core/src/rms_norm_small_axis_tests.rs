@@ -157,3 +157,57 @@ fn rms_norm_small_axis_band_f32_matches_f64_reference() {
     }
     sweep_band(dtype::FLOAT32, "f32", &[128, 192, 256, 288], 1e-5);
 }
+
+/// One bf16 ulp at `v`: `2^(exponent - 7)`.
+fn bf16_ulp(v: f64) -> f64 {
+    2f64.powi(v.abs().max(f64::MIN_POSITIVE).log2().floor() as i32 - 7)
+}
+
+/// The worst error of `got` against `reference`, in bf16 ulps of the
+/// reference value.
+fn worst_ulps(got: &[f32], reference: &[f64]) -> f64 {
+    got.iter()
+        .zip(reference)
+        .map(|(&g, &r)| (g as f64 - r).abs() / bf16_ulp(r))
+        .fold(0.0, f64::max)
+}
+
+/// The double-rounding gap behind issue #3457: `fast_rms_norm` rounds
+/// `x * inv` to bf16 before the gamma multiply and again after, so on a bf16
+/// row whose gammas are not powers of two some outputs land more than half an
+/// ulp from the exact value. `rms_norm_round_once` rounds the f32 product once
+/// and stays within half an ulp (plus the f32 evaluation's own error).
+#[test]
+fn rms_norm_round_once_is_within_half_an_ulp_where_fast_rms_norm_is_not() {
+    if !gpu_available() {
+        return;
+    }
+    let axis = 256usize;
+    // A deterministic row and gammas of 1 + odd multiples of 1/128 (bf16
+    // exact), so the gamma multiply carries mantissa bits the first rounding
+    // already dropped.
+    let x_vals: Vec<f32> = (0..axis)
+        .map(|i| ((i as f32 * 0.731).sin() * 2.5) + 0.01 * i as f32 / axis as f32)
+        .collect();
+    let w_vals: Vec<f32> = (0..axis)
+        .map(|i| 1.0 + ((2 * (i % 37) + 1) as f32) / 128.0)
+        .collect();
+    let x = astype(&from_slice_f32(&x_vals, &[1, axis as i32]), dtype::BFLOAT16);
+    let w = astype(&from_slice_f32(&w_vals, &[axis as i32]), dtype::BFLOAT16);
+    eval(&x);
+    eval(&w);
+    let (xs, ws) = (flatten_f32(&x), flatten_f32(&w));
+    let reference = reference_rows(&xs, &ws, 1, axis, EPS as f64);
+
+    let once = flatten_f32(&crate::layers::rms_norm_round_once(&x, &w, EPS));
+    let fast = flatten_f32(&fast_rms_norm(&x, &w, EPS));
+    let (once_ulps, fast_ulps) = (worst_ulps(&once, &reference), worst_ulps(&fast, &reference));
+    assert!(
+        once_ulps <= 0.5 + 1e-3,
+        "round-once worst error {once_ulps:.3} ulp exceeds half an ulp"
+    );
+    assert!(
+        fast_ulps > 0.5 + 1e-3,
+        "fast_rms_norm worst error {fast_ulps:.3} ulp: the double rounding this documents is gone"
+    );
+}

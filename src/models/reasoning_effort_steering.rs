@@ -189,8 +189,9 @@ impl ReasoningEffortSteering {
             Ok(level)
         } else {
             Err(format!(
-                "reasoning_effort must be one of {}; got {raw:?}",
-                self.accepted_levels().join(", ")
+                "reasoning_effort must be one of {}; got {}",
+                self.accepted_levels().join(", "),
+                bounded_echo(raw)
             ))
         }
     }
@@ -216,6 +217,19 @@ impl ReasoningEffortSteering {
             .get(&level)
             .map(|alpha| *alpha as f32)
             .ok_or_else(|| format!("reasoning_effort {level:?} has no alpha"))
+    }
+}
+
+/// Characters of a refused level echoed back in the error.
+const ECHO_CHARS: usize = 32;
+
+/// `raw` Debug-escaped for the client error, cut at [`ECHO_CHARS`] characters
+/// (on a char boundary) with its byte length when longer, so a multi-megabyte
+/// level is neither echoed in the 400 nor logged in full (issue #3457).
+fn bounded_echo(raw: &str) -> String {
+    match raw.char_indices().nth(ECHO_CHARS) {
+        Some((cut, _)) => format!("{:?}... ({} bytes)", &raw[..cut], raw.len()),
+        None => format!("{raw:?}"),
     }
 }
 
