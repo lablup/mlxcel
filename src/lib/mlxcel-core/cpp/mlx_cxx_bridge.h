@@ -579,6 +579,17 @@ std::unique_ptr<MlxArray> qwen4_hyper_gate(const MlxArray& x, int32_t count);
 std::unique_ptr<MlxArray> qwen4_hyper_mix(const MlxArray& projected, const MlxArray& normed);
 std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxArray& weights, const MlxArray& hyper);
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps);
+// Raon_mHC decode-step site graphs (issue #3458): the eager ops of
+// `models/raon_mhc.rs` replayed from one compiled tape each, bit for bit.
+void raon_mhc_route_aggregate(
+    const MlxArray& streams, const MlxArray& proj, const MlxArray& alpha, const MlxArray& bias,
+    const MlxArray& eps, const MlxArray& post_factor, const MlxArray& basis,
+    const MlxArray& basis_t, const MlxArray& chart0, const MlxArray& identity,
+    const MlxArray& gamma, std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_post_out, std::unique_ptr<MlxArray>& h_res_out);
+std::unique_ptr<MlxArray> raon_mhc_mix(
+    const MlxArray& streams, const MlxArray& branch, const MlxArray& h_post,
+    const MlxArray& h_res);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
 // Compiled gelu_approx: despite the name, exact erf GELU

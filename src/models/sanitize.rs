@@ -827,6 +827,12 @@ fn repack_nvfp4_weights_with_route(
         route.reason,
     );
 
+    // Where the repack spends its time, reported once per load at debug
+    // level (`RUST_LOG=mlxcel::models::sanitize=debug`, issue #3458).
+    let mut profile = Nvfp4RepackProfile::default();
+    let repack_start = std::time::Instant::now();
+    let layers = fp4_prefixes.len();
+
     for prefix in fp4_prefixes {
         let weight_key = format!("{prefix}.weight");
         let scale_key = format!("{prefix}.weight_scale");
@@ -848,6 +854,39 @@ fn repack_nvfp4_weights_with_route(
             continue;
         }
 
+        // The checkpoint's own planes, reinterpreted on the device with no
+        // host copy, when the triplet is in the canonical layout (#3458).
+        // Any other layout takes the host transcode below, which names what
+        // is wrong with it.
+        if strategy == Nvfp4RepackStrategy::DirectTranscode
+            && let Some((weight_u32, scales_u8, global_scale)) = nvfp4_device_transcode(
+                weights.get(&weight_key).unwrap(),
+                weights.get(&scale_key).unwrap(),
+                weights.get(&scale2_key).unwrap(),
+            )
+        {
+            // Materialized here, as the host transcode does, so the planes
+            // are ready when the load returns instead of at the first token.
+            let phase = std::time::Instant::now();
+            let ptrs: Vec<*const mlxcel_core::MlxArray> = [&weight_u32, &scales_u8, &global_scale]
+                .into_iter()
+                .map(|arr| arr.as_ref().unwrap() as *const mlxcel_core::MlxArray)
+                .collect();
+            // SAFETY: the three pointers borrow arrays that live until the
+            // inserts below.
+            unsafe { mlxcel_core::eval_all(&ptrs) };
+            profile.device_eval += phase.elapsed();
+            weights.insert(weight_key, weight_u32);
+            weights.insert(repacked_scales_key, scales_u8);
+            weights.insert(global_scale_key, global_scale);
+            weights.remove(&repacked_biases_key);
+            weights.remove(&scale_key);
+            weights.remove(&scale2_key);
+            weights.remove(&input_scale_key);
+            profile.device_transcoded += 1;
+            continue;
+        }
+
         let (
             weight_shape,
             weight_dtype,
@@ -861,6 +900,7 @@ fn repack_nvfp4_weights_with_route(
             let scale_arr = weights.get(&scale_key).unwrap();
             let scale2_arr = weights.get(&scale2_key).unwrap();
 
+            let phase = std::time::Instant::now();
             mlxcel_core::eval(weight_arr);
             mlxcel_core::eval(scale2_arr);
 
@@ -868,6 +908,8 @@ fn repack_nvfp4_weights_with_route(
             let weight_dtype = mlxcel_core::array_dtype(weight_arr);
             let scale_shape = mlxcel_core::array_shape(scale_arr);
             let weight_bytes = mlxcel_core::array_to_raw_bytes(weight_arr);
+            profile.weight_host_copy += phase.elapsed();
+            let phase = std::time::Instant::now();
             // The checkpoint stores the block scales as F8_E4M3; the Gemma 4
             // loader decodes them to f16 at load time (MLX has no native float8
             // dtype). Normalize to F32 before the raw-byte parse below so both
@@ -890,6 +932,8 @@ fn repack_nvfp4_weights_with_route(
                 mlxcel_core::eval(&scale_f32_arr);
                 mlxcel_core::array_to_raw_bytes(&scale_f32_arr)
             };
+
+            profile.scale_decode += phase.elapsed();
 
             // `weight_scale_2` must be a single-element per-tensor scalar
             // (ModelOpt's convention). `item_f32` reinterprets the buffer
@@ -1077,6 +1121,7 @@ fn repack_nvfp4_weights_with_route(
             // bytes. The decode is lossless, so this recovers the checkpoint's
             // exact per-block scale for MLX native NVFP4 without folding
             // weight_scale_2 into it.
+            let phase = std::time::Instant::now();
             let mut e4m3_bytes = Vec::with_capacity(out_dim * num_groups);
             for i in 0..(out_dim * num_groups) {
                 let base = i * 4;
@@ -1093,6 +1138,7 @@ fn repack_nvfp4_weights_with_route(
                 &[out_dim as i32, num_groups as i32],
                 mlxcel_core::dtype::UINT8,
             );
+            profile.scale_reencode += phase.elapsed();
 
             // Global-scale sidecar: the single per-tensor weight_scale_2, kept
             // as an f32 scalar and applied as a scalar multiply on the linear
@@ -1114,6 +1160,7 @@ fn repack_nvfp4_weights_with_route(
             weights.remove(&scale_key);
             weights.remove(&scale2_key);
             weights.remove(&input_scale_key); // may not exist; remove is a no-op then
+            profile.host_transcoded += 1;
             continue;
         }
 
@@ -1196,7 +1243,94 @@ fn repack_nvfp4_weights_with_route(
         weights.remove(&scale2_key);
         weights.remove(&input_scale_key); // may not exist; remove is a no-op then
     }
+    profile.report(layers, repack_start.elapsed());
     Ok(())
+}
+
+/// The direct ModelOpt NVFP4 transcode of one triplet without a host copy
+/// (issue #3458): `(weight, scales, global_scale)` in MLX's native NVFP4
+/// layout, or `None` when the triplet is not in the canonical layout.
+///
+/// The host transcode read every packed weight to a host buffer, decoded the
+/// E4M3 block scales to f32 and encoded them back to the bytes they started
+/// as, which took about 70 s for the 9538 triplets of Raon-1 mini. MLX's
+/// safetensors reader hands `F8_E4M3` back as its raw `uint8` bytes, so the
+/// scales are already the plane MLX reads and are passed through unchanged;
+/// the packed weight is viewed as little-endian `uint32` on the device (two
+/// E2M1 nibbles per byte, low nibble first, is MLX's eight-nibbles-per-word
+/// order); and `weight_scale_2` becomes the f32 `[1]` tensor scale. The
+/// caller evaluates the three arrays.
+///
+/// The result is byte-identical to the host transcode, except that a
+/// negative-NaN scale byte (`0xFF`) stays as stored where the decode and
+/// re-encode round trip rewrote it to the canonical `0x7F`; both are NaN.
+///
+/// A block scale the loader already decoded to a float dtype (the Gemma 4
+/// selective loader) is not canonical here and keeps the host transcode.
+fn nvfp4_device_transcode(
+    weight: &mlxcel_core::MlxArray,
+    scale: &mlxcel_core::MlxArray,
+    scale2: &mlxcel_core::MlxArray,
+) -> Option<(
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+)> {
+    use mlxcel_core::dtype::{FLOAT32, UINT8, UINT32};
+    let weight_shape = mlxcel_core::array_shape(weight);
+    let [out_dim, packed_dim] = weight_shape[..] else {
+        return None;
+    };
+    // `in_dim = 2 * packed_dim` must be a whole number of 16-element blocks,
+    // which also makes `packed_dim` a whole number of u32 words.
+    let block_bytes = (NVFP4_SOURCE_GROUP_SIZE / 2) as i32;
+    if out_dim <= 0 || packed_dim <= 0 || packed_dim % block_bytes != 0 {
+        return None;
+    }
+    let canonical = mlxcel_core::array_dtype(weight) == UINT8
+        && mlxcel_core::array_dtype(scale) == UINT8
+        && mlxcel_core::array_shape(scale) == [out_dim, packed_dim / block_bytes]
+        && mlxcel_core::array_size(scale2) == 1;
+    if !canonical {
+        return None;
+    }
+    let weight_u32 = mlxcel_core::view(&mlxcel_core::contiguous(weight, false), UINT32);
+    let global_scale = mlxcel_core::reshape(&mlxcel_core::astype(scale2, FLOAT32), &[1]);
+    Some((weight_u32, mlxcel_core::copy(scale), global_scale))
+}
+
+/// Wall time of the ModelOpt NVFP4 repack by phase, summed over the layers of
+/// one load (issue #3458).
+#[derive(Default)]
+struct Nvfp4RepackProfile {
+    /// Evaluating the packed weight and copying it to a host buffer.
+    weight_host_copy: std::time::Duration,
+    /// Copying the block scales to host and decoding them to f32.
+    scale_decode: std::time::Duration,
+    /// Encoding the f32 block scales back to E4M3 bytes.
+    scale_reencode: std::time::Duration,
+    /// Evaluating the planes of the layers transcoded on the device.
+    device_eval: std::time::Duration,
+    /// Layers transcoded through host buffers.
+    host_transcoded: usize,
+    /// Layers transcoded on the device, with no host copy.
+    device_transcoded: usize,
+}
+
+impl Nvfp4RepackProfile {
+    fn report(&self, layers: usize, total: std::time::Duration) {
+        tracing::debug!(
+            layers,
+            host_transcoded = self.host_transcoded,
+            device_transcoded = self.device_transcoded,
+            total_ms = total.as_millis() as u64,
+            weight_host_copy_ms = self.weight_host_copy.as_millis() as u64,
+            scale_decode_ms = self.scale_decode.as_millis() as u64,
+            scale_reencode_ms = self.scale_reencode.as_millis() as u64,
+            device_eval_ms = self.device_eval.as_millis() as u64,
+            "ModelOpt NVFP4 repack profile"
+        );
+    }
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the quantized groups for the

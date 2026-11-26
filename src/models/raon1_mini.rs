@@ -43,7 +43,7 @@ use super::raon_rda::{RaonDeltaAttention, RaonDeltaCache, RdaSpec};
 use super::raon1_mini_moe::{MoeSpec, RaonMoe, RaonSituMlp};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr, dtype};
+use mlxcel_core::{MlxArray, UniquePtr};
 use std::path::Path;
 
 pub use super::raon1_mini_config::Raon1MiniConfig;
@@ -57,6 +57,9 @@ use effort::EffortState;
 
 #[path = "raon1_mini_speculative.rs"]
 pub mod speculative;
+
+#[path = "raon1_mini_snapshot.rs"]
+mod snapshot;
 
 /// Per-layer state: RDA conv window plus recurrent state, or the MLA latent
 /// pair (`kv_latent`, `k_pe`) in a `KVCache`.
@@ -140,6 +143,9 @@ pub(crate) struct Raon1MiniDecoderLayer {
     post_attention_layernorm: RMSNorm,
     attn_mhc: RaonMhc,
     mlp_mhc: RaonMhc,
+    /// Whether single-position steps take the compiled mHC site graphs
+    /// (`MLXCEL_RAON_DECODE_FUSION`, issue #3458).
+    compiled_mhc: bool,
 }
 
 impl Raon1MiniDecoderLayer {
@@ -174,22 +180,16 @@ impl Raon1MiniDecoderLayer {
         steer: Option<&MlxArray>,
         mixer: impl FnOnce(&Mixer, &MlxArray) -> UniquePtr<MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let dt = mlxcel_core::array_dtype(streams);
-        let route = self.attn_mhc.route(streams);
-        let sf = mlxcel_core::astype(streams, dtype::FLOAT32);
-        let x = self
-            .input_layernorm
-            .forward(&raon_mhc::aggregate(&sf, &route.h_pre, dt));
-        let y = mixer(&self.mixer, &x);
-        let streams = raon_mhc::mix(&sf, &y, &route, dt);
+        let compiled = self.compiled_mhc;
+        let (x, site) = self.attn_mhc.enter(streams, compiled);
+        let y = mixer(&self.mixer, &self.input_layernorm.forward(&x));
+        let streams = self.attn_mhc.leave(streams, &y, &site);
 
-        let route = self.mlp_mhc.route(&streams);
-        let sf = mlxcel_core::astype(&streams, dtype::FLOAT32);
-        let x = self
-            .post_attention_layernorm
-            .forward(&raon_mhc::aggregate(&sf, &route.h_pre, dt));
-        let y = self.ffn.forward(&x, steer);
-        raon_mhc::mix(&sf, &y, &route, dt)
+        let (x, site) = self.mlp_mhc.enter(&streams, compiled);
+        let y = self
+            .ffn
+            .forward(&self.post_attention_layernorm.forward(&x), steer);
+        self.mlp_mhc.leave(&streams, &y, &site)
     }
 
     fn from_weights(
@@ -293,6 +293,7 @@ impl Raon1MiniDecoderLayer {
             post_attention_layernorm: norm("post_attention_layernorm")?,
             attn_mhc: site("self_attn_raon_mhc")?,
             mlp_mhc: site("mlp_raon_mhc")?,
+            compiled_mhc: raon_mhc::DecodeFusion::from_env().mhc,
         })
     }
 }

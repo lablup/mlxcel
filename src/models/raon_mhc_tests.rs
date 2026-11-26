@@ -216,3 +216,179 @@ fn aggregate_and_mix_match_a_hand_computed_two_stream_case() {
         vec![9.5, 18.0]
     );
 }
+
+fn raw(a: &MlxArray) -> Vec<u8> {
+    mlxcel_core::eval(a);
+    mlxcel_core::array_to_raw_bytes(a)
+}
+
+/// The compiled decode graphs (issue #3458) equal the eager ops bit for bit:
+/// the branch input and the write-back of a single-position step, in bf16
+/// and f32, at one and several rows, at the real stream width.
+#[test]
+fn compiled_site_equals_the_eager_site_bit_for_bit() {
+    let _guard = guard();
+    let n = 4usize;
+    for (d, seeds) in [(64usize, 0..6u32), (2560, 0..2)] {
+        let w = n * d;
+        for seed in seeds {
+            let weights = site_weights(
+                n,
+                d,
+                noise(n * w, seed + 11),
+                noise(n * w, seed + 12),
+                noise(9 * w, seed + 13).iter().map(|v| v * 40.0).collect(),
+                [1.5, 0.7, 3.0],
+                noise(n, seed + 14),
+                noise(n, seed + 15),
+                noise(9, seed + 16).iter().map(|v| v * 8.0).collect(),
+                0.3 * seed as f32 - 0.5,
+            );
+            for dt in [dtype::BFLOAT16, dtype::FLOAT32] {
+                let site =
+                    RaonMhc::from_weights(&weights, "site", n, d, 1e-5, 2.0, dt).expect("loads");
+                for b in [1i32, 3] {
+                    let what = format!("d {d} seed {seed} dtype {dt} rows {b}");
+                    let streams = mlxcel_core::astype(
+                        &arr(
+                            &noise(b as usize * w, seed + 19)
+                                .iter()
+                                .map(|v| v * 6.0)
+                                .collect::<Vec<_>>(),
+                            &[b, 1, n as i32, d as i32],
+                        ),
+                        dt,
+                    );
+                    let branch = mlxcel_core::astype(
+                        &arr(&noise(b as usize * d, seed + 23), &[b, 1, d as i32]),
+                        dt,
+                    );
+                    let (x_eager, eager) = site.enter(&streams, false);
+                    let (x_compiled, compiled) = site.enter(&streams, true);
+                    assert!(eager.streams_f32.is_some(), "{what}: eager path");
+                    assert!(compiled.streams_f32.is_none(), "{what}: compiled path");
+                    assert_eq!(mlxcel_core::array_dtype(&x_compiled), dt, "{what}");
+                    assert_eq!(raw(&x_compiled), raw(&x_eager), "{what}: branch input");
+                    assert_eq!(raw(&compiled.h_post), raw(&eager.h_post), "{what}: h_post");
+                    assert_eq!(raw(&compiled.h_res), raw(&eager.h_res), "{what}: h_res");
+                    let out_eager = site.leave(&streams, &branch, &eager);
+                    let out_compiled = site.leave(&streams, &branch, &compiled);
+                    assert_eq!(mlxcel_core::array_dtype(&out_compiled), dt, "{what}");
+                    assert_eq!(raw(&out_compiled), raw(&out_eager), "{what}: write-back");
+                }
+            }
+        }
+    }
+}
+
+/// A step of several positions, and any step inside a speculative verify
+/// block, stays on the eager ops whatever the caller asks for.
+#[test]
+fn compiled_site_is_limited_to_single_position_steps_outside_a_verify_block() {
+    let _guard = guard();
+    let (n, d) = (4usize, 8usize);
+    let w = n * d;
+    let weights = site_weights(
+        n,
+        d,
+        noise(n * w, 31),
+        noise(n * w, 32),
+        noise(9 * w, 33),
+        [1.5, 0.7, 3.0],
+        noise(n, 34),
+        noise(n, 35),
+        noise(9, 36),
+        0.2,
+    );
+    let site = RaonMhc::from_weights(&weights, "site", n, d, 1e-5, 2.0, dtype::FLOAT32).unwrap();
+    let block = arr(&noise(3 * w, 37), &[1, 3, n as i32, d as i32]);
+    assert!(site.enter(&block, true).1.streams_f32.is_some());
+    let step = arr(&noise(w, 38), &[1, 1, n as i32, d as i32]);
+    assert!(site.enter(&step, true).1.streams_f32.is_none());
+    let _scope = mlxcel_core::row_invariant::Scope::enter(mlxcel_core::row_invariant::Mode {
+        kernel: false,
+        verify_block: true,
+    });
+    assert!(site.enter(&step, true).1.streams_f32.is_some());
+}
+
+#[test]
+fn decode_fusion_setting_parses_its_values() {
+    use super::DecodeFusion;
+    assert_eq!(DecodeFusion::parse(None), DecodeFusion::ALL);
+    assert_eq!(DecodeFusion::parse(Some("all")), DecodeFusion::ALL);
+    assert_eq!(DecodeFusion::parse(Some(" OFF ")), DecodeFusion::OFF);
+    let mhc = DecodeFusion::parse(Some("mhc"));
+    assert!(mhc.mhc && !mhc.selector);
+    let selector = DecodeFusion::parse(Some("selector"));
+    assert!(selector.selector && !selector.mhc);
+    assert_eq!(
+        DecodeFusion::parse(Some("selector, mhc")),
+        DecodeFusion::ALL
+    );
+    // A name that is no fast path keeps the default instead of turning one off.
+    assert_eq!(DecodeFusion::parse(Some("mhc,typo")), DecodeFusion::ALL);
+}
+
+/// The one-row selector product (issue #3458) at the real width in bf16: a
+/// decode step's coefficients equal the same row's inside a verify block,
+/// bit for bit, in the row-major form and in the reference form, and a
+/// product of several rows outside a verify block keeps the plain matmul
+/// whatever the form of the one-row product.
+#[test]
+fn one_row_selector_products_agree_between_a_decode_step_and_a_verify_row() {
+    let _guard = guard();
+    let (n, d) = (4usize, 2560usize);
+    let w = n * d;
+    let weights = site_weights(
+        n,
+        d,
+        noise(n * w, 41),
+        noise(n * w, 42),
+        noise(9 * w, 43).iter().map(|v| v * 40.0).collect(),
+        [1.5, 0.7, 3.0],
+        noise(n, 44),
+        noise(n, 45),
+        noise(9, 46).iter().map(|v| v * 8.0).collect(),
+        0.1,
+    );
+    let dt = dtype::BFLOAT16;
+    let block = mlxcel_core::astype(
+        &arr(
+            &noise(4 * w, 47).iter().map(|v| v * 6.0).collect::<Vec<_>>(),
+            &[1, 4, n as i32, d as i32],
+        ),
+        dt,
+    );
+    let row = |streams: &MlxArray, t: i32| mlxcel_core::utils::slice_axis(streams, 1, t, t + 1);
+    let coefficients =
+        |route: &MhcRoute| (raw(&route.h_pre), raw(&route.h_post), raw(&route.h_res));
+    let mut plain_blocks = Vec::new();
+    for row_major in [true, false] {
+        let mut site = RaonMhc::from_weights(&weights, "site", n, d, 1e-5, 2.0, dt).unwrap();
+        site.set_row_major_single(row_major);
+        // Outside a verify block the four rows are one matmul.
+        plain_blocks.push(coefficients(&site.route(&block)));
+        let steps: Vec<_> = (0..4)
+            .map(|t| coefficients(&site.route(&row(&block, t))))
+            .collect();
+        let _scope = mlxcel_core::row_invariant::Scope::enter(mlxcel_core::row_invariant::Mode {
+            kernel: false,
+            verify_block: true,
+        });
+        let verify = site.route(&block);
+        for (t, step) in steps.iter().enumerate() {
+            let t = t as i32;
+            let verify_row = (
+                raw(&row(&verify.h_pre, t)),
+                raw(&row(&verify.h_post, t)),
+                raw(&row(&verify.h_res, t)),
+            );
+            assert_eq!(&verify_row, step, "row-major {row_major}: verify row {t}");
+        }
+    }
+    assert_eq!(
+        plain_blocks[0], plain_blocks[1],
+        "a multi-row product is unchanged"
+    );
+}
