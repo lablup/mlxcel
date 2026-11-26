@@ -44,7 +44,7 @@ use crate::server::types::request::Tool;
 /// Shared by [`strip_thinking`], which removes them, and
 /// [`thinking_marker_pair`], which reports which one a generation used, so the
 /// two cannot disagree about what delimits a thinking block.
-pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 9] = [
+pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 10] = [
     ("<think>", "</think>"),
     ("<|content_thinking|>", "<|end_message|>"),
     ("<|channel>", "<channel|>"),
@@ -61,6 +61,8 @@ pub(super) const THINKING_MARKER_PAIRS: [(&str, &str); 9] = [
     ("<ifm|think_faster>", "</ifm|think_faster>"),
     // Tencent Hy4 (#2354). The template primes the open, as for K3.
     ("<think:opensource>", "</think:opensource>"),
+    // Mistral reasoning checkpoints (Magistral, Ministral reasoning; #3209).
+    ("[THINK]", "[/THINK]"),
 ];
 
 fn has_inkling_primed_boundary(text: &str) -> bool {
@@ -369,6 +371,139 @@ impl FormatParser {
     }
 }
 
+/// Where a reasoning block still open at the end of `text` starts:
+/// `(open_at, body_at)`, the byte offsets of its open marker and of its body.
+/// `primed` means the prompt opened one, so the text starts inside it until
+/// the first close marker; an unclosed primed block is `(0, 0)`.
+///
+/// Walks the same marker pairs [`strip_thinking`] removes, the way it pairs
+/// them: a close with no open before it ends a primed block, and an open is
+/// closed only by its own family's close.
+fn unclosed_reasoning(text: &str, primed: bool) -> Option<(usize, usize)> {
+    let earliest_close = |from: usize| {
+        THINKING_MARKER_PAIRS
+            .iter()
+            .filter(|(open, _)| {
+                *open != "<|content_thinking|>" || has_inkling_primed_boundary(text)
+            })
+            .filter_map(|(_, close)| text[from..].find(close).map(|i| from + i + close.len()))
+            .min()
+    };
+    let mut pos = 0usize;
+    // The block the scan is inside: (open_at, body_at, its close marker, or
+    // `None` for a primed block any family's close ends).
+    let mut inside: Option<(usize, usize, Option<&str>)> = primed.then_some((0, 0, None));
+    if !primed {
+        // `strip_thinking`'s primed pass: a close before any open ends a
+        // block the prompt opened.
+        let first_open = THINKING_MARKER_PAIRS
+            .iter()
+            .filter_map(|(open, _)| text.find(open))
+            .min()
+            .unwrap_or(text.len());
+        if let Some(end) = earliest_close(0).filter(|&end| end <= first_open) {
+            pos = end;
+        }
+    }
+    loop {
+        match inside {
+            Some((open_at, body_at, close)) => {
+                let end = match close {
+                    Some(close) => text[body_at..]
+                        .find(close)
+                        .map(|i| body_at + i + close.len()),
+                    None => earliest_close(body_at),
+                };
+                match end {
+                    Some(end) => {
+                        pos = end;
+                        inside = None;
+                    }
+                    None => return Some((open_at, body_at)),
+                }
+            }
+            None => {
+                let (at, open, close) = THINKING_MARKER_PAIRS
+                    .iter()
+                    .filter_map(|&(open, close)| {
+                        text[pos..].find(open).map(|i| (pos + i, open, close))
+                    })
+                    .min_by_key(|&(at, open, _)| (at, std::cmp::Reverse(open.len())))?;
+                inside = Some((at, at + open.len(), Some(close)));
+            }
+        }
+    }
+}
+
+/// The tool-call block that ends an unclosed reasoning body, if the body ends
+/// with a complete one and nothing but whitespace after it (#3209 rule 3).
+///
+/// The block starts at the last open marker before the trailing end marker,
+/// and must not contain another end marker: a block followed by more text,
+/// including a second end marker, was reasoning, as
+/// [`StreamFilter`](super::stream_filter::StreamFilter) decides it.
+fn tail_tool_block(body: &str) -> Option<&str> {
+    let (opens, closes) = super::stream_filter::reasoning_tool_markers();
+    let trimmed = body.trim_end();
+    let close = closes
+        .iter()
+        .filter(|close| trimmed.ends_with(**close))
+        .max_by_key(|close| close.len())?;
+    let before_close = &trimmed[..trimmed.len() - close.len()];
+    // The opener that ends last starts the block; on a tie (MiniMax M3's
+    // namespaced `<tool_call>` ends where its embedded Hermes tag ends), the
+    // longer one.
+    let (open_at, open_end) = opens
+        .iter()
+        .filter_map(|open| before_close.rfind(open).map(|at| (at, at + open.len())))
+        .max_by_key(|&(at, end)| (end, std::cmp::Reverse(at)))?;
+    let inner = &before_close[open_end..];
+    if closes.iter().any(|close| inner.contains(close)) {
+        return None;
+    }
+    Some(&trimmed[open_at..])
+}
+
+/// Markers of the families that route their own channels (Kimi K3 XTML,
+/// Harmony, Muse / ATEM, Inkling). A primed reasoning output that never
+/// closes still reaches their parsers whole, as before #3209, so their
+/// channel routing is unchanged.
+const OWN_CHANNEL_MARKERS: &[&str] = &[
+    "<|open|>",
+    "<|close|>",
+    "<|channel|>",
+    "<|message|>",
+    "<|start|>assistant",
+    "<atem:",
+    "<|message_model|>",
+    "<|content_invoke_tool_json|>",
+];
+
+/// The text the format parsers see: thinking blocks removed, and a reasoning
+/// block still open at the end reduced to the tool call it ends with, if any
+/// (#3209 rules 3 and 4). Balanced blocks, and an example call inside them,
+/// are removed whole by [`strip_thinking`] (rules 1 and 2).
+fn strip_reasoning(raw_output: &str, primed_open_thinking: bool) -> String {
+    let Some((open_at, body_at)) = unclosed_reasoning(raw_output, primed_open_thinking) else {
+        return strip_thinking(raw_output);
+    };
+    let primed_unclosed = open_at == 0 && body_at == 0;
+    if primed_unclosed && OWN_CHANNEL_MARKERS.iter().any(|m| raw_output.contains(m)) {
+        return strip_thinking(raw_output);
+    }
+    // A primed block that never closes is the whole output; `strip_thinking`
+    // finds no marker in it and would hand all of it to the parsers.
+    let mut visible = if primed_unclosed {
+        String::new()
+    } else {
+        strip_thinking(raw_output)
+    };
+    if let Some(call) = tail_tool_block(&raw_output[body_at..]) {
+        visible.push_str(call);
+    }
+    visible
+}
+
 /// Parse model output for tool calls, trying each known format in order.
 ///
 /// `tools` is the set of tools that were passed in the request.  When
@@ -377,7 +512,40 @@ impl FormatParser {
 ///
 /// Returns a `ToolCallParseResult` which may contain zero or more parsed
 /// calls.
+///
+/// This is [`parse_tool_calls_with_context`] for a prompt that did not prime
+/// an open reasoning block.
 pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallParseResult {
+    parse_tool_calls_with_context(raw_output, tools, false)
+}
+
+/// [`parse_tool_calls`] with the reasoning state the prompt left open
+/// (#3209).
+///
+/// A tool call inside a reasoning block is reasoning text unless it ends the
+/// output:
+///
+/// 1. A call in a reasoning block that closes later is never executed.
+/// 2. A reasoning close also ends a call block still open inside it.
+/// 3. A complete call that ends an unclosed reasoning block (explicit open,
+///    or `primed_open_thinking`), with only whitespace after it, is executed.
+/// 4. Anything else inside an unclosed reasoning block is reasoning.
+///
+/// The streaming [`StreamFilter`](super::stream_filter::StreamFilter) holds
+/// the same blocks back and releases them as reasoning by the same rules, so
+/// `reasoning_content` and the executed calls agree across both paths.
+/// Harmony, Muse/ATEM, Inkling and Kimi K3 route their own channels and are
+/// unchanged.
+///
+/// Used by: `routes::chat` (both paths), `routes::responses`,
+/// `routes::responses_run`, `routes::responses_mcp_loop`, `routes::anthropic`
+/// (both paths) and `in_process::chat` (`mlxcel run`), with the primed state
+/// each computes for its stream filter.
+pub fn parse_tool_calls_with_context(
+    raw_output: &str,
+    tools: Option<&[Tool]>,
+    primed_open_thinking: bool,
+) -> ToolCallParseResult {
     // Inkling (#3228) closes thinking and invoke messages with the same
     // `<|end_message|>`, so its calls are taken from the raw output before the
     // thinking pass, which would otherwise pair a thinking open with the
@@ -397,8 +565,8 @@ pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallPar
         }
     }
 
-    // Strip thinking blocks first
-    let cleaned = strip_thinking(raw_output);
+    // Strip thinking blocks first; an unclosed one keeps only a tail call.
+    let cleaned = strip_reasoning(raw_output, primed_open_thinking);
     let text = cleaned.trim();
 
     if text.is_empty() {

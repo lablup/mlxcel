@@ -837,9 +837,10 @@ pub(crate) fn drive_response_run(
         .map(|g| g.clone())
         .unwrap_or_default();
     let mut parsed_tools = if parse_tools {
-        Some(tool_calls::parse_tool_calls(
+        Some(tool_calls::parse_tool_calls_with_context(
             &full_raw,
             tools_for_parser.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None

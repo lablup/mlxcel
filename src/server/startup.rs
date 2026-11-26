@@ -1822,8 +1822,17 @@ pub(crate) fn load_chat_front(
     // #686). Per-request kwargs and `--chat-template-kwargs` still win via
     // `merge_server_and_request`.
     if crate::server::chat_front::apply_thinking_default(&mut chat_template, &tokenizer) {
-        let thinking_markers = tokenizer.infer_thinking_markers();
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
+        // mlx-lm#1974: a template that writes `<think>` as text turns the
+        // default on even without a vocabulary token, so say which one did.
+        let marker_source = if tokenizer.infer_thinking_markers().has_thinking() {
+            "vocab"
+        } else {
+            "template"
+        };
         tracing::info!(
+            marker_source,
             think_start = ?thinking_markers.think_start,
             think_end = ?thinking_markers.think_end,
             think_start_tokens_len = thinking_markers

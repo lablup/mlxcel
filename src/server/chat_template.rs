@@ -762,12 +762,18 @@ impl ChatTemplateProcessor {
     /// architecture name — any future template that adopts the same idiom is
     /// covered automatically.
     ///
-    /// The check requires the literal `not thinking is defined` substring, so
-    /// templates that instead declare `enable_thinking is not defined` (e.g.
-    /// GLM-5.2's `glm_moe_dsa` template) do not match: `"is not defined"` is
-    /// not the same substring as `"is defined"` preceded by `not `.
+    /// The check matches the literal `not thinking is defined` substring, or,
+    /// as mlx-lm's `_infer_thinking_kwarg` does since mlx-lm#1974, a
+    /// ` thinking is defined` test in a template that never mentions
+    /// `enable_thinking` (`{% if thinking is defined and thinking %}`). A
+    /// template that reads `enable_thinking` keeps getting that kwarg alone:
+    /// GLM-5.2's `glm_moe_dsa` template declares `enable_thinking is not
+    /// defined`, and `"is not defined"` is not `"is defined"` preceded by
+    /// `not `, so it matches neither form.
     fn wants_bare_thinking_alias(&self) -> bool {
         self.template.contains("not thinking is defined")
+            || (self.template.contains(" thinking is defined")
+                && !self.template.contains("enable_thinking"))
     }
 
     /// Detect a chat template that gates reasoning on a `thinking_mode`
@@ -5238,3 +5244,7 @@ TOOL
 #[cfg(test)]
 #[path = "chat_template_text_wrap_tests.rs"]
 mod text_wrap_tests;
+
+#[cfg(test)]
+#[path = "chat_template_thinking_alias_tests.rs"]
+mod thinking_alias_tests;

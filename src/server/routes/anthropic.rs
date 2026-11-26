@@ -442,9 +442,10 @@ async fn non_stream_messages(
     // Parse tool calls and recover the visible/reasoning split using the
     // shared chat helpers.
     let parsed_tools = if tool_calls::should_parse_tool_calls(&translated.chat_request) {
-        Some(tool_calls::parse_tool_calls(
+        Some(tool_calls::parse_tool_calls_with_context(
             &result.text,
             translated.chat_request.tools.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None
@@ -860,9 +861,10 @@ async fn stream_messages(
             .map(|g| g.clone())
             .unwrap_or_default();
         let parsed_tools = if parse_tools {
-            Some(tool_calls::parse_tool_calls(
+            Some(tool_calls::parse_tool_calls_with_context(
                 &full_raw,
                 tools_for_parser.as_deref(),
+                primed_open_thinking,
             ))
         } else {
             None
