@@ -5866,13 +5866,12 @@ mod xla_canonical_diagnostics {
         // CPU oracle agrees there (854), while for the single-pass full
         // prefill it ranks 854 first by a 0.75-logit margin over 236798, a
         // cross-device close-ranking flip that is recorded, not gated.
-        // The prefix-decode top1 moved to 854 there; re-captured
-        // again on GB10 at the fc344c98 MLX pin (#3134 advanced it three times
-        // since 551039ee), the eager prefix-decode ranks 236798 first by a
-        // 0.3125-logit margin over 854 (XLA agrees by 0.375), while the
-        // mlx-vlm 0.7.8 CPU oracle still ranks 854 first by 0.75. A
-        // cross-build, cross-device close-ranking flip, recorded next to the
-        // pin.
+        // Re-captured again on GB10 at the fc344c98 MLX pin (#3134 advanced
+        // it three times since 551039ee), the eager prefix-decode ranks
+        // 236798 first by a 0.3125-logit margin over 854 (XLA agrees by
+        // 0.375), while the mlx-vlm 0.7.8 CPU oracle still ranks 854 first
+        // by 0.75. A cross-build, cross-device close-ranking flip, recorded
+        // next to the pin.
         assert_eq!(
             argmax(&mlx_logits),
             236798,
