@@ -95,6 +95,8 @@ pub enum ResponsesTranslateError {
     TruncationUnsupported(String),
     #[error("max_output_tokens must be > 0")]
     MaxOutputTokensInvalid,
+    #[error("top_logprobs must be between 0 and 20")]
+    TopLogprobsOutOfRange,
     #[error("{0}")]
     InvalidInputPart(String),
     #[error("invalid compaction item: {0}")]
@@ -173,6 +175,11 @@ pub fn responses_request_to_chat_with_mcp(
         && cap == 0
     {
         return Err(ResponsesTranslateError::MaxOutputTokensInvalid);
+    }
+    if let Some(top) = request.top_logprobs
+        && top > 20
+    {
+        return Err(ResponsesTranslateError::TopLogprobsOutOfRange);
     }
     reject_unsupported_tools(request.tools.as_deref(), mcp_enabled)?;
     // Refused before the chained response is looked up, so the caller reads
@@ -1357,6 +1364,21 @@ mod tests {
         req.max_output_tokens = Some(0);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
         matches!(err, ResponsesTranslateError::MaxOutputTokensInvalid);
+    }
+
+    #[test]
+    fn top_logprobs_above_twenty_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.top_logprobs = Some(21);
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::TopLogprobsOutOfRange
+        ));
+
+        req.top_logprobs = Some(20);
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        assert_eq!(translated.chat_request.top_logprobs, Some(20));
     }
 
     #[test]
