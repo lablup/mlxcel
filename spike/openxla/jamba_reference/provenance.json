@@ -31,5 +31,23 @@
     "raw per-expert HF MoE checkpoints (only the stacked switch_mlp layout loads)",
     "quantized (MLX 4-bit) Jamba checkpoints",
     "a real MoE Jamba checkpoint (the 3B checkpoint has num_experts = 1)"
-  ]
+  ],
+  "integrated": {
+    "runtime_source_head": "b9b5545a4258f274d2534c23017df2f4ed409b2e",
+    "base": "01e6516b (main after #3452 Falcon-H1 plain RoPE and #3449 Plamo2)",
+    "release_binary_sha256": {
+      "mlxcel": "f42067b3976fda5c3339cc9390ece127508ed0c383a45d9a98abee87ee1ccbe5",
+      "mlxcel-server": "a0061a80ed6fc1bc3ba3a70b00fd3acc422cb7863bc4ba0fa5b90737d9fffb9e"
+    },
+    "note": "later commits on the branch add only evidence and documentation",
+    "commands": {
+      "integrated-cuda-validate-arch-b4-n8.log": "MLXCEL_XLA_DEVICE=cuda gpu-lock run --tag xla-3349 -- scripts/xla/validate_arch.sh --model /tmp/epic564-models/jamba-3b --device cuda --batch 4 --requests 8 --maxcap 24 --oracle /tmp/epic564-plan/jamba-3b-oracle.json",
+      "integrated-cuda-cli-server.log": "gpu-lock run --tag xla-3349 -- $PY spike/openxla/falcon_h1_cli_server_check.py --device cuda --model /tmp/epic564-models/jamba-3b --oracle /tmp/epic564-plan/jamba-3b-oracle.json --bin-dir target/release --binary-source-head b9b5545a --checkpoint-revision 7524370414253301341370beba35e3d549cbf5f3",
+      "integrated-cuda-*.log (test targets)": "gpu-lock run --tag xla-3349 -- cargo test --profile test-fast --features xla-iree,test-utils --test {xla_jamba,xla_plamo2,xla_falcon_h1,xla_ssm_single_seq,xla_ssm_state_carry,xla_hybrid_nemotron_h} -- --ignored --nocapture --test-threads=1 with MLXCEL_XLA_DEVICE=cuda MLXCEL_REQUIRE_MODELS=1; PLAMO2 fixtures /tmp/epic564-plan/plamo2-fixtures, model /tmp/epic564-models/plamo-2-1b, oracle spike/openxla/plamo2_reference/oracle.json; FALCON_H1 model /tmp/epic564-models/falcon-h1, oracle spike/openxla/falcon_h1_reference/hf-f32-oracle.json",
+      "integrated-cpu-jamba-synthetic.log": "MLXCEL_XLA_DEVICE=local-task jamba_moe_hf_synthetic_parity",
+      "integrated-guard-tests.log": "cargo test --profile test-fast --features xla-iree --lib xla_prompt_cache_guard",
+      "integrated-xla-lib-tests.log": "cargo test --profile test-fast -p mlxcel-xla --lib",
+      "integrated-clippy.log": "cargo clippy --profile test-fast -p mlxcel-xla --all-targets -- -D warnings"
+    }
+  }
 }

@@ -27,7 +27,7 @@ MLXCEL_JAMBA_FIXTURE=/tmp/epic564-models/jamba-moe-tiny MLXCEL_XLA_DEVICE=local-
 
 ## Results (GB10, IREE 3.12.0rc20260721, f32)
 
-Runtime source `76a3dc4c`; commands and binary hashes are in `jamba_reference/provenance.json`.
+First acceptance ran on runtime source `76a3dc4c`. After rebasing onto main `01e6516b` (Falcon-H1 plain RoPE #3452, Plamo2 #3449), the integrated runtime source `b9b5545a` repeated every row below on CUDA and the synthetic parity on local-task (`jamba_reference/integrated-*`). It also passed the Plamo2, Falcon-H1, Mamba1/Mamba2 SSM and Nemotron-H CUDA suites, kept every registered golden byte-exact, and was clippy clean with `--all-targets`. Commands and binary hashes for both runs are in `jamba_reference/provenance.json`.
 
 | Check | Result |
 |---|---|
