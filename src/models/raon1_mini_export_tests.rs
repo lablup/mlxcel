@@ -341,7 +341,7 @@ fn write_safetensors(path: &std::path::Path, files: &[(String, UniquePtr<MlxArra
         );
     }
     let mut header = serde_json::to_string(&header).unwrap();
-    while header.len() % 8 != 0 {
+    while !header.len().is_multiple_of(8) {
         header.push(' ');
     }
     let mut file = std::fs::File::create(path).unwrap();
