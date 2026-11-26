@@ -105,6 +105,11 @@ impl RaonDFlash2Drafter {
                 ),
             });
         }
+        if self.model.embed_tokens.is_none() {
+            return Err(DrafterError::DraftFailed {
+                reason: "Raon DFlash2 drafter is not bound to a target embedding table".to_string(),
+            });
+        }
         hidden.ok_or_else(|| DrafterError::DraftFailed {
             reason: "Raon DFlash2 drafter requires the target's captured mHC streams; got \
                      hidden = None"
@@ -117,10 +122,12 @@ impl RaonDFlash2Drafter {
         last_bonus: i32,
         hidden: &MlxArray,
         block_size: usize,
-    ) -> UniquePtr<MlxArray> {
-        self.model.add_context(hidden, &mut self.state);
+    ) -> Result<UniquePtr<MlxArray>, DrafterError> {
+        self.model
+            .add_context(hidden, &mut self.state)
+            .map_err(|reason| DrafterError::DraftFailed { reason })?;
         let bonus = ffi::from_slice_i32(&[last_bonus], &[1]);
-        self.model.propose(&bonus, block_size, &self.state)
+        Ok(self.model.propose(&bonus, block_size, &self.state))
     }
 }
 
@@ -191,6 +198,17 @@ impl Drafter for RaonDFlash2Drafter {
         true
     }
 
+    /// The context window (`swa_window_size`): older prompt rows never
+    /// reach `fc`, so the target captures only the newest this many.
+    fn context_window(&self) -> Option<usize> {
+        Some(self.model.config.window)
+    }
+
+    fn skip_context(&mut self, positions: usize) {
+        let positions = i32::try_from(positions).unwrap_or(i32::MAX);
+        self.model.skip_context(positions, &mut self.state);
+    }
+
     fn draft_block(
         &mut self,
         last_bonus: i32,
@@ -199,7 +217,7 @@ impl Drafter for RaonDFlash2Drafter {
         _sampler: &SamplingConfig,
     ) -> Result<Vec<i32>, DrafterError> {
         let hidden = self.check_args(hidden, block_size)?;
-        let tokens = self.draft(last_bonus, hidden, block_size);
+        let tokens = self.draft(last_bonus, hidden, block_size)?;
         crate::try_eval(&tokens).map_err(|e| DrafterError::DraftFailed {
             reason: e.to_string(),
         })?;
@@ -217,7 +235,7 @@ impl Drafter for RaonDFlash2Drafter {
         _sampler: &SamplingConfig,
     ) -> Result<UniquePtr<MlxArray>, DrafterError> {
         let hidden = self.check_args(hidden, block_size)?;
-        Ok(self.draft(last_bonus, hidden, block_size))
+        self.draft(last_bonus, hidden, block_size)
     }
 
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError> {

@@ -439,6 +439,10 @@ pub struct DFlashGenerator {
     /// History before the first bonus (the prompt when the sampler reads
     /// history), for the sampled verify rows (issue #3436).
     token_history: Vec<i32>,
+    /// Prompt rows before the first hidden's first row, which the target did
+    /// not capture (issue #3436); handed to [`Drafter::skip_context`] after
+    /// the drafter resets.
+    first_context_start: usize,
 }
 
 impl DFlashGenerator {
@@ -466,6 +470,7 @@ impl DFlashGenerator {
             generated_tokens: Vec::new(),
             accept_lens: Vec::new(),
             token_history: Vec::new(),
+            first_context_start: 0,
         }
     }
 
@@ -474,6 +479,13 @@ impl DFlashGenerator {
     /// bonus, the emitted tokens and the accepted drafts (issue #3436).
     pub fn set_token_history(&mut self, history: Vec<i32>) {
         self.token_history = history;
+    }
+
+    /// The first hidden starts `rows` prompt rows in: the target captured
+    /// only the newest [`Drafter::context_window`] rows of the prompt
+    /// (issue #3436).
+    pub fn set_first_context_start(&mut self, rows: usize) {
+        self.first_context_start = rows;
     }
 
     /// Convenience constructor that uses the [`DEFAULT_BLOCK_SIZE`] and
@@ -774,6 +786,9 @@ impl DFlashGenerator {
         let bind_reset_start = Instant::now();
         self.drafter.bind(target_lm)?;
         self.drafter.reset(target_lm)?;
+        if self.first_context_start > 0 {
+            self.drafter.skip_context(self.first_context_start);
+        }
         let bind_reset_time = bind_reset_start.elapsed();
 
         let mut diagnostics = DFlashDiagnostics {
@@ -1027,7 +1042,7 @@ impl DFlashGenerator {
                     verify_logits,
                     &draft_tokens,
                     &self.sampler,
-                    &history,
+                    history,
                 );
                 (tokens, Some(adjusted))
             } else {

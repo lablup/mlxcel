@@ -358,3 +358,57 @@ fn context_window_keeps_the_newest_positions_at_their_absolute_offsets() {
     assert_eq!(split.context_position(), whole.context_position());
     assert_eq!(a, b);
 }
+
+#[test]
+fn features_of_the_wrong_width_are_a_draft_error_not_a_panic() {
+    let (mut drafter, cfg) = tiny_drafter(3);
+    let sampler = crate::generate::SamplingConfig::default();
+    let narrow = ffi::ones(&[1, 4, cfg.target_feature_size as i32 - 1], dtype::FLOAT32);
+    let err = drafter
+        .draft_block(1, Some(&narrow), 4, &sampler)
+        .expect_err("narrow features");
+    assert!(err.to_string().contains("wide"), "{err}");
+    let Err(err) = drafter.draft_block_array(1, Some(&narrow), 4, &sampler) else {
+        panic!("narrow features must not draft");
+    };
+    assert!(err.to_string().contains("wide"), "{err}");
+    assert_eq!(drafter.context_position(), 0, "nothing appended");
+}
+
+#[test]
+fn skipping_the_uncaptured_rows_drafts_as_the_whole_prompt_does() {
+    use crate::drafter::Drafter;
+    let sampler = crate::generate::SamplingConfig::default();
+    let (mut whole, cfg) = tiny_drafter(5);
+    let window = cfg.window as i32;
+    let width = cfg.target_feature_size as i32;
+    let long = features(&cfg, window + 6, 2);
+    let a = whole
+        .draft_block(4, Some(&long), 4, &sampler)
+        .expect("drafts");
+
+    // The target captured only the newest window and reported the rest.
+    let (mut tail, _) = tiny_drafter(5);
+    assert_eq!(tail.context_window(), Some(cfg.window));
+    tail.skip_context(6);
+    let newest = ffi::slice(&long, &[0, 6, 0], &[1, window + 6, width]);
+    let b = tail
+        .draft_block(4, Some(&newest), 4, &sampler)
+        .expect("drafts");
+    assert_eq!(tail.context_position(), whole.context_position());
+    assert_eq!(tail.context_len(), whole.context_len());
+    assert_eq!(a, b);
+}
+
+#[test]
+fn config_rejects_dimensions_that_overflow_an_i32() {
+    let mut c = release_config();
+    c["head_dim"] = json!(1 << 20);
+    c["num_attention_heads"] = json!(1 << 20);
+    let err = RaonDFlash2Config::from_json(&c).expect_err("q width overflows");
+    assert!(err.contains("head_dim"), "{err}");
+    let mut c = release_config();
+    c["dflash_config"]["target_feature_size"] = json!(1u64 << 33);
+    let err = RaonDFlash2Config::from_json(&c).expect_err("feature width overflows");
+    assert!(err.contains("target_feature_size"), "{err}");
+}

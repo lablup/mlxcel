@@ -253,7 +253,7 @@ fn sampled_rows_report_the_penalty_adjusted_logits() {
         ..SamplingConfig::default()
     };
     let logits = ffi::zeros(&[1, 2, VOCAB as i32], crate::dtype::FLOAT32);
-    let (tokens, adjusted) = super::sample_verify_rows(&logits, &[], &sampler, &[0]);
+    let (tokens, adjusted) = super::sample_verify_rows(&logits, &[], &sampler, vec![0]);
     assert_eq!(tokens.len(), 1, "no draft: only the bonus row is sampled");
     assert_ne!(tokens[0], 0, "the penalized token is never drawn");
     assert_eq!(ffi::array_shape(&adjusted), vec![1, 1, VOCAB as i32]);

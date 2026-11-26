@@ -117,17 +117,25 @@ impl RaonDFlash2DraftModel {
     /// `[T, target_feature_size]`) for the next `T` positions. Positions
     /// older than the window are skipped before `fc` runs, and a skip
     /// restarts every window, as the vendor `add_context` does.
-    pub fn add_context(&self, feats: &MlxArray, state: &mut DFlash2State) {
+    ///
+    /// # Errors
+    /// Returns a message when `feats` is not `target_feature_size` wide (a
+    /// target that captured the wrong layers or streams), before any MLX op
+    /// that would throw across the bridge.
+    pub fn add_context(&self, feats: &MlxArray, state: &mut DFlash2State) -> Result<(), String> {
         let shape = ffi::array_shape(feats);
-        let width = *shape.last().expect("features have a feature axis");
+        let Some(&width) = shape.last() else {
+            return Err("Raon DFlash2: target features are a scalar, not [.., T, features]".into());
+        };
+        if usize::try_from(width).ok() != Some(self.config.target_feature_size) {
+            return Err(format!(
+                "Raon DFlash2: target features are {width} wide, the drafter reads {}",
+                self.config.target_feature_size
+            ));
+        }
         let t: i32 = shape[..shape.len() - 1].iter().product();
-        assert_eq!(
-            width as usize, self.config.target_feature_size,
-            "Raon DFlash2: target features are {width} wide, the drafter reads {}",
-            self.config.target_feature_size
-        );
         if t == 0 {
-            return;
+            return Ok(());
         }
         let rows = ffi::reshape(feats, &[t, width]);
         let window = self.config.window as i32;
@@ -146,6 +154,19 @@ impl RaonDFlash2DraftModel {
             w.append(k, v);
         }
         state.ctx_pos += t;
+        Ok(())
+    }
+
+    /// Advance past `positions` context rows the drafter will never see
+    /// (the target captured only the newest window of a long prompt), as a
+    /// longer [`Self::add_context`] would have skipped them: the next row
+    /// lands at its absolute position and the windows restart.
+    pub fn skip_context(&self, positions: i32, state: &mut DFlash2State) {
+        if positions <= 0 {
+            return;
+        }
+        state.ctx_pos = state.ctx_pos.saturating_add(positions);
+        state.windows.iter_mut().for_each(ContextWindow::clear);
     }
 
     /// Hidden rows `[n - 1, hidden]` of the block `[bonus, mask x (n - 1)]`

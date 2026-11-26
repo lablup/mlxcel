@@ -95,6 +95,9 @@ pub struct Raon1MiniSpecCache {
     steps: Vec<RdaStep>,
     /// The burst's steering alpha (the same in every layer).
     alpha: f32,
+    /// Newest prompt rows a prefill captures at the tap layers (the
+    /// drafter's context window), `None` for every row.
+    capture_tail: Option<usize>,
 }
 
 /// Output of one Raon verify (or prefill) forward.
@@ -102,7 +105,9 @@ pub struct Raon1MiniVerifyOutput {
     /// `[1, L, vocab]` logits (`[1, 1, vocab]` for a prefill: the last row).
     pub logits: UniquePtr<MlxArray>,
     /// The streams after every captured layer, `[1, L, streams * hidden]`
-    /// each, in capture order.
+    /// each, in capture order. A prefill limited by
+    /// [`Raon1MiniModel::limit_prefill_capture`] keeps only the newest rows
+    /// of a longer prompt.
     pub hidden_states: Vec<UniquePtr<MlxArray>>,
 }
 
@@ -117,8 +122,21 @@ impl Raon1MiniModel {
                 layer,
                 steps: Vec::new(),
                 alpha,
+                capture_tail: None,
             })
             .collect()
+    }
+
+    /// Capture only the newest `rows` prompt rows at the tap layers on the
+    /// next prefill. The DFlash2 drafter keeps a `swa_window_size` window and
+    /// skips older rows before `fc`, so capturing them would only hold
+    /// `L x 5 x 4 x hidden` features (about 3.3 GB at a 32K prompt, twice
+    /// that once concatenated) for nothing. The caller tells the drafter how
+    /// many rows were left out ([`mlxcel_core::drafter::Drafter::skip_context`]).
+    pub fn limit_prefill_capture(&self, caches: &mut [Raon1MiniSpecCache], rows: usize) {
+        for cache in caches {
+            cache.capture_tail = Some(rows.max(1));
+        }
     }
 
     /// The forward of a burst. `verify` marks a verify block (2 to 16 rows:
@@ -141,6 +159,14 @@ impl Raon1MiniModel {
         let shape = mlxcel_core::array_shape(input_ids);
         assert_eq!(shape[0], 1, "raon1_mini speculative forward is B = 1");
         let l = shape[1];
+        // Newest rows a prefill captures (the drafter window), when fewer
+        // than the prompt.
+        let tail = caches
+            .first()
+            .and_then(|c| c.capture_tail)
+            .filter(|_| last_row)
+            .and_then(|rows| i32::try_from(rows).ok())
+            .filter(|&rows| rows < l);
         let verify = verify && (2..=row_invariant::MAX_ROWS).contains(&l);
         let _rows = row_scope(verify);
         let steer = self.steer_rows(&[caches[0].alpha]);
@@ -180,7 +206,14 @@ impl Raon1MiniModel {
             });
             if capture_layer_ids.contains(&idx) {
                 let s = mlxcel_core::array_shape(&streams);
-                hidden_states.push(mlxcel_core::reshape(&streams, &[s[0], s[1], s[2] * s[3]]));
+                let captured = match tail {
+                    Some(rows) => {
+                        mlxcel_core::slice(&streams, &[0, l - rows, 0, 0], &[s[0], l, s[2], s[3]])
+                    }
+                    None => mlxcel_core::array_handle_clone(&streams),
+                };
+                let rows = tail.unwrap_or(s[1]);
+                hidden_states.push(mlxcel_core::reshape(&captured, &[s[0], rows, s[2] * s[3]]));
             }
         }
         let row = last_row.then_some(l as usize - 1);

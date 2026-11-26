@@ -1357,6 +1357,22 @@ pub trait Drafter {
         false
     }
 
+    /// How many of the newest context positions this drafter keeps, when it
+    /// keeps a bounded window (the Raon DFlash2 drafter's
+    /// `swa_window_size`, issue #3436). A target may then capture only that
+    /// many of the newest prompt rows at prefill and report the rest through
+    /// [`Self::skip_context`]. `None` (the default) wants every row.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// The first hidden handed to a draft call after [`Self::reset`] starts
+    /// `positions` rows into the prompt, because the target captured only
+    /// the newest [`Self::context_window`] rows. A drafter that tracks
+    /// absolute positions advances past them; the default ignores it.
+    #[allow(unused_variables)]
+    fn skip_context(&mut self, positions: usize) {}
+
     /// Whether this drafter can only draft under an argmax sampler.
     ///
     /// The LFM2 DSpark drafter (issue #1339) chains its block through a

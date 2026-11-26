@@ -240,6 +240,35 @@ impl RaonDFlash2Config {
                 ));
             }
         }
+        // Tensor dimensions are i32 on the MLX side; a product that does
+        // not fit would wrap in `expected_shapes` and let a crafted tensor
+        // pass the shape check.
+        let fits = |n: Option<usize>| n.is_some_and(|n| n <= i32::MAX as usize);
+        let products = [
+            (
+                "num_attention_heads x head_dim",
+                self.num_attention_heads.checked_mul(self.head_dim),
+            ),
+            (
+                "num_key_value_heads x head_dim",
+                self.num_key_value_heads.checked_mul(self.head_dim),
+            ),
+            (
+                "2 x conv_kernel_size x hidden_size / conv_group_size",
+                (2 * self.conv_taps).checked_mul(self.hidden_size / self.conv_group_size.max(1)),
+            ),
+            (
+                "dflash_config.target_feature_size",
+                Some(self.target_feature_size),
+            ),
+        ];
+        for (name, value) in products {
+            if !fits(value) {
+                return Err(format!(
+                    "Raon DFlash2 config.json: {name} does not fit an i32 tensor dimension"
+                ));
+            }
+        }
         if self.vocab_size == 0 || self.vocab_size > i32::MAX as usize {
             return Err(format!(
                 "Raon DFlash2 config.json: vocab_size = {} is outside 1..=i32::MAX",

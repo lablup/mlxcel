@@ -264,6 +264,13 @@ pub(crate) trait DFlashTargetModel:
     /// default; runs on the fresh caches before the prefill.
     fn enable_speculative_buffers(&self, _caches: &mut [Self::Cache], _block_size: usize) {}
 
+    /// Hook for a target that can capture only the newest `rows` prompt rows
+    /// at prefill, for a drafter that keeps a bounded context window
+    /// (`Drafter::context_window`, issue #3436). Runs on the fresh caches
+    /// before the prefill; the burst then tells the drafter how many rows
+    /// were left out. No-op by default (every row is captured).
+    fn limit_prefill_capture(&self, _caches: &mut [Self::Cache], _rows: usize) {}
+
     /// Whether a `block_size`-row verify block is byte-identical to the
     /// single-token decode chain on this host, and the burst may therefore
     /// promise the temperature-0 contract. Every family with a server-side
@@ -445,6 +452,13 @@ impl DFlashTargetModel for crate::models::Raon1MiniModel {
         seq_id: Option<mlxcel_core::cache::SequenceId>,
     ) -> Vec<crate::models::raon1_mini::speculative::Raon1MiniSpecCache> {
         self.make_speculative_caches(seq_id)
+    }
+    fn limit_prefill_capture(
+        &self,
+        caches: &mut [crate::models::raon1_mini::speculative::Raon1MiniSpecCache],
+        rows: usize,
+    ) {
+        crate::models::Raon1MiniModel::limit_prefill_capture(self, caches, rows);
     }
     fn first_hidden_rows() -> FirstHiddenRows {
         FirstHiddenRows::EveryPromptRow
@@ -667,6 +681,22 @@ fn first_hidden_for(
     }
 }
 
+/// Prompt rows before the first row of `first_hidden`: nonzero only under
+/// the every-row policy when the target captured just the newest rows of
+/// the prompt ([`DFlashTargetModel::limit_prefill_capture`], issue #3436).
+fn first_context_start(rows: FirstHiddenRows, prompt_len: usize, first_hidden: &MlxArray) -> usize {
+    match rows {
+        FirstHiddenRows::EveryPromptRow => {
+            let shape = mlxcel_core::array_shape(first_hidden);
+            let captured = shape
+                .get(shape.len().saturating_sub(2))
+                .map_or(0, |&n| usize::try_from(n).unwrap_or(0));
+            prompt_len.saturating_sub(captured)
+        }
+        FirstHiddenRows::LastPromptPosition => 0,
+    }
+}
+
 /// DFlash B = 1 burst on any [`DFlashTargetModel`]: prefill through the
 /// target's speculative verify hook, first-bonus and first-hidden
 /// extraction, then `DFlashGenerator::run`.
@@ -753,6 +783,9 @@ where
 
     let mut caches: Vec<T::Cache> = target.make_dflash_caches_for(seq_id);
     target.enable_speculative_buffers(&mut caches, block_size as usize);
+    if let Some(window) = owned_drafter.context_window() {
+        target.limit_prefill_capture(&mut caches, window);
+    }
 
     // Prefill through the speculative verify hook, capturing the layers the
     // drafter checkpoint asks for (`target_layer_ids`).
@@ -816,6 +849,8 @@ where
         concat_captured_hidden(hidden_states),
         last_pos,
     );
+    let first_context_start =
+        first_context_start(T::first_hidden_rows(), prompt_tokens.len(), &first_hidden);
     let first_hidden_ms = first_hidden_start.elapsed().as_secs_f64() * 1000.0;
 
     // Release the prefill's rollback snapshots before the round loop starts.
@@ -835,6 +870,7 @@ where
     );
     // A sampled verify row reads the history classic decode would (#3436).
     generator.set_token_history(token_history.to_vec());
+    generator.set_first_context_start(first_context_start);
     let result = generator.run(
         target,
         target as &dyn LanguageModel,
@@ -1137,6 +1173,27 @@ mod tests {
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&last),
             vec![18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
+        );
+    }
+
+    /// The drafter skips exactly the prompt rows a limited prefill did not
+    /// capture, and nothing under the last-position policy (issue #3436).
+    #[test]
+    fn first_context_start_counts_the_uncaptured_prompt_rows() {
+        let _runtime = crate::initialize_runtime();
+        let tail = mlxcel_core::zeros(&[1, 3, 6], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(
+            first_context_start(FirstHiddenRows::EveryPromptRow, 10, &tail),
+            7
+        );
+        assert_eq!(
+            first_context_start(FirstHiddenRows::EveryPromptRow, 3, &tail),
+            0
+        );
+        let last = mlxcel_core::zeros(&[1, 1, 6], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(
+            first_context_start(FirstHiddenRows::LastPromptPosition, 10, &last),
+            0
         );
     }
 

@@ -215,3 +215,46 @@ fn rollback_after_a_partial_accept_equals_a_fresh_decode_of_the_accepted_tokens(
         assert_eq!(row(&a.logits, 0), want, "accepted {accepted}: next logits");
     }
 }
+
+#[test]
+fn a_limited_prefill_captures_the_newest_rows_and_keeps_the_logits() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = tiny_model();
+    let taps = [0usize, 2];
+    let mut full = model.make_speculative_caches(None);
+    let whole = model.prefill_forward_with_capture_layers(&ids(&[PROMPT]), &mut full, &taps);
+    let whole_feats = model.concat_hidden_for_drafter(&whole);
+
+    let keep = 3usize;
+    let mut limited = model.make_speculative_caches(None);
+    model.limit_prefill_capture(&mut limited, keep);
+    let tail = model.prefill_forward_with_capture_layers(&ids(&[PROMPT]), &mut limited, &taps);
+    let tail_feats = model.concat_hidden_for_drafter(&tail);
+
+    let n = PROMPT.len() as i32;
+    let width = mlxcel_core::array_shape(&whole_feats)[2];
+    assert_eq!(
+        mlxcel_core::array_shape(&tail_feats),
+        vec![1, keep as i32, width]
+    );
+    let newest = mlxcel_core::slice(&whole_feats, &[0, n - keep as i32, 0], &[1, n, width]);
+    assert_eq!(
+        bytes(&tail_feats),
+        bytes(&newest),
+        "newest rows, same bytes"
+    );
+    assert_eq!(
+        bytes(&tail.logits),
+        bytes(&whole.logits),
+        "logits unchanged"
+    );
+
+    // A window at least the prompt's length captures every row.
+    let mut wide = model.make_speculative_caches(None);
+    model.limit_prefill_capture(&mut wide, PROMPT.len());
+    let all = model.prefill_forward_with_capture_layers(&ids(&[PROMPT]), &mut wide, &taps);
+    assert_eq!(
+        bytes(&model.concat_hidden_for_drafter(&all)),
+        bytes(&whole_feats)
+    );
+}

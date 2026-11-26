@@ -310,6 +310,11 @@ fn run_raon1_mini(
     println!("Raon DFlash2 drafter loaded and bound (block_size = {block_size}).");
     let prefill_start = Instant::now();
     let mut caches = model.make_speculative_caches(None);
+    // The drafter keeps a window of the newest positions; older prompt rows
+    // are not captured (issue #3436).
+    if let Some(window) = drafter.context_window() {
+        model.limit_prefill_capture(&mut caches, window);
+    }
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let verify_out =
         model.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
@@ -460,6 +465,12 @@ where
     // the drafter keeps the newest window of them.
     let first_hidden = target.concat_hidden_for_drafter(&verify_out);
     mlxcel_core::eval(&first_hidden);
+    // A target that captured only the newest rows (Raon-1 mini, issue
+    // #3436) leaves the older prompt rows to the drafter's position count.
+    let captured_rows = mlxcel_core::array_shape(&first_hidden)
+        .get(1)
+        .map_or(0, |&n| usize::try_from(n).unwrap_or(0));
+    let first_context_start = prompt_tokens.len().saturating_sub(captured_rows);
     drop(verify_out);
     let prefill_time_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -472,6 +483,7 @@ where
         mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
     );
     generator.set_token_history(token_history);
+    generator.set_first_context_start(first_context_start);
     let output = generator
         .run(
             target,

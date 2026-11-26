@@ -70,16 +70,15 @@ pub(crate) fn sample_verify_rows(
     logits: &MlxArray,
     draft: &[i32],
     sampler: &SamplingConfig,
-    history: &[i32],
+    history: Vec<i32>,
 ) -> (Vec<i32>, UniquePtr<MlxArray>) {
     let shape = ffi::array_shape(logits);
     let rows = shape[1] as usize;
     let needs_history = sampler.needs_token_history();
-    let mut row_history: Vec<i32> = if needs_history {
-        history.to_vec()
-    } else {
-        Vec::new()
-    };
+    // Taken by value: the round loop builds it fresh each round, so the
+    // accepted drafts extend it in place instead of a second prompt-sized
+    // copy.
+    let mut row_history: Vec<i32> = if needs_history { history } else { Vec::new() };
     let mut out = Vec::with_capacity(rows);
     let mut adjusted_rows = Vec::with_capacity(rows);
     for i in 0..rows {
