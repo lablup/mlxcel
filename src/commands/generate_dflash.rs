@@ -287,6 +287,13 @@ fn run_raon1_mini(
             )
         },
     )?;
+    let trained = drafter.configured_block_size().unwrap_or(block_size);
+    if !(2..=trained).contains(&block_size) {
+        return Err(anyhow!(
+            "the Raon DFlash2 drafter serves verify blocks of 2..={trained} rows (its trained \
+             block); got --draft-block-size {block_size}"
+        ));
+    }
     refuse_sampling(sampling_config)?;
     if !token_bias.is_empty() {
         return Err(anyhow!(

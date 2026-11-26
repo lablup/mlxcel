@@ -29,6 +29,11 @@ pub const RAON_DFLASH2_ARCHITECTURE: &str = "DFlash2DraftModel";
 /// Largest draft block (bonus plus proposals) the drafter serves. The vendor
 /// runtime drafts 5 or 7 tokens (blocks of 6 or 8); the target's
 /// row-invariant verify covers up to 16 rows.
+/// Verify width (one bonus row and four drafts) when `--draft-block-size`
+/// is not given: the fastest or tied-fastest width of 3, 5 and 7 across the
+/// prompts of `docs/benchmark_results/raon-dflash2-m3ultra-2026-11-26.md`.
+pub const DEFAULT_VERIFY_WIDTH: usize = 5;
+
 pub const MAX_BLOCK_SIZE: usize = 16;
 
 /// Upper bound on any single width read from the config.
@@ -255,14 +260,17 @@ impl RaonDFlash2Config {
                 self.block_size
             ));
         }
-        if self.hidden_size % self.conv_group_size != 0 {
+        if !self.hidden_size.is_multiple_of(self.conv_group_size) {
             return Err(format!(
                 "Raon DFlash2 config.json: hidden_size {} is not a multiple of \
                  dflash_config.conv_group_size {}",
                 self.hidden_size, self.conv_group_size
             ));
         }
-        if self.num_attention_heads % self.num_key_value_heads != 0 {
+        if !self
+            .num_attention_heads
+            .is_multiple_of(self.num_key_value_heads)
+        {
             return Err(format!(
                 "Raon DFlash2 config.json: num_attention_heads {} is not a multiple of \
                  num_key_value_heads {}",

@@ -57,7 +57,8 @@ fn tiny_config_json() -> serde_json::Value {
             "target_layer_ids": [0, 2], "target_streams_per_layer": 2
         },
         "head_dim": 4, "hidden_size": 8, "intermediate_size": 12,
-        "num_attention_heads": 2, "num_hidden_layers": 2, "num_key_value_heads": 1,
+        // Grouped like the release (20 query heads over 5 KV heads).
+        "num_attention_heads": 4, "num_hidden_layers": 2, "num_key_value_heads": 2,
         "rms_norm_eps": 1e-05, "rope_parameters": {"rope_theta": 10000.0},
         "vocab_size": 32
     })
@@ -140,7 +141,9 @@ fn values(x: &ffi::MlxArray) -> Vec<f32> {
     crate::utils::array_to_vec_f32(&x)
 }
 
-/// Host reference of the grouped convolution.
+/// Host reference of the grouped convolution (the geometry spelled out
+/// argument by argument, like `grouped_conv`).
+#[allow(clippy::too_many_arguments)]
 fn host_conv(
     h: &[f32],
     delta: &[f32],
@@ -308,6 +311,11 @@ fn draft_block_is_deterministic_and_in_vocabulary() {
     assert_eq!(a.context_position(), 5);
     assert!(a.draft_block(3, None, 4, &sampler).is_err());
     assert!(a.draft_block(3, Some(&feats), 1, &sampler).is_err());
+    let past_trained = a.model.config.block_size + 1;
+    assert!(
+        a.draft_block(3, Some(&feats), past_trained, &sampler)
+            .is_err()
+    );
 }
 
 #[test]

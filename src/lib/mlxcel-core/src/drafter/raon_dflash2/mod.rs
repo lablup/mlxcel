@@ -51,7 +51,7 @@ pub mod model;
 pub mod sanitize;
 pub mod selector;
 
-pub use config::{RAON_DFLASH2_ARCHITECTURE, RaonDFlash2Config};
+pub use config::{DEFAULT_VERIFY_WIDTH, RAON_DFLASH2_ARCHITECTURE, RaonDFlash2Config};
 pub use drafter::RaonDFlash2Drafter;
 pub use model::RaonDFlash2DraftModel;
 

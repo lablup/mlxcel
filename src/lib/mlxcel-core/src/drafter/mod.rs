@@ -709,6 +709,18 @@ pub fn peek_inkling2_dspark_configured_block_size(model_path: &Path) -> Option<u
     inkling2_dspark::peek_configured_block_size(model_path)
 }
 
+/// The default verify width of the Raon-1 mini DFlash2 drafter at
+/// `model_path` (issue #3436): [`raon_dflash2::DEFAULT_VERIFY_WIDTH`], the
+/// measured width, not the checkpoint's trained `block_size` (8), which
+/// verifies more rows than it accepts on an M3 Ultra. `None` for any other
+/// directory.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_raon_dflash2_default_block_size(model_path: &Path) -> Option<usize> {
+    raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(model_path)
+        .then_some(raon_dflash2::DEFAULT_VERIFY_WIDTH)
+}
+
 /// Read the default verify width of an LFM2 DSpark drafter at `model_path`
 /// (issue #1339): `min(block_size + 1, runtime_block_size)`, with a missing
 /// `runtime_block_size` reading as the eight-row default

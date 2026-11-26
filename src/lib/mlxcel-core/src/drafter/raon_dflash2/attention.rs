@@ -122,10 +122,13 @@ impl DFlash2Attention {
             Some((ck, cv)) => (concatenate(&ck, &k, 2), concatenate(&cv, &v, 2)),
             None => (k, v),
         };
-        // SAFETY: a null mask pointer selects MLX's unmasked attention; the
-        // three operands outlive the call.
-        let o =
-            unsafe { ffi::scaled_dot_product_attention(&q, &k, &v, self.scale, std::ptr::null()) };
+        // SAFETY: a null mask pointer selects unmasked attention, and the
+        // three operands outlive the call. The fast kernel expands the
+        // grouped KV heads (the plain bridge SDPA broadcasts them, which only
+        // works for one KV head).
+        let o = unsafe {
+            ffi::fast_scaled_dot_product_attention(&q, &k, &v, self.scale, std::ptr::null())
+        };
         let o = ffi::transpose_axes(&o, &[0, 2, 1, 3]);
         let o = ffi::reshape(&o, &[n, self.n_heads * self.head_dim]);
         self.o_proj.forward(&o)

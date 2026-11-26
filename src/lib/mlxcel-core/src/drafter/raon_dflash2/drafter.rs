@@ -29,7 +29,7 @@ use crate::weights::WeightMap;
 use cxx::UniquePtr;
 use std::path::Path;
 
-use super::config::{MAX_BLOCK_SIZE, RaonDFlash2Config};
+use super::config::RaonDFlash2Config;
 use super::model::{DFlash2State, RaonDFlash2DraftModel};
 use super::sanitize::sanitize_weights;
 
@@ -90,13 +90,17 @@ impl RaonDFlash2Drafter {
         self.state.windows.first().map_or(0, |w| w.len())
     }
 
-    fn check_args(hidden: Option<&MlxArray>, block_size: usize) -> Result<&MlxArray, DrafterError> {
-        if !(2..=MAX_BLOCK_SIZE).contains(&block_size) {
+    fn check_args<'a>(
+        &self,
+        hidden: Option<&'a MlxArray>,
+        block_size: usize,
+    ) -> Result<&'a MlxArray, DrafterError> {
+        let trained = self.model.config.block_size;
+        if !(2..=trained).contains(&block_size) {
             return Err(DrafterError::DraftFailed {
                 reason: format!(
-                    "Raon DFlash2 drafter serves blocks of 2..={MAX_BLOCK_SIZE} rows (got \
-                     {block_size}): block size 1 drafts nothing and the target's \
-                     row-invariant verify covers at most {MAX_BLOCK_SIZE} rows"
+                    "Raon DFlash2 drafter serves blocks of 2..={trained} rows, its trained \
+                     block (got {block_size}); block size 1 drafts nothing"
                 ),
             });
         }
@@ -191,7 +195,7 @@ impl Drafter for RaonDFlash2Drafter {
         block_size: usize,
         _sampler: &SamplingConfig,
     ) -> Result<Vec<i32>, DrafterError> {
-        let hidden = Self::check_args(hidden, block_size)?;
+        let hidden = self.check_args(hidden, block_size)?;
         let tokens = self.draft(last_bonus, hidden, block_size);
         crate::try_eval(&tokens).map_err(|e| DrafterError::DraftFailed {
             reason: e.to_string(),
@@ -209,7 +213,7 @@ impl Drafter for RaonDFlash2Drafter {
         block_size: usize,
         _sampler: &SamplingConfig,
     ) -> Result<UniquePtr<MlxArray>, DrafterError> {
-        let hidden = Self::check_args(hidden, block_size)?;
+        let hidden = self.check_args(hidden, block_size)?;
         Ok(self.draft(last_bonus, hidden, block_size))
     }
 

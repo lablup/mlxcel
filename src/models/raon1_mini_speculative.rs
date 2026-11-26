@@ -50,6 +50,10 @@ use mlxcel_core::drafter::dflash::SpeculativeTarget;
 use mlxcel_core::row_invariant;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// The block KRAFTON/Raon-1-mini-dflash2 was trained on (its `block_size`),
+/// the widest verify it can draft for.
+const DRAFTER_TRAINED_BLOCK: usize = 8;
+
 /// Independent synthetic inputs the exactness probe runs.
 const PROBE_DRAWS: usize = 3;
 /// Prompt length of each probe draw.
@@ -260,9 +264,9 @@ impl Raon1MiniModel {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
-        if block_size > row_invariant::MAX_ROWS as usize {
+        if block_size > DRAFTER_TRAINED_BLOCK {
             return BlockChainExactness::NotRun(
-                "block wider than the row-invariant verify limit (16)",
+                "block wider than the DFlash2 drafter's trained 8 rows",
             );
         }
         let vocab = self.vocab_size();
