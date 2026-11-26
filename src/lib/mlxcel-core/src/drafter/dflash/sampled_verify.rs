@@ -34,38 +34,44 @@ use crate::drafter::Drafter;
 use crate::drafter::dflash::drafter::sampler_is_greedy;
 use crate::ffi::{self, MlxArray};
 use crate::generate::SamplingConfig;
+use cxx::UniquePtr;
 
 /// Whether the round loop samples the verify rows for `drafter` under
 /// `sampler`: the drafter must declare a deterministic draft, and the
 /// request must sample, read history (penalties, DRY) or bias tokens, which
-/// the argmax walk would ignore. A stateful sampler (Mirostat) never takes
-/// this path; the burst declines it before the loop starts.
+/// the argmax walk would ignore. A stateful sampler (Mirostat, adaptive-p)
+/// never takes this path; the burst declines it before the loop starts.
 pub(crate) fn uses_sampled_verify(drafter: &dyn Drafter, sampler: &SamplingConfig) -> bool {
     drafter.supports_sampled_verify()
-        && sampler.effective_mirostat() == 0
+        && sampled_verify_serves(sampler)
         && (!sampler_is_greedy(sampler)
             || sampler.needs_token_history()
             || !sampler.token_bias.is_empty())
 }
 
-/// Whether a drafter that samples its verify rows can serve `sampler`
-/// (everything but a stateful Mirostat chain).
+/// Whether a drafter that samples its verify rows can serve `sampler`:
+/// everything but a feedback sampler (Mirostat's `mu`, adaptive-p's EMA),
+/// whose state each row would have to carry from the previous accepted row.
+/// The rows are sampled statelessly, so such a sampler would restart from
+/// its initial state on every row and leave plain sampling's distribution.
 pub fn sampled_verify_serves(sampler: &SamplingConfig) -> bool {
-    sampler.effective_mirostat() == 0
+    !sampler.needs_sampler_feedback_state()
 }
 
 /// The target tokens of one verify block under sampling: row `i` of
 /// `logits` (`[1, K, vocab]`) is sampled with `history` followed by
 /// `draft[..i]`, and sampling stops at the first row whose token differs
-/// from its draft (that token is the round's bonus). The result has
+/// from its draft (that token is the round's bonus). The tokens have
 /// `accepted + 1` entries, which is what [`super::round_loop::speculative_walk`]
-/// reads.
+/// reads; the second value is the sampler-adjusted logits of those rows
+/// (`[1, accepted + 1, vocab]`), the logits plain decode reports
+/// log-probabilities from.
 pub(crate) fn sample_verify_rows(
     logits: &MlxArray,
     draft: &[i32],
     sampler: &SamplingConfig,
     history: &[i32],
-) -> Vec<i32> {
+) -> (Vec<i32>, UniquePtr<MlxArray>) {
     let shape = ffi::array_shape(logits);
     let rows = shape[1] as usize;
     let needs_history = sampler.needs_token_history();
@@ -75,13 +81,16 @@ pub(crate) fn sample_verify_rows(
         Vec::new()
     };
     let mut out = Vec::with_capacity(rows);
+    let mut adjusted_rows = Vec::with_capacity(rows);
     for i in 0..rows {
         let row = ffi::slice(
             logits,
             &[0, i as i32, 0],
             &[shape[0], i as i32 + 1, shape[2]],
         );
-        let (token, _) = crate::sampling::sample_token_optimized(&row, sampler, &row_history);
+        let (token, adjusted) =
+            crate::sampling::sample_token_optimized(&row, sampler, &row_history);
+        adjusted_rows.push(ffi::reshape(&adjusted, &[1, 1, shape[2]]));
         ffi::eval(&token);
         let y = ffi::item_i32(&token);
         out.push(y);
@@ -94,7 +103,8 @@ pub(crate) fn sample_verify_rows(
             _ => break,
         }
     }
-    out
+    let refs: Vec<&MlxArray> = adjusted_rows.iter().map(|r| &**r).collect();
+    (out, crate::ops::concatenate_many(&refs, 1))
 }
 
 #[cfg(test)]

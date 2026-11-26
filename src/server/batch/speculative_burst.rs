@@ -1954,7 +1954,8 @@ fn run_dflash_burst(
         return Err(BurstOutcome::DeclineToClassic);
     }
     // A drafter that samples its verify rows (Raon DFlash2, issue #3436)
-    // cannot carry a stateful Mirostat chain across them.
+    // cannot carry a feedback sampler's state (Mirostat, adaptive-p) across
+    // them.
     if ctx
         .drafter_slot
         .drafter_ref()
@@ -1962,9 +1963,9 @@ fn run_dflash_burst(
         && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling)
     {
         tracing::warn!(
-            "DFlash speculative dispatch declined for seq {}: the request samples with \
-             Mirostat, whose state the sampled verify rows cannot carry; serving it with \
-             classic decode",
+            "DFlash speculative dispatch declined for seq {}: the request samples with a \
+             feedback sampler (Mirostat or adaptive-p), whose state the sampled verify rows \
+             cannot carry; serving it with classic decode",
             seq.seq_id,
         );
         return Err(BurstOutcome::DeclineToClassic);

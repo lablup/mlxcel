@@ -295,12 +295,13 @@ fn run_raon1_mini(
         ));
     }
     // The draft is deterministic, so sampling (and penalties, and a token
-    // bias) runs through the sampled verify rows; only a stateful Mirostat
-    // chain cannot (issue #3436).
+    // bias) runs through the sampled verify rows; only a feedback sampler
+    // (Mirostat, adaptive-p) cannot (issue #3436).
     if !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(sampling_config) {
         return Err(anyhow!(
             "--draft-kind dflash on Raon-1 mini samples each verify row independently and \
-             cannot carry Mirostat's state; drop --mirostat or --draft-model."
+             cannot carry a feedback sampler's state (Mirostat, adaptive-p); drop that \
+             sampler or --draft-model."
         ));
     }
     if !model.dflash_exactness_allows(block_size) {

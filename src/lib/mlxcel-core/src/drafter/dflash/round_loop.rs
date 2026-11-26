@@ -1012,7 +1012,7 @@ impl DFlashGenerator {
             // A deterministic draft under sampling: the target tokens are
             // the sampler's draws, so the walk keeps plain sampling's
             // distribution (issue #3436).
-            let target_tokens = if sampled_verify {
+            let (target_tokens, sampled_logits) = if sampled_verify {
                 let history: Vec<i32> = if self.sampler.needs_token_history() {
                     self.token_history
                         .iter()
@@ -1023,14 +1023,15 @@ impl DFlashGenerator {
                 } else {
                     Vec::new()
                 };
-                super::sampled_verify::sample_verify_rows(
+                let (tokens, adjusted) = super::sampled_verify::sample_verify_rows(
                     verify_logits,
                     &draft_tokens,
                     &self.sampler,
                     &history,
-                )
+                );
+                (tokens, Some(adjusted))
             } else {
-                target_tokens
+                (target_tokens, None)
             };
             diagnostics.target_argmax_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -1042,8 +1043,13 @@ impl DFlashGenerator {
             // `compute_logprobs`, so these logprobs are byte-identical
             // to the classic path for greedy sampling.
             let phase_start = Instant::now();
-            let target_logprobs =
-                per_position_logprobs(verify_logits, &target_tokens, logprobs_config);
+            // Sampled rows report from the sampler-adjusted logits, as
+            // plain decode does (penalties and bias applied, issue #3436).
+            let target_logprobs = per_position_logprobs(
+                sampled_logits.as_deref().unwrap_or(verify_logits),
+                &target_tokens,
+                logprobs_config,
+            );
             diagnostics.logprobs_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Walk ----

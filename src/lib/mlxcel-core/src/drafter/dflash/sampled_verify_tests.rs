@@ -219,3 +219,48 @@ fn a_presence_penalty_sees_the_accepted_drafts() {
         assert_eq!(distinct.len(), seen.len(), "repeated token in {seen:?}");
     }
 }
+
+#[test]
+fn feedback_samplers_never_take_the_sampled_verify_rows() {
+    // Each verify row samples statelessly, so a sampler whose state carries
+    // from one token to the next (Mirostat's mu, adaptive-p's EMA) would
+    // restart on every row; the round loop and the burst gate refuse both.
+    let mirostat = SamplingConfig {
+        mirostat: 2,
+        ..SamplingConfig::default()
+    };
+    let adaptive = SamplingConfig {
+        adaptive_target: 0.5,
+        ..SamplingConfig::default()
+    };
+    for sampler in [&mirostat, &adaptive] {
+        assert!(sampler.needs_sampler_feedback_state());
+        assert!(!super::sampled_verify_serves(sampler));
+        assert!(!super::uses_sampled_verify(&StepDrafter, sampler));
+    }
+    assert!(super::uses_sampled_verify(
+        &StepDrafter,
+        &SamplingConfig::default()
+    ));
+}
+
+#[test]
+fn sampled_rows_report_the_penalty_adjusted_logits() {
+    // Plain decode computes log-probabilities from the sampler-adjusted
+    // logits; the sampled verify rows hand those back for the same report.
+    let sampler = SamplingConfig {
+        presence_penalty: 50.0,
+        ..SamplingConfig::default()
+    };
+    let logits = ffi::zeros(&[1, 2, VOCAB as i32], crate::dtype::FLOAT32);
+    let (tokens, adjusted) = super::sample_verify_rows(&logits, &[], &sampler, &[0]);
+    assert_eq!(tokens.len(), 1, "no draft: only the bonus row is sampled");
+    assert_ne!(tokens[0], 0, "the penalized token is never drawn");
+    assert_eq!(ffi::array_shape(&adjusted), vec![1, 1, VOCAB as i32]);
+    let row = crate::utils::array_to_vec_f32(&ffi::astype(&adjusted, crate::dtype::FLOAT32));
+    assert!(
+        row[0] <= -49.0,
+        "token 0 carries the presence penalty: {row:?}"
+    );
+    assert!(row[1..].iter().all(|&v| v.abs() < 1e-6), "{row:?}");
+}
