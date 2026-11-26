@@ -4835,6 +4835,13 @@ mod conv_no_plan_tests;
 #[path = "reduce_output_dtype_tests.rs"]
 mod reduce_output_dtype_tests;
 
+// `fast_rope` over broadcast and strided inputs returns what a dense buffer of
+// the same values rotates to (the CUDA RoPE kernel gave every index along a
+// broadcast axis one shared output element). Runs on every backend.
+#[cfg(test)]
+#[path = "rope_input_layout_tests.rs"]
+mod rope_input_layout_tests;
+
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
 // host f64 reference on the CPU stream. Runs on every backend.
