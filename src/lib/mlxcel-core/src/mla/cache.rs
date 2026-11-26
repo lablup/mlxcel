@@ -180,6 +180,11 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // latent view (#3162).
     "kimi_linear",
     "kimi_k3",
+    // Raon-1 mini borrows the Kimi K3 MLA for its seven NoPE MLA layers and
+    // caches the same pair there (`src/models/raon1_mini.rs`). It is not in
+    // `QUANTIZED_LATENT_FAMILIES`: no int8 latent trace has been run on it,
+    // so it keeps fp16 by default.
+    "raon1_mini",
     // Both LongCat `model_type`s load `LongcatFlashNgramModel`, whose MLA
     // stores `update_and_fetch(kv_latent, k_pe)` on every step
     // (`src/models/longcat_flash_ngram.rs`); the plain variant only swaps

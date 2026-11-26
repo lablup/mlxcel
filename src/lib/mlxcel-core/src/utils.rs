@@ -103,7 +103,7 @@ pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
 ///
 /// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
 /// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
-/// speculative path), KimiLinear and KimiK3 (short conv), RecurrentGemma,
+/// speculative path), KimiLinear, KimiK3 and RaonRda (short conv), RecurrentGemma,
 /// Inkling (short conv), Z1T (AFT-conv window)
 pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
     materialized_axis_tail(x, 1, n_keep)
@@ -1484,7 +1484,7 @@ pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///// Numerically stable softplus activation: log(1 + exp(x)).
 /// Uses logaddexp(x, 0) internally to match Python's mx.logaddexp(x, 0).
 /// This avoids float16 overflow for values >= ~11.09 (exp(x) > float16 max).
-/// Used by: this wrapper is called directly by GatedDelta, Laguna and
+/// Used by: this wrapper is called directly by GatedDelta, Laguna, RaonRda and
 /// DeepSeekV4MoE. Mamba, Mamba2, Jamba, RecurrentGemma, FalconH1,
 /// GraniteMoeHybrid, NemotronH, Plamo2, and the shared audio attention tower
 /// (`audio/attention.rs`, `audio/gemma3n/attention.rs`) instead call the raw

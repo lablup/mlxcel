@@ -467,6 +467,39 @@ fn kimi_k3_without_vision_config_is_the_text_backbone_even_with_tower_weights() 
 }
 
 #[test]
+fn raon1_mini_model_type_is_detected() {
+    // The vendor MLX export shares the model_type; detection still routes it
+    // here so `Raon1MiniConfig` can refuse it by name (#3225, #3437).
+    for (name, extra) in [
+        ("raon1_mini", json!({})),
+        (
+            "raon1_mini_vendor",
+            json!({ "raon_fused_mhc_decode": true }),
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        let mut config = json!({
+            "model_type": "raon1_mini",
+            "architectures": ["Raon1MiniForCausalLM"],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            config[k] = v.clone();
+        }
+        fs::write(
+            model_dir.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::Raon1Mini, "{name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
 fn gpt_bigcode_model_type_is_detected() {
     // GPT-BigCode reuses GPT-2's config field names and its `architectures`
     // entry starts with the same `GPT` prefix, so detection must key off

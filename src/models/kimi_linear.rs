@@ -1340,7 +1340,7 @@ impl KimiDecoderLayer {
 /// cross-checked against the four config dimensions that index it, because
 /// the reshape below aborts the process rather than returning on a mismatch.
 ///
-/// Used by: KimiLinear, KimiK3
+/// Used by: KimiLinear, KimiK3, Raon1Mini
 pub(crate) fn decompose_kv_b_proj(
     weights: &mut WeightMap,
     attn_prefix: &str,

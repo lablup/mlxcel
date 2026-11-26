@@ -1094,6 +1094,30 @@ pub(crate) struct KimiK3MLAAttention {
     /// it; the projection shapes already carry it.
     v_head_dim: i32,
     scale: f32,
+    /// Family key for the latent-cache helpers' warnings and their
+    /// `QUANTIZED_LATENT_FAMILIES` gate: `kimi_k3`, or the borrowing family.
+    family: &'static str,
+}
+
+/// Geometry and options of one gated q-LoRA NoPE MLA layer, for a family
+/// that borrows [`KimiK3MLAAttention`] without a [`KimiK3TextConfig`].
+///
+/// Used by: KimiK3 (through [`KimiK3MLAAttention::from_weights`]), Raon1Mini
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NopeMlaSpec {
+    pub(crate) hidden_size: usize,
+    pub(crate) num_heads: usize,
+    pub(crate) q_lora_rank: Option<usize>,
+    pub(crate) kv_lora_rank: usize,
+    pub(crate) qk_nope_head_dim: usize,
+    pub(crate) qk_rope_head_dim: usize,
+    pub(crate) v_head_dim: usize,
+    pub(crate) use_output_gate: bool,
+    /// Epsilon of `q_a_layernorm` / `kv_a_layernorm`.
+    pub(crate) latent_norm_eps: f32,
+    pub(crate) group_size: i32,
+    pub(crate) bits: i32,
+    pub(crate) family: &'static str,
 }
 
 impl KimiK3MLAAttention {
@@ -1108,7 +1132,12 @@ impl KimiK3MLAAttention {
         )
     }
 
-    fn forward_batched_decode(
+    /// One decode token per row (`x` `[B, 1, hidden]`) against each row's
+    /// own latent cache, which may differ in length.
+    ///
+    /// Used by: KimiK3 (`forward_batched_attention`), Raon1Mini (native
+    /// batched decode, `raon1_mini_lm.rs`)
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
@@ -1147,7 +1176,7 @@ impl KimiK3MLAAttention {
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1);
         let output = super::mla_batched::mla_latent_decode_rows(
-            "kimi_k3",
+            self.family,
             true,
             self.geometry(),
             &q_latent,
@@ -1218,7 +1247,7 @@ impl KimiK3MLAAttention {
             self.geometry(),
             kv_latent,
             k_pe,
-            "kimi_k3",
+            self.family,
             true,
         );
 
@@ -1391,23 +1420,49 @@ impl KimiK3MLAAttention {
         config: &KimiK3TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
-        let gs = config.group_size();
-        let bits = config.bits();
+        let spec = NopeMlaSpec {
+            hidden_size: config.hidden_size,
+            num_heads: config.num_attention_heads,
+            q_lora_rank: config.q_lora_rank,
+            kv_lora_rank: config.kv_lora_rank,
+            qk_nope_head_dim: config.qk_nope_head_dim,
+            qk_rope_head_dim: config.qk_rope_head_dim,
+            v_head_dim: config.v_head_dim,
+            use_output_gate: config.mla_use_output_gate,
+            latent_norm_eps: MLA_LORA_NORM_EPS,
+            group_size: config.group_size(),
+            bits: config.bits(),
+            family: "kimi_k3",
+        };
+        Self::from_spec(weights, &spec, prefix)
+    }
+
+    /// Load one layer from explicit geometry.
+    ///
+    /// Used by: [`Self::from_weights`], Raon1Mini (`raon1_mini.rs`)
+    pub(crate) fn from_spec(
+        weights: &WeightMap,
+        spec: &NopeMlaSpec,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let gs = spec.group_size;
+        let bits = spec.bits;
+        let q_head_dim = spec.qk_nope_head_dim + spec.qk_rope_head_dim;
 
         check_axis(
             weights,
             &format!("{prefix}.kv_a_proj_with_mqa.weight"),
             0,
-            config.kv_lora_rank + config.qk_rope_head_dim,
+            spec.kv_lora_rank + spec.qk_rope_head_dim,
             "kv_lora_rank + qk_rope_head_dim",
         )?;
         check_numel(
             weights,
             &format!("{prefix}.kv_a_layernorm.weight"),
-            config.kv_lora_rank,
+            spec.kv_lora_rank,
             "kv_lora_rank",
         )?;
-        let q_out_key = if config.q_lora_rank.is_some() {
+        let q_out_key = if spec.q_lora_rank.is_some() {
             format!("{prefix}.q_b_proj.weight")
         } else {
             format!("{prefix}.q_proj.weight")
@@ -1416,10 +1471,10 @@ impl KimiK3MLAAttention {
             weights,
             &q_out_key,
             0,
-            config.num_attention_heads * config.q_head_dim(),
+            spec.num_heads * q_head_dim,
             "num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim)",
         )?;
-        if let Some(rank) = config.q_lora_rank {
+        if let Some(rank) = spec.q_lora_rank {
             check_axis(
                 weights,
                 &format!("{prefix}.q_a_proj.weight"),
@@ -1434,7 +1489,7 @@ impl KimiK3MLAAttention {
                 "q_lora_rank",
             )?;
         }
-        if config.mla_use_output_gate {
+        if spec.use_output_gate {
             // The gate multiplies the `[B, L, num_attention_heads * v_head_dim]`
             // attention output; a width that neither matches it nor broadcasts
             // against it throws inside MLX rather than returning.
@@ -1442,7 +1497,7 @@ impl KimiK3MLAAttention {
                 weights,
                 &format!("{prefix}.g_proj.weight"),
                 0,
-                config.num_attention_heads * config.v_head_dim,
+                spec.num_heads * spec.v_head_dim,
                 "num_attention_heads * v_head_dim",
             )?;
         }
@@ -1450,11 +1505,11 @@ impl KimiK3MLAAttention {
             weights,
             &format!("{prefix}.o_proj.weight"),
             0,
-            config.hidden_size,
+            spec.hidden_size,
             "hidden_size",
         )?;
 
-        let q_proj = if config.q_lora_rank.is_some() {
+        let q_proj = if spec.q_lora_rank.is_some() {
             let q_a_norm = take_weight(weights, &format!("{prefix}.q_a_layernorm.weight"))?;
             QueryProjection::LoRA {
                 q_a_proj: UnifiedLinear::from_weights(
@@ -1463,7 +1518,7 @@ impl KimiK3MLAAttention {
                     gs,
                     bits,
                 )?,
-                q_a_layernorm: RMSNorm::new(q_a_norm, MLA_LORA_NORM_EPS),
+                q_a_layernorm: RMSNorm::new(q_a_norm, spec.latent_norm_eps),
                 q_b_proj: UnifiedLinear::from_weights(
                     weights,
                     &format!("{prefix}.q_b_proj"),
@@ -1489,7 +1544,7 @@ impl KimiK3MLAAttention {
         let embed_q = MultiLinear::from_weights(weights, &format!("{prefix}.embed_q"), gs, bits)?;
         let unembed_out =
             MultiLinear::from_weights(weights, &format!("{prefix}.unembed_out"), gs, bits)?;
-        let g_proj = if config.mla_use_output_gate {
+        let g_proj = if spec.use_output_gate {
             Some(UnifiedLinear::from_weights(
                 weights,
                 &format!("{prefix}.g_proj"),
@@ -1504,18 +1559,19 @@ impl KimiK3MLAAttention {
         Ok(Self {
             q_proj,
             kv_a_proj_with_mqa,
-            kv_a_layernorm: RMSNorm::new(kv_norm_weight, MLA_LORA_NORM_EPS),
+            kv_a_layernorm: RMSNorm::new(kv_norm_weight, spec.latent_norm_eps),
             embed_q,
             unembed_out,
             g_proj,
             o_proj,
-            num_heads: config.num_attention_heads as i32,
-            qk_nope_head_dim: config.qk_nope_head_dim as i32,
-            qk_rope_head_dim: config.qk_rope_head_dim as i32,
-            q_head_dim: config.q_head_dim() as i32,
-            kv_lora_rank: config.kv_lora_rank as i32,
-            v_head_dim: config.v_head_dim as i32,
-            scale: (config.q_head_dim() as f32).powf(-0.5),
+            num_heads: spec.num_heads as i32,
+            qk_nope_head_dim: spec.qk_nope_head_dim as i32,
+            qk_rope_head_dim: spec.qk_rope_head_dim as i32,
+            q_head_dim: q_head_dim as i32,
+            kv_lora_rank: spec.kv_lora_rank as i32,
+            v_head_dim: spec.v_head_dim as i32,
+            scale: (q_head_dim as f32).powf(-0.5),
+            family: spec.family,
         })
     }
 }

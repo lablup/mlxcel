@@ -284,8 +284,8 @@ pub(crate) fn latent_window_prefix(window: &LatentWindow, keys: i32) -> LatentWi
 /// the latent pair, and gives the storage report the same answer as the
 /// builder.
 ///
-/// Used by: the Kimi Linear and Kimi K3 cache builders and their
-/// `kv_cache_storage_modes` (#3162).
+/// Used by: the Kimi Linear, Kimi K3 and Raon-1 mini cache builders and
+/// their `kv_cache_storage_modes` (#3162).
 pub(crate) fn latent_pair_cache_mode(
     mode: mlxcel_core::cache::KVCacheMode,
 ) -> mlxcel_core::cache::KVCacheMode {

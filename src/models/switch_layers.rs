@@ -14,7 +14,7 @@
 
 //! Shared SwitchLinear / SwitchGLU for MoE models
 //!
-//! Used by: KimiLinear, KimiK3, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
+//! Used by: KimiLinear, KimiK3, Raon1Mini, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
 //!          GLM4Moe, GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe,
 //!          Qwen3VLMoe, PhiMoE, OLMoE, Inkling, etc.
 //!
@@ -1632,7 +1632,8 @@ fn stack_individual_experts_with_count(
 /// [`situ_activation`] with the config's `activation_situ_beta` and
 /// `activation_situ_linear_beta`.
 ///
-/// Used by: KimiK3 (SiTU); every other `SwitchGLU` caller stays on SwiGlu.
+/// Used by: KimiK3 and Raon1Mini (SiTU); every other `SwitchGLU` caller
+/// stays on SwiGlu.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SwitchGluActivation {
     /// `silu(gate) * up`.
@@ -1656,7 +1657,7 @@ pub enum SwitchGluActivation {
 /// https://huggingface.co/moonshotai/Kimi-K3/blob/main/modeling_kimi_linear.py).
 ///
 /// Used by: KimiK3 (`KimiK3MLP`, and `SwitchGLU` through
-/// [`SwitchGluActivation::SiTU`])
+/// [`SwitchGluActivation::SiTU`]), Raon1Mini (`RaonSituMlp` and its MoE experts)
 pub fn situ_activation(
     gate: &MlxArray,
     up: &MlxArray,
@@ -2187,7 +2188,7 @@ impl SwitchGLU {
     /// Kimi K3, from a `compressed-tensors` `mxfp4-pack-quantized` export
     /// (uint32 packed codes and uint8 E8M0 scales, no biases).
     ///
-    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4).
+    /// Used by: Inkling (nvfp4), Laguna (nvfp4), KimiK3 (mxfp4), Raon1Mini (mxfp8).
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,

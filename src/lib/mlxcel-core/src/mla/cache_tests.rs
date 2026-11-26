@@ -179,6 +179,7 @@ fn only_the_fallback_less_families_are_latent_families() {
         "hy_v4",
         "kimi_linear",
         "kimi_k3",
+        "raon1_mini",
         "longcat_flash",
         "longcat_flash_ngram",
         "xing4_0",
@@ -186,7 +187,7 @@ fn only_the_fallback_less_families_are_latent_families() {
     ] {
         assert!(caches_mla_latent_pair(family), "{family}");
     }
-    assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 19);
+    assert_eq!(MLA_LATENT_CACHE_FAMILIES.len(), 20);
     assert!(!caches_mla_latent_pair("deepseek_v2"));
     assert!(!caches_mla_latent_pair("llama"));
     assert!(!caches_mla_latent_pair(""));

@@ -131,6 +131,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Qwen3VLModel@src/vision/qwen3_vl.rs",
     "Qwen3VLMoeModel@src/models/qwen3_vl_moe.rs",
     "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
+    "Raon1MiniModel@src/models/raon1_mini_lm.rs",
     "Rwkv7@src/models/rwkv7.rs",
     "SeedOssModel@src/models/seed_oss.rs",
     "SmolLM3Model@src/models/smollm3.rs",

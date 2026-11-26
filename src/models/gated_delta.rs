@@ -17,7 +17,7 @@
 //! This module provides the core gated delta net primitives used by models
 //! that employ hybrid transformer + linear attention architectures.
 //!
-//! Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3
+//! Used by: Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear, KimiK3, Raon1Mini
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gated_delta.py
 
@@ -166,7 +166,7 @@ fn compute_g_float32(a_log: &MlxArray, a: &MlxArray, dt_bias: &MlxArray) -> Uniq
 /// path behind [`gated_delta_ops`] is unchanged: the gate is a plain
 /// `[B, T, H, Dk]` (or `[B, T, H]`) float32 input either way.
 ///
-/// Used by: KimiK3
+/// Used by: KimiK3, Raon1Mini
 pub fn compute_g_lower_bounded(
     a_log: &MlxArray,
     a: &MlxArray,
@@ -297,6 +297,29 @@ pub fn gated_delta_ops(
     mask: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     gated_delta_ops_with_parity(q, k, v, g, beta, state, mask, false, false)
+}
+
+/// [`gated_delta_ops`] with the float32 gate and recurrent state kept as
+/// float32 on every path.
+///
+/// The standard Metal kernel casts a float32 `g` and the incoming state to
+/// the activation dtype before the dispatch, and stores the outgoing state in
+/// that dtype. In bf16 a decay just below 1 has a step of 2^-8, so `0.998`
+/// becomes `0.996` and the error compounds once per token in long-memory
+/// heads. This variant skips those casts, as a reference that keeps the log
+/// decay and the state in float32 requires.
+///
+/// Used by: Raon1Mini (`raon_rda.rs`)
+pub fn gated_delta_ops_precise(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    g: &MlxArray,
+    beta: &MlxArray,
+    state: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    gated_delta_ops_with_parity(q, k, v, g, beta, state, mask, false, true)
 }
 
 /// Body of [`gated_delta_ops`] with the chain-parity switch.
