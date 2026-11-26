@@ -32,8 +32,8 @@ failures=0
 # the resolver is exercised on every form it claims to read. Thirteen of them
 # call `prefill_causal_mask`, whose annotation is a complete roster. All
 # fourteen call `layers::attention_from_ptr`, whose annotation is a rule with a
-# regenerating command and no count. Six call the three grandfathered,
-# unannotated helpers. One calls `softcap`; the rest of the `softcap` text in
+# regenerating command and no count. Six call each of the three formerly
+# grandfathered helpers. One calls `softcap`; the rest of the `softcap` text in
 # the tree is decoys.
 make_tree() {
   local dir="$work/$1"
@@ -82,6 +82,7 @@ write(
     """\
 use crate::ffi;
 
+/// Used by: NemotronH, Lfm2, Jamba, FalconH1, Plamo2 and Gemma3.
 pub fn slice_axis(x: f32) -> f32 {
     x
 }
@@ -108,6 +109,7 @@ pub fn prefill_causal_mask(size: i32) -> f32 {
 }
 
 /// SiLU through the raw FFI entry point.
+/// Used by: NemotronH, Lfm2, Jamba, FalconH1, Plamo2 and Gemma3.
 #[inline]
 pub fn silu(x: f32) -> f32 {
     ffi::silu(x)
@@ -121,6 +123,7 @@ pub fn softcap(x: f32, cap: f32) -> f32 {
     (x / cap).tanh() * cap
 }
 
+/// Used by: NemotronH, Lfm2, Jamba, FalconH1, Plamo2 and Gemma3.
 pub fn stack_arrays(x: f32) -> f32 {
     x
 }
@@ -386,7 +389,7 @@ layers="src/lib/mlxcel-core/src/layers.rs"
 # so every failure below is caused by its mutation and not by the fixture.
 dir="$(make_tree control)"
 if run_case control "$dir" 0; then
-  assert_contains control "used-by: OK, 8 top-level pub fn in 2 shared files, 5 annotated"
+  assert_contains control "used-by: OK, 8 top-level pub fn in 2 shared files, 8 annotated"
   assert_not_contains control "not gated"
 fi
 
@@ -397,11 +400,11 @@ fi
 # `mlxcel_core::silu` a caller of `utils.rs::silu`: six files call the wrapper
 # and `sampler.rs` calls the FFI function.
 if run_case control-report "$dir" 0 --report; then
-  assert_contains control-report "  softcap:38 callers=1 annotation=roster"
+  assert_contains control-report "  softcap:40 callers=1 annotation=roster"
   assert_contains control-report "      src/models/recurrent_gemma.rs:1 path"
-  assert_contains control-report "  silu:30 callers=6 annotation=debt"
-  assert_contains control-report "  create_causal_mask:18 callers=14 annotation=command"
-  assert_contains control-report "  prefill_causal_mask:24 callers=13 annotation=roster"
+  assert_contains control-report "  silu:32 callers=6 annotation=roster"
+  assert_contains control-report "  create_causal_mask:19 callers=14 annotation=command"
+  assert_contains control-report "  prefill_causal_mask:25 callers=13 annotation=roster"
   assert_contains control-report "      src/models/qwen3_5.rs:5 name"
   assert_contains control-report "  attention_from_ptr:15 callers=14 annotation=command"
   for decoy in emitter_model muse_glimmer gemma2 sampler recurrent_gemma_tests \
@@ -528,7 +531,7 @@ for stem in mamba mamba2 rwkv7 dbrx bitnet; do
   add_model "$dir" "$stem" 'mlxcel_core::utils::softcap(1.0, 2.0)'
 done
 if run_case absent-annotation "$dir" 1; then
-  assert_contains absent-annotation "$utils:36: \`softcap\` has 6 caller files outside its own module (threshold 5) and no \`/// Used by:\` annotation"
+  assert_contains absent-annotation "$utils:38: \`softcap\` has 6 caller files outside its own module (threshold 5) and no \`/// Used by:\` annotation"
   assert_contains absent-annotation "src/models/bitnet.rs, src/models/dbrx.rs, src/models/mamba.rs"
   assert_not_contains absent-annotation "emitter_model"
 fi
@@ -577,7 +580,7 @@ path.write_text(
 )
 PY
 if run_case stale-roster "$dir" 1; then
-  assert_contains stale-roster "$utils:21: \`create_causal_mask\`: 12 of 14 caller files are not accounted for by the \`Used by:\` annotation"
+  assert_contains stale-roster "$utils:22: \`create_causal_mask\`: 12 of 14 caller files are not accounted for by the \`Used by:\` annotation"
   assert_contains stale-roster "src/models/falcon_h1.rs, src/models/gemma3.rs, src/models/gemma4.rs"
   assert_contains stale-roster "src/models/nemotron_h.rs"
   # `DeepSeek` and `Hunyuan` do name a caller each, so those two are not listed.
@@ -654,12 +657,14 @@ if run_case plain-comment "$dir" 1; then
   assert_contains plain-comment "\`repeat_kv\` keeps its \`Used by:\` annotation in a \`//\` comment"
 fi
 
-# A short roster with an unnamed caller is reported but not gated.
-dir="$(make_tree short-roster-advisory)"
+# One omitted caller fails even below the absence threshold.
+dir="$(make_tree short-roster)"
 add_model "$dir" rwkv7 'mlxcel_core::utils::repeat_kv(1.0)'
-if run_case short-roster-advisory "$dir" 0; then
-  assert_contains short-roster-advisory "not gated, at or below the enumeration threshold of 12: 1 annotation(s) with 1 unnamed caller file(s)"
+if run_case short-roster "$dir" 1; then
+  assert_contains short-roster "\`repeat_kv\`: 1 of 3 caller files are not accounted for by the \`Used by:\` annotation: src/models/rwkv7.rs."
 fi
+replace_in "$dir/$utils" 'DeepSeekV2 and Llama4.' 'DeepSeekV2, Llama4 and RWKV-7.'
+run_case short-roster-updated "$dir" 0 || true
 
 # A regenerating command has to be one the check can re-run, and has to search
 # for the function it sits on. Otherwise it would account for nothing, or for
@@ -683,19 +688,13 @@ if run_case command-missing-directory "$dir" 1; then
   assert_contains command-missing-directory "searches \`src/decoders\`, which does not exist"
 fi
 
-# UNANNOTATED_DEBT can only shrink: an entry that gained an annotation, or
-# whose function is gone, fails until it is removed.
-dir="$(make_tree debt-annotated)"
-replace_in "$dir/$utils" 'pub fn slice_axis(' '/// Used by: NemotronH, Lfm2, Jamba, FalconH1, Plamo2 and Gemma3.
-pub fn slice_axis('
-if run_case debt-annotated "$dir" 1; then
-  assert_contains debt-annotated "\`slice_axis\` is listed in UNANNOTATED_DEBT but now carries a \`Used by:\` annotation. Remove the entry."
-fi
-
-dir="$(make_tree debt-function-gone)"
-replace_in "$dir/$utils" 'pub fn stack_arrays(x: f32) -> f32 {' 'pub fn stack_all(x: f32) -> f32 {'
-if run_case debt-function-gone "$dir" 1; then
-  assert_contains debt-function-gone "$utils::stack_arrays: listed in UNANNOTATED_DEBT but no such top-level \`pub fn\` exists. Remove the entry."
+# Removing the three paid-down annotations brings each helper under rule 1.
+dir="$(make_tree former-debt)"
+replace_in "$dir/$utils" '/// Used by: NemotronH, Lfm2, Jamba, FalconH1, Plamo2 and Gemma3.' ''
+if run_case former-debt "$dir" 1; then
+  for helper in slice_axis silu stack_arrays; do
+    assert_contains former-debt "\`$helper\` has 6 caller files outside its own module (threshold 5) and no \`/// Used by:\` annotation"
+  done
 fi
 
 # The scope is fail-closed: a scoped file that is renamed away fails rather

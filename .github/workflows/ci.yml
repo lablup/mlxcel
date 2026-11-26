@@ -582,9 +582,8 @@ jobs:
     # helper, and a wrong one reads as an answer: issue #1110 was filed against
     # a `create_causal_mask` roster naming six families that had stopped
     # calling it. The check resolves the real callers through `use`
-    # declarations and fails when a function with more than a dozen caller
-    # files leaves one unaccounted for, by name or through the regenerating
-    # grep the annotation carries (issue #1141). The second step is the
+    # declarations and requires each annotation to account for every caller
+    # file by name or through the regenerating grep it carries (issue #1141). The second step is the
     # checker's own negative coverage on a synthetic workspace, the pre-#1121
     # roster included.
     runs-on: ubuntu-latest
