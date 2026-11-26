@@ -67,10 +67,11 @@ impl RaonSituMlp {
     }
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = self.gate_proj.forward(x);
-        let up = self.up_proj.forward(x);
+        use mlxcel_core::row_invariant::linear;
+        let gate = linear(&self.gate_proj, x);
+        let up = linear(&self.up_proj, x);
         let act = situ_activation(&gate, &up, self.beta, Some(self.linear_beta));
-        self.down_proj.forward(&act)
+        linear(&self.down_proj, &act)
     }
 }
 
@@ -209,8 +210,10 @@ impl RaonMoe {
 
     /// `(top-k expert ids [N, k], float32 routing weights [N, k])` for `x_flat` `[N, D]`.
     pub fn route(&self, x_flat: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let logits =
-            mlxcel_core::matmul(&mlxcel_core::astype(x_flat, dtype::FLOAT32), &self.router_t);
+        let logits = mlxcel_core::row_invariant::per_row(
+            &mlxcel_core::astype(x_flat, dtype::FLOAT32),
+            |x| mlxcel_core::matmul(x, &self.router_t),
+        );
         let scores = mlxcel_core::sigmoid(&logits);
         let selection = match &self.correction_bias {
             Some(bias) => mlxcel_core::add(&scores, bias),

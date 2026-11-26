@@ -55,6 +55,9 @@ mod lm;
 mod effort;
 use effort::EffortState;
 
+#[path = "raon1_mini_speculative.rs"]
+pub mod speculative;
+
 /// Per-layer state: RDA conv window plus recurrent state, or the MLA latent
 /// pair (`kv_latent`, `k_pe`) in a `KVCache`.
 pub enum Raon1MiniLayerCache {
@@ -443,6 +446,7 @@ impl Raon1MiniModel {
             self.layers.len(),
             "raon1_mini: one cache per layer"
         );
+        let _rows = speculative::row_scope(false);
         let mut streams = raon_mhc::expand_streams(&h, self.streams);
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             streams = layer.forward(&streams, cache, masks, steer);
@@ -456,9 +460,10 @@ impl Raon1MiniModel {
         let h = raon_mhc::reduce_streams(streams, self.act_dtype);
         let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
+        // Row-invariant inside a speculative verify block (#3436).
         match &self.lm_head {
-            Some(head) => head.forward(&h),
-            None => self.embed_tokens.as_linear(&h),
+            Some(head) => mlxcel_core::row_invariant::linear(head, &h),
+            None => mlxcel_core::row_invariant::per_row(&h, |h| self.embed_tokens.as_linear(h)),
         }
     }
 }

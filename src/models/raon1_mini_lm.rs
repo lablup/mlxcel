@@ -163,6 +163,7 @@ impl Raon1MiniModel {
         ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
         let steer = self.steer_sequences(ids);
+        let _rows = super::speculative::row_scope(false);
         let h = self.embed_tokens.forward(input_ids);
         let mut streams = super::raon_mhc::expand_streams(&h, self.streams);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -257,6 +258,24 @@ impl LanguageModel for Raon1MiniModel {
 
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
+    }
+
+    /// Lent to the DFlash2 drafter, which embeds its block with the target's
+    /// table (#3436).
+    fn embed_tokens_module(&self) -> Option<mlxcel_core::layers::UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+
+    /// Lent to the DFlash2 drafter, which scores its block with the target's
+    /// head (#3436).
+    fn lm_head_module(&self) -> Option<mlxcel_core::layers::UnifiedLinear> {
+        self.lm_head
+            .as_ref()
+            .map(mlxcel_core::layers::UnifiedLinear::clone_shared)
+    }
+
+    fn residual_stream_count(&self) -> Option<usize> {
+        Some(self.streams)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

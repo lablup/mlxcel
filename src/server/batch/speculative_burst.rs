@@ -1757,6 +1757,7 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
         LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
+        LoadedModel::Raon1Mini(m) => m.exactness_allows(bs),
         _ => return None,
     })
 }
@@ -1791,6 +1792,9 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         LoadedModel::Inkling2VLM(_) => {
             <crate::vision::Inkling2VlModel as DFlashTargetModel>::supports_batched()
         }
+        LoadedModel::Raon1Mini(_) => {
+            <crate::models::Raon1MiniModel as DFlashTargetModel>::supports_batched()
+        }
         _ => return None,
     })
 }
@@ -1815,6 +1819,10 @@ pub(crate) fn dflash_burst_would_engage(
         && dflash_target_exactness_allows(model, block_size as usize) == Some(true)
         && !(drafter_slot.drafter_ref().is_some_and(|d| d.greedy_only())
             && !sampler_is_greedy(&seq.sampling))
+        && !(drafter_slot
+            .drafter_ref()
+            .is_some_and(|d| d.supports_sampled_verify())
+            && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling))
 }
 
 /// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
@@ -1892,8 +1900,8 @@ fn run_dflash_burst(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
              LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), Laguna (Laguna DFlash drafter), or Inkling 2 (its bundled \
-             DSpark drafter); falling back to \
+             assistant drafter), Laguna (Laguna DFlash drafter), Inkling 2 (its bundled \
+             DSpark drafter), or Raon-1 mini (DFlash2 drafter); falling back to \
              classic decode",
             model_variant_label(ctx.model),
         );
@@ -1942,6 +1950,23 @@ fn run_dflash_burst(
             seq.seq_id,
             seq.sampling.temperature,
             seq.sampling.top_k,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+    // A drafter that samples its verify rows (Raon DFlash2, issue #3436)
+    // cannot carry a feedback sampler's state (Mirostat, adaptive-p) across
+    // them.
+    if ctx
+        .drafter_slot
+        .drafter_ref()
+        .is_some_and(|d| d.supports_sampled_verify())
+        && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling)
+    {
+        tracing::warn!(
+            "DFlash speculative dispatch declined for seq {}: the request samples with a \
+             feedback sampler (Mirostat or adaptive-p), whose state the sampled verify rows \
+             cannot carry; serving it with classic decode",
+            seq.seq_id,
         );
         return Err(BurstOutcome::DeclineToClassic);
     }
@@ -1996,6 +2021,7 @@ fn run_dflash_burst(
                 cancel,
                 &logprobs_config,
                 (ctx.prefill_chunk_size, ctx.prefill_boundary),
+                Some(seq.seq_id),
             )?
         };
     }
@@ -2012,6 +2038,7 @@ fn run_dflash_burst(
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
         LoadedModel::Inkling2VLM(m) => drive!(m),
+        LoadedModel::Raon1Mini(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -3156,6 +3183,7 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Inkling2VLM(_) => "Inkling2VLM",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
+        LoadedModel::Raon1Mini(_) => "Raon1Mini",
         _ => "other",
     }
 }
