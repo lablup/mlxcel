@@ -209,6 +209,81 @@ fn the_server_default_level_applies_only_when_the_request_sets_none() {
     );
 }
 
+#[test]
+fn a_request_turning_thinking_off_beats_the_server_default_level() {
+    let server_low = ChatTemplateKwargs::from_json_object(
+        json!({"reasoning_effort": "low"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    for thinking_off in [
+        json!({"chat_template_kwargs": {"enable_thinking": false}}),
+        json!({"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}}),
+        json!({"reasoning": false}),
+    ] {
+        assert_eq!(
+            resolve_with_default(thinking_off.clone(), Some(&server_low)),
+            Ok(Some("none".into())),
+            "{thinking_off}"
+        );
+    }
+    // An explicit per-request level still wins over the request's own
+    // thinking-off and over the server default.
+    assert_eq!(
+        resolve_with_default(
+            json!({
+                "reasoning_effort": "medium",
+                "chat_template_kwargs": {"enable_thinking": false}
+            }),
+            Some(&server_low)
+        ),
+        Ok(Some("medium".into()))
+    );
+    assert_eq!(
+        resolve_with_default(
+            json!({"chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "xhigh"}}),
+            Some(&server_low)
+        ),
+        Ok(Some("xhigh".into()))
+    );
+    // A request that leaves thinking on keeps the server level.
+    assert_eq!(
+        resolve_with_default(
+            json!({"chat_template_kwargs": {"enable_thinking": true}}),
+            Some(&server_low)
+        ),
+        Ok(Some("low".into()))
+    );
+}
+
+#[tokio::test]
+async fn a_thinking_off_request_renders_and_steers_the_same_way_over_a_server_level() {
+    let server_low = ChatTemplateKwargs::from_json_object(
+        json!({"reasoning_effort": "low"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let prepared = prepare_chat_request_with_cache(
+        &processor(true),
+        &request(json!({"chat_template_kwargs": {"enable_thinking": false}})),
+        Some(&server_low),
+        false,
+        false,
+        false,
+        &crate::tokenizer::ThinkingMarkers::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        prepared.prompt.trim_end().ends_with("<think></think>"),
+        "{}",
+        prepared.prompt
+    );
+    assert_eq!(prepared.model_reasoning_effort.as_deref(), Some("none"));
+}
+
 async fn render(extra: Value) -> anyhow::Result<crate::server::chat_request::PreparedChatRequest> {
     prepare_chat_request_with_cache(
         &processor(true),

@@ -32,14 +32,18 @@
 //!    `reasoning.effort` is translated onto it) or `reasoning`. A disabled
 //!    `reasoning: false` selects `none`. The existing template mapping
 //!    already renders a portable `none` with `enable_thinking=false`.
-//! 3. The server-default `--chat-template-kwargs` `reasoning_effort`, the
+//! 3. A per-request `enable_thinking: false` (in `chat_template_kwargs`,
+//!    top-level or under `extra_body`) selects `none`, even over a server
+//!    default level: the render turns thinking off for this request, and the
+//!    model card documents both controls as giving the same result.
+//! 4. The server-default `--chat-template-kwargs` `reasoning_effort`, the
 //!    operator's level for requests that set none (llama-server's
 //!    `--reasoning-effort`).
-//! 4. Thinking off with no level selects `none`: both controls give the same
+//! 5. Thinking off with no level selects `none`: both controls give the same
 //!    result. Thinking is resolved as the render resolves it: the request's
 //!    `enable_thinking`, else its portable `reasoning` toggle, else the
 //!    server default.
-//! 5. The config's `default` level.
+//! 6. The config's `default` level.
 //!
 //! No translation: the value must be `none` or one of the config's alpha
 //! keys after trimming and lowercasing, so OpenAI's `minimal` and the
@@ -75,7 +79,7 @@ pub(crate) fn resolve_model_reasoning_effort(
         merged_extra_body.as_ref(),
     );
     let control = request.resolve_reasoning_control();
-    let explicit = per_request
+    let request_level = per_request
         .get(REASONING_EFFORT)
         .map(level_text)
         .or_else(|| {
@@ -84,18 +88,22 @@ pub(crate) fn resolve_model_reasoning_effort(
                 (None, false) => Some(NONE_LEVEL.to_string()),
                 (None, true) => None,
             })
-        })
-        .or_else(|| {
-            server_default_kwargs
-                .and_then(|kwargs| kwargs.get(REASONING_EFFORT))
-                .map(level_text)
         });
-    let level = match explicit {
-        Some(raw) => steering.normalize_level(&raw)?,
-        None if thinking_disabled(&per_request, control.as_ref(), server_default_kwargs) => {
-            NONE_LEVEL.to_string()
-        }
-        None => steering.default.clone(),
+    if let Some(raw) = request_level {
+        return steering.normalize_level(&raw).map(Some);
+    }
+    let request_thinking_off =
+        per_request.get(ENABLE_THINKING).and_then(Value::as_bool) == Some(false);
+    if request_thinking_off {
+        return Ok(Some(NONE_LEVEL.to_string()));
+    }
+    if let Some(value) = server_default_kwargs.and_then(|kwargs| kwargs.get(REASONING_EFFORT)) {
+        return steering.normalize_level(&level_text(value)).map(Some);
+    }
+    let level = if thinking_disabled(&per_request, control.as_ref(), server_default_kwargs) {
+        NONE_LEVEL.to_string()
+    } else {
+        steering.default.clone()
     };
     Ok(Some(level))
 }
