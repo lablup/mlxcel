@@ -175,7 +175,8 @@ pub struct AdjacentFramePairPlan {
 ///
 /// Odd frame counts conceptually repeat the final frame. The reference keeps
 /// at least two pairs even when the request budget is smaller, so a one-frame
-/// clip produces two identical `[0, 0]` pairs.
+/// clip produces two identical `[0, 0]` pairs. The reference formula's Python
+/// `round` rounds half to even: 12 frames in 5 pairs anchor at 2.5 -> 2.
 pub fn pair_adjacent_frame_indices(
     frame_count: usize,
     max_pairs: usize,
@@ -192,7 +193,8 @@ pub fn pair_adjacent_frame_indices(
     let denominator = pair_count.saturating_sub(1).max(1) as f64;
     let anchors = (0..pair_count)
         .map(|index| {
-            ((index as f64 * last_anchor as f64 / denominator).round() as usize).min(last_anchor)
+            ((index as f64 * last_anchor as f64 / denominator).round_ties_even() as usize)
+                .min(last_anchor)
         })
         .collect::<Vec<_>>();
     let pairs = anchors
@@ -1927,7 +1929,8 @@ pub fn load_videos_with_policy(
 /// Indices of the `max_frames` frames [`subsample_evenly`] keeps out of
 /// `len` sampled ones.
 ///
-/// Same `round(i * (len - 1) / (max - 1))` spacing [`uniform_indices`] uses,
+/// Same `round(i * (len - 1) / (max - 1))` spacing [`uniform_indices`] uses
+/// (half to even, as numpy's `round` does),
 /// exposed separately because the fallback subsamples an already-decoded frame
 /// vector rather than choosing what to decode. The result is strictly
 /// increasing whenever `max_frames <= len`, because the step is then at
@@ -1946,7 +1949,7 @@ pub fn evenly_spaced_indices(len: usize, max_frames: usize) -> Vec<usize> {
     let last = (len - 1) as f64;
     let step = last / (max_frames - 1) as f64;
     (0..max_frames)
-        .map(|i| ((i as f64 * step).round() as usize).min(len - 1))
+        .map(|i| ((i as f64 * step).round_ties_even() as usize).min(len - 1))
         .collect()
 }
 
@@ -2092,7 +2095,8 @@ pub fn load_video_source_frames_fallback(
 
 /// Compute `nframes` evenly-spaced frame indices across
 /// `[0, total_frames - 1]`. Mirrors the Python `np.linspace(...).round()
-/// .astype(int)` call used in `load_video`.
+/// .astype(int)` call used in `load_video`; numpy's `round` rounds half to
+/// even, so `uniform_indices(6, 3)` is `[0, 2, 5]` (2.5 -> 2).
 fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
     if nframes <= 1 {
         return vec![0];
@@ -2100,7 +2104,7 @@ fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
     let last = total_frames.saturating_sub(1) as f64;
     let step = last / (nframes as f64 - 1.0);
     (0..nframes)
-        .map(|i| (i as f64 * step).round() as usize)
+        .map(|i| (i as f64 * step).round_ties_even() as usize)
         .map(|i| i.min(total_frames.saturating_sub(1)))
         .collect()
 }

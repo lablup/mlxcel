@@ -45,6 +45,19 @@ fn frames(count: usize, width: u32, height: u32) -> Vec<DynamicImage> {
         .collect()
 }
 
+/// `_sample_frames` uses `np.linspace(0, T - 1, n).round()`, which rounds
+/// half to even: 6 frames sampled to 3 keep frames 0, 2 and 5, not 0, 3, 5.
+#[test]
+fn uniform_sample_frames_rounds_ties_to_even() {
+    let distinct: Vec<DynamicImage> = (0..6u8).map(|i| synthetic_rgb(4, 4, i * 40)).collect();
+    let kept = uniform_sample_frames(&distinct, 3);
+    let fills: Vec<u8> = kept
+        .iter()
+        .map(|f| f.to_rgb8().get_pixel(0, 0)[0])
+        .collect();
+    assert_eq!(fills, vec![0, 80, 200]);
+}
+
 #[test]
 fn process_videos_emits_one_features_block_per_video() {
     let processor = Gemma4Processor::new(16, 280, 3);

@@ -285,18 +285,19 @@ impl Qwen2VLProcessor {
         let (min_pixels, max_pixels) = self.effective_pixel_bounds();
         let (min_pixels, max_pixels) = (min_pixels as u64, max_pixels as u64);
         let area = |h: u64, w: u64| h.saturating_mul(w);
-        let round_to = |edge: f64, scale: f64, mode: fn(f64) -> f64| -> u64 {
-            (mode(edge * scale / factor as f64) as u64)
-                .max(1)
-                .saturating_mul(factor)
-        };
+        // The reference's `round(height / factor) * factor` has no floor: a
+        // thin edge that rounds to 0 drops the area under `min_pixels`, and
+        // that branch rescales the original size (10x1000 at factor 28 gives
+        // 28x560, not the 28x1008 a one-factor floor here would keep).
+        let round_to =
+            |edge: f64| -> u64 { (edge / factor as f64).round_ties_even() as u64 * factor };
 
         // Start with original size, round to factor. Arithmetic is u64 and
         // saturating so a huge image or a huge checkpoint bound cannot wrap.
         // The reference's `round(height / factor)` is Python's `round`, which
         // rounds half to even: 720 / 32 = 22.5 goes to 22, not 23.
-        let mut h = round_to(orig_h as f64, 1.0, f64::round_ties_even);
-        let mut w = round_to(orig_w as f64, 1.0, f64::round_ties_even);
+        let mut h = round_to(f64::from(orig_h));
+        let mut w = round_to(f64::from(orig_w));
 
         // Out of bounds, scale the original size once as the reference does:
         // `beta = sqrt(h * w / max_pixels)`, then `floor(h / beta / factor)`
@@ -315,21 +316,27 @@ impl Qwen2VLProcessor {
             let beta = (orig_area / max_pixels as f64).sqrt();
             h = snap((orig_h / beta / factor_f).floor());
             w = snap((orig_w / beta / factor_f).floor());
-            // Past 200:1 the reference raises instead of resizing. There the
-            // short side can clamp to one `factor` with the area still over
-            // the cap; trim the long side so `max_image_tokens` still holds.
-            if area(h, w) > max_pixels && orig_h.max(orig_w) / orig_h.min(orig_w) > 200.0 {
-                if h <= w {
-                    w = (max_pixels / h / factor).max(1) * factor;
-                } else {
-                    h = (max_pixels / w / factor).max(1) * factor;
-                }
-            }
         } else if pixels < min_pixels {
             let beta = (min_pixels as f64 / orig_area).sqrt();
             h = snap((orig_h * beta / factor_f).ceil());
             w = snap((orig_w * beta / factor_f).ceil());
         }
+        // Past 200:1 the reference raises instead of resizing. There the
+        // short side can clamp to one `factor` with the area still over the
+        // cap (after either branch); trim the long side so
+        // `max_image_tokens` still holds.
+        if area(h, w) > max_pixels && orig_h.max(orig_w) / orig_h.min(orig_w) > 200.0 {
+            if h <= w {
+                w = (max_pixels / h / factor).max(1) * factor;
+            } else {
+                h = (max_pixels / w / factor).max(1) * factor;
+            }
+        }
+        // Deviation: with `min_pixels == 0` an edge that rounds to 0 passes
+        // both bounds checks and the reference returns a zero edge, which no
+        // resize can produce. Floor it to one `factor`.
+        h = h.max(factor);
+        w = w.max(factor);
 
         (
             u32::try_from(h).unwrap_or(u32::MAX),
@@ -827,5 +834,39 @@ mod tests {
         assert_eq!(p.smart_resize(0, 10), (28, 196));
         assert_eq!(p.smart_resize(10, 0), (196, 28));
         assert_eq!(p.smart_resize(0, 0), (56, 56));
+    }
+
+    /// A thin edge rounds to 0 in the reference's first step, so the area
+    /// falls under `min_pixels` and the original size is rescaled. Expected
+    /// values are transformers 5.16.1 `image_processing_qwen2_vl.
+    /// smart_resize`: `(10, 1000, 28, 3136, 12845056)` gives
+    /// `beta = sqrt(3136 / 10000) = 0.56`, `ceil(10 * 0.56 / 28) = 1`,
+    /// `ceil(1000 * 0.56 / 28) = 20`, so 28x560 (a one-factor floor on the
+    /// first step kept 28x1008); `(10, 1000, 32, 65536, 16777216)` gives
+    /// 32x2560.
+    #[test]
+    fn smart_resize_thin_edge_rescales_like_the_reference() {
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(10, 1000), (28, 560));
+        assert_eq!(p28.smart_resize(1000, 10), (560, 28));
+        let p32 = factor_32_processor();
+        assert_eq!(p32.smart_resize(10, 1000), (32, 2560));
+        assert_eq!(p32.smart_resize(1000, 10), (2560, 32));
+        // `min_pixels == 0`: the reference returns a zero edge; one factor here.
+        let p0 = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(0, 12_845_056);
+        assert_eq!(p0.smart_resize(10, 1000), (28, 1008));
+    }
+
+    /// Past 200:1 a thin edge now takes the `min_pixels` branch, whose long
+    /// side can still exceed a small cap; the trim must apply there too.
+    #[test]
+    fn smart_resize_extreme_aspect_under_min_pixels_keeps_the_cap() {
+        let cap = 200_704;
+        let p = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(3136, cap);
+        for (h, w) in [(1, 100_000), (100_000, 1)] {
+            let (rh, rw) = p.smart_resize(h, w);
+            assert_eq!((rh % 28, rw % 28), (0, 0), "{h}x{w}");
+            assert!((rh as usize) * (rw as usize) <= cap, "{h}x{w} -> {rh}x{rw}");
+        }
     }
 }

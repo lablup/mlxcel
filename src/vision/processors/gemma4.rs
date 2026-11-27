@@ -488,7 +488,8 @@ impl Gemma4Processor {
 /// Mirrors the upstream `Gemma4VideoProcessor._sample_frames`
 /// implementation: returns `frames` as-is when its length is at most
 /// `target`; otherwise picks `target` linearly-spaced indices using
-/// `linspace(0, T-1, target).round()`.
+/// `linspace(0, T-1, target).round()`. numpy's `round` rounds half to even,
+/// so 6 frames sampled to 3 keep frames 0, 2 and 5 (2.5 -> 2).
 fn uniform_sample_frames(frames: &[DynamicImage], target: usize) -> Vec<DynamicImage> {
     let total = frames.len();
     if total == 0 {
@@ -504,7 +505,7 @@ fn uniform_sample_frames(frames: &[DynamicImage], target: usize) -> Vec<DynamicI
     let step = last / (target as f64 - 1.0);
     (0..target)
         .map(|i| {
-            let idx = (i as f64 * step).round() as usize;
+            let idx = (i as f64 * step).round_ties_even() as usize;
             frames[idx.min(total - 1)].clone()
         })
         .collect()
