@@ -74,7 +74,12 @@ fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
 /// dimensions, exactly as `GptOssModel` always computed it; without it the
 /// fractional bounds are kept, as `PrivacyFilterRoPE` does upstream.
 ///
-/// Used by: GptOss, OpenAIPrivacyFilter, Ministral3
+/// Used by: GptOss, OpenAIPrivacyFilter, Ministral3. Not used by the families
+/// on the shared RoPE path or by Qwen 3.5: they build their YaRN table with
+/// `rope_utils::yarn_rope_setup`, a second builder that also honors
+/// `truncate` (#3215) and takes the `--yarn-*` knobs. The two agree for the
+/// same parameters (`rope_utils_tests::yarn_truncate_false_matches_gpt_oss_builder`);
+/// unifying them is a separate refactor.
 pub(crate) fn yarn_rope_freqs(params: &YarnRopeParams) -> (Vec<f32>, f32) {
     let dims = params.dims as f32;
     let base = params.base;

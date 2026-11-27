@@ -274,11 +274,86 @@ pub struct TextConfig {
     #[serde(default)]
     pub moe_intermediate_size: Option<usize>,
     pub layer_types: Vec<String>,
+    /// The full-attention layers' shapes as transformers 5.15+ writes them:
+    /// `{"<layer index>": {"head_dim": H, "num_key_value_heads": K}}`, in
+    /// place of `global_head_dim` / `num_global_key_value_heads`
+    /// (Blaizzy/mlx-vlm#2719). Folded into those two fields by
+    /// [`TextConfig::apply_per_layer_config`], which every parse site calls;
+    /// its presence also selects the global KV-head count for full-attention
+    /// layers ([`TextConfig::num_kv_heads_for_layer`]).
+    #[serde(default)]
+    pub per_layer_config: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub quantization: Option<QuantizationArgs>,
 }
 
 impl TextConfig {
+    /// Overwrite `global_head_dim` and `num_global_key_value_heads` with the
+    /// shape `per_layer_config` gives the full-attention layers. A config
+    /// without the block is left exactly as parsed.
+    ///
+    /// Port of `apply_per_layer_config` in
+    /// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma4/config.py>
+    /// (Blaizzy/mlx-vlm#2719); the rules and the error texts are in
+    /// [`mlxcel_core::gemma4_per_layer`]. Idempotent, so a config that is
+    /// serialized and parsed again resolves to the same shape.
+    ///
+    /// Used by: [`ModelArgs::text_args`] and [`ModelArgs::validate_text_config`]
+    /// (Gemma 4 text, VLM, Unified, tensor-parallel), DiffusionGemma
+    /// (`diffusion_gemma::ModelArgs::text_args`) and the tensor-parallel
+    /// batching probe (`gemma4_force_no_batch`).
+    pub(crate) fn apply_per_layer_config(&mut self) -> Result<(), String> {
+        let layer_types: Vec<&str> = self.layer_types.iter().map(String::as_str).collect();
+        let resolved =
+            mlxcel_core::gemma4_per_layer::gemma4_global_attention_from_per_layer_config(
+                self.per_layer_config.as_ref(),
+                &layer_types,
+                self.head_dim,
+                self.num_key_value_heads,
+            )?;
+        if let Some((head_dim, kv_heads)) = resolved {
+            self.global_head_dim = Some(head_dim);
+            self.num_global_key_value_heads = Some(kv_heads);
+        }
+        Ok(())
+    }
+
+    /// Restate `per_layer_config` as one entry per full-attention layer
+    /// carrying the current `global_head_dim` / `num_global_key_value_heads`.
+    /// A config without the block is left alone.
+    ///
+    /// For a caller that edits the resolved shape and serializes the config
+    /// again: without this, the next parse would re-apply the checkpoint's
+    /// original entries over the edit.
+    ///
+    /// Used by: the tensor-parallel Gemma 4 runtime (`local_gemma4_args`),
+    /// which divides the KV-head counts by the rank count.
+    pub(crate) fn restate_per_layer_config(&mut self) {
+        if self.per_layer_config.is_none() {
+            return;
+        }
+        let head_dim = self.global_head_dim.unwrap_or(self.head_dim);
+        let kv_heads = self
+            .num_global_key_value_heads
+            .unwrap_or(self.num_key_value_heads);
+        let restated = self
+            .layer_types
+            .iter()
+            .enumerate()
+            .filter(|(_, layer_type)| layer_type.as_str() == "full_attention")
+            .map(|(layer, _)| {
+                (
+                    layer.to_string(),
+                    serde_json::json!({
+                        "head_dim": head_dim,
+                        "num_key_value_heads": kv_heads,
+                    }),
+                )
+            })
+            .collect();
+        self.per_layer_config = Some(restated);
+    }
+
     /// Whether MTP verify must reproduce classic decode one query row at a
     /// time, which restricts it to B=1 linear blocks on rotating-buffered
     /// caches. The 31B policy is unchanged on every backend; 12B is enabled
@@ -391,8 +466,14 @@ impl TextConfig {
         }
     }
 
+    /// A full-attention layer takes `num_global_key_value_heads` when
+    /// `attention_k_eq_v` is set or the config carried `per_layer_config`
+    /// (upstream `Attention.__init__`, Blaizzy/mlx-vlm#2719); otherwise, and
+    /// on every sliding layer, the base `num_key_value_heads`.
     fn num_kv_heads_for_layer(&self, layer_idx: usize) -> i32 {
-        if self.attention_k_eq_v && !self.is_sliding_layer(layer_idx) {
+        if (self.attention_k_eq_v || self.per_layer_config.is_some())
+            && !self.is_sliding_layer(layer_idx)
+        {
             self.num_global_key_value_heads
                 .unwrap_or(self.num_key_value_heads) as i32
         } else {
@@ -441,9 +522,18 @@ pub struct ModelArgs {
 }
 
 impl ModelArgs {
+    /// The parsed `text_config`, with `per_layer_config` already applied.
+    ///
+    /// Panics on a `text_config` that does not parse or whose
+    /// `per_layer_config` is not one this model can represent. A loader
+    /// calls [`Self::validate_text_config`] first, so a bad checkpoint is a
+    /// load error rather than a panic here.
     pub fn text_args(&self) -> TextConfig {
         let mut config: TextConfig =
             serde_json::from_value(self.text_config.clone()).expect("Failed to parse text_config");
+        config
+            .apply_per_layer_config()
+            .expect("Failed to apply per_layer_config");
         if config.quantization.is_none()
             && let Some(ref q) = self.quantization
         {
@@ -460,6 +550,20 @@ impl ModelArgs {
             });
         }
         config
+    }
+
+    /// Check what [`Self::text_args`] would panic on: a `text_config` that
+    /// does not parse, or a `per_layer_config` this model cannot represent
+    /// (the upstream message, see [`TextConfig::apply_per_layer_config`]).
+    ///
+    /// Used by: `Gemma4Model::load`, `Gemma4Model::from_weights`,
+    /// `Gemma4StageModel::from_filtered_weights`, the Gemma 4 VLM and
+    /// Unified loaders, and the tensor-parallel Gemma 4 runtime, each right
+    /// after parsing `config.json`.
+    pub fn validate_text_config(&self) -> Result<(), String> {
+        let mut config: TextConfig = serde_json::from_value(self.text_config.clone())
+            .map_err(|e| format!("Failed to parse text_config: {e}"))?;
+        config.apply_per_layer_config()
     }
 
     pub fn eos_token_ids(&self) -> Vec<i32> {
@@ -4975,6 +5079,7 @@ impl Gemma4Model {
         let config_str = crate::models::sanitize_config_json(&config_str);
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        args.validate_text_config()?;
         let config_value: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse sanitized config.json: {}", e))?;
 
@@ -5009,6 +5114,7 @@ impl Gemma4Model {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        args.validate_text_config()?;
         let config = args.text_args();
         let text_model = Gemma4TextModel::from_weights(weights, &config, "language_model.model")?;
         let eos_token_ids = {
@@ -5282,6 +5388,7 @@ impl Gemma4StageModel {
         let config_str = crate::models::sanitize_config_json(&config_str);
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        args.validate_text_config()?;
         let config_value: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse sanitized config.json: {}", e))?;
 
@@ -5323,6 +5430,7 @@ impl Gemma4StageModel {
         stage_index: usize,
         weight_backing: super::sanitize::Gemma4WeightBacking,
     ) -> Result<Self, String> {
+        args.validate_text_config()?;
         let config = args.text_args();
         // Same load-time window check as `Gemma4TextModel::from_weights`:
         // the stage cache builder casts `sliding_window` too (issue #2790).

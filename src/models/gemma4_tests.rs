@@ -2462,3 +2462,248 @@ mod kv_shared_tail_trim {
         }
     }
 }
+
+// `per_layer_config` (#3215): transformers 5.15+ writes the full-attention
+// shapes there instead of `global_head_dim` / `num_global_key_value_heads`.
+// Ports of `TestGemma4PerLayerConfig` in Blaizzy/mlx-vlm#2719.
+
+/// Upstream's `test_kv_heads_without_k_eq_v` config: six layers in a sliding
+/// pattern of 6 (layer 5 is the full-attention one), hidden 32, four heads,
+/// sliding `8 x 4` KV heads, legacy global keys `16 x 2`.
+fn per_layer_model_args(overrides: serde_json::Value) -> ModelArgs {
+    let mut text_config = serde_json::json!({
+        "model_type": "gemma4_text",
+        "hidden_size": 32,
+        "num_hidden_layers": 6,
+        "intermediate_size": 64,
+        "num_attention_heads": 4,
+        "head_dim": 8,
+        "global_head_dim": 16,
+        "rms_norm_eps": 1e-6,
+        "vocab_size": 8,
+        "num_key_value_heads": 4,
+        "num_global_key_value_heads": 2,
+        "num_kv_shared_layers": 0,
+        "rope_parameters": {
+            "full_attention": {"rope_theta": 1000000.0, "rope_type": "proportional"},
+            "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+        },
+        "sliding_window": 8,
+        "sliding_window_pattern": 6,
+        "max_position_embeddings": 4096,
+        "attention_k_eq_v": false,
+        "layer_types": [
+            "sliding_attention", "sliding_attention", "sliding_attention",
+            "sliding_attention", "sliding_attention", "full_attention"
+        ]
+    });
+    let object = text_config.as_object_mut().expect("text config object");
+    for (key, value) in overrides.as_object().expect("overrides object") {
+        if value.is_null() {
+            object.remove(key);
+        } else {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    ModelArgs {
+        model_type: "gemma4".to_string(),
+        text_config,
+        eos_token_id: None,
+        quantization: None,
+        quantization_config: None,
+    }
+}
+
+/// Attention weights for one layer with `kv_heads x head_dim` K and V
+/// projections over a 32-wide hidden state and four query heads.
+fn per_layer_attention_weights(head_dim: i32, kv_heads: i32) -> mlxcel_core::weights::WeightMap {
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    let mut put = |name: &str, shape: &[i32]| {
+        let len: i32 = shape.iter().product();
+        let values: Vec<f32> = (0..len).map(|i| 0.01 + (i % 13) as f32 * 0.005).collect();
+        weights.insert(
+            format!("attn.{name}"),
+            mlxcel_core::from_slice_f32(&values, shape),
+        );
+    };
+    put("q_proj.weight", &[4 * head_dim, 32]);
+    put("k_proj.weight", &[kv_heads * head_dim, 32]);
+    put("v_proj.weight", &[kv_heads * head_dim, 32]);
+    put("o_proj.weight", &[32, 4 * head_dim]);
+    put("q_norm.weight", &[head_dim]);
+    put("k_norm.weight", &[head_dim]);
+    weights
+}
+
+/// Build layer `layer_idx`'s attention from weights whose K and V projections
+/// are `(kv_heads * head_dim, 32)`, check the geometry the config resolved,
+/// and run it, so a config that resolved a different shape than the weights
+/// carry cannot pass.
+fn assert_layer_attention(config: &TextConfig, layer_idx: usize, head_dim: i32, kv_heads: i32) {
+    use super::gemma4::Attention;
+
+    let weights = per_layer_attention_weights(head_dim, kv_heads);
+    let attention =
+        Attention::from_weights(&weights, config, layer_idx, "attn").expect("attention builds");
+    assert_eq!(
+        (attention.head_dim, attention.n_kv_heads),
+        (head_dim, kv_heads),
+        "layer {layer_idx} geometry"
+    );
+
+    let hidden: Vec<f32> = (0..3 * 32).map(|i| (i % 7) as f32 * 0.1 - 0.3).collect();
+    let hidden = mlxcel_core::from_slice_f32(&hidden, &[1, 3, 32]);
+    let mut cache = mlxcel_core::layers::KVCache::new();
+    let (out, _) = attention.forward(&hidden, None, &mut cache, None, None, None);
+    mlxcel_core::eval(&out);
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1, 3, 32]);
+}
+
+#[test]
+fn kv_heads_without_k_eq_v_follow_per_layer_config() {
+    // `per_layer_config` present, `attention_k_eq_v` off: the full-attention
+    // layer takes the entry's two KV heads, with `(2 * 16, 32)` K/V
+    // projections. The legacy global keys are absent, as transformers 5.15+
+    // writes the config.
+    let config = per_layer_model_args(serde_json::json!({
+        "global_head_dim": null,
+        "num_global_key_value_heads": null,
+        "per_layer_config": {"05": {"head_dim": 16, "num_key_value_heads": 2}}
+    }))
+    .text_args();
+    assert_eq!(
+        (config.global_head_dim, config.num_global_key_value_heads),
+        (Some(16), Some(2))
+    );
+    assert_layer_attention(&config, 5, 16, 2);
+    // Sliding layers never change.
+    assert_layer_attention(&config, 0, 8, 4);
+
+    // Without `per_layer_config` and without `attention_k_eq_v`, the full
+    // layer keeps the base KV-head count even though the legacy key says 2.
+    let legacy = per_layer_model_args(serde_json::json!({})).text_args();
+    assert_layer_attention(&legacy, 5, 16, 4);
+    assert_layer_attention(&legacy, 0, 8, 4);
+}
+
+#[test]
+fn legacy_global_keys_unchanged() {
+    // No `per_layer_config`: the two legacy keys are what the config wrote.
+    let args = per_layer_model_args(serde_json::json!({}));
+    args.validate_text_config().expect("legacy config is valid");
+    let config = args.text_args();
+    assert!(config.per_layer_config.is_none());
+    assert_eq!(
+        (config.global_head_dim, config.num_global_key_value_heads),
+        (Some(16), Some(2))
+    );
+
+    // `attention_k_eq_v` selects the global KV-head count, as before.
+    let k_eq_v = per_layer_model_args(serde_json::json!({"attention_k_eq_v": true})).text_args();
+    assert_layer_attention(&k_eq_v, 5, 16, 2);
+    assert_layer_attention(&k_eq_v, 0, 8, 4);
+
+    // Neither legacy key: full-attention layers use the base geometry.
+    let bare = per_layer_model_args(serde_json::json!({
+        "global_head_dim": null,
+        "num_global_key_value_heads": null
+    }))
+    .text_args();
+    assert_eq!(
+        (bare.global_head_dim, bare.num_global_key_value_heads),
+        (None, None)
+    );
+    assert_layer_attention(&bare, 5, 8, 4);
+}
+
+#[test]
+fn per_layer_config_overrides_the_legacy_keys_and_inherits_base_shapes() {
+    // An entry wins over the legacy keys it replaces.
+    let config = per_layer_model_args(serde_json::json!({
+        "attention_k_eq_v": true,
+        "per_layer_config": {"5": {"head_dim": 24, "num_key_value_heads": 1}}
+    }))
+    .text_args();
+    assert_eq!(
+        (config.global_head_dim, config.num_global_key_value_heads),
+        (Some(24), Some(1))
+    );
+
+    // `{}` inherits the base shape, not the legacy global one.
+    let empty = per_layer_model_args(serde_json::json!({"per_layer_config": {}})).text_args();
+    assert_eq!(
+        (empty.global_head_dim, empty.num_global_key_value_heads),
+        (Some(8), Some(4))
+    );
+    assert_layer_attention(&empty, 5, 8, 4);
+
+    // Serializing and parsing again resolves to the same shape.
+    let reparsed: TextConfig =
+        serde_json::from_value(serde_json::to_value(&config).expect("serialize")).expect("reparse");
+    assert_eq!(reparsed.per_layer_config, config.per_layer_config);
+    let mut reapplied = reparsed;
+    reapplied.apply_per_layer_config().expect("reapply");
+    assert_eq!(
+        (
+            reapplied.global_head_dim,
+            reapplied.num_global_key_value_heads
+        ),
+        (Some(24), Some(1))
+    );
+}
+
+#[test]
+fn a_per_layer_config_the_model_cannot_represent_is_a_load_error() {
+    // An entry on a sliding layer: `validate_text_config` reports upstream's
+    // message, and the loaders call it before `text_args` would panic.
+    let args = per_layer_model_args(serde_json::json!({
+        "per_layer_config": {"00": {"head_dim": 16}}
+    }));
+    let error = args.validate_text_config().unwrap_err();
+    assert_eq!(
+        error,
+        "per_layer_config overrides layer 0, which is not a full-attention layer; \
+         this is not supported"
+    );
+    let weights = mlxcel_core::weights::WeightMap::new();
+    let load_error = match super::Gemma4Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a rejected per_layer_config must not load"),
+        Err(error) => error,
+    };
+    assert_eq!(load_error, error);
+
+    let unknown = per_layer_model_args(serde_json::json!({
+        "per_layer_config": {"05": {"head_dim": 16, "window": 4}}
+    }));
+    assert_eq!(
+        unknown.validate_text_config().unwrap_err(),
+        "per_layer_config has unsupported keys ['window']"
+    );
+}
+
+#[test]
+fn restated_per_layer_config_survives_an_edit_of_the_resolved_shape() {
+    // The tensor-parallel runtime divides the KV-head counts per rank and
+    // serializes the config for each rank to parse again.
+    let mut config = per_layer_model_args(serde_json::json!({
+        "per_layer_config": {"05": {"head_dim": 16, "num_key_value_heads": 2}}
+    }))
+    .text_args();
+    config.num_global_key_value_heads = Some(1);
+    config.num_key_value_heads = 2;
+    config.restate_per_layer_config();
+
+    let mut rank: TextConfig =
+        serde_json::from_value(serde_json::to_value(&config).expect("serialize")).expect("reparse");
+    rank.apply_per_layer_config().expect("reapply");
+    assert_eq!(
+        (rank.global_head_dim, rank.num_global_key_value_heads),
+        (Some(16), Some(1))
+    );
+    assert_eq!(rank.num_key_value_heads, 2);
+
+    // A config without the block stays without it.
+    let mut legacy = per_layer_model_args(serde_json::json!({})).text_args();
+    legacy.restate_per_layer_config();
+    assert!(legacy.per_layer_config.is_none());
+}
