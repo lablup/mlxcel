@@ -323,6 +323,8 @@ async fn generate_summary(
         is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     let mut options = build_generate_options_with_live(&chat.params, &state.config, live, false);
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
     options.thinking_primed_close =

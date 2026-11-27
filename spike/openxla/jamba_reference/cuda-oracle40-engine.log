@@ -1,0 +1,76 @@
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4693:5
+     |
+4693 | /     pub fn prefill_prepared_slot_logits(
+4694 | |         &mut self,
+4695 | |         slot: usize,
+4696 | |         prepared: &PreparedIreePrefill,
+4697 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4830:5
+     |
+4830 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4831 | |         &mut self,
+4832 | |         slot: usize,
+4833 | |         prepared: &PreparedIreePrefill,
+4834 | |         deepstack: &PreparedDeepStack,
+4835 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedDeepStack` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4830:5
+     |
+4830 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4831 | |         &mut self,
+4832 | |         slot: usize,
+4833 | |         prepared: &PreparedIreePrefill,
+4834 | |         deepstack: &PreparedDeepStack,
+4835 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedDeepStack` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared_deepstack.rs:340:1
+     |
+ 340 | pub(crate) struct PreparedDeepStack {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4982:5
+     |
+4982 | /     pub fn prefill_gemma3n_prepared_slot_logits(
+4983 | |         &mut self,
+4984 | |         slot: usize,
+4985 | |         prepared: &PreparedIreePrefill,
+4986 | |         dense_ple: &Gemma3nDensePle,
+4987 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mlxcel-xla` (lib) generated 4 warnings
+
+running 1 test
+test jamba_original_checkpoint_oracle_tokens ... Jamba 40 oracle tokens match on cuda
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 36.73s
+

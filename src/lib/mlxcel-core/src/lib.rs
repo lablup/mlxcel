@@ -794,6 +794,43 @@ mod ffi {
             hyper: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
+        /// One Raon_mHC site of a decode step up to the branch input, as one
+        /// compiled graph (issue #3458): the selector scaling, `h_pre`,
+        /// `h_post`, the Helmert-chart residual mix `h_res`, and the
+        /// aggregated branch input rounded once to the stream dtype. Same ops
+        /// in the same order as the eager `models::raon_mhc` path, so the
+        /// outputs are bit-identical. Fixed-shape compile: call it for
+        /// single-position steps only.
+        /// Used by: Raon1Mini (`RaonMhc::enter`)
+        #[allow(clippy::too_many_arguments)]
+        fn raon_mhc_route_aggregate(
+            streams: &MlxArray,
+            proj: &MlxArray,
+            alpha: &MlxArray,
+            bias: &MlxArray,
+            eps: &MlxArray,
+            post_factor: &MlxArray,
+            basis: &MlxArray,
+            basis_t: &MlxArray,
+            chart0: &MlxArray,
+            identity: &MlxArray,
+            gamma: &MlxArray,
+            x_out: &mut UniquePtr<MlxArray>,
+            h_post_out: &mut UniquePtr<MlxArray>,
+            h_res_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// The Raon_mHC write-back `h_res @ streams + h_post * branch` in
+        /// float32, rounded once to the stream dtype, as one compiled graph
+        /// (issue #3458). Bit-identical to the eager `raon_mhc::mix`.
+        /// Used by: Raon1Mini (`RaonMhc::leave`)
+        fn raon_mhc_mix(
+            streams: &MlxArray,
+            branch: &MlxArray,
+            h_post: &MlxArray,
+            h_res: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Explicit float32 RMS normalization and scale, rounded once to the input dtype.
         /// Matches Qwen4-Exp's compiled zero-centered normalization graph.
         fn compiled_scaled_rms_norm(
@@ -4835,6 +4872,13 @@ mod conv_no_plan_tests;
 #[path = "reduce_output_dtype_tests.rs"]
 mod reduce_output_dtype_tests;
 
+// `fast_rope` over broadcast and strided inputs returns what a dense buffer of
+// the same values rotates to (the CUDA RoPE kernel gave every index along a
+// broadcast axis one shared output element). Runs on every backend.
+#[cfg(test)]
+#[path = "rope_input_layout_tests.rs"]
+mod rope_input_layout_tests;
+
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
 // host f64 reference on the CPU stream. Runs on every backend.
@@ -4965,6 +5009,48 @@ mod cuda_test_serialization_tests;
 #[cfg(test)]
 #[path = "fused_norm_parity_tests.rs"]
 mod fused_norm_parity_tests;
+
+// Experimental cuda-oxide route behind the fused residual-add RMSNorm kernel
+// (#2833). Present only in a build made with
+// MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 (Linux, `cuda`), which is when the
+// build script sets this cfg and stages the artifact; every other build
+// compiles none of it.
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_abi;
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_artifact;
+#[cfg(mlxcel_cuda_oxide_fused_norm)]
+pub mod cuda_oxide_fused_norm;
+
+// Manifest, schema and digest validation of the cuda-oxide artifact. No GPU.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_artifact_tests.rs"]
+mod cuda_oxide_artifact_tests;
+
+// The #2832 case matrix and input generator, ported from the standalone
+// harness, plus the route guard the GPU tests below share.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_fixtures.rs"]
+mod cuda_oxide_fused_norm_fixtures;
+
+// The #2832 numerical matrix (130 cases) through the MLX adapter, against the
+// existing fused CUDA kernel and the graph path, with the route marker
+// asserted for every case. GB10 only: the artifact targets sm_121.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_matrix_tests.rs"]
+mod cuda_oxide_fused_norm_matrix_tests;
+
+// Scheduling and lifetime of the cuda-oxide node inside MLX lazy evaluation:
+// lazy chains, graph replay, captured child graphs, allocator reuse, threads.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_exec_tests.rs"]
+mod cuda_oxide_fused_norm_exec_tests;
+
+// What the cuda-oxide route refuses and how: fallback before enqueue, a warm
+// PTX cache that must not mask a bad artifact, and evaluation-time failures.
+#[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
+#[path = "cuda_oxide_fused_norm_fallback_tests.rs"]
+mod cuda_oxide_fused_norm_fallback_tests;
 
 #[cfg(test)]
 #[path = "mamba1_scan_parity_tests.rs"]

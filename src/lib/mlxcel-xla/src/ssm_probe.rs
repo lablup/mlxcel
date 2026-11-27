@@ -98,7 +98,11 @@ impl SsmProbeSpec {
             "mamba1" => (
                 SsmKind::Mamba1 {
                     dt_rank: self.dt_rank,
-                    bcdt_norm: self.bcdt_norm,
+                    bcdt_norm: if self.bcdt_norm {
+                        crate::emitter::BcdtNorm::Weightless
+                    } else {
+                        crate::emitter::BcdtNorm::None
+                    },
                 },
                 d_inner,
             ),
@@ -149,6 +153,16 @@ impl SsmProbeSpec {
                 ("a_log", vec![c.d_inner(), c.state_size]),
                 ("d", vec![c.d_inner()]),
             ]),
+            SsmKind::Plamo2 { dt_rank } => layout.extend([
+                ("bcdt_proj", vec![2 * c.state_size + dt_rank, c.d_inner()]),
+                ("dt_proj", vec![h, dt_rank]),
+                ("dt_norm", vec![dt_rank]),
+                ("b_norm", vec![c.state_size]),
+                ("c_norm", vec![c.state_size]),
+                ("a_log", vec![h]),
+                ("d", vec![h]),
+                ("dt_bias", vec![h]),
+            ]),
         }
         layout.push(("out_proj", vec![self.hidden, c.d_inner()]));
         if c.use_bias {
@@ -163,8 +177,8 @@ impl SsmProbeSpec {
         let (h, p, n) = (c.n_heads, c.head_dim, c.state_size);
         let tail = c.conv_kernel - 1;
         let h_shape = match (c.kind, self.decode) {
-            (SsmKind::Mamba2, true) => vec![self.rows, h, p, n],
-            (SsmKind::Mamba2, false) => vec![h, p, n],
+            (SsmKind::Mamba2 | SsmKind::Plamo2 { .. }, true) => vec![self.rows, h, p, n],
+            (SsmKind::Mamba2 | SsmKind::Plamo2 { .. }, false) => vec![h, p, n],
             (SsmKind::Mamba1 { .. }, true) => vec![self.rows, c.d_inner(), n],
             (SsmKind::Mamba1 { .. }, false) => vec![c.d_inner(), n],
         };

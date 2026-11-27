@@ -984,6 +984,18 @@ impl BatchScheduler {
                 return;
             }
         };
+        // The warm-up extends a prefix computed at the context's reasoning
+        // effort (#3435; folded into its key), so it is steered the same way.
+        if self
+            .engine
+            .model()
+            .set_sequence_reasoning_effort(Some(seq_id), ctx.model_reasoning_effort.as_deref())
+            .is_err()
+        {
+            self.release_sequence_caches(seq_id);
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
         let (model, pool) = self.engine.parts_mut();
         if entry
             .with_snapshot(|snapshot| {

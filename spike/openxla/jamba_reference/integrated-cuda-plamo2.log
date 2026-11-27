@@ -1,0 +1,99 @@
+== cuda-plamo2: MLXCEL_PLAMO2_FIXTURES=/tmp/epic564-plan/plamo2-fixtures MLXCEL_PLAMO2_MODEL=/tmp/epic564-models/plamo-2-1b MLXCEL_PLAMO2_ORACLE=spike/openxla/plamo2_reference/oracle.json cargo test --profile test-fast --features xla-iree,test-utils --test xla_plamo2 -- --ignored --nocapture --test-threads=1
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4685:5
+     |
+4685 | /     pub fn prefill_prepared_slot_logits(
+4686 | |         &mut self,
+4687 | |         slot: usize,
+4688 | |         prepared: &PreparedIreePrefill,
+4689 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4822:5
+     |
+4822 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4823 | |         &mut self,
+4824 | |         slot: usize,
+4825 | |         prepared: &PreparedIreePrefill,
+4826 | |         deepstack: &PreparedDeepStack,
+4827 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedDeepStack` is more private than the item `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4822:5
+     |
+4822 | /     pub fn prefill_deepstack_prepared_slot_logits(
+4823 | |         &mut self,
+4824 | |         slot: usize,
+4825 | |         prepared: &PreparedIreePrefill,
+4826 | |         deepstack: &PreparedDeepStack,
+4827 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_deepstack_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedDeepStack` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared_deepstack.rs:340:1
+     |
+ 340 | pub(crate) struct PreparedDeepStack {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PreparedIreePrefill` is more private than the item `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits`
+    --> src/lib/mlxcel-xla/src/iree.rs:4974:5
+     |
+4974 | /     pub fn prefill_gemma3n_prepared_slot_logits(
+4975 | |         &mut self,
+4976 | |         slot: usize,
+4977 | |         prepared: &PreparedIreePrefill,
+4978 | |         dense_ple: &Gemma3nDensePle,
+4979 | |     ) -> Result<Vec<f32>, String> {
+     | |_________________________________^ method `IreeRaggedLlama::prefill_gemma3n_prepared_slot_logits` is reachable at visibility `pub`
+     |
+note: but type `PreparedIreePrefill` is only usable at visibility `pub(crate)`
+    --> src/lib/mlxcel-xla/src/prepared.rs:81:1
+     |
+  81 | pub(crate) struct PreparedIreePrefill {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `mlxcel-xla` (lib) generated 4 warnings
+
+running 3 tests
+test plamo2_original_checkpoint_oracle_tokens ... PLaMo 2 40/40 oracle tokens match on cuda
+ok
+test plamo2_synthetic_parity ... hybrid: single-sequence tokens exact; worst ragged |logit delta| 1.001e-5
+ok
+test plamo2_window_probe ... window len 2047: tokens [8, 8, 8, 63, 26, 52]; first-step |xla - variant|: inclusive=1.267e-6 exclusive=1.267e-6 plus=1.267e-6 none=1.267e-6
+window len 2048: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=1.550e-6 exclusive=1.550e-6 plus=1.550e-6 none=1.550e-6
+window len 2049: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.162e-6 exclusive=4.152e-1 plus=1.162e-6 none=1.162e-6
+window len 2050: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.788e-6 exclusive=4.154e-1 plus=5.891e-3 none=5.891e-3
+window len 2051: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.132e-6 exclusive=4.156e-1 plus=5.895e-3 none=1.659e-2
+window: matches the inclusive mask; worst |logit delta| 5.364e-6
+window_minus len 2047: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=1.267e-6 exclusive=1.267e-6 plus=1.267e-6 none=1.267e-6
+window_minus len 2048: tokens [8, 56, 12, 29, 52, 52]; first-step |xla - variant|: inclusive=1.550e-6 exclusive=1.550e-6 plus=1.550e-6 none=1.550e-6
+window_minus len 2049: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.152e-1 exclusive=2.563e-6 plus=4.152e-1 none=4.152e-1
+window_minus len 2050: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.154e-1 exclusive=2.861e-6 plus=4.213e-1 none=4.213e-1
+window_minus len 2051: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.156e-1 exclusive=2.444e-6 plus=4.215e-1 none=4.322e-1
+window_minus: matches the exclusive mask; worst |logit delta| 2.861e-6
+window_plus len 2047: tokens [8, 8, 8, 8, 63, 26]; first-step |xla - variant|: inclusive=1.267e-6 exclusive=1.267e-6 plus=1.267e-6 none=1.267e-6
+window_plus len 2048: tokens [8, 8, 8, 63, 26, 52]; first-step |xla - variant|: inclusive=1.550e-6 exclusive=1.550e-6 plus=1.550e-6 none=1.550e-6
+window_plus len 2049: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=1.162e-6 exclusive=4.152e-1 plus=1.162e-6 none=1.162e-6
+window_plus len 2050: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=5.891e-3 exclusive=4.213e-1 plus=1.788e-6 none=1.788e-6
+window_plus len 2051: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=5.894e-3 exclusive=4.215e-1 plus=1.729e-6 none=1.070e-2
+window_plus: matches the plus mask; worst |logit delta| 2.760e-6
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.39s
+
+exit=0

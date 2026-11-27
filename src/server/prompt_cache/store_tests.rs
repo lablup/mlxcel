@@ -1517,3 +1517,45 @@ fn keep_previous_turn_forgets_an_evicted_restore_source() {
     }
     assert_eq!(store.stats().snapshot_entries, 1);
 }
+
+/// A prefix cached at one reasoning effort of a steering model is never
+/// reused at another (#3435): the effort is folded into `template_sig`, so
+/// each level has its own bucket and cross-session trie.
+#[test]
+fn a_prefix_cached_at_one_reasoning_effort_is_not_reused_at_another() {
+    use super::super::key::fold_model_reasoning_effort;
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+    let toks = tokens(0, 16);
+    let sig = |level: &str| fold_model_reasoning_effort("tpl".to_string(), Some(level));
+    let (high, low) = (sig("high"), sig("low"));
+    store
+        .insert(
+            &key_sig(&high, &toks),
+            CacheEntry::new_for_test(toks.clone(), 1024),
+        )
+        .expect("insert succeeds");
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig(&high, &toks), &toks)
+            .is_some()
+    );
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig(&low, &toks), &toks)
+            .is_none(),
+        "a low-effort request must not adopt a high-effort prefix"
+    );
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig("tpl", &toks), &toks)
+            .is_none()
+    );
+    assert_ne!(
+        key_sig(&high, &toks).digest(),
+        key_sig(&low, &toks).digest()
+    );
+}
+
+fn key_sig<'a>(sig: &'a str, tokens: &'a [i32]) -> PromptCacheKey<'a> {
+    PromptCacheKey::new_full("m", None, sig, None, MultimodalDigest::empty(), tokens)
+}

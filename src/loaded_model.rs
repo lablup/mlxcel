@@ -655,6 +655,18 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, try_prepare_sequence_state(seq_id))
     }
 
+    fn set_sequence_reasoning_effort(
+        &self,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        level: Option<&str>,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, set_sequence_reasoning_effort(seq_id, level))
+    }
+
+    fn sequence_reasoning_effort(&self, seq_id: mlxcel_core::cache::SequenceId) -> Option<String> {
+        delegate_language_model!(self, sequence_reasoning_effort(seq_id))
+    }
+
     // The fallible forwards must reach the inner model's overrides (the
     // remote pipeline model's, #2727); a trait default here would wrap this
     // wrapper's infallible forward and never see them.

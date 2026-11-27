@@ -430,6 +430,7 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
                     Some(DFLASH_DRAFT_ARCHITECTURE)
                         | Some(DSPARK_DRAFT_ARCHITECTURE)
                         | Some(crate::drafter::laguna_dflash::LAGUNA_DFLASH_ARCHITECTURE)
+                        | Some(crate::drafter::raon_dflash2::RAON_DFLASH2_ARCHITECTURE)
                 )
             })
         })

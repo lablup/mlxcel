@@ -273,6 +273,10 @@ pub struct GenerationConfigDefaults {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<i32>,
+    /// Transformers' `presence_penalty`, which `generate` applies on every
+    /// step (Raon-1 sets 1.5). Read for the server default only; `mlxcel
+    /// generate` keeps 0.0 (issue #3457). A negative value is ignored.
+    pub presence_penalty: Option<f32>,
 }
 
 fn parse_generation_config_defaults(config: &serde_json::Value) -> GenerationConfigDefaults {
@@ -281,6 +285,25 @@ fn parse_generation_config_defaults(config: &serde_json::Value) -> GenerationCon
         temperature: parse_finite_f32_field(config, "temperature"),
         top_p: parse_finite_f32_field(config, "top_p"),
         top_k: parse_i32_field(config, "top_k"),
+        presence_penalty: parse_presence_penalty(config),
+    }
+}
+
+/// `presence_penalty` when it is a finite, non-negative number. Anything else
+/// present (negative, non-numeric) is ignored with a warning, so the server
+/// keeps its 0.0 default rather than rewarding repetition.
+fn parse_presence_penalty(config: &serde_json::Value) -> Option<f32> {
+    let raw = config.get("presence_penalty")?;
+    match parse_finite_f32_field(config, "presence_penalty") {
+        Some(value) if value >= 0.0 => Some(value),
+        _ if raw.is_null() => None,
+        _ => {
+            tracing::warn!(
+                "generation_config.json presence_penalty {raw} is not a finite non-negative \
+                 number; ignoring it"
+            );
+            None
+        }
     }
 }
 

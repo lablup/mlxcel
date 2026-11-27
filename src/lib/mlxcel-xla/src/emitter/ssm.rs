@@ -26,16 +26,19 @@
 //! unchanged. The conv tail is the last `K-1` pre-conv inputs ending at
 //! `real_len`, taken with `dynamic_slice` from the sequence left-padded with the
 //! incoming tail (zeros for a fresh sequence). The builder has no `while` op and
-//! IREE-CUDA rejects scatter, so every form uses `dot_general`, `pad`, slices,
-//! `select` and `reduce_window` only. The prefill form choice and its measured
+//! IREE-CUDA rejects scatter, so every form uses `dot_general`, `pad`, slices
+//! and `select` only (no `reduce_window`: IREE-Metal miscompiles the prefix-sum
+//! form, issue #3343). The prefill form choice and its measured
 //! alternatives are recorded in `spike/openxla/FINDINGS_ssm.md`.
 
 use super::builder::{Builder, Ty, Val};
 use super::config::{SsmConfig, SsmKind};
 #[allow(unused_imports)] // Public within the emitter for #3349/#3356 reuse.
 pub(crate) use super::ssm_mamba1::{
-    Mamba1MixerW, diag_scan_prefill, diag_scan_step, mamba1_mixer_prefill, mamba1_mixer_step,
+    BcdtNormW, Mamba1MixerW, diag_scan_prefill, diag_scan_step, mamba1_mixer_prefill,
+    mamba1_mixer_step,
 };
+pub(crate) use super::ssm_plamo2::{Plamo2MixerW, plamo2_mixer_prefill, plamo2_mixer_step};
 use super::ssm_scan::{SsmPrefillForm, selective_scan_prefill_form};
 
 /// One Mamba2 mixer layer's weights, in the HF checkpoint layout.
@@ -64,6 +67,7 @@ pub(crate) struct Mamba2MixerW {
 pub(crate) enum SsmMixerW {
     Mamba2(Mamba2MixerW),
     Mamba1(Mamba1MixerW),
+    Plamo2(Plamo2MixerW),
 }
 
 /// One recurrent layer's carried state.
@@ -512,7 +516,9 @@ pub(crate) fn mamba2_mixer_step(
 /// The decode state type for `batch` rows.
 pub(crate) fn ssm_state_types(c: &SsmConfig, batch: usize) -> (Ty, Ty) {
     let h = match c.kind {
-        SsmKind::Mamba2 => vec![batch, c.n_heads, c.head_dim, c.state_size],
+        SsmKind::Mamba2 | SsmKind::Plamo2 { .. } => {
+            vec![batch, c.n_heads, c.head_dim, c.state_size]
+        }
         SsmKind::Mamba1 { .. } => vec![batch, c.d_inner(), c.state_size],
     };
     (

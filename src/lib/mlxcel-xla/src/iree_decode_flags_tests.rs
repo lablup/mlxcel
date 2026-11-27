@@ -76,6 +76,46 @@ fn gemma3n_decode_drops_aggressive_fusion() {
     }
 }
 
+/// issue #3349: softmax-routed MoE decodes drop aggressive fusion; a dense
+/// Jamba keeps it.
+#[test]
+fn softmax_moe_decode_drops_aggressive_fusion() {
+    let runtime = |json: &str| {
+        RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(json)
+                .unwrap()
+                .with_context_capacity(16)
+                .unwrap(),
+        ))
+    };
+    let flags = target_flags("local-task").unwrap();
+    for (what, json, fused) in [
+        (
+            "jamba MoE",
+            include_str!("../assets/jamba/config.json").to_string(),
+            false,
+        ),
+        (
+            "qwen2_moe",
+            include_str!("../assets/qwen2-moe-tiny/config.json").to_string(),
+            false,
+        ),
+        (
+            "dense jamba",
+            {
+                let mut v: serde_json::Value =
+                    serde_json::from_str(include_str!("../assets/jamba/config.json")).unwrap();
+                v["num_experts"] = serde_json::json!(1);
+                v.to_string()
+            },
+            true,
+        ),
+    ] {
+        let decode = decode_compile_flags(&runtime(&json), &flags);
+        assert_eq!(has_aggressive_fusion(&decode), fused, "{what}: {decode:?}");
+    }
+}
+
 /// The checkpoint whose decode graph failed to compile, from
 /// `GEMMA3N_MODEL_DIR` or the repository's `models` link farm.
 fn gemma3n_model_dir() -> PathBuf {

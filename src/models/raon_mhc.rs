@@ -46,6 +46,11 @@
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
+#[path = "raon_mhc_decode.rs"]
+mod decode;
+use decode::CompiledConsts;
+pub use decode::DecodeFusion;
+
 /// Orthonormal Helmert-style basis `Q` (`[n, n-1]`, row-major) with
 /// `Q^T Q = I` and `Q^T 1 = 0`:
 /// `Q[row, col] = (1 if row <= col, -(col + 1) if row == col + 1, else 0) / sqrt((col + 1)(col + 2))`.
@@ -83,6 +88,11 @@ pub struct MhcRoute {
 pub struct RaonMhc {
     /// `[n*D, 2n + (n-1)^2]` in the model dtype: `[phi_pre; phi_post; phi_z]^T`.
     selector_t: UniquePtr<MlxArray>,
+    /// The same plane row-major, `[2n + (n-1)^2, n*D]`, for one-row products.
+    selector: UniquePtr<MlxArray>,
+    /// Whether a one-row selector product takes the row-major form
+    /// ([`DecodeFusion::selector`]).
+    row_major_single: bool,
     alpha_pre: f32,
     alpha_post: f32,
     alpha_z: f32,
@@ -100,6 +110,8 @@ pub struct RaonMhc {
     streams: i32,
     selector_eps: f32,
     post_factor: f32,
+    /// The same coefficients as arrays, for the compiled decode graphs.
+    compiled: CompiledConsts,
 }
 
 fn scalar_f32(weights: &WeightMap, key: &str) -> Result<f32, String> {
@@ -195,14 +207,32 @@ impl RaonMhc {
             .collect();
         let chart0 = mlxcel_core::from_slice_f32(&chart0, &[n as i32, n as i32]);
 
+        let alpha_pre = scalar_f32(weights, &format!("{prefix}.alpha_pre"))?;
+        let alpha_post = scalar_f32(weights, &format!("{prefix}.alpha_post"))?;
+        let alpha_z = scalar_f32(weights, &format!("{prefix}.res.alpha_z"))?;
+        let b_pre = vector_f32(weights, &format!("{prefix}.b_pre"), n)?;
+        let b_post = vector_f32(weights, &format!("{prefix}.b_post"), n)?;
+        let b_z = vector_f32(weights, &format!("{prefix}.res.b_z"), m)?;
+        let compiled = CompiledConsts::new(
+            [alpha_pre, alpha_post, alpha_z],
+            [&*b_pre, &*b_post, &*b_z],
+            (n, m),
+            selector_eps,
+            post_factor,
+            gamma,
+            &eye,
+        );
+
         Ok(Self {
             selector_t,
-            alpha_pre: scalar_f32(weights, &format!("{prefix}.alpha_pre"))?,
-            alpha_post: scalar_f32(weights, &format!("{prefix}.alpha_post"))?,
-            alpha_z: scalar_f32(weights, &format!("{prefix}.res.alpha_z"))?,
-            b_pre: vector_f32(weights, &format!("{prefix}.b_pre"), n)?,
-            b_post: vector_f32(weights, &format!("{prefix}.b_post"), n)?,
-            b_z: vector_f32(weights, &format!("{prefix}.res.b_z"), m)?,
+            selector,
+            row_major_single: DecodeFusion::from_env().selector,
+            alpha_pre,
+            alpha_post,
+            alpha_z,
+            b_pre,
+            b_post,
+            b_z,
             gamma,
             basis,
             basis_t,
@@ -211,7 +241,33 @@ impl RaonMhc {
             streams: n as i32,
             selector_eps,
             post_factor,
+            compiled,
         })
+    }
+
+    /// The selector GEMM `flat @ [phi_pre; phi_post; phi_z]^T` in the model
+    /// dtype, `flat` being `[.., n*D]`.
+    ///
+    /// A product of exactly one row (a decode step, or one row of a
+    /// speculative verify block, which is split per row) is formed as
+    /// `selector @ flat^T` over the row-major plane. With the transposed
+    /// plane on the right MLX runs its transposed gemv kernel there, which
+    /// took about 255 us for this `[n*D, 17]` shape on an M3 Ultra against
+    /// about 35 us row-major, at 50 sites per token (issue #3458). Decode
+    /// steps and verify rows both take this form, so they stay bit-equal;
+    /// products of several rows (prefill, batched decode) keep the plain
+    /// matmul and its bytes.
+    fn selector_product(&self, flat: &MlxArray) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(flat);
+        let (lead, width) = shape.split_at(shape.len() - 1);
+        if !self.row_major_single || lead.iter().product::<i32>() != 1 {
+            return mlxcel_core::matmul(flat, &self.selector_t);
+        }
+        let column = mlxcel_core::reshape(flat, &[width[0], 1]);
+        let out = mlxcel_core::matmul(&self.selector, &column);
+        let mut out_shape = lead.to_vec();
+        out_shape.push(mlxcel_core::array_shape(&self.selector)[0]);
+        mlxcel_core::reshape(&out, &out_shape)
     }
 
     /// The per-token coefficients for `streams` (`[B, L, n, D]`).
@@ -226,7 +282,9 @@ impl RaonMhc {
         let ms = mlxcel_core::mean_axis(&mlxcel_core::square(&flat_f32), -1, true);
         let eps = mlxcel_core::full_f32(&[1], self.selector_eps, dtype::FLOAT32);
         let inv = mlxcel_core::rsqrt(&mlxcel_core::add(&ms, &eps));
-        let proj = mlxcel_core::matmul(&flat, &self.selector_t);
+        // One row at a time inside a speculative verify block, so each row
+        // equals its decode step (issue #3436); a plain matmul elsewhere.
+        let proj = mlxcel_core::row_invariant::per_row(&flat, |x| self.selector_product(x));
         let proj = mlxcel_core::multiply(&mlxcel_core::astype(&proj, dtype::FLOAT32), &inv);
 
         let part = |start: i32, end: i32| mlxcel_core::slice(&proj, &[0, 0, start], &[b, l, end]);
@@ -276,15 +334,26 @@ pub fn aggregate(streams_f32: &MlxArray, h_pre: &MlxArray, out_dtype: i32) -> Un
 
 /// Write-back `h_res @ streams + h_post * branch` in float32, rounded once.
 /// `branch` is `[B, L, D]` in any dtype; the result is `[B, L, n, D]` in `out_dtype`.
+#[cfg(test)]
 pub fn mix(
     streams_f32: &MlxArray,
     branch: &MlxArray,
     route: &MhcRoute,
     out_dtype: i32,
 ) -> UniquePtr<MlxArray> {
-    let mixed = mlxcel_core::matmul(&route.h_res, streams_f32);
+    mix_parts(streams_f32, branch, &route.h_post, &route.h_res, out_dtype)
+}
+
+fn mix_parts(
+    streams_f32: &MlxArray,
+    branch: &MlxArray,
+    h_post: &MlxArray,
+    h_res: &MlxArray,
+    out_dtype: i32,
+) -> UniquePtr<MlxArray> {
+    let mixed = mlxcel_core::matmul(h_res, streams_f32);
     let branch = mlxcel_core::expand_dims(&mlxcel_core::astype(branch, dtype::FLOAT32), -2);
-    let post = mlxcel_core::expand_dims(&route.h_post, -1);
+    let post = mlxcel_core::expand_dims(h_post, -1);
     let written = mlxcel_core::add(&mixed, &mlxcel_core::multiply(&post, &branch));
     mlxcel_core::astype(&written, out_dtype)
 }

@@ -205,6 +205,8 @@ pub(crate) async fn prepare_generation(
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3's XTML format, #1338) produced the
     // prompt as token ids. Handing them to the provider is what keeps the
     // rendered structure intact: re-tokenizing `prepared.prompt` would have to

@@ -66,9 +66,10 @@ impl Default for SamConfig {
 /// Separable bicubic resample of a `[in_h, in_w, dim]` grid to `[out_h, out_w, dim]`.
 ///
 /// With `antialias` and downsampling (`scale > 1`) the filter support is
-/// stretched by `scale` and the taps renormalized (SAM `pos_embed`); without it
-/// the plain 4-tap kernel is used (CLIP `position_embedding`). The matrices come
-/// from the shared [`resample_matrix::interp_matrix`].
+/// stretched by `scale` and the taps renormalized; without it the plain 4-tap
+/// kernel is used. The DeepSeek-OCR SAM `pos_embed` and CLIP
+/// `position_embedding` both resample with `antialias`. The matrices come from
+/// the shared [`resample_matrix::interp_matrix`].
 pub(crate) fn bicubic_resample(
     grid: &MlxArray,
     in_h: i32,
@@ -136,6 +137,16 @@ pub(crate) fn window_unpartition(
 /// Extract per-relative-position embeddings, interpolating the stored table
 /// along axis 0 when the required `2*max(q,k)-1` length differs from it.
 /// Returns `(q_size, k_size, head_dim)`.
+///
+/// The interpolation is PyTorch `F.interpolate(mode="linear",
+/// align_corners=False)`, which SAM's reference calls: output row `i` samples
+/// the table at the half-pixel center `max((i + 0.5) * L / max_rel_dist - 0.5, 0)`
+/// (mlx-vlm `deepseekocr/sam.py` `get_rel_pos`, #3235).
+///
+/// Used by: the SAM tower's global-attention blocks, shared by DeepSeek-OCR,
+/// Unlimited-OCR, DeepSeek-OCR-2 and GOT-OCR 2.0. Only a SAM grid other than
+/// the 64x64 the tables were trained at reaches the resample branch, which
+/// GOT-OCR's fixed 1024 canvas never does.
 fn get_rel_pos(q_size: i32, k_size: i32, rel_pos: &MlxArray) -> UniquePtr<MlxArray> {
     let max_rel_dist = 2 * q_size.max(k_size) - 1;
     let l = mlxcel_core::array_shape(rel_pos)[0];
@@ -143,8 +154,11 @@ fn get_rel_pos(q_size: i32, k_size: i32, rel_pos: &MlxArray) -> UniquePtr<MlxArr
         // Linear interpolation of the `(L, C)` table to `(max_rel_dist, C)`.
         let rp = mlxcel_core::astype(rel_pos, mlxcel_core::dtype::FLOAT32);
         let scale = l as f32 / max_rel_dist as f32;
-        let idx = mlxcel_core::arange_f32(0.0, max_rel_dist as f32, 1.0);
-        let idx = mlxcel_core::multiply_scalar(&idx, scale);
+        // Half-pixel source coordinates, clamped at 0, in float32.
+        let idx: Vec<f32> = (0..max_rel_dist)
+            .map(|i| ((i as f32 + 0.5) * scale - 0.5).max(0.0))
+            .collect();
+        let idx = mlxcel_core::from_slice_f32(&idx, &[max_rel_dist]);
         let floor = mlxcel_core::floor(&idx);
         let floor_i = mlxcel_core::astype(&floor, mlxcel_core::dtype::INT32);
         let ones = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
@@ -541,5 +555,31 @@ mod tests {
         let cell = mlxcel_core::slice(&r, &[0, 0, 0], &[1, 1, 1]);
         mlxcel_core::eval(&cell);
         assert_eq!(mlxcel_core::item_f32(&cell), (13 * dim) as f32);
+    }
+
+    /// The resample branch samples the stored table at half-pixel centers,
+    /// which is PyTorch `F.interpolate(mode="linear", align_corners=False)`
+    /// as SAM's reference calls it (issue #3235). A `(5, 1)` table
+    /// `[0, 1, 2, 3, 4]` resized to `max_rel_dist = 3` (`q = k = 2`,
+    /// `scale = 5/3`) samples at `max((i + 0.5) * 5/3 - 0.5, 0)` =
+    /// `[1/3, 2, 11/3]`, and the gather then reads `resized[i - j + 1]`. The
+    /// old `i * scale` sampling gives 5/3, 0 and 10/3 at the same cells.
+    #[test]
+    fn get_rel_pos_uses_half_pixel_centers() {
+        let rp = mlxcel_core::from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0], &[5, 1]);
+        let r = get_rel_pos(2, 2, &rp);
+        assert_eq!(mlxcel_core::array_shape(&r), vec![2, 2, 1]);
+        let v = mlxcel_core::utils::array_to_vec_f32(&r); // row-major (q, k, 1)
+        for (cell, got, want) in [
+            ("[0][0]", v[0], 2.0f32),
+            ("[0][1]", v[1], 1.0 / 3.0),
+            ("[1][0]", v[2], 11.0 / 3.0),
+            ("[1][1]", v[3], 2.0),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "rel_pos {cell}: expected {want}, got {got}"
+            );
+        }
     }
 }

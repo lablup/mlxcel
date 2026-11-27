@@ -178,6 +178,7 @@ fn fused_qkv_name(cfg: &Config, prefix: &str) -> String {
     match cfg.weight_scheme {
         crate::emitter::WeightScheme::Molmo => format!("{prefix}{}", s.q_proj),
         crate::emitter::WeightScheme::Molmo2 => format!("{prefix}self_attn.att_proj.weight"),
+        crate::emitter::WeightScheme::Plamo2 => format!("{prefix}{}", s.q_proj),
         _ => format!("{prefix}self_attn.qkv_proj.weight"),
     }
 }
@@ -205,8 +206,11 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
         .ssm
         .as_ref()
         .expect("a recurrent layer implies an SsmConfig");
-    let m = if cfg.falcon_h1.is_some() {
+    let m = if cfg.falcon_h1.is_some() || cfg.weight_scheme == crate::emitter::WeightScheme::Jamba {
         format!("{p}mamba.")
+    } else if cfg.plamo2.is_some() {
+        // The PLaMo 2 block norms are pushed with the layer's MLP norms.
+        format!("{p}mixer.")
     } else {
         out.push(WeightSpec::Whole(format!("{p}norm.weight")));
         format!("{p}mixer.")
@@ -228,11 +232,30 @@ fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant:
                 out.push(WeightSpec::Whole(format!("{m}norm.weight")));
             }
         }
-        crate::emitter::SsmKind::Mamba1 { .. } => {
+        crate::emitter::SsmKind::Mamba1 { bcdt_norm, .. } => {
             push_proj(out, format!("{m}x_proj.weight"), quant);
             push_proj(out, format!("{m}dt_proj.weight"), quant);
             out.push(WeightSpec::Whole(format!("{m}dt_proj.bias")));
             for name in ["A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+            if bcdt_norm == crate::emitter::BcdtNorm::Weighted {
+                for name in ["dt_layernorm", "b_layernorm", "c_layernorm"] {
+                    out.push(WeightSpec::Whole(format!("{m}{name}.weight")));
+                }
+            }
+        }
+        crate::emitter::SsmKind::Plamo2 { .. } => {
+            push_proj(out, format!("{m}bcdt_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            for name in [
+                "dt_norm_weight",
+                "B_norm_weight",
+                "C_norm_weight",
+                "A_log",
+                "D",
+                "dt_bias",
+            ] {
                 out.push(WeightSpec::Whole(format!("{m}{name}")));
             }
         }
@@ -295,16 +318,13 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
         // A recurrent (Mamba2) layer has its own tensor list (issue #3338).
-        if matches!(
-            cfg.layer_mixer(i),
-            crate::emitter::MixerKind::Mamba2 | crate::emitter::MixerKind::Mamba1
-        ) {
+        if cfg.is_ffn_free_ssm_layer(i) {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
             continue;
         }
         let has_ffn = cfg.layer_has_ffn(i);
         let has_attn = cfg.attn_layer_index(i).is_some();
-        let has_post = !cfg.parallel_block && has_ffn && has_attn;
+        let has_post = cfg.layer_has_post_mixer_norm(i);
         let nemotron = cfg.weight_scheme == crate::emitter::WeightScheme::NemotronH;
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
@@ -458,8 +478,9 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
             }
         }
-        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
-        if cfg.qk_norm.is_some() {
+        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k. Only an
+        // attention layer has them (a PLaMo 2 Mamba block has none).
+        if cfg.qk_norm.is_some() && has_attn {
             out.push(WeightSpec::Whole(format!("{p}{}", s.q_norm)));
             out.push(WeightSpec::Whole(format!("{p}{}", s.k_norm)));
         }
@@ -531,7 +552,8 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         if moe_layer {
             let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
             let mp = m.weight_prefix;
-            out.push(WeightSpec::Whole(format!("{p}{mp}.gate.weight")));
+            let router = crate::weight_names::moe_router_stem(cfg.weight_scheme);
+            out.push(WeightSpec::Whole(format!("{p}{mp}.{router}.weight")));
             if matches!(
                 m.scoring,
                 MoeScoring::Sigmoid {
@@ -582,7 +604,7 @@ pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 }
             }
         }
-        if cfg.falcon_h1.is_some() {
+        if cfg.layer_mixer(i).is_recurrent() {
             push_ssm_layer_specs(&mut out, cfg, &p, quant);
         }
         if cfg.phi4_lora.is_some() {
@@ -1802,6 +1824,11 @@ mod tests {
                 "falcon_h1",
                 include_str!("../assets/falcon_h1/config.json").into(),
             ),
+            (
+                "plamo2",
+                include_str!("../assets/plamo2/config.json").into(),
+            ),
+            ("jamba", include_str!("../assets/jamba/config.json").into()),
         ];
         for (family, json) in &families {
             let base = Config::from_json_str(json)

@@ -25,6 +25,21 @@ fn make_solid_image(w: u32, h: u32, r: u8, g: u8, b: u8) -> DynamicImage {
     DynamicImage::ImageRgb8(img)
 }
 
+/// Upstream's `round(orig / patch + 0.5)` is Python's `round`, so an edge
+/// that is an even multiple of the patch lands on that multiple. Expected
+/// values are mlx-vlm `_compute_target_patches` (e8035ae3), `(w, h)` order.
+#[test]
+fn compute_target_patches_breaks_ties_to_even_like_python_round() {
+    let proc = NemotronHNanoOmniImageProcessor::new(NemotronHNanoOmniProcessorConfig::default());
+    // 1024 / 16 + 0.5 = 64.5 -> 64, so 64x64 patches (1024 tokens after 2x2).
+    assert_eq!(proc.compute_target_patches(1024, 1024, 13312), (64, 64));
+    assert_eq!(proc.compute_target_patches(480, 640, 13312), (40, 30));
+    // 720 / 16 + 0.5 = 45.5 -> 46 under both rules; 1280 / 16 is even.
+    assert_eq!(proc.compute_target_patches(720, 1280, 13312), (80, 46));
+    // 496 / 16 + 0.5 = 31.5 -> 32 under both rules.
+    assert_eq!(proc.compute_target_patches(496, 496, 13312), (32, 32));
+}
+
 #[test]
 fn compute_target_patches_respects_min_floor() {
     let proc = NemotronHNanoOmniImageProcessor::with_defaults();

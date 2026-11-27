@@ -55,7 +55,7 @@ use crate::layers::{FusedAddRmsNormSpec, GemmaRMSNorm, RMSNorm};
 /// One ulp relative to the RMS element is `2^-24` (f32), `2^-11` (f16) and
 /// `2^-8` (bf16); the max budget allows a few ulp on the largest element of a
 /// standard-normal sample, which sits around 4 sigma.
-fn tolerance_for(dtype: i32) -> (f64, f64) {
+pub(crate) fn tolerance_for(dtype: i32) -> (f64, f64) {
     if dtype == dtype::FLOAT32 {
         (1e-6, 1e-5)
     } else if dtype == dtype::FLOAT16 {

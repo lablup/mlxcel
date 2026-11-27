@@ -1,0 +1,14 @@
+
+running 9 tests
+test server::xla_prompt_cache_guard::tests::a_local_hf_mamba2_checkpoint_is_refused ... ok
+test server::xla_prompt_cache_guard::tests::an_emitter_loadable_mamba2_is_refused_through_has_recurrent_state ... ok
+test server::xla_prompt_cache_guard::tests::an_attention_model_keeps_its_store_and_apc ... ok
+test server::xla_prompt_cache_guard::tests::an_emitter_loadable_nemotron_h_gets_no_prompt_cache_or_apc ... ok
+test server::xla_prompt_cache_guard::tests::an_emitter_loadable_plamo2_gets_no_prompt_cache_or_apc ... ok
+test server::xla_prompt_cache_guard::tests::an_unreadable_or_unparseable_config_fails_closed ... ok
+test server::xla_prompt_cache_guard::tests::an_emitter_loadable_jamba_gets_no_prompt_cache_or_apc ... ok
+test server::xla_prompt_cache_guard::tests::every_epic_recurrent_type_gets_no_store_and_no_apc ... ok
+test server::xla_prompt_cache_guard::tests::startup_resolver_builds_no_store_for_an_xla_recurrent_model ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 13235 filtered out; finished in 0.01s
+

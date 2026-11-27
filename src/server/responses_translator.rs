@@ -91,6 +91,10 @@ pub enum ResponsesTranslateError {
     PreviousNotFinished { id: String, status: &'static str },
     #[error("metadata is limited to 16 entries; received {0}")]
     MetadataTooLarge(usize),
+    #[error("metadata keys are limited to 64 characters")]
+    MetadataKeyTooLong,
+    #[error("metadata values are limited to 512 characters")]
+    MetadataValueTooLong,
     #[error("truncation='{0}' is not supported in Phase 1; only 'disabled' is accepted")]
     TruncationUnsupported(String),
     #[error("max_output_tokens must be > 0")]
@@ -162,6 +166,16 @@ pub fn responses_request_to_chat_with_mcp(
         && meta.len() > 16
     {
         return Err(ResponsesTranslateError::MetadataTooLarge(meta.len()));
+    }
+    if let Some(meta) = request.metadata.as_ref() {
+        for (key, value) in meta {
+            if key.chars().count() > 64 {
+                return Err(ResponsesTranslateError::MetadataKeyTooLong);
+            }
+            if value.chars().count() > 512 {
+                return Err(ResponsesTranslateError::MetadataValueTooLong);
+            }
+        }
     }
     if let Some(trunc) = request.truncation.as_deref()
         && !trunc.is_empty()
@@ -957,7 +971,10 @@ mod tests {
         req.previous_response_id = Some("resp_x".to_string());
         req.conversation = Some(ConversationRef::Id("conv_y".to_string()));
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::PreviousAndConversation);
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::PreviousAndConversation
+        ));
     }
 
     #[test]
@@ -973,7 +990,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.truncation = Some("auto".to_string());
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::TruncationUnsupported(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::TruncationUnsupported(_)
+        ));
     }
 
     #[test]
@@ -985,7 +1005,29 @@ mod tests {
         }
         req.metadata = Some(m);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::MetadataTooLarge(17));
+        assert!(matches!(err, ResponsesTranslateError::MetadataTooLarge(17)));
+    }
+
+    #[test]
+    fn metadata_key_over_64_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".repeat(65), "v".to_string())]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataKeyTooLong));
+
+        req.metadata = Some(HashMap::from([("k".repeat(64), "v".to_string())]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
+    }
+
+    #[test]
+    fn metadata_value_over_512_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(513))]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataValueTooLong));
+
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(512))]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
     }
 
     #[test]
@@ -993,7 +1035,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.tools = Some(vec![ResponseTool::Unsupported]);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::UnsupportedToolType(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::UnsupportedToolType(_)
+        ));
     }
 
     #[test]
@@ -1307,7 +1352,7 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("turn 2".to_string()));
         req.previous_response_id = Some("resp_doesnt_exist".to_string());
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::PreviousNotFound(_));
+        assert!(matches!(err, ResponsesTranslateError::PreviousNotFound(_)));
     }
 
     #[test]
@@ -1329,7 +1374,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.conversation = Some(ConversationRef::Id("conv_99".to_string()));
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::ConversationStoreDisabled(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::ConversationStoreDisabled(_)
+        ));
     }
 
     #[test]
@@ -1363,7 +1411,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.max_output_tokens = Some(0);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::MaxOutputTokensInvalid);
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::MaxOutputTokensInvalid
+        ));
     }
 
     #[test]

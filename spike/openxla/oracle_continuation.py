@@ -29,6 +29,9 @@ Usage:
     ... --selftest
 
 Output JSON: {"prompt_text", "prompt_ids": [int...], "ref_token_ids": [int...]}.
+With `--top2` it also carries "ref_top2_ids" (the runner-up token at each step)
+and "ref_top2_gaps" (top-1 minus top-2 logit), which `near_tie_check.py` and
+`xla_oracle_check` use to judge a reduced-precision divergence (issue #3343).
 """
 
 from __future__ import annotations
@@ -188,7 +191,11 @@ def dequant_checkpoint(model_dir: str, out_dir: str, bits: int, group_size: int)
 
 
 def hf_greedy_oracle(model_dir: str, prompt: str, n_new: int) -> dict:
-    """Run HF fp32 greedy (pure argmax, no EOS stop) for ``n_new`` steps."""
+    """Run HF fp32 greedy (pure argmax, no EOS stop) for ``n_new`` steps.
+
+    Besides the argmax trajectory, the result records the runner-up token and
+    the top-1 minus top-2 logit gap at every step (``top2_ids``, ``top2_gaps``).
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -199,16 +206,26 @@ def hf_greedy_oracle(model_dir: str, prompt: str, n_new: int) -> dict:
     prompt_ids = tok(prompt, return_tensors="pt").input_ids  # [1, L]
     ids = prompt_ids.clone()
     ref: list[int] = []
+    top2_ids: list[int] = []
+    top2_gaps: list[float] = []
     with torch.no_grad():
         for _ in range(n_new):
             logits = model(ids).logits[:, -1, :]  # [1, V]
             nxt = int(torch.argmax(logits, dim=-1).item())
             ref.append(nxt)
+            best = torch.topk(logits[0], 2)
+            # topk breaks an exact tie arbitrarily; the runner-up is whichever
+            # of the two is not the argmax.
+            runner = [int(i) for i in best.indices.tolist() if int(i) != nxt]
+            top2_ids.append(runner[0] if runner else nxt)
+            top2_gaps.append(float(best.values[0] - best.values[1]))
             ids = torch.cat([ids, torch.tensor([[nxt]])], dim=1)
     return {
         "prompt_text": prompt,
         "prompt_ids": prompt_ids[0].tolist(),
         "ref_token_ids": ref,
+        "top2_ids": top2_ids,
+        "top2_gaps": top2_gaps,
         "decoded": tok.decode(ref),
     }
 
@@ -229,6 +246,12 @@ def main() -> int:
         "--keep-dequant",
         action="store_true",
         help="do not remove the dequantized checkpoint afterwards",
+    )
+    ap.add_argument(
+        "--top2",
+        action="store_true",
+        help="also write ref_top2_ids and ref_top2_gaps (top-1 minus top-2 logit "
+        "per step) for the near-tie rule",
     )
     ap.add_argument(
         "--selftest",
@@ -265,15 +288,16 @@ def main() -> int:
         flush=True,
     )
     result = hf_greedy_oracle(source, args.prompt, args.max_new)
+    payload = {
+        "prompt_text": result["prompt_text"],
+        "prompt_ids": result["prompt_ids"],
+        "ref_token_ids": result["ref_token_ids"],
+    }
+    if args.top2:
+        payload["ref_top2_ids"] = result["top2_ids"]
+        payload["ref_top2_gaps"] = result["top2_gaps"]
     with open(args.out, "w") as f:
-        json.dump(
-            {
-                "prompt_text": result["prompt_text"],
-                "prompt_ids": result["prompt_ids"],
-                "ref_token_ids": result["ref_token_ids"],
-            },
-            f,
-        )
+        json.dump(payload, f)
     print(
         f"[oracle] wrote {args.out}: {len(result['prompt_ids'])} prompt tokens, "
         f"{len(result['ref_token_ids'])} reference tokens",

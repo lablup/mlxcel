@@ -436,6 +436,13 @@ pub struct DFlashGenerator {
     /// first-bonus emission, which has no walk). Used by tests to pin
     /// the upstream `accept_lens` parity.
     accept_lens: Vec<u32>,
+    /// History before the first bonus (the prompt when the sampler reads
+    /// history), for the sampled verify rows (issue #3436).
+    token_history: Vec<i32>,
+    /// Prompt rows before the first hidden's first row, which the target did
+    /// not capture (issue #3436); handed to [`Drafter::skip_context`] after
+    /// the drafter resets.
+    first_context_start: usize,
 }
 
 impl DFlashGenerator {
@@ -462,7 +469,23 @@ impl DFlashGenerator {
             mask_token_id,
             generated_tokens: Vec::new(),
             accept_lens: Vec::new(),
+            token_history: Vec::new(),
+            first_context_start: 0,
         }
+    }
+
+    /// The history plain decode starts from (the prompt when the sampler
+    /// reads history), which a sampled verify row extends with the first
+    /// bonus, the emitted tokens and the accepted drafts (issue #3436).
+    pub fn set_token_history(&mut self, history: Vec<i32>) {
+        self.token_history = history;
+    }
+
+    /// The first hidden starts `rows` prompt rows in: the target captured
+    /// only the newest [`Drafter::context_window`] rows of the prompt
+    /// (issue #3436).
+    pub fn set_first_context_start(&mut self, rows: usize) {
+        self.first_context_start = rows;
     }
 
     /// Convenience constructor that uses the [`DEFAULT_BLOCK_SIZE`] and
@@ -763,6 +786,9 @@ impl DFlashGenerator {
         let bind_reset_start = Instant::now();
         self.drafter.bind(target_lm)?;
         self.drafter.reset(target_lm)?;
+        if self.first_context_start > 0 {
+            self.drafter.skip_context(self.first_context_start);
+        }
         let bind_reset_time = bind_reset_start.elapsed();
 
         let mut diagnostics = DFlashDiagnostics {
@@ -831,6 +857,8 @@ impl DFlashGenerator {
                 width_controller = None;
                 super::width_policy::ExpectedThroughputWidth::new(block_size_cfg)
             });
+        let sampled_verify =
+            super::sampled_verify::uses_sampled_verify(self.drafter.as_ref(), &self.sampler);
         let mut bonus = first_bonus;
         // Committed target hidden rows the drafter has not consumed yet: the
         // last drafted round's accepted rows, then one row per classic step.
@@ -996,6 +1024,30 @@ impl DFlashGenerator {
                 bs - 1,
                 bs,
             );
+            // A deterministic draft under sampling: the target tokens are
+            // the sampler's draws, so the walk keeps plain sampling's
+            // distribution (issue #3436).
+            let (target_tokens, sampled_logits) = if sampled_verify {
+                let history: Vec<i32> = if self.sampler.needs_token_history() {
+                    self.token_history
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(first_bonus))
+                        .chain(self.generated_tokens.iter().copied())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let (tokens, adjusted) = super::sampled_verify::sample_verify_rows(
+                    verify_logits,
+                    &draft_tokens,
+                    &self.sampler,
+                    history,
+                );
+                (tokens, Some(adjusted))
+            } else {
+                (target_tokens, None)
+            };
             diagnostics.target_argmax_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // Per-position log-probability data, aligned 1:1 with
@@ -1006,8 +1058,13 @@ impl DFlashGenerator {
             // `compute_logprobs`, so these logprobs are byte-identical
             // to the classic path for greedy sampling.
             let phase_start = Instant::now();
-            let target_logprobs =
-                per_position_logprobs(verify_logits, &target_tokens, logprobs_config);
+            // Sampled rows report from the sampler-adjusted logits, as
+            // plain decode does (penalties and bias applied, issue #3436).
+            let target_logprobs = per_position_logprobs(
+                sampled_logits.as_deref().unwrap_or(verify_logits),
+                &target_tokens,
+                logprobs_config,
+            );
             diagnostics.logprobs_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Walk ----

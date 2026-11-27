@@ -211,6 +211,8 @@ fn nemotron_h_block_aliases_and_rejections() {
 fn nemotron_h_moe_schedule_router_and_weight_schema() {
     let v = tiny_moe_json();
     let c = Config::from_json_str(&v.to_string()).unwrap();
+    // Sigmoid routing keeps aggressive decode fusion (#3349).
+    assert!(c.moe.is_some() && !c.has_softmax_moe());
     assert_eq!(
         c.layer_mixers,
         [

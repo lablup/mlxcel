@@ -270,6 +270,7 @@ jobs:
               - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/jit_module.cpp'
               - 'scripts/mlxcelverse/cuda_ptx_cache_win_test*'
               - 'scripts/mlxcelverse/rocm_hsaco_cache_test*'
+              - '.github/workflows/ci.yml'
             # What can break the CPU-only link of `mlxcel-core`: the Rust
             # sources and manifests, plus the bridge C++ that `rust` above does
             # not match. The bug that motivated the `cpu-link` job lived in
@@ -2275,15 +2276,20 @@ jobs:
               "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
+          # Compile with the Clang that ships with this Visual Studio, not the
+          # image's standalone LLVM on PATH: each MSVC STL release requires a
+          # minimum Clang (STL1000), and the standalone LLVM lags behind it
+          # (LLVM 20.1.8 against MSVC 14.52, which requires Clang 22).
+          $cxx = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang++.exe'
+          if (-not (Test-Path $cxx)) { throw "no Visual Studio Clang at $cxx (component VC.Llvm.Clang)" }
+          "CXX=$($cxx -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: CUDA PTX cache host test
         shell: bash
-        env:
-          CXX: clang++
-        run: bash scripts/mlxcelverse/cuda_ptx_cache_win_test.sh
+        run: |
+          "$CXX" --version | head -n 1
+          bash scripts/mlxcelverse/cuda_ptx_cache_win_test.sh
       - name: ROCm kernel cache host test
         shell: bash
-        env:
-          CXX: clang++
         run: bash scripts/mlxcelverse/rocm_hsaco_cache_test.sh
 
   # ============================================================================

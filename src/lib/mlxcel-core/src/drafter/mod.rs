@@ -77,6 +77,7 @@
 
 pub mod laguna_dflash;
 pub mod masks;
+pub mod raon_dflash2;
 
 use crate::ffi::MlxArray;
 use crate::generate::LanguageModel;
@@ -708,6 +709,18 @@ pub fn peek_inkling2_dspark_configured_block_size(model_path: &Path) -> Option<u
     inkling2_dspark::peek_configured_block_size(model_path)
 }
 
+/// The default verify width of the Raon-1 mini DFlash2 drafter at
+/// `model_path` (issue #3436): [`raon_dflash2::DEFAULT_VERIFY_WIDTH`], the
+/// measured width, not the checkpoint's trained `block_size` (8), which
+/// verifies more rows than it accepts on an M3 Ultra. `None` for any other
+/// directory.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_raon_dflash2_default_block_size(model_path: &Path) -> Option<usize> {
+    raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(model_path)
+        .then_some(raon_dflash2::DEFAULT_VERIFY_WIDTH)
+}
+
 /// Read the default verify width of an LFM2 DSpark drafter at `model_path`
 /// (issue #1339): `min(block_size + 1, runtime_block_size)`, with a missing
 /// `runtime_block_size` reading as the eight-row default
@@ -1336,6 +1349,30 @@ pub trait Drafter {
         false
     }
 
+    /// Whether the draft is a function of the context alone (no sampler
+    /// draws), so the DFlash round loop may accept it under sampling by
+    /// sampling each verify row and comparing (issue #3436; see
+    /// `dflash::sampled_verify`). The default keeps the argmax walk.
+    fn supports_sampled_verify(&self) -> bool {
+        false
+    }
+
+    /// How many of the newest context positions this drafter keeps, when it
+    /// keeps a bounded window (the Raon DFlash2 drafter's
+    /// `swa_window_size`, issue #3436). A target may then capture only that
+    /// many of the newest prompt rows at prefill and report the rest through
+    /// [`Self::skip_context`]. `None` (the default) wants every row.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// The first hidden handed to a draft call after [`Self::reset`] starts
+    /// `positions` rows into the prompt, because the target captured only
+    /// the newest [`Self::context_window`] rows. A drafter that tracks
+    /// absolute positions advances past them; the default ignores it.
+    #[allow(unused_variables)]
+    fn skip_context(&mut self, positions: usize) {}
+
     /// Whether this drafter can only draft under an argmax sampler.
     ///
     /// The LFM2 DSpark drafter (issue #1339) chains its block through a
@@ -1393,6 +1430,14 @@ pub trait Drafter {
     /// reads Inkling 2 pre-layer captures, so the target gate pairs it with
     /// an Inkling 2 target only.
     fn is_inkling2_dspark(&self) -> bool {
+        false
+    }
+
+    /// Whether this drafter is the Raon-1 mini DFlash2 speculator (issue
+    /// #3436). Same role as [`Self::is_laguna_dflash`]: its `fc` reads the
+    /// four mHC streams of five Raon layers, so the target gate pairs it with
+    /// a Raon-1 mini target only.
+    fn is_raon_dflash2(&self) -> bool {
         false
     }
 
@@ -1577,6 +1622,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             let model_type = peek_drafter_model_type(path)?;
             if model_type.as_deref() == Some(dflash::MUSE_ASSISTANT_MODEL_TYPE) {
                 let drafter = dflash::MuseAssistantDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
+            if raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(path) {
+                let drafter = raon_dflash2::RaonDFlash2Drafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
             if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {

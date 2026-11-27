@@ -1,0 +1,23 @@
+running 1 test
+window len 2047: tokens [8, 8, 8, 63, 26, 52]; first-step |xla - variant|: inclusive=3.189e-6 exclusive=3.189e-6 plus=3.189e-6 none=3.189e-6
+window len 2048: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=2.086e-6 exclusive=2.086e-6 plus=2.086e-6 none=2.086e-6
+window len 2049: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.192e-6 exclusive=4.152e-1 plus=1.192e-6 none=1.192e-6
+window len 2050: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.512e-6 exclusive=4.154e-1 plus=5.891e-3 none=5.891e-3
+window len 2051: tokens [8, 56, 12, 52, 9, 52]; first-step |xla - variant|: inclusive=1.669e-6 exclusive=4.156e-1 plus=5.895e-3 none=1.659e-2
+window: matches the inclusive mask; worst |logit delta| 4.232e-6
+window_minus len 2047: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=3.189e-6 exclusive=3.189e-6 plus=3.189e-6 none=3.189e-6
+window_minus len 2048: tokens [8, 56, 12, 29, 52, 52]; first-step |xla - variant|: inclusive=2.086e-6 exclusive=2.086e-6 plus=2.086e-6 none=2.086e-6
+window_minus len 2049: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.152e-1 exclusive=2.861e-6 plus=4.152e-1 none=4.152e-1
+window_minus len 2050: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.154e-1 exclusive=3.278e-6 plus=4.213e-1 none=4.213e-1
+window_minus len 2051: tokens [56, 12, 29, 49, 49, 49]; first-step |xla - variant|: inclusive=4.156e-1 exclusive=3.040e-6 plus=4.215e-1 none=4.322e-1
+window_minus: matches the exclusive mask; worst |logit delta| 3.278e-6
+window_plus len 2047: tokens [8, 8, 8, 8, 63, 26]; first-step |xla - variant|: inclusive=3.189e-6 exclusive=3.189e-6 plus=3.189e-6 none=3.189e-6
+window_plus len 2048: tokens [8, 8, 8, 63, 26, 52]; first-step |xla - variant|: inclusive=2.086e-6 exclusive=2.086e-6 plus=2.086e-6 none=2.086e-6
+window_plus len 2049: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=1.192e-6 exclusive=4.152e-1 plus=1.192e-6 none=1.192e-6
+window_plus len 2050: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=5.892e-3 exclusive=4.213e-1 plus=9.798e-7 none=9.798e-7
+window_plus len 2051: tokens [8, 8, 52, 56, 12, 52]; first-step |xla - variant|: inclusive=5.894e-3 exclusive=4.215e-1 plus=1.609e-6 none=1.070e-2
+window_plus: matches the plus mask; worst |logit delta| 3.189e-6
+test plamo2_window_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.35s
+

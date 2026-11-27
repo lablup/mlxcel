@@ -184,12 +184,24 @@ fn resolve_max_batch_prefill_tokens(
 /// Decide whether a request may participate in experimental VLM prompt-prefix
 /// cache sharing (#124 step c).
 ///
-/// Sharing is allowed only when all three hold:
+/// Sharing is allowed only when all four hold:
 /// 1. the operator opted in (`--enable-vlm-prefix-cache`),
-/// 2. the request actually carries multimodal content, and
-/// 3. it has no video payload (video frame bytes are NOT folded into the
-///    request's multimodal digest, so a video prefix could collide with a
-///    different video in the same bucket).
+/// 2. the request actually carries multimodal content,
+/// 3. it has no video payload, and
+/// 4. it needs no request-scoped mode restore (Phi4MM's adapter mode is not
+///    part of the cache snapshots).
+///
+/// Video stays excluded because the request's multimodal digest describes
+/// neither of the two things a video prefix depends on. The frame bytes are
+/// not folded into it, so a video prefix could collide with a different video
+/// in the same bucket. Nor is each clip's `second_per_grid`
+/// (`temporal_patch_size / sampled fps`): Qwen2.5-VL spaces a video's temporal
+/// MRoPE positions by it, so the same frames sampled at another rate put every
+/// later token at a different position and the cached KV rows would be wrong
+/// for it. Enabling video sharing therefore requires folding both the frame
+/// bytes and the per-clip `second_per_grid` into the digest first; upstream
+/// keys prefix reuse on per-clip timing for the same reason
+/// (Blaizzy/mlx-vlm#2760, commit `7fbd093f`).
 ///
 /// Text-only requests and any request with video always return `false`,
 /// preserving the legacy cold-prefill path. Keeping the decision in one pure
@@ -1156,6 +1168,14 @@ mod scheduler_model_owned_cache_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_slot_tests.rs"]
 mod scheduler_model_owned_slot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_reasoning_effort_tests.rs"]
+mod scheduler_reasoning_effort_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_cache_raon_tests.rs"]
+mod scheduler_model_owned_cache_raon_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_pipeline_failure_tests.rs"]

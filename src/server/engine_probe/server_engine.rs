@@ -275,6 +275,7 @@ impl ServerEngine {
                 root_prompt: None,
                 root_prefix_tokens: None,
                 snapshot_lineage: Default::default(),
+                model_reasoning_effort: None,
             });
         let options = ServerGenerateOptions {
             max_tokens: request.max_tokens,
@@ -305,6 +306,7 @@ impl ServerEngine {
             pre_rendered_prompt_tokens: Some(request.prompt_tokens.to_vec()),
             admission_notification: None,
             count_prompt_only: false,
+            model_reasoning_effort: None,
         };
         let live = self.server.config().live_settings();
         let before = self.server.observability().snapshot();

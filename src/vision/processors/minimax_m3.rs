@@ -62,8 +62,9 @@ impl Default for MiniMaxM3Processor {
     }
 }
 
+/// Python's `round`, as the reference uses it, rounds half to even.
 fn round_by_factor(n: f64, factor: f64) -> f64 {
-    (n / factor).round() * factor
+    (n / factor).round_ties_even() * factor
 }
 fn ceil_by_factor(n: f64, factor: f64) -> f64 {
     (n / factor).ceil() * factor
@@ -227,6 +228,20 @@ mod tests {
             h,
             image::Rgb([120, 60, 200]),
         ))
+    }
+
+    /// Expected values are the reference `smart_resize` (transformers 5.24.1
+    /// `minimax_m3_vl` and mlx-vlm, which agree), whose Python `round` breaks
+    /// a tie towards the even neighbour.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let p = MiniMaxM3Processor::default();
+        // 854 / 28 = 30.5 -> 30; 350 / 28 = 12.5 -> 12.
+        assert_eq!(p.smart_resize(480, 854), (476, 840));
+        assert_eq!(p.smart_resize(350, 350), (336, 336));
+        // A non-tie and the over-budget path do not move.
+        assert_eq!(p.smart_resize(480, 640), (476, 644));
+        assert_eq!(p.smart_resize(1080, 1920), (504, 896));
     }
 
     #[test]

@@ -193,8 +193,11 @@ impl NemotronHNanoOmniImageProcessor {
     ) -> (usize, usize) {
         let patch = self.config.patch_size as f64;
         // Upstream uses `round(orig_h / patch + 0.5)` for "ceil-ish" rounding.
-        let closest_patch_h = ((orig_h as f64 / patch + 0.5).round()) as usize;
-        let closest_patch_w = ((orig_w as f64 / patch + 0.5).round()) as usize;
+        // Python's `round` rounds half to even, so an edge that is an exact
+        // multiple of the patch lands on the even neighbour: 1024 / 16 + 0.5 =
+        // 64.5 rounds to 64, not 65.
+        let closest_patch_h = ((orig_h as f64 / patch + 0.5).round_ties_even()) as usize;
+        let closest_patch_w = ((orig_w as f64 / patch + 0.5).round_ties_even()) as usize;
         let patches = (closest_patch_h * closest_patch_w).max(1);
 
         let factor = ((tokens_available as f64) / (patches as f64))

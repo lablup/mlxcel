@@ -511,6 +511,7 @@ pub(crate) fn build_server_generate_options_with_live(
             .lora_runtime
             .as_ref()
             .map(|set| std::sync::Arc::new(set.server_scales())),
+        model_reasoning_effort: None,
     }
 }
 

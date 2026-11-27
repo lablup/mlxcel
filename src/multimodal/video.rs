@@ -917,11 +917,13 @@ impl From<&Path> for VideoSource {
 // ─── Helper functions ────────────────────────────────────────────────────────
 
 /// Round `value` to the nearest multiple of `factor`. Mirrors
-/// `round_by_factor` from `video_generate.py`.
+/// `round_by_factor` from `video_generate.py` (mlx-vlm `utils.py` `_round`),
+/// whose Python `round` breaks a tie towards the even neighbour: 5 frames at
+/// factor 2 is 2.5 multiples and becomes 4, not 6.
 #[inline]
 fn round_by_factor(value: f64, factor: usize) -> usize {
     let factor_f = factor as f64;
-    ((value / factor_f).round() as usize) * factor
+    ((value / factor_f).round_ties_even() as usize) * factor
 }
 
 /// Floor `value` to the nearest multiple of `factor` from below. Mirrors
@@ -1457,10 +1459,46 @@ pub fn load_video_source_with_policy(
 /// `source_fps` is the probed frame rate of the container. Frame time in
 /// seconds is `frame_indices[i] / source_fps`, which stays correct when the
 /// sampler resamples a clip at a rate other than the one requested.
+/// `total_frames` is the probed frame count of the source clip.
 pub struct SampledVideo {
     pub frames: Vec<DynamicImage>,
     pub frame_indices: Vec<usize>,
     pub source_fps: f64,
+    pub total_frames: usize,
+}
+
+impl SampledVideo {
+    /// Frame rate of the sampled frames over the source timeline:
+    /// `frame_indices.len() / total_frames * source_fps`.
+    ///
+    /// This is transformers' `VideoMetadata.sampled_fps`, the value the
+    /// Qwen2.5-VL reference processor turns into `second_per_grid_ts`
+    /// (Blaizzy/mlx-vlm#2760). It describes the frames that were encoded, so
+    /// it differs from the requested fps whenever the sampler rounds the frame
+    /// count or a `num_frames` request fixes it.
+    ///
+    /// Errors when no frame was sampled, when the source frame count is zero,
+    /// or when the result is not a positive finite rate.
+    pub fn sampled_fps(&self) -> anyhow::Result<f64> {
+        if self.frame_indices.is_empty() {
+            anyhow::bail!("sampled fps is undefined for a clip with no sampled frames");
+        }
+        if self.total_frames == 0 {
+            anyhow::bail!("sampled fps is undefined for a clip with zero source frames");
+        }
+        let sampled_fps =
+            self.frame_indices.len() as f64 / self.total_frames as f64 * self.source_fps;
+        if !sampled_fps.is_finite() || sampled_fps <= 0.0 {
+            anyhow::bail!(
+                "sampled fps must be positive and finite, got {sampled_fps} from {} sampled \
+                 frame(s) of {} at {} fps",
+                self.frame_indices.len(),
+                self.total_frames,
+                self.source_fps
+            );
+        }
+        Ok(sampled_fps)
+    }
 }
 
 /// Like [`load_video_source_with_policy`], but keeps the source frame indices
@@ -1556,6 +1594,7 @@ pub fn load_video_source_sampled_with_policy_and_budget(
         frames,
         frame_indices: indices,
         source_fps: meta.fps,
+        total_frames: meta.total_frames,
     })
 }
 
@@ -1628,6 +1667,7 @@ where
         frames,
         frame_indices: indices,
         source_fps: meta.fps,
+        total_frames: meta.total_frames,
     })
 }
 

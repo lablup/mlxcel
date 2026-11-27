@@ -2583,3 +2583,154 @@ fn a_disk_loaded_gemma3_mlp_preserves_modelopt_tensor_scales() {
         "disk-loaded tensor-scale mismatches: {failed:?}"
     );
 }
+
+/// One ModelOpt NVFP4 triplet (`out` rows of `2 * packed` elements) under
+/// `layer`, its block scales either as the checkpoint's E4M3 bytes (what
+/// MLX's safetensors reader hands back) or decoded to f16 (what the Gemma 4
+/// selective loader hands back), repacked by the direct transcode.
+fn repacked_nvfp4_triplet(
+    weight: &[u8],
+    scales: &[u8],
+    out: i32,
+    scales_as_e4m3_bytes: bool,
+) -> WeightMap {
+    let groups = scales.len() as i32 / out;
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "layer.weight".to_string(),
+        mlxcel_core::from_bytes(weight, &[out, weight.len() as i32 / out], dtype::UINT8),
+    );
+    let scale = if scales_as_e4m3_bytes {
+        mlxcel_core::from_bytes(scales, &[out, groups], dtype::UINT8)
+    } else {
+        let decoded: Vec<f32> = scales
+            .iter()
+            .map(|&b| super::sanitize::f8_e4m3_to_f32(b))
+            .collect();
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&decoded, &[out, groups]),
+            dtype::FLOAT16,
+        )
+    };
+    weights.insert("layer.weight_scale".to_string(), scale);
+    weights.insert(
+        "layer.weight_scale_2".to_string(),
+        mlxcel_core::from_slice_f32(&[0.37], &[]),
+    );
+    weights.insert(
+        "layer.input_scale".to_string(),
+        mlxcel_core::from_slice_f32(&[1.5], &[]),
+    );
+    super::sanitize::sanitize_modelopt_nvfp4_weights(&mut weights, None).expect("repack");
+    weights
+}
+
+/// The on-device ModelOpt NVFP4 transcode (issue #3458) writes the planes the
+/// host transcode writes, byte for byte: the packed weight as uint32 words,
+/// every E4M3 block-scale byte, and the f32 tensor scale. The triplet's
+/// auxiliary keys are gone on both routes.
+#[test]
+fn nvfp4_device_transcode_matches_the_host_transcode_byte_for_byte() {
+    let _env = env_lock();
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    // 16 rows of 256 elements: 16 blocks a row, so the 256 scale bytes cover
+    // every E4M3 code. 0xFF (negative NaN) is the one code the host round
+    // trip rewrites, to the canonical NaN 0x7F; it is checked on its own.
+    let (out, packed) = (16i32, 128usize);
+    let weight: Vec<u8> = (0..out as usize * packed)
+        .map(|i| (i as u32).wrapping_mul(2_654_435_761).to_le_bytes()[3])
+        .collect();
+    let scales: Vec<u8> = (0..=255u8)
+        .map(|b| if b == 0xFF { 0x7E } else { b })
+        .collect();
+    let bytes = |weights: &WeightMap, key: &str| {
+        let array = weights.get(key).unwrap_or_else(|| panic!("missing {key}"));
+        mlxcel_core::eval(array);
+        (
+            mlxcel_core::array_dtype(array),
+            mlxcel_core::array_shape(array),
+            mlxcel_core::array_to_raw_bytes(array),
+        )
+    };
+
+    let device = repacked_nvfp4_triplet(&weight, &scales, out, true);
+    let host = repacked_nvfp4_triplet(&weight, &scales, out, false);
+    for key in ["layer.weight", "layer.scales", "layer.global_scale"] {
+        assert_eq!(bytes(&device, key), bytes(&host, key), "{key}");
+    }
+    let (weight_dtype, weight_shape, weight_words) = bytes(&device, "layer.weight");
+    assert_eq!(weight_dtype, dtype::UINT32);
+    assert_eq!(weight_shape, vec![out, packed as i32 / 4]);
+    assert_eq!(weight_words, weight, "the packed nibbles are not rewritten");
+    let (scale_dtype, scale_shape, scale_bytes) = bytes(&device, "layer.scales");
+    assert_eq!((scale_dtype, scale_shape), (dtype::UINT8, vec![out, 16]));
+    assert_eq!(scale_bytes, scales, "the E4M3 scale bytes pass through");
+    let (scale2_dtype, scale2_shape, scale2_bytes) = bytes(&device, "layer.global_scale");
+    assert_eq!((scale2_dtype, scale2_shape), (dtype::FLOAT32, vec![1]));
+    assert_eq!(scale2_bytes, 0.37f32.to_le_bytes());
+    for weights in [&device, &host] {
+        for gone in ["weight_scale", "weight_scale_2", "input_scale", "biases"] {
+            assert!(!weights.contains_key(&format!("layer.{gone}")), "{gone}");
+        }
+    }
+
+    // The negative NaN code stays as stored on the device route; the host
+    // round trip canonicalizes it. Both decode to NaN.
+    let nan_scales = vec![0xFFu8; 16];
+    let nan_weight = vec![0x21u8; 16 * 8];
+    let device = repacked_nvfp4_triplet(&nan_weight, &nan_scales, 16, true);
+    let host = repacked_nvfp4_triplet(&nan_weight, &nan_scales, 16, false);
+    assert_eq!(bytes(&device, "layer.scales").2, vec![0xFF; 16]);
+    assert_eq!(bytes(&host, "layer.scales").2, vec![0x7F; 16]);
+}
+
+/// The device route is taken for a canonical `uint8` scale triplet and
+/// declined for a float scale plane, so the byte-for-byte test above cannot
+/// pass with the route silently disabled (a regression to the 63 to 70 s
+/// host transcode).
+#[test]
+fn nvfp4_device_transcode_is_taken_for_uint8_scales_and_declined_for_f16() {
+    let _env = env_lock();
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let weight = mlxcel_core::from_bytes(&[0x21u8; 16 * 8], &[16, 8], dtype::UINT8);
+    let scale2 = mlxcel_core::from_slice_f32(&[0.37], &[]);
+    let uint8_scales = mlxcel_core::from_bytes(&[0x40u8; 16], &[16, 1], dtype::UINT8);
+    let taken = super::sanitize::nvfp4_device_transcode(&weight, &uint8_scales, &scale2)
+        .expect("a canonical uint8 scale triplet takes the device route");
+    assert_eq!(mlxcel_core::array_dtype(&taken.0), dtype::UINT32);
+    assert_eq!(mlxcel_core::array_shape(&taken.0), vec![16, 2]);
+
+    let f16_scales = mlxcel_core::astype(&uint8_scales, dtype::FLOAT16);
+    assert!(
+        super::sanitize::nvfp4_device_transcode(&weight, &f16_scales, &scale2).is_none(),
+        "float scales keep the host transcode"
+    );
+}
+
+/// A triplet outside the canonical layout (here a block-scale plane one
+/// block short) is not taken by the device route.
+#[test]
+fn nvfp4_device_transcode_declines_a_scale_plane_of_the_wrong_shape() {
+    let _env = env_lock();
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "layer.weight".to_string(),
+        mlxcel_core::from_bytes(&[0x21u8; 2 * 16], &[2, 16], dtype::UINT8),
+    );
+    // Two rows of 32 elements need two blocks a row; this plane has one.
+    weights.insert(
+        "layer.weight_scale".to_string(),
+        mlxcel_core::from_bytes(&[0x40u8; 2], &[2, 1], dtype::UINT8),
+    );
+    weights.insert(
+        "layer.weight_scale_2".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0], &[]),
+    );
+    // Declined by the device route, and by the host route for the same
+    // reason (a short scale buffer); the weight keeps its packed uint8 form.
+    let _ = super::sanitize::sanitize_modelopt_nvfp4_weights(&mut weights, None);
+    let weight = weights.get("layer.weight").expect("weight kept");
+    assert_eq!(mlxcel_core::array_dtype(weight), dtype::UINT8);
+    assert!(!weights.contains_key("layer.global_scale"));
+}

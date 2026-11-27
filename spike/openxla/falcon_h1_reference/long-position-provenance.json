@@ -1,0 +1,17 @@
+{
+  "purpose": "Falcon-H1 RoPE scaling check at long positions (Refs #3346)",
+  "checkpoint": "tiiuae/Falcon-H1-Tiny-90M-Instruct",
+  "revision": "e6389502a0b12cd8da894b395ba5bf7436873b16",
+  "oracle_backend": "native HF Transformers fp32 on CPU, eager attention, fresh prefix per step (use_cache=False)",
+  "packages": {"torch": "2.12.1+cpu", "transformers": "5.12.1"},
+  "iree": "3.12.0rc20260721",
+  "device": "local-task",
+  "prompt": "torch.randint(100, vocab-100) stream, seed 3346; prefixes 32, 512, 2048, 3584; 4 teacher-forced steps each",
+  "oracle_command": "HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 $MLXCEL_ORACLE_PYTHON spike/openxla/falcon_h1_oracle.py --out $MLXCEL_FALCON_H1_FIXTURES --long-model $MLXCEL_FALCON_H1_MODEL",
+  "oracle_script_sha256": "0f0b327cb0d3493d8d8d76a5657525e1d1981ec74030245df4c7ef0d3ad5f388",
+  "long_oracle_json_sha256": "9d10560130ec039d1c8b0c7af99a22f3afa68505709ff9047804761f30527927",
+  "long_oracle_json_bytes": 10729919,
+  "test_command": "MLXCEL_XLA_DEVICE=local-task cargo test --profile test-fast --features xla-iree,test-utils --test xla_falcon_h1 -- --ignored --nocapture --test-threads=1",
+  "before": {"log": "cpu-long-before.log", "source": "c5afefbd (origin/main) plus the probe test and oracle mode only, test tolerance 2e-3", "max_abs_by_prefix": {"32": 5.02e-1, "512": 4.41, "2048": 4.69, "3584": 4.74}, "argmax_mismatches": "8 of 16"},
+  "after": {"log": "cpu-long-after.log", "source": "fix/falcon-h1-plain-rope, test tolerance 1e-3", "max_abs_by_prefix": {"32": 1.16e-4, "512": 6.87e-5, "2048": 8.96e-5, "3584": 1.20e-4}, "argmax_mismatches": "0 of 16"}
+}

@@ -547,6 +547,29 @@ pub fn template_sig(
     hex
 }
 
+/// Fold a model-side reasoning effort (#3435) into a `template_sig`.
+///
+/// A reasoning-effort steering model (Raon-1 mini) adds `alpha * c` to the
+/// MoE output of its steered layers, so a prefix's KV and recurrent state
+/// depend on the effort even when the rendered prompt does not. Folding the
+/// level into the signature puts each effort in its own bucket for every
+/// reuse channel (dense KV, snapshots, warm-ups). `None` (every model that
+/// does not steer) returns the signature unchanged, so no existing bucket
+/// moves.
+#[must_use]
+pub fn fold_model_reasoning_effort(template_sig: String, level: Option<&str>) -> String {
+    let Some(level) = level else {
+        return template_sig;
+    };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mlxcel:prompt-cache:model-reasoning-effort:v1");
+    write_field(&mut hasher, template_sig.as_bytes());
+    write_field(&mut hasher, level.as_bytes());
+    let mut out = [0u8; 32];
+    hasher.finalize_xof().fill(&mut out);
+    out.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Compute a stable digest of the `tools` array.
 ///
 /// The digest is **order-preserving**: reordering the tools list changes the

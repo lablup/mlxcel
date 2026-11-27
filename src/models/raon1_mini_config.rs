@@ -17,11 +17,13 @@
 //! Field names and defaults follow `configuration_raon1_mini.py` at
 //! `KRAFTON/Raon-1-mini@6691a076`. [`Raon1MiniConfig::from_json_str`] also
 //! rejects the configurations the reference forward cannot run, by name, and
-//! the vendor MLX export (`KRAFTON/Raon-1-mini-mlx`), whose NVFP4 layout with
-//! `global_scale` sidecars and fused decode modules is #3437.
+//! any quantization other than the original checkpoint's MXFP8 experts and the
+//! two NVFP4 exports (`raon1_mini_quant.rs`, #3437).
 
 use serde::Deserialize;
 use serde_json::Value;
+
+use super::reasoning_effort_steering::ReasoningEffortSteering;
 
 /// `rda_config` block: the Raon Delta Attention geometry and the 1-based
 /// layer lists that split the stack into RDA and MLA layers.
@@ -113,6 +115,9 @@ pub struct Raon1MiniConfig {
     pub latent_moe_use_norm: bool,
     #[serde(default)]
     pub attn_res_block_size: Option<usize>,
+    /// Reasoning-effort steering (#3435); `None` means alpha 0 everywhere.
+    #[serde(default)]
+    pub reasoning_effort_steering: Option<ReasoningEffortSteering>,
     /// Every other top-level key (`quantization_config`, the vendor MLX
     /// export's markers, ...), checked by [`Raon1MiniConfig::validate`].
     #[serde(flatten)]
@@ -168,16 +173,6 @@ fn default_decay_rank() -> usize {
     128
 }
 
-/// Top-level keys only the vendor MLX export (`KRAFTON/Raon-1-mini-mlx`)
-/// writes. Any of them means the NVFP4 + `global_scale` layout with fused
-/// decode modules and a custom `model_file`, which #3437 adds.
-pub const VENDOR_MLX_EXPORT_KEYS: [&str; 4] = [
-    "raon_global_scaled_linears",
-    "raon_merged_gate_up",
-    "raon_fused_mhc_decode",
-    "model_file",
-];
-
 /// Generation EOS ids of the release (`generation_config.json`): `<|im_end|>`
 /// and `<|endoftext|>`.
 pub const DEFAULT_EOS_TOKEN_IDS: [i32; 2] = [259202, 259200];
@@ -187,8 +182,8 @@ impl Raon1MiniConfig {
     pub fn from_json_str(json: &str) -> Result<Self, String> {
         let value: Value =
             serde_json::from_str(json).map_err(|e| format!("raon1_mini config.json: {e}"))?;
-        // The export check runs on the raw JSON first, so a vendor export
-        // whose other fields would not even parse still gets its named error.
+        // The quantization check runs on the raw JSON first, so an unsupported
+        // export whose other fields would not even parse still fails by name.
         reject_unsupported_export(&value)?;
         let config: Self =
             serde_json::from_value(value).map_err(|e| format!("raon1_mini config.json: {e}"))?;
@@ -310,6 +305,16 @@ impl Raon1MiniConfig {
             ));
         }
         self.validate_geometry()?;
+        if let Some(steering) = &self.reasoning_effort_steering {
+            steering
+                .validate(self.num_hidden_layers)
+                .map_err(|e| format!("raon1_mini: {e}"))?;
+            if let Some(layer) = steering.layers.iter().find(|&&l| !self.is_moe_layer(l)) {
+                return fail(format!(
+                    "reasoning_effort_steering lists layer {layer}, which is not a MoE layer"
+                ));
+            }
+        }
         validate_layer_partition(
             &self.rda_config.rda_layers,
             &self.rda_config.mla_layers,
@@ -435,46 +440,10 @@ pub fn validate_layer_partition(
 }
 
 /// Refuse the checkpoints this port does not run, before any weight loads.
+/// The original checkpoint and both NVFP4 exports load (#3437); any other
+/// quantization fails by name (`raon1_mini_quant.rs`).
 fn reject_unsupported_export(config: &Value) -> Result<(), String> {
-    if let Some(key) = VENDOR_MLX_EXPORT_KEYS
-        .iter()
-        .find(|key| config.get(**key).is_some())
-    {
-        return Err(format!(
-            "raon1_mini: this is the vendor MLX export (KRAFTON/Raon-1-mini-mlx, config key \
-             `{key}`), whose NVFP4 global-scale layout is not supported yet (#3437). Load the \
-             original checkpoint KRAFTON/Raon-1-mini instead"
-        ));
-    }
-    if config.get("quantization").is_some() {
-        return Err(
-            "raon1_mini: MLX-quantized exports (a `quantization` block) are not supported yet \
-             (#3437). Load the original checkpoint KRAFTON/Raon-1-mini instead"
-                .to_string(),
-        );
-    }
-    if let Some(qc) = config.get("quantization_config") {
-        let method = qc.get("quant_method").and_then(Value::as_str).unwrap_or("");
-        if method != "mxfp8" {
-            return Err(format!(
-                "raon1_mini: quantization_config quant_method {method:?} is not supported (#3437); \
-                 only the original checkpoint's native mxfp8 experts load. Use KRAFTON/Raon-1-mini"
-            ));
-        }
-        if qc.get("dequantize").and_then(Value::as_bool) == Some(true) {
-            return Err("raon1_mini: quantization_config dequantize true is not supported".into());
-        }
-        let block = qc.get("weight_block_size").and_then(Value::as_array);
-        let block_ok = block
-            .is_none_or(|b| b.len() == 2 && b[0].as_u64() == Some(1) && b[1].as_u64() == Some(32));
-        if !block_ok {
-            return Err(format!(
-                "raon1_mini: mxfp8 weight_block_size {:?} is not supported; MLX's mxfp8 is [1, 32]",
-                qc.get("weight_block_size")
-            ));
-        }
-    }
-    Ok(())
+    super::raon1_mini_quant::check_export(config)
 }
 
 #[cfg(test)]

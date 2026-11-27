@@ -37,6 +37,9 @@ pub enum MixerKind {
     Mamba1,
     /// Attention and Mamba2 sharing an input norm, followed by a separate FFN.
     ParallelMamba2Attention,
+    /// PLaMo 2's Mamba block: an offset-normed [`SsmKind::Plamo2`] mixer with a
+    /// post-mixer norm, then the block's own SwiGLU MLP (issue #3347).
+    Plamo2Mamba,
     /// A feed-forward-only block (no token mixer or persistent state).
     None,
 }
@@ -47,7 +50,7 @@ impl MixerKind {
     pub fn is_recurrent(self) -> bool {
         matches!(
             self,
-            Self::Mamba2 | Self::Mamba1 | Self::ParallelMamba2Attention
+            Self::Mamba2 | Self::Mamba1 | Self::ParallelMamba2Attention | Self::Plamo2Mamba
         )
     }
 
@@ -65,6 +68,7 @@ impl MixerKind {
             MixerKind::Mamba2 => "mamba2",
             MixerKind::Mamba1 => "mamba",
             MixerKind::ParallelMamba2Attention => "falcon_h1",
+            MixerKind::Plamo2Mamba => "plamo2",
             MixerKind::None => "ffn",
         }
     }
@@ -100,11 +104,32 @@ impl Config {
     /// `norm -> mixer -> residual` with no FFN.
     #[must_use]
     pub fn layer_has_ffn(&self, li: usize) -> bool {
-        if self.weight_scheme == WeightScheme::NemotronH {
-            self.layer_mixer(li) == MixerKind::None
-        } else {
-            self.layer_mixer(li).has_attention()
+        match self.weight_scheme {
+            WeightScheme::NemotronH => self.layer_mixer(li) == MixerKind::None,
+            // Every PLaMo 2 block, Mamba or attention, ends in a dense MLP.
+            WeightScheme::Plamo2 => li < self.n_layers,
+            // Every Jamba block, attention or Mamba1, ends in a dense or MoE FFN.
+            WeightScheme::Jamba => li < self.n_layers,
+            _ => self.layer_mixer(li).has_attention(),
         }
+    }
+
+    /// Whether layer `li` is a pure SSM block, `x + mixer(norm(x))` with no
+    /// FFN (Mamba, Mamba2, Nemotron-H `M`). Such a layer takes the short
+    /// recurrent weight list; a recurrent layer with an FFN (Jamba) does not.
+    #[must_use]
+    pub fn is_ffn_free_ssm_layer(&self, li: usize) -> bool {
+        matches!(self.layer_mixer(li), MixerKind::Mamba2 | MixerKind::Mamba1)
+            && !self.layer_has_ffn(li)
+    }
+
+    /// Whether layer `li` normalizes the residual between its token mixer and
+    /// its FFN (`post_attention_layernorm`, or Falcon-H1 / Jamba
+    /// `pre_ff_layernorm`). False for a parallel block, which feeds the FFN the
+    /// mixer's input norm, and for a block without a mixer or without an FFN.
+    #[must_use]
+    pub fn layer_has_post_mixer_norm(&self, li: usize) -> bool {
+        !self.parallel_block && self.layer_has_ffn(li) && self.layer_mixer(li) != MixerKind::None
     }
 
     /// Number of attention rows in the KV cache, excluding SSM and FFN blocks.
@@ -171,6 +196,9 @@ impl Config {
                     SsmKind::Mamba1 { .. } => {
                         vec![layers, ssm.d_inner(), ssm.state_size]
                     }
+                    SsmKind::Plamo2 { .. } => {
+                        vec![layers, ssm.n_heads, ssm.head_dim, ssm.state_size]
+                    }
                 };
                 vec![
                     StateTensorSpec {
@@ -199,9 +227,11 @@ impl Config {
     /// MLA and recurrent-state configs do: an f16 recurrent state is not
     /// token-exact (on hip the single-sequence Mamba2 path drifts from the HF
     /// fp32 reference after about 16 tokens on some prompts, issue #3340).
+    /// PLaMo 2 does too, including an attention-only (`mamba_enabled: false`)
+    /// config, whose head-scaled Q/K norm is authored in f32 (issue #3347).
     #[must_use]
     pub fn pins_f32_precision(&self) -> bool {
-        self.mla.is_some() || self.has_recurrent_state()
+        self.mla.is_some() || self.has_recurrent_state() || self.plamo2.is_some()
     }
 
     /// The family name of the first recurrent mixer, for error messages.

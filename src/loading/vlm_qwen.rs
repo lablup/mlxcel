@@ -784,6 +784,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
         video_token_id: token_ids.video_token_id,
         vision_start_token_id: token_ids.vision_start_token_id,
         spatial_merge_size: vision_config.spatial_merge_size,
+        video_tokens_per_second: vision_config.tokens_per_second,
     };
 
     Ok(LoadedModel::Qwen25VL(vlm))
