@@ -89,6 +89,7 @@ impl BatchScheduler {
             seq.prompt_tokens.clone(),
             SnapshotOrigin::Completion,
             encoded_span,
+            None,
         );
     }
 }

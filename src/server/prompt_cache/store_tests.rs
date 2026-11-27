@@ -1263,6 +1263,84 @@ fn boundary_snapshots_still_chain_against_each_other() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn preserving_insert_keeps_the_restored_boundary_until_the_next_turn() {
+    // Issue #3467. A background warm-up restores the turn's boundary snapshot
+    // `turn`, extends it by the reply, and stores the result `warm` as a
+    // Boundary entry. A plain insert superseded `turn`, the only stored vector
+    // that is a prefix of the same turn sent again, so a retry prefilled from
+    // cold. The preserving insert keeps exactly that one entry.
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+    let boundary = |tokens: &[i32]| {
+        snapshot_entry_for_test(tokens.to_vec(), "fam").with_origin(SnapshotOrigin::Boundary)
+    };
+    let stale: Vec<i32> = tokens(100, 16);
+    let turn: Vec<i32> = tokens(100, 24);
+    let warm: Vec<i32> = tokens(100, 32);
+    let next: Vec<i32> = tokens(100, 40);
+
+    // `stale` goes in after `turn`: a shorter insert supersedes nothing, so
+    // the chain holds two prefixes of `warm` at once.
+    store
+        .insert_snapshot(&key_for_session("m", Some("sess"), &turn), boundary(&turn))
+        .expect("turn boundary insert succeeds");
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &stale),
+            boundary(&stale),
+        )
+        .expect("stale boundary insert succeeds");
+    assert_eq!(store.stats().snapshot_entries, 2);
+
+    let (restored, matched) = store
+        .peek_snapshot_prefix(&key_for_session("m", Some("sess"), &warm), &warm)
+        .expect("the warm-up restores the longest stored prefix");
+    assert_eq!(matched, turn.len());
+    store
+        .insert_snapshot_preserving(
+            &key_for_session("m", Some("sess"), &warm),
+            boundary(&warm),
+            Some(&restored),
+        )
+        .expect("warmed boundary insert succeeds");
+
+    let stats = store.stats();
+    assert_eq!(
+        stats.snapshot_entries, 2,
+        "the restored boundary and the warmed one"
+    );
+    assert_eq!(
+        stats.snapshot_supersedes, 1,
+        "the second, shorter prefix is still superseded"
+    );
+    // The same turn again: its prompt extends `turn` and leaves `warm` there.
+    let mut retry = turn.clone();
+    retry.extend([9001, 9002, 9003]);
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("sess"), &retry), &retry)
+        .expect("a retry of the turn restores its boundary snapshot");
+    assert_eq!((matched, &entry.tokens), (turn.len(), &turn));
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("sess"), &stale), &stale)
+            .is_none(),
+        "the stale prefix is gone"
+    );
+
+    // The next turn's own boundary insert preserves nothing and supersedes
+    // both, so the chain is back at one entry.
+    store
+        .insert_snapshot(&key_for_session("m", Some("sess"), &next), boundary(&next))
+        .expect("next turn boundary insert succeeds");
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 1);
+    assert_eq!(stats.snapshot_supersedes, 3);
+    let (entry, _) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("sess"), &next), &next)
+        .expect("the next turn's boundary is the resident snapshot");
+    assert_eq!(entry.tokens, next);
+}
+
+#[test]
 fn paged_set_without_handles_is_empty() {
     use super::super::entry::paged_set_is_empty;
 
