@@ -4758,6 +4758,10 @@ pub mod weight_wiring;
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
 pub mod rope_proportional;
 
+// YaRN attention-factor scaling of the rotated lanes only, shared by the
+// Qwen 3.5 target attention and its MTP drafter layer (#3479).
+pub mod rope_lanes;
+
 // transformers 5 `rope_parameters` lift shared by every config struct that
 // reads the flat `rope_theta` / `rope_scaling` keys (#2443).
 pub mod rope_parameters;

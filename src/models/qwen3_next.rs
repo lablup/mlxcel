@@ -639,25 +639,11 @@ impl Qwen3NextAttention {
 
     /// Multiply the first `rope_dims` lanes of a `[.., D]` Q or K block by
     /// the YaRN attention factor and leave the pass-through lanes as they
-    /// are. The scalar is materialized in the block's own dtype.
+    /// are. The scalar is materialized in the block's own dtype. Shared with
+    /// the Qwen 3.5 MTP drafter layer through
+    /// [`mlxcel_core::rope_lanes::scale_rotary_lanes`] (issue #3479).
     fn scale_rotary_lanes(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        if self.rope_attention_factor == 1.0 {
-            return mlxcel_core::copy(x);
-        }
-        let shape = mlxcel_core::array_shape(x);
-        let last = shape.len() - 1;
-        if self.rope_dims >= shape[last] {
-            return mlxcel_core::multiply_scalar(x, self.rope_attention_factor);
-        }
-        let start = vec![0; shape.len()];
-        let mut rotary_end = shape.clone();
-        rotary_end[last] = self.rope_dims;
-        let mut pass_start = start.clone();
-        pass_start[last] = self.rope_dims;
-        let rotary = mlxcel_core::slice(x, &start, &rotary_end);
-        let pass = mlxcel_core::slice(x, &pass_start, &shape);
-        let rotary = mlxcel_core::multiply_scalar(&rotary, self.rope_attention_factor);
-        mlxcel_core::concatenate(&rotary, &pass, -1)
+        mlxcel_core::rope_lanes::scale_rotary_lanes(x, self.rope_dims, self.rope_attention_factor)
     }
 
     /// The standard rotation of a `[B, H, L, D]` block at `offset`: the

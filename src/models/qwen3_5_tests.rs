@@ -703,7 +703,7 @@ fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
 /// 16 GB checkpoint. Trimmed only of the 64-entry `layer_types` array, which
 /// mlxcel ignores in favour of the positional
 /// `!(i + 1).is_multiple_of(full_attention_interval)` rule.
-fn qwen3_8_27b_text_config() -> serde_json::Value {
+pub(crate) fn qwen3_8_27b_text_config() -> serde_json::Value {
     serde_json::json!({
         "attention_bias": false,
         "attention_dropout": 0.0,
@@ -1349,7 +1349,7 @@ fn prefill_hidden_encodes_every_prompt_from_a_fresh_state() {
 /// `rope_parameters` of the `sensenova/SenseNova-6.8-Code2Video` text config
 /// (Qwen3.5-27B: head_dim 256, partial rotary 0.25, so 64 rotary dims),
 /// upstream's `QWEN3_5_YARN_PARAMETERS`.
-fn sensenova_yarn_parameters() -> serde_json::Value {
+pub(crate) fn sensenova_yarn_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "yarn",
         "factor": 2.0,
@@ -1401,12 +1401,12 @@ const QWEN3_5_YARN_HF_INV_FREQ: [f64; 32] = [
 const QWEN3_5_YARN_HF_ATTENTION_FACTOR: f64 = 1.0693147180559945;
 
 /// The Qwen3.5-27B text geometry with `rope_parameters` replaced.
-fn yarn_config(rope_parameters: serde_json::Value) -> Qwen35Config {
+pub(crate) fn yarn_config(rope_parameters: serde_json::Value) -> Qwen35Config {
     config_with(serde_json::json!({ "rope_parameters": rope_parameters }))
 }
 
 /// [`sensenova_yarn_parameters`] with keys overridden, or removed by `null`.
-fn yarn_parameters_with(overrides: serde_json::Value) -> serde_json::Value {
+pub(crate) fn yarn_parameters_with(overrides: serde_json::Value) -> serde_json::Value {
     let mut parameters = sensenova_yarn_parameters();
     let object = parameters.as_object_mut().expect("object");
     for (key, value) in overrides.as_object().expect("overrides object") {
@@ -1419,7 +1419,7 @@ fn yarn_parameters_with(overrides: serde_json::Value) -> serde_json::Value {
     parameters
 }
 
-fn assert_matches_hf_inv_freq(inv_freq: &[f32]) {
+pub(crate) fn assert_matches_hf_inv_freq(inv_freq: &[f32]) {
     assert_eq!(inv_freq.len(), QWEN3_5_YARN_HF_INV_FREQ.len());
     for (pair, (actual, expected)) in inv_freq.iter().zip(QWEN3_5_YARN_HF_INV_FREQ).enumerate() {
         assert!(

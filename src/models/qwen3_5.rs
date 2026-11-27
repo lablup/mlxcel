@@ -443,6 +443,118 @@ fn qwen35_yarn_attention_factor(block: &serde_json::Value, factor: f64) -> f64 {
     }
 }
 
+/// The YaRN frequency table and attention factor, when `rope_parameters`
+/// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
+/// block, which keeps the plain `rope_theta` rotation.
+///
+/// Port of `Qwen3_5RotaryEmbedding` / `_yarn_inv_freq` in
+/// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py>
+/// (Blaizzy/mlx-vlm#2649). The table comes from the shared
+/// [`super::rope_utils::yarn_rope_setup`] over the rotary dims and
+/// `rope_theta`, with `max_position_embeddings` as the original context
+/// when the block names none, so the `--yarn-orig-ctx`, `--yarn-beta-fast`,
+/// `--yarn-beta-slow` and `--yarn-ext-factor` knobs reach it. The
+/// attention factor follows the transformers rules
+/// ([`qwen35_yarn_attention_factor`]), except that with a resolved
+/// extrapolation mix of 0 it is `--yarn-attn-factor`, as on the shared
+/// path.
+///
+/// A block that names `yarn` and cannot build a table is a load error
+/// naming the field, never a fallback to the unscaled rotation.
+///
+/// The inputs are the config's rotary geometry so the Qwen 3.5 MTP
+/// drafter, whose `text_config` mirrors the target's, builds a
+/// bit-identical table through this same code (issue #3479).
+///
+/// Used by: [`Qwen35Config::yarn`] and
+/// `crate::models::drafter_loader::load_drafter` (the `qwen3_5_mtp` arm).
+pub(crate) fn qwen35_yarn(
+    rope_parameters: Option<&serde_json::Value>,
+    rope_dims: i32,
+    rope_theta: f32,
+    max_position_embeddings: Option<usize>,
+) -> Result<Option<Qwen35Yarn>, String> {
+    use super::rope_overrides;
+    use super::rope_utils::{RopeScalingSpec, yarn_rope_setup};
+
+    let Some(block) = rope_parameters else {
+        return Ok(None);
+    };
+    let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
+    if spec.rope_type() != "yarn" {
+        return Ok(None);
+    }
+
+    let wrong_type = |key: &str, value: &serde_json::Value, expected: &str| {
+        format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `{key}` must be {expected}, got {}",
+            truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS)
+        )
+    };
+    for key in [
+        "factor",
+        "original_max_position_embeddings",
+        "beta_fast",
+        "beta_slow",
+        "attention_factor",
+        "mscale",
+        "mscale_all_dim",
+    ] {
+        if let Some(value) = block.get(key)
+            && !value.is_null()
+            && !value.is_number()
+        {
+            return Err(wrong_type(key, value, "a number"));
+        }
+    }
+    if let Some(value) = block.get("truncate")
+        && !value.is_null()
+        && !value.is_boolean()
+    {
+        return Err(wrong_type("truncate", value, "a boolean"));
+    }
+    let Some(factor) = block.get("factor").and_then(|value| value.as_f64()) else {
+        return Err("Qwen3.5 rope_parameters declares YaRN, but `factor` is missing".to_string());
+    };
+
+    let dims = rope_dims.max(0) as usize;
+    let train_ctx = max_position_embeddings.map(|ctx| ctx as f32);
+    let (freqs, shared_multiplier) = yarn_rope_setup(&spec, dims, rope_theta, train_ctx)
+        .map_err(|reason| format!("Qwen3.5 rope_parameters declares YaRN, but {reason}"))?;
+
+    let ext_factor = rope_overrides::installed_yarn_knobs()
+        .and_then(|knobs| knobs.ext_factor)
+        .unwrap_or(1.0);
+    let attention_factor = if ext_factor == 0.0 {
+        shared_multiplier
+    } else {
+        qwen35_yarn_attention_factor(block, factor) as f32
+    };
+    if !(attention_factor.is_finite() && attention_factor > 0.0) {
+        return Err(format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `attention_factor` resolves to \
+             {attention_factor}, which is not a positive finite number"
+        ));
+    }
+
+    // Qwen 3.5 is not on the `--rope-scaling` / `--rope-scale` /
+    // `--rope-freq-scale` / `--rope-freq-base` seam, so an override that
+    // carries any of those must keep failing `verify_applied`. One made
+    // of `--yarn-*` knobs alone has just been consumed by the table.
+    if let Some(over) = rope_overrides::installed()
+        && over.scaling_type().is_none()
+        && over.freq_base().is_none()
+        && over.freq_scale().is_none()
+    {
+        rope_overrides::note_application();
+    }
+
+    Ok(Some(Qwen35Yarn {
+        freqs,
+        attention_factor,
+    }))
+}
+
 impl Qwen35Config {
     pub fn group_size(&self) -> i32 {
         self.quantization
@@ -484,109 +596,21 @@ impl Qwen35Config {
 
     /// The YaRN frequency table and attention factor, when `rope_parameters`
     /// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
-    /// block, which keeps the plain `rope_theta` rotation.
-    ///
-    /// Port of `Qwen3_5RotaryEmbedding` / `_yarn_inv_freq` in
-    /// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py>
-    /// (Blaizzy/mlx-vlm#2649). The table comes from the shared
-    /// [`super::rope_utils::yarn_rope_setup`] over the rotary dims and
-    /// `rope_theta`, with `max_position_embeddings` as the original context
-    /// when the block names none, so the `--yarn-orig-ctx`, `--yarn-beta-fast`,
-    /// `--yarn-beta-slow` and `--yarn-ext-factor` knobs reach it. The
-    /// attention factor follows the transformers rules
-    /// ([`qwen35_yarn_attention_factor`]), except that with a resolved
-    /// extrapolation mix of 0 it is `--yarn-attn-factor`, as on the shared
-    /// path.
-    ///
-    /// A block that names `yarn` and cannot build a table is a load error
-    /// naming the field, never a fallback to the unscaled rotation.
+    /// block, which keeps the plain `rope_theta` rotation. See
+    /// [`qwen35_yarn`], which this delegates to with this config's rotary
+    /// geometry.
     ///
     /// Used by: `Qwen35Model::from_weights_impl` and
     /// `Qwen35StageModel::from_filtered_weights`, and through them every
     /// Qwen 3.5 loader (text, VLM, MiniCPM-V 4.6, tensor-parallel, pipeline
     /// stage).
     pub(crate) fn yarn(&self) -> Result<Option<Qwen35Yarn>, String> {
-        use super::rope_overrides;
-        use super::rope_utils::{RopeScalingSpec, yarn_rope_setup};
-
-        let Some(block) = self.rope_parameters.as_ref() else {
-            return Ok(None);
-        };
-        let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
-        if spec.rope_type() != "yarn" {
-            return Ok(None);
-        }
-
-        let wrong_type = |key: &str, value: &serde_json::Value, expected: &str| {
-            format!(
-                "Qwen3.5 rope_parameters declares YaRN, but `{key}` must be {expected}, got {}",
-                truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS)
-            )
-        };
-        for key in [
-            "factor",
-            "original_max_position_embeddings",
-            "beta_fast",
-            "beta_slow",
-            "attention_factor",
-            "mscale",
-            "mscale_all_dim",
-        ] {
-            if let Some(value) = block.get(key)
-                && !value.is_null()
-                && !value.is_number()
-            {
-                return Err(wrong_type(key, value, "a number"));
-            }
-        }
-        if let Some(value) = block.get("truncate")
-            && !value.is_null()
-            && !value.is_boolean()
-        {
-            return Err(wrong_type("truncate", value, "a boolean"));
-        }
-        let Some(factor) = block.get("factor").and_then(|value| value.as_f64()) else {
-            return Err(
-                "Qwen3.5 rope_parameters declares YaRN, but `factor` is missing".to_string(),
-            );
-        };
-
-        let dims = self.rope_dims().max(0) as usize;
-        let train_ctx = self.max_position_embeddings.map(|ctx| ctx as f32);
-        let (freqs, shared_multiplier) = yarn_rope_setup(&spec, dims, self.rope_theta(), train_ctx)
-            .map_err(|reason| format!("Qwen3.5 rope_parameters declares YaRN, but {reason}"))?;
-
-        let ext_factor = rope_overrides::installed_yarn_knobs()
-            .and_then(|knobs| knobs.ext_factor)
-            .unwrap_or(1.0);
-        let attention_factor = if ext_factor == 0.0 {
-            shared_multiplier
-        } else {
-            qwen35_yarn_attention_factor(block, factor) as f32
-        };
-        if !(attention_factor.is_finite() && attention_factor > 0.0) {
-            return Err(format!(
-                "Qwen3.5 rope_parameters declares YaRN, but `attention_factor` resolves to \
-                 {attention_factor}, which is not a positive finite number"
-            ));
-        }
-
-        // Qwen 3.5 is not on the `--rope-scaling` / `--rope-scale` /
-        // `--rope-freq-scale` / `--rope-freq-base` seam, so an override that
-        // carries any of those must keep failing `verify_applied`. One made
-        // of `--yarn-*` knobs alone has just been consumed by the table.
-        if let Some(over) = rope_overrides::installed()
-            && over.scaling_type().is_none()
-            && over.freq_base().is_none()
-            && over.freq_scale().is_none()
-        {
-            rope_overrides::note_application();
-        }
-
-        Ok(Some(Qwen35Yarn {
-            freqs,
-            attention_factor,
-        }))
+        qwen35_yarn(
+            self.rope_parameters.as_ref(),
+            self.rope_dims(),
+            self.rope_theta(),
+            self.max_position_embeddings,
+        )
     }
 
     /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out
