@@ -62,6 +62,8 @@ scripts/check-lint.sh
 scripts/check-clean-build.sh
 ```
 
+`scripts/standalone-bench.sh` (#2834) builds `standalone/oxide_standalone_bench.cpp` against the driver API and runs the committed PTX under `gpu-lock`. Its digest check proves that the PTX matches the five in-tree manifests; it is not an authenticity check, and the gap between the check and the program's load of the file is local-only (anyone who can rewrite the file in that window already runs code as the same user).
+
 Every GPU-allocating command goes through `gpu-lock run --tag issue-2832* -- ...`; a missing or busy lock is an error, never a reason to run unguarded. `run.sh` then checks every reported launch against the manifests: `grid = rows`, `block = fused_norm_threads(dim)` (the reference launcher's rule: `clamp(ceil_div(ceil_div(dim, 4), 32) * 32, 32, 1024)`), the per-entry case and element totals, and that the harness also exercised the shape rejections. A shortened or re-routed run fails the script rather than passing on exit status.
 
 ## Case matrix and budgets

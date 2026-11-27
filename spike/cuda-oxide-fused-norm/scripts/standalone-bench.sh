@@ -24,6 +24,10 @@
 #
 # --wrap puts a profiler in front of the program inside the lock, for example
 #   --wrap "nsys profile --trace=cuda --sample=none --cpuctxsw=none -o out"
+# The digest check proves that the PTX matches the in-tree manifests, not that
+# either is authentic, and the gap between the check and the program's load of
+# the file is local-only: whoever can rewrite the PTX in that window already
+# runs code as this user.
 # Environment: CUDA_HOME (default /usr/local/cuda), CXX (default g++),
 # GPU_LOCK_TAG (default issue-2834-standalone).
 set -euo pipefail

@@ -9,6 +9,7 @@ Raw rows and commands for [the benchmark evidence report](../../mlxcelverse/cuda
 | `host-state.csv` | Per stage: start, end, load average, whether a CI job was running at its end |
 | `m1-end-to-end.csv`, `m1-end-to-end-summary.csv` | M1: 7 interleaved rounds, 6 cells, 4 arms; route counters, peak memory and token ids per pass; paired deltas and null floor per cell |
 | `m2-logit-trace-summary.csv`, `m2-logit-trace-comparison.txt` | M2: route line and SHA-256 of each teacher-forced logit trace; `compare_logit_traces.py` output for every arm against `fused` |
+| `m2c-adapter-matrix-test.log` | M2(c): full output of the 31 `cuda_oxide` adapter tests, including the 130-case matrix result (a correctness rerun, no timing) |
 | `m3-standalone-events.csv` | M3: standalone driver-API launches, CUDA events, 5 processes, 23 shapes |
 | `m4-nsys-kernels*.csv`, `m4-nsys-cuda-api*.csv` | M4: kernel durations and CUDA API calls from `nsys`, standalone and MLX with graphs off; `-repeat` is the second set |
 | `m5-op-level-mlx*.csv` | M5: op level through MLX with graphs on, `iso` and `pipe`; `-repeat` is the second set |

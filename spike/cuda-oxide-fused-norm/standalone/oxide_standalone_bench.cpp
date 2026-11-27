@@ -26,6 +26,12 @@
 // five manifests before running it, and wraps the run in `gpu-lock`. It is not
 // part of any cargo build.
 //
+// The digest check proves that the PTX about to load is the PTX the in-tree
+// manifests pin; it says nothing about who produced either (it is not an
+// authenticity check). The gap between the check and the load is a local one:
+// anyone who can rewrite the PTX file in that window can already run code as
+// the same user.
+//
 // ABI (abi/*.schema.json): x_ptr, x_len, residual_ptr, residual_len,
 // weight_ptr, weight_len, eps (f32), weight_bias (f32), dim (u32), normed_ptr,
 // normed_len, new_residual_ptr, new_residual_len. Lengths are u64 element
@@ -36,6 +42,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -132,6 +139,23 @@ struct Shape {
     unsigned dim;
 };
 
+// A whole-string unsigned decimal no larger than `max`. std::stoul accepts a
+// leading '-' (and wraps it), ignores trailing text and throws on garbage; a
+// benchmark argument must be none of those.
+unsigned long parse_unsigned(const std::string& text, const std::string& what,
+                             unsigned long max) {
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) {
+        die(what + ": expected a non-negative decimal integer, got '" + text + "'");
+    }
+    try {
+        unsigned long value = std::stoul(text);
+        if (value > max) die(what + ": " + text + " is above the limit " + std::to_string(max));
+        return value;
+    } catch (const std::exception&) {
+        die(what + ": '" + text + "' is out of range");
+    }
+}
+
 // act:weight:ROWSxDIM
 Shape parse_shape(const std::string& spec) {
     std::stringstream ss(spec);
@@ -142,8 +166,8 @@ Shape parse_shape(const std::string& spec) {
     auto x = dims.find('x');
     if (x == std::string::npos) die("shape " + spec + ": expected act:weight:ROWSxDIM");
     Shape s{parse_dtype(act), parse_dtype(weight), act, weight,
-            static_cast<unsigned>(std::stoul(dims.substr(0, x))),
-            static_cast<unsigned>(std::stoul(dims.substr(x + 1)))};
+            static_cast<unsigned>(parse_unsigned(dims.substr(0, x), "shape " + spec + " rows", UINT_MAX)),
+            static_cast<unsigned>(parse_unsigned(dims.substr(x + 1), "shape " + spec + " width", UINT_MAX))};
     if (s.rows == 0 || s.dim == 0) die("shape " + spec + ": zero rows or width");
     return s;
 }
@@ -177,8 +201,8 @@ int main(int argc, char** argv) {
         if (flag == "--ptx") ptx_path = value();
         else if (flag == "--csv") csv_path = value();
         else if (flag == "--label") label = value();
-        else if (flag == "--iters") iters = std::stoi(value());
-        else if (flag == "--warmup") warmup = std::stoi(value());
+        else if (flag == "--iters") iters = static_cast<int>(parse_unsigned(value(), "--iters", 100000000));
+        else if (flag == "--warmup") warmup = static_cast<int>(parse_unsigned(value(), "--warmup", 100000000));
         else if (flag == "--shape") shapes.push_back(parse_shape(value()));
         else die("unknown argument " + flag);
     }
@@ -327,14 +351,23 @@ int main(int argc, char** argv) {
         double bytes_moved = 5.0 * act_bytes + static_cast<double>(s.rows) * w_bytes;
         double gbps = bytes_moved / (warm_mean_us * 1e-6) / 1e9;
 
-        char line[1024];
-        std::snprintf(line, sizeof line,
-                      "%s,%s,%s,%u,%u,%u,%u,%s,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%.2f,%s,%s\n",
-                      label.c_str(), s.act_name.c_str(), s.weight_name.c_str(), s.rows, s.dim,
-                      s.rows, block, entry.c_str(), iters, warmup, module_load_ms, context_ms,
-                      first_us, warm_mean_us, percentile(samples, 0.5), percentile(samples, 0.9),
-                      samples.front(), launch_call_us, sync_roundtrip_us, bytes_moved, gbps,
-                      first_in_process ? "true" : "false", ok ? "true" : "false");
+        const char* row_format =
+            "%s,%s,%s,%u,%u,%u,%u,%s,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.0f,%.2f,%s,%s\n";
+        auto format_row = [&](char* buf, size_t cap) {
+            return std::snprintf(buf, cap, row_format, label.c_str(), s.act_name.c_str(),
+                                 s.weight_name.c_str(), s.rows, s.dim, s.rows, block, entry.c_str(),
+                                 iters, warmup, module_load_ms, context_ms, first_us, warm_mean_us,
+                                 percentile(samples, 0.5), percentile(samples, 0.9),
+                                 samples.front(), launch_call_us, sync_roundtrip_us, bytes_moved,
+                                 gbps, first_in_process ? "true" : "false", ok ? "true" : "false");
+        };
+        // Sized by a first pass, so a long --label cannot truncate the row and
+        // drop its newline.
+        int needed = format_row(nullptr, 0);
+        if (needed < 0) die("cannot format the CSV row");
+        std::string line(static_cast<size_t>(needed) + 1, '\0');
+        format_row(line.data(), line.size());
+        line.resize(static_cast<size_t>(needed));
         rows_csv += line;
         std::printf("%-4s/%-4s %5u x %-5u grid %5u block %4u  first %8.2f us  warm mean %8.3f  "
                     "median %8.3f  p90 %8.3f  launch call %6.3f  launch+sync %7.3f  %7.2f GB/s%s\n",

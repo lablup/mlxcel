@@ -18,7 +18,7 @@
 # before the first of them ran.
 #
 #   run.sh <stage> [<stage> ...]
-#   stages: env m3 m4 m5 m6 m6b m1 m2 m7 m8 m9
+#   stages: env m3 m4 m5 m6 m6b m1 m2 m2c m7 m8 m9
 #   SET=<suffix> writes m4/m5 to files with that suffix (a repeat set).
 #
 # Build first, outside gpu-lock:
@@ -44,7 +44,19 @@ trace=$repo/target/release/examples/logit_trace
 cuda=${CUDA_HOME:-/usr/local/cuda}
 corpus=$repo/tests/fixtures/bench/fused-moe-dff-prompt-439-words.txt
 
-mkdir -p "$WORK" "$WORK/ptx-warm"
+# --wrap in standalone-bench.sh splits its argument on whitespace, so a WORK
+# with whitespace would split the profiler's -o path.
+case "$WORK" in
+    *[[:space:]]*) echo "run.sh: WORK must not contain whitespace: $WORK" >&2; exit 2 ;;
+esac
+mkdir -p "$WORK"
+# chmod 700 below must never reach into the checkout.
+work_real=$(cd "$WORK" && pwd -P)
+case "$work_real/" in
+    "$repo"/*) echo "run.sh: WORK ($work_real) is inside the checkout $repo; refusing" >&2; exit 2 ;;
+esac
+WORK=$work_real
+mkdir -p "$WORK/ptx-warm"
 chmod 700 "$WORK" "$WORK/ptx-warm"
 export MLX_PTX_CACHE_DIR=$WORK/ptx-warm
 
@@ -69,9 +81,11 @@ wait_runner() { # never start measuring while a CI job runs on this host
 }
 
 stage_env() {
-    python3 - "$repo" "$MODEL" "$spike" "$opbench" "$ckptbench" "$cuda" >"$here/provenance.json" <<'PY'
+    # Written beside the target and renamed only when the Python step succeeds,
+    # so a failure leaves the committed provenance.json alone.
+    python3 - "$repo" "$MODEL" "$spike" "$opbench" "$ckptbench" "$cuda" "$trace" >"$here/provenance.json.new" <<'PY'
 import hashlib, json, os, platform, subprocess, sys
-repo, model, spike, opbench, ckptbench, cuda = sys.argv[1:7]
+repo, model, spike, opbench, ckptbench, cuda, trace = sys.argv[1:8]
 def sh(*cmd):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, cwd=repo).stdout.strip()
@@ -108,7 +122,7 @@ out = {
         "profile": "release",
         "features": "cuda",
         "env": {"MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM": "1", "MLXCEL_CUDA_ARCHITECTURES": "121"},
-        "binaries_sha256": {os.path.basename(p): sha(p) for p in (opbench, ckptbench)},
+        "binaries_sha256": {os.path.basename(p): sha(p) for p in (opbench, ckptbench, trace)},
     },
     "artifact": {
         "ptx_sha256": sha(os.path.join(spike, "artifacts", "fused_add_rms_norm.sm_121.ptx")),
@@ -121,11 +135,12 @@ out = {
         "tokenizer_sha256": sha(os.path.join(model, "tokenizer.json")),
     },
     "gpu_lock": sh("which", "gpu-lock"),
-    "ci_job_running_at_capture": bool(sh("pgrep", "-f", "Runner.Worker")),
+    "ci_job_running_at_capture": bool(sh("pgrep", "-x", "Runner.Worker")),
 }
 json.dump(out, sys.stdout, indent=2)
 print()
 PY
+    mv "$here/provenance.json.new" "$here/provenance.json"
     cat "$here/provenance.json"
 }
 
@@ -190,7 +205,12 @@ stage_m5() {
 stage_m6() {
     wait_runner
     local shapes=bf16:bf16:1x2048,bf16:bf16:1x4096
-    local out=$here/m6-cold-start
+    # Rows go to a staging directory and replace the committed CSVs only after
+    # every sample ran; a failed stage leaves nothing that a rerun would append to.
+    local stage=$WORK/m6-stage
+    [ -e "$stage" ] && { echo "run.sh: $stage exists from an earlier run; remove it or use a fresh WORK" >&2; exit 2; }
+    mkdir -p "$stage"
+    local out=$stage/m6-cold-start
     for rep in 1 2 3 4 5; do
         # fused, empty disk cache: NVRTC compiles the kernel.
         local empty=$WORK/ptx-empty-$rep
@@ -208,6 +228,7 @@ stage_m6() {
     done
     mv "$out.cold.csv" "$here/m6-cold-start.csv"
     mv "$out" "$here/m6-cold-start-steady.csv"
+    rmdir "$stage"
 }
 
 # M6, driver compute cache off (protocol adjustment 1). The CUDA driver keeps
@@ -219,7 +240,10 @@ stage_m6() {
 stage_m6b() {
     wait_runner
     local shapes=bf16:bf16:1x2048,bf16:bf16:1x4096
-    local out=$here/m6b-cold-start-driver-cache-off
+    local stage=$WORK/m6b-stage
+    [ -e "$stage" ] && { echo "run.sh: $stage exists from an earlier run; remove it or use a fresh WORK" >&2; exit 2; }
+    mkdir -p "$stage"
+    local out=$stage/m6b-cold-start-driver-cache-off
     for rep in 1 2 3 4 5; do
         local empty=$WORK/ptx-empty-nodrv-$rep
         [ -e "$empty" ] && { echo "run.sh: $empty exists; use a fresh WORK" >&2; exit 2; }
@@ -232,10 +256,12 @@ stage_m6b() {
             --arms oxide --shapes "$shapes" --iters 50 --label "oxide-rep$rep" --csv "$out"
         CUDA_CACHE_DISABLE=1 GPU_LOCK_TAG=issue-2834-standalone "$spike/scripts/standalone-bench.sh" \
             --shapes model --iters 200 --label "driver-cache-off-rep$rep" \
-            --csv "$here/m6b-standalone-driver-cache-off.csv"
+            --csv "$stage/m6b-standalone-driver-cache-off.csv"
     done
     mv "$out.cold.csv" "$here/m6b-cold-start-driver-cache-off.csv"
     mv "$out" "$here/m6b-cold-start-driver-cache-off-steady.csv"
+    mv "$stage/m6b-standalone-driver-cache-off.csv" "$here/m6b-standalone-driver-cache-off.csv"
+    rmdir "$stage"
 }
 
 # M8, exploratory (protocol adjustment 3): CUDA API calls per op, one arm per
@@ -292,11 +318,16 @@ stage_m2() {
         local shape=$1 chunk=$2 arm=$3
         shift 3
         local out=$WORK/traces/$shape-$arm.tsv
-        env -u MLXCEL_FUSED_ADD_RMSNORM -u MLXCEL_CUDA_OXIDE_FUSED_NORM "$@" \
+        env -u MLXCEL_FUSED_ADD_RMSNORM -u MLXCEL_CUDA_OXIDE_FUSED_NORM \
+            -u MLXCEL_CUDA_OXIDE_FUSED_NORM_DIR "$@" \
             gpu-lock run --tag issue-2834-trace -- "$trace" "$MODEL" "$corpus" "$chunk" 1 8 \
             >"$out" 2>"$out.err"
         local route
-        route=$(grep '^# fused_norm_route' "$out.err" | tr '\t' ' ')
+        route=$(grep '^# fused_norm_route' "$out.err" | tr '\t' ' ') || true
+        if [ -z "$route" ]; then
+            echo "run.sh: no '# fused_norm_route' line on stderr for $shape/$arm (see $out.err); without it the arm's route is unproven" >&2
+            exit 4
+        fi
         echo "$shape,$arm,$route,$(sha256sum "$out" | cut -d' ' -f1),$(grep -vc '^#' "$out")" >>"$summary"
     }
     for shape in prefill256 decode-b1 decode-b4; do
@@ -328,6 +359,31 @@ stage_m2() {
     cat "$summary"
 }
 
+# M2(c): the #2832 130-case matrix through the adapter, as the 31 tests of the
+# opted-in mlxcel-core lib test binary whose name contains cuda_oxide. A
+# correctness rerun, not a measurement. LIB is that binary, built outside
+# gpu-lock with
+#   MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 \
+#     cargo test --release -p mlxcel-core --features cuda --lib --no-run
+stage_m2c() {
+    # No wait_runner: this checks outputs, it does not time anything, so a CI
+    # job on the host does not affect the result.
+    local lib=${LIB:?set LIB to the opted-in mlxcel_core lib test binary}
+    local out=$here/m2c-adapter-matrix-test.log
+    local status=0
+    {
+        echo "# command: gpu-lock run --tag issue-2834-finalize -- $lib cuda_oxide --test-threads=1 --nocapture"
+        echo "# mlxcel_commit: $(git -C "$repo" rev-parse HEAD)"
+        echo "# binary_sha256: $(sha256sum "$lib" | cut -d' ' -f1)"
+        echo "# started_utc: $(date -u +%FT%TZ)"
+        gpu-lock run --tag issue-2834-finalize -- "$lib" cuda_oxide --test-threads=1 --nocapture 2>&1 || status=$?
+        echo "# exit_status: $status"
+    } >"$out.part"
+    mv "$out.part" "$out"
+    grep -E 'RESULT |^test result' "$out"
+    return "$status"
+}
+
 # M7: resource usage and instruction counts, one tool on both cubins.
 stage_m7() {
     local out=$here/m7-kernel-resources.csv
@@ -355,9 +411,19 @@ for m in re.finditer(r"Function (\S+?):\s*\n\s*(.*)", res):
 PY
     }
     resources cuda-oxide "$spike/artifacts/fused_add_rms_norm.sm_121.cubin"
-    for f in "$MLX_PTX_CACHE_DIR"/sm121-nvrtc13.0/custom_kernel_mlxcel_fused_add_rms_norm_*.ptx; do
-        resources existing-nvrtc "$f"
+    # nullglob: an empty cache must end the stage with a message, not feed the
+    # literal pattern to cuobjdump.
+    local ptx found=0
+    shopt -s nullglob
+    for ptx in "$MLX_PTX_CACHE_DIR"/sm121-nvrtc13.0/custom_kernel_mlxcel_fused_add_rms_norm_*.ptx; do
+        resources existing-nvrtc "$ptx"
+        found=1
     done
+    shopt -u nullglob
+    if [ "$found" = 0 ]; then
+        echo "run.sh: no NVRTC fused_add_rms_norm PTX under $MLX_PTX_CACHE_DIR; run m5 or m6 first" >&2
+        exit 4
+    fi
     cat "$out"
 }
 
@@ -367,7 +433,7 @@ host_state=$here/host-state.csv
 [ -f "$host_state" ] || echo "stage,started_utc,ended_utc,load1_start,load1_end,ci_job_running_at_end" >"$host_state"
 for stage in "$@"; do
     case "$stage" in
-        env | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m9)
+        env | m1 | m2 | m2c | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m9)
             started=$(date -u +%FT%TZ)
             load_start=$(cut -d' ' -f1 /proc/loadavg)
             "stage_$stage"

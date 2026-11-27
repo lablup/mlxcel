@@ -28,6 +28,10 @@
     "binaries_sha256": {
       "oxide_fused_norm_bench": "24f0d2d8d4e28599c8d7a119bc98fb608aa27254adc05cac60eac09af6130059",
       "oxide_fused_norm_checkpoint_bench": "bca95b8d77e539c3d07620e754901e4fea5a6530404901852a18d798e9ce3e62"
+    },
+    "binaries_sha256_recorded_after_capture": {
+      "logit_trace": "83112b6460351fc23824001e5e2db210ac4b8f675082d0b50ee17e2f732a1172",
+      "note": "logit_trace was not hashed at capture. Recomputed on 2026-11-27 from target/release/examples/logit_trace, whose mtime (11:50 KST, before every stage) is unchanged since the M2 run and which no later build touched; oxide_fused_norm_bench in the capture entry above is the build from before the M9 rebuild at 70fa4f9a"
     }
   },
   "artifact": {

@@ -231,9 +231,10 @@ def cmd_summarize(a):
                    if r["arm"] == arm and (r["path"], r["batch"], r["prompt_target_len"]) == cell]
             digests = sorted({r["tokens_sha256_16"] for r in sel})
             peaks = [int(r["peak_memory_bytes"]) / 2**30 for r in sel]
-            print(f"| {cell[0]} B={cell[1]} prompt {cell[2]} | {arm} | {len(digests)}: "
-                  f"{', '.join(digests)} | {min(peaks):.3f}..{max(peaks):.3f} |")
-    if a.out:
+            peak_txt = f"{min(peaks):.3f}..{max(peaks):.3f}" if peaks else "unresolved (no rows)"
+            digest_txt = f"{len(digests)}: {', '.join(digests)}" if digests else "unresolved (no rows)"
+            print(f"| {cell[0]} B={cell[1]} prompt {cell[2]} | {arm} | {digest_txt} | {peak_txt} |")
+    if a.out and out_rows:
         with open(a.out, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=list(out_rows[0]), lineterminator="\n")
             writer.writeheader()
