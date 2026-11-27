@@ -68,6 +68,16 @@ pub struct DFlashAttention {
     /// (`rope_is_neox_style: false`); `false` rotates `i` with
     /// `i + head_dim / 2` (NeoX style, the Qwen 3.5 DFlash checkpoints).
     pub rope_traditional: bool,
+    /// Sliding window of a DSpark `sliding_attention` layer (issue #3261):
+    /// a proposal row attends the newest `window` positions, itself
+    /// included, so the context cache keeps `window - 1` rows. `None` for a
+    /// full-attention layer and for every plain DFlash checkpoint.
+    pub sliding_window: Option<i32>,
+    /// Whether proposal rows are masked causally
+    /// ([`DFlashConfig::layer_is_causal`]). `false` for every checkpoint
+    /// before the Speculators layout: the masked block attends itself
+    /// bidirectionally.
+    pub is_causal: bool,
 }
 
 impl DFlashAttention {
@@ -169,22 +179,46 @@ impl DFlashAttention {
         // next round's offset and double-count proposal positions in
         // every subsequent attention forward).
         let (keys, values) = cache.update_and_fetch(ctx_keys, ctx_values);
+        // A sliding layer keeps the newest `window - 1` context rows: the
+        // first proposal row sits at position `p` and attends `[p - window +
+        // 1, p]`, which is exactly those rows plus itself, and every later
+        // row sees fewer. Older rows are evicted here, after the write, so
+        // the cache stays bounded by the window however long the context
+        // grows and `offset` keeps counting absolute positions for RoPE.
+        // Upstream drops such rows before projecting them and rotates the
+        // rest at the same absolute positions, so the kept K/V are the same.
+        let (keys, values) = match self.sliding_window {
+            Some(window) => keep_newest_context_rows(cache, keys, values, window - 1),
+            None => (keys, values),
+        };
+        let prior = ffi::array_shape(&keys)[2];
 
         // Concatenate proposal K/V along the seq axis (axis=2 for
         // [B, H, S+L, D] vs [B, H, S, D]).
         let keys_combined = crate::ops::concatenate(&keys, &prop_keys, 2);
         let values_combined = crate::ops::concatenate(&values, &prop_values, 2);
 
-        // Fast scaled-dot-product attention with no mask (upstream passes
-        // none — the drafter's masked forward bakes the mask into the
-        // input tokens, not into the attention).
+        // A plain DFlash or LFM2 DSpark block attends with no mask (upstream
+        // passes none: the masked forward bakes the mask into the input
+        // tokens). A causal layer (the Speculators DSpark drafter) masks
+        // proposal row `j`, at position `prior + j`, to the columns at or
+        // before it, and to the last `window` of those when it slides:
+        // upstream `create_causal_mask(L, offset = prior, window_size)`.
+        let mask = self.is_causal.then(|| {
+            crate::utils::create_causal_mask_with_window_full(l, prior, self.sliding_window)
+        });
+        let mask_ptr = mask
+            .as_deref()
+            .map_or(std::ptr::null(), |m| m as *const MlxArray);
+        // SAFETY: `mask_ptr` is null or points at `mask`, which outlives the
+        // call; the bridge only reads it.
         let attn = unsafe {
             ffi::fast_scaled_dot_product_attention(
                 &queries,
                 &keys_combined,
                 &values_combined,
                 self.scale,
-                std::ptr::null(),
+                mask_ptr,
             )
         };
 
@@ -195,11 +229,14 @@ impl DFlashAttention {
         self.o_proj.forward(&attn)
     }
 
-    /// Load DFlash attention weights for one layer.
+    /// Load DFlash attention weights for drafter layer `layer_idx`, whose
+    /// position in `config.layer_types` decides whether it slides and
+    /// whether it is causal.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         config: &DFlashConfig,
+        layer_idx: usize,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
@@ -245,9 +282,59 @@ impl DFlashAttention {
             scale,
             rope_base: config.rope_theta,
             rope_traditional: !config.rope_is_neox_style,
+            // `DFlashConfig::from_json` bounds the window to
+            // `2..=MAX_SLIDING_WINDOW`, which fits an i32.
+            sliding_window: config
+                .layer_sliding_window(layer_idx)
+                .and_then(|w| i32::try_from(w).ok()),
+            is_causal: config.layer_is_causal(layer_idx),
         })
     }
 }
+
+/// Keep the newest `keep` rows of a sliding layer's context: evict the older
+/// ones from `cache` and return the kept K/V (`[B, H, <= keep, D]`).
+///
+/// `keys` / `values` are what `update_and_fetch` just returned, the cache's
+/// whole live window. `KVCache::trim_front` leaves `offset` monotonic, so the
+/// next round's rows are still rotated at their absolute positions.
+///
+/// Used by: [`DFlashAttention::forward`].
+fn keep_newest_context_rows(
+    cache: &mut KVCache,
+    keys: UniquePtr<MlxArray>,
+    values: UniquePtr<MlxArray>,
+    keep: i32,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let k_shape = ffi::array_shape(&keys);
+    let live = k_shape[2];
+    let excess = live - keep;
+    if excess <= 0 {
+        return (keys, values);
+    }
+    let v_shape = ffi::array_shape(&values);
+    let kept_keys = ffi::slice(
+        &keys,
+        &[0, 0, excess, 0],
+        &[k_shape[0], k_shape[1], live, k_shape[3]],
+    );
+    let kept_values = ffi::slice(
+        &values,
+        &[0, 0, excess, 0],
+        &[v_shape[0], v_shape[1], live, v_shape[3]],
+    );
+    // The fetched arrays are views of the cache buffers, so drop them before
+    // the trim reallocates; the kept slices hold their own references.
+    drop((keys, values));
+    cache.trim_front(excess);
+    (kept_keys, kept_values)
+}
+
+/// Sliding-window and causal attention of the DSpark layouts (issue #3261),
+/// kept in their own file so this module stays readable.
+#[cfg(test)]
+#[path = "attention_sliding_tests.rs"]
+mod sliding_tests;
 
 #[cfg(test)]
 mod tests {
@@ -329,11 +416,11 @@ mod tests {
             block_size: 4,
             mask_token_id: 31,
             target_layer_ids: vec![0],
-            num_target_layers: 1,
+            num_target_layers: Some(1),
             rope_is_neox_style,
             ..DFlashConfig::default()
         };
-        DFlashAttention::from_weights(&weights, "self_attn", &cfg, 64, 4).unwrap()
+        DFlashAttention::from_weights(&weights, "self_attn", &cfg, 0, 64, 4).unwrap()
     }
 
     /// `rope_is_neox_style: false` (the DSpark checkpoints, issue #1339)

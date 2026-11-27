@@ -1214,7 +1214,8 @@ pub fn create_causal_mask_with_window(
 
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
-/// Used by: Laguna DFlash (`drafter/laguna_dflash/attention.rs`),
+/// Used by: Laguna DFlash (`drafter/laguna_dflash/attention.rs`), the causal
+/// layers of a DSpark drafter (`drafter/dflash/attention.rs`, issue #3261),
 /// `prefill_sdpa.rs`, `lib.rs`'s shared dispatch for a
 /// softcapped single-pass prefill longer than the sliding window (#413), and
 /// `window_sdpa::legacy_causal_window_mask`, the legacy arm of the native

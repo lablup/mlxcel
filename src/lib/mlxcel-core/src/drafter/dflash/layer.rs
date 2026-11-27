@@ -59,11 +59,12 @@ impl DFlashDecoderLayer {
         ffi::add(&h, &mlp_out)
     }
 
-    /// Load one decoder layer's weights from the map.
+    /// Load the weights of drafter layer `layer_idx` from the map.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         config: &DFlashConfig,
+        layer_idx: usize,
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
@@ -71,6 +72,7 @@ impl DFlashDecoderLayer {
             weights,
             &format!("{prefix}.self_attn"),
             config,
+            layer_idx,
             group_size,
             bits,
         )?;

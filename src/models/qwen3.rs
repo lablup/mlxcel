@@ -644,6 +644,30 @@ impl Qwen3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_hidden_capturing(input_ids, input_embeddings, caches, mask, &[], &mut [])
+    }
+
+    /// [`Self::forward_hidden`], also copying the residual stream after each
+    /// layer named in `capture_layer_ids` into the matching slot of
+    /// `captured` (before the final norm), for a DSpark drafter's `fc`
+    /// projection (issue #3261).
+    ///
+    /// One body for both, so a speculative verify block and a generation
+    /// step build the same graph: the capture keeps a handle to a value the
+    /// forward computes anyway and changes nothing it computes. A layer id
+    /// at or past the depth leaves its slot `None`.
+    ///
+    /// Used by: [`Self::forward_hidden`], the DSpark speculative target
+    /// (`models::dense_speculative`).
+    pub(crate) fn forward_hidden_capturing(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        capture_layer_ids: &[usize],
+        captured: &mut [Option<UniquePtr<MlxArray>>],
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeddings) = input_embeddings {
             mlxcel_core::copy(embeddings)
         } else {
@@ -654,6 +678,7 @@ impl Qwen3Model {
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            crate::models::dense_speculative::capture_layer(i, &h, capture_layer_ids, captured);
             pipeline_hint(&h, i, n);
         }
 
@@ -699,7 +724,7 @@ impl Qwen3Model {
     }
 
     /// LM head (or the tied embedding) over normalized hidden states.
-    fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
         if let Some(ref lm_head) = self.lm_head {
             lm_head.forward(h)
         } else {
@@ -937,6 +962,19 @@ impl LanguageModel for Qwen3Model {
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.get_embed_tokens(input_ids))
+    }
+
+    /// The embedding table a DSpark drafter measures the target vocabulary
+    /// on and, when its checkpoint ships none, borrows (issue #3261).
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+
+    /// The untied output head, for a drafter that ships no head of its own;
+    /// `None` on a tied checkpoint, where the drafter projects through the
+    /// embedding table as this model does.
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        self.lm_head.as_ref().map(UnifiedLinear::clone_shared)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

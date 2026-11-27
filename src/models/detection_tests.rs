@@ -1478,6 +1478,20 @@ fn dflash_drafter_is_rejected_on_either_marker_alone() {
             "dspark_architecture_only",
             r#"{"architectures": ["Lfm2DSparkDraftModel"], "model_type": "qwen3"}"#,
         ),
+        // The OpenBMB DSpark drafters (issue #3261) declare `model_type:
+        // qwen3` and no `dflash_config`; without their architecture marker
+        // the directory would route to `Qwen3Model::load`.
+        (
+            "openbmb_dspark_architecture_only",
+            r#"{"architectures": ["Qwen3DSparkModel"], "model_type": "qwen3"}"#,
+        ),
+        // The Red Hat Speculators DSpark drafters keep `model_type` under
+        // `transformer_layer_config` and are marked at the root.
+        (
+            "speculators_dspark_marker",
+            r#"{"architectures": ["DSparkDraftModel"], "speculators_model_type": "dspark",
+                "transformer_layer_config": {"model_type": "qwen3"}}"#,
+        ),
     ] {
         let model_dir = temp_path(name);
         fs::create_dir_all(&model_dir).unwrap();

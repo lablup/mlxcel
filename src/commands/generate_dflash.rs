@@ -26,8 +26,10 @@
 //!
 //! Targets: Laguna ([`LoadedModel::Laguna`]), Inkling 2
 //! ([`LoadedModel::Inkling2VLM`], its bundled DSpark drafter, issue #3374;
-//! an image prompt is prefilled from its merged embeddings) and Raon-1 mini
-//! ([`LoadedModel::Raon1Mini`], its DFlash2 drafter, issue #3436). Qwen 3.5 DFlash
+//! an image prompt is prefilled from its merged embeddings), Raon-1 mini
+//! ([`LoadedModel::Raon1Mini`], its DFlash2 drafter, issue #3436) and dense
+//! Qwen3 and Llama ([`LoadedModel::Qwen3`], [`LoadedModel::Llama`], a Red Hat
+//! Speculators or OpenBMB DSpark drafter, issue #3261). Qwen 3.5 DFlash
 //! keeps its server-only status (its offline arm was never wired).
 
 use std::path::Path;
@@ -47,7 +49,11 @@ use mlxcel_core::sampling::{LogprobsConfig, TokenBiasMap, sample_token_optimized
 pub(super) fn offline_dflash_target_supported(model: &LoadedModel) -> bool {
     matches!(
         model,
-        LoadedModel::Laguna(_) | LoadedModel::Inkling2VLM(_) | LoadedModel::Raon1Mini(_)
+        LoadedModel::Laguna(_)
+            | LoadedModel::Inkling2VLM(_)
+            | LoadedModel::Raon1Mini(_)
+            | LoadedModel::Qwen3(_)
+            | LoadedModel::Llama(_)
     )
 }
 
@@ -120,11 +126,45 @@ pub(super) fn run_offline_dflash(
                 token_bias,
             )
         }
+        LoadedModel::Qwen3(target) => {
+            if vlm_embeddings.is_some() {
+                return Err(anyhow!(
+                    "Qwen3 is a text model; --draft-kind dflash takes a text prompt"
+                ));
+            }
+            run_dense(
+                target,
+                "Qwen3",
+                draft_model_path,
+                prompt_tokens,
+                max_tokens,
+                sampling_config,
+                block_size,
+                token_bias,
+            )
+        }
+        LoadedModel::Llama(target) => {
+            if vlm_embeddings.is_some() {
+                return Err(anyhow!(
+                    "this Llama checkpoint is a text model; --draft-kind dflash takes a text \
+                     prompt"
+                ));
+            }
+            run_dense(
+                target,
+                "Llama",
+                draft_model_path,
+                prompt_tokens,
+                max_tokens,
+                sampling_config,
+                block_size,
+                token_bias,
+            )
+        }
         _ => Err(anyhow!(
-            "--draft-kind dflash is only wired offline for Laguna, Inkling 2 and Raon-1 mini \
-             targets (the \
-             Qwen 3.5 DFlash pairing runs through mlxcel-server); omit --draft-model to run \
-             classic decode"
+            "--draft-kind dflash is only wired offline for Laguna, Inkling 2, Raon-1 mini, \
+             Qwen3 and Llama targets (the Qwen 3.5 DFlash pairing runs through \
+             mlxcel-server); omit --draft-model to run classic decode"
         )),
     }
 }
@@ -250,6 +290,80 @@ fn run_laguna(
         wrapper.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
     drive_round_loop(
         wrapper,
+        drafter,
+        &mut caches,
+        verify_out,
+        prompt_tokens,
+        max_tokens,
+        sampling_config,
+        block_size,
+        token_bias,
+        prefill_start,
+    )
+}
+
+/// A dense Qwen3 or Llama target drafting with a DSpark drafter (issue
+/// #3261): `RedHatAI/Qwen3-4B-speculator.dspark` on `Qwen/Qwen3-4B`,
+/// `openbmb/MiniCPM5-2B-DSpark` on `openbmb/MiniCPM5-2B`.
+///
+/// The gates are the server burst's, in its order: the measured
+/// block-versus-chain probe before any drafter IO, then the drafter's own
+/// pairing gate (`validate_target_compat`, inside [`load_paired_drafter`]),
+/// then the target's tap and vocabulary bounds. The prefill forwards the
+/// pieces classic `mlxcel generate` forwards, so the caches every later
+/// token is computed from are the classic ones.
+#[allow(clippy::too_many_arguments)]
+fn run_dense<T>(
+    target: &T,
+    family: &'static str,
+    draft_model_path: &Path,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampling_config: &SamplingConfig,
+    block_size: usize,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)>
+where
+    T: mlxcel::models::dense_speculative::DenseSpeculativeTarget,
+{
+    // Fails closed; `MLXCEL_MTP_ALLOW_INEXACT=1` engages anyway.
+    if !target.dflash_exactness_allows(block_size) {
+        return Err(inexact_error(family, block_size));
+    }
+    let target_lm: &dyn LanguageModel = target;
+    // These targets name no required drafter family (as Qwen 3.5 does not),
+    // so the family half of the gate admits every DFlash-kind drafter and
+    // the numbers below tell a mismatched one apart.
+    let (drafter, capture_layer_ids) =
+        load_paired_drafter(draft_model_path, target_lm, |_| true, String::new)?;
+    if let Some(reason) = target.dflash_drafter_pairing_error(drafter.as_ref()) {
+        return Err(anyhow!("DFlash drafter incompatible with target: {reason}"));
+    }
+    // A greedy-only drafter (DSpark) has no stochastic acceptance rule, and
+    // the round loop's verify argmax would return a sampling request greedy.
+    refuse_sampling(sampling_config)?;
+    // The round loop's per-position verify argmax applies no token bias
+    // (only the first bonus goes through `sample_token_optimized`), so a
+    // bias would be honoured for one token and dropped for the rest.
+    if !token_bias.is_empty() {
+        return Err(anyhow!(
+            "--draft-kind dflash cannot honour a token bias (--lang-bias or a model's \
+             suppressed-token set): the verify argmax applies none. Drop --draft-model to \
+             decode classically with the bias."
+        ));
+    }
+    println!("DFlash drafter loaded and bound (block_size = {block_size}).");
+    let prefill_start = Instant::now();
+    let mut caches = LanguageModel::make_caches(target);
+    let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let verify_out = target.dflash_prefill_planned(
+        &prompt_arr,
+        &mut caches,
+        &capture_layer_ids,
+        mlxcel_core::prefill_plan::prefill_chunk_len(),
+    );
+    drive_round_loop(
+        target,
         drafter,
         &mut caches,
         verify_out,

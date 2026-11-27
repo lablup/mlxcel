@@ -31,6 +31,13 @@
 //! (`DFlashDraftModel::draft_block_dspark_array`), in being greedy-only,
 //! and in the block-size policy (`configured_block_size` /
 //! `prefer_requested_block_size`).
+//!
+//! It also serves the Red Hat Speculators and OpenBMB DSpark drafters for
+//! dense Qwen3 and Llama targets (issue #3261). Those add sliding causal
+//! draft attention, a draft head the checkpoint may ship itself, and a
+//! reduced draft vocabulary mapped back through `d2t`; all three are decided
+//! by the config and handled inside the model, so this wrapper is unchanged
+//! for them apart from the pairing gate below.
 
 use crate::cache::KVCache;
 use crate::drafter::{Drafter, DrafterError, DrafterKind};
@@ -335,13 +342,14 @@ pub(crate) fn dspark_config_pairing_error(
             "DSpark drafter target_layer_ids {ids:?} must be non-empty and strictly increasing"
         ));
     }
-    if ids
-        .last()
-        .is_some_and(|&last| last >= config.num_target_layers)
+    // Only when the checkpoint declares a depth. The Speculators layout
+    // declares none (issue #3261), and its taps are then bounded by the bound
+    // target's own depth in `dspark_target_pairing_error`.
+    if let Some(depth) = config.num_target_layers
+        && ids.last().is_some_and(|&last| last >= depth)
     {
         return Some(format!(
-            "DSpark drafter target_layer_ids {ids:?} reach past num_target_layers = {}",
-            config.num_target_layers
+            "DSpark drafter target_layer_ids {ids:?} reach past num_target_layers = {depth}"
         ));
     }
     let expected = ids.len() * config.hidden_size;
@@ -401,6 +409,13 @@ pub(crate) fn dspark_config_pairing_error(
 /// target does not hand out a tied embedding to measure, in which case the
 /// vocabulary check is skipped rather than guessed.
 ///
+/// Every mismatch names both numbers. The tap check runs against the
+/// target's actual depth whether or not the config declares
+/// `num_target_layers`: a config that declares none (the Speculators layout,
+/// issue #3261) has no other bound on its taps, and a tap at or past the
+/// depth captures nothing, which the target's verify forward would hand the
+/// drafter as a zero slab.
+///
 /// Used by: [`DFlashDrafter::validate_target_compat`].
 pub(crate) fn dspark_target_pairing_error(
     config: &DFlashConfig,
@@ -413,17 +428,33 @@ pub(crate) fn dspark_target_pairing_error(
             "DSpark drafter is incompatible with this target: drafter hidden_size = {} but the \
              target's hidden size = {target_hidden}. The drafter's fc projection reads the \
              target's residual streams, so these must be equal (pair the LFM2.5-2.6B target with \
-             LFM2.5-2.6B-DSpark, the 8B-A1B target with 8B-A1B-DSpark, and so on).",
+             LFM2.5-2.6B-DSpark, Qwen3-4B with Qwen3-4B-speculator.dspark, MiniCPM5-2B with \
+             MiniCPM5-2B-DSpark, and so on).",
             config.hidden_size
         ));
     }
-    if target_layers != config.num_target_layers {
+    if let Some(declared) = config.num_target_layers
+        && target_layers != declared
+    {
         return Some(format!(
-            "DSpark drafter is incompatible with this target: drafter num_target_layers = {} but \
-             the target has {target_layers} layers. The captured target_layer_ids {:?} index \
-             into the target's layer stack, so the drafter must be the one published for this \
-             exact target.",
-            config.num_target_layers, config.target_layer_ids
+            "DSpark drafter is incompatible with this target: drafter num_target_layers = \
+             {declared} but the target has {target_layers} layers. The captured \
+             target_layer_ids {:?} index into the target's layer stack, so the drafter must be \
+             the one published for this exact target.",
+            config.target_layer_ids
+        ));
+    }
+    if let Some(&tap) = config
+        .target_layer_ids
+        .iter()
+        .find(|&&tap| tap >= target_layers)
+    {
+        return Some(format!(
+            "DSpark drafter is incompatible with this target: target_layer_ids {:?} taps layer \
+             index {tap} but the target has {target_layers} layers (valid indices 0..={}). The \
+             drafter must be the one published for this exact target.",
+            config.target_layer_ids,
+            target_layers.saturating_sub(1)
         ));
     }
     if let Some(vocab) = target_vocab
@@ -431,8 +462,9 @@ pub(crate) fn dspark_target_pairing_error(
     {
         return Some(format!(
             "DSpark drafter vocabulary is incompatible with this target: drafter vocab_size = {} \
-             but the target's tied LM head emits {vocab} logits. The Markov head is a transition \
-             table over the target vocabulary, so the two must match.",
+             but the target's embedding table, used as a projection, emits {vocab} logits. The \
+             drafter proposes target token ids and its Markov head is a transition table over \
+             the target vocabulary, so the two must match.",
             config.vocab_size
         ));
     }
@@ -604,6 +636,10 @@ impl Drafter for DFlashDrafter {
 
     fn dflash_target_layer_ids(&self) -> Option<&[usize]> {
         Some(&self.model.config.target_layer_ids)
+    }
+
+    fn dflash_vocab_size(&self) -> Option<usize> {
+        Some(self.model.config.vocab_size)
     }
 
     /// DSpark (issue #1339): the verify width the checkpoint runs at by
@@ -1105,7 +1141,7 @@ mod tests {
             mask_token_id: 125_017,
             markov_rank: 256,
             target_layer_ids: vec![2, 9, 17, 21, 27],
-            num_target_layers: 30,
+            num_target_layers: Some(30),
             ..DFlashConfig::default()
         }
     }

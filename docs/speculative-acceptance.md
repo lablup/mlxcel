@@ -93,6 +93,7 @@ acceptance-optimal rule: see the next section.
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode |
+| DFlash round loop (Speculators or OpenBMB DSpark drafter on a dense Qwen3 or Llama target, #3261) | argmax (lossless here, probe-gated) | refused offline, declines to classic decode in the server |
 | DFlash round loop (Inkling 2 bundled DSpark drafter, #3374) | argmax (lossless here, probe-gated) | refused offline, declines to classic decode in the server |
 | DFlash round loop (Muse Glimmer assistant drafter) | argmax (lossless here, probe-gated) | argmax-against-argmax (**biased**) |
 
@@ -186,11 +187,15 @@ because they borrow both from the target when they bind. The LFM2 DSpark drafter
 (#1339) and the Muse Glimmer assistant (#1343) have the same shape. Laguna and
 Inkling 2 have offline arms; Inkling 2's drafter is the `mtp.safetensors` shipped
 in the target checkpoint, so `--draft-model` names the target directory itself
-and the pairing is detected from its `mtp_config` (#3374).
+and the pairing is detected from its `mtp_config` (#3374). Dense Qwen3 and Llama
+targets have an offline arm too, for the Red Hat Speculators and OpenBMB DSpark
+drafters (#3261); the Speculators checkpoint ships its own `embed_tokens` and
+`lm_head`, the OpenBMB one borrows both.
 
 The discriminator is structural (a `dflash_config` block and/or
-`architectures: ["DFlashDraftModel"]` or `["Lfm2DSparkDraftModel"]` in the
-drafter's `config.json`, or the Muse assistant's own
+`architectures: ["DFlashDraftModel"]`, `["Lfm2DSparkDraftModel"]` or
+`["Qwen3DSparkModel"]` in the drafter's `config.json`, a root
+`speculators_model_type: "dspark"`, or the Muse assistant's own
 `model_type: muse_glimmer_assistant` / `["MuseGlimmerAssistantModel"]`), not
 the resolved `DrafterKind`. An ordinary full model auto-resolves to `dflash` too, so the resolved kind cannot tell
 the two apart. The same structural check runs inside `get_model_type`, so

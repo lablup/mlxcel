@@ -35,6 +35,21 @@
 //! Upstream reference: 38 lines of Python including the JSON-flattening
 //! convention. The Rust port keeps the same flattening semantics for
 //! `mask_token_id` and `target_layer_ids`.
+//!
+//! Two further DSpark layouts load through the same struct (issue #3261,
+//! upstream `mlx_vlm/speculative/drafters/dspark/config.py`,
+//! Neywa-Labs/mlx-vlm#2676):
+//!
+//! - **Speculators** (`RedHatAI/Qwen3-4B-speculator.dspark`,
+//!   `speculators_model_type: "dspark"`): the draft backbone sits under
+//!   `transformer_layer_config` and the target taps are
+//!   `aux_hidden_state_layer_ids`.
+//! - **OpenBMB** (`openbmb/MiniCPM5-2B-DSpark`, `architectures:
+//!   ["Qwen3DSparkModel"]`): a flat root config with `projector_type:
+//!   "dspark"`.
+//!
+//! Neither carries a `dflash_config` block; [`DFlashConfig::from_json`]
+//! normalizes both, and [`is_dflash_drafter_config`] recognizes both markers.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -121,9 +136,17 @@ pub struct DFlashConfig {
     #[serde(default = "default_target_layer_ids")]
     pub target_layer_ids: Vec<usize>,
 
-    /// Total layer count of the target's transformer stack (32 for Qwen 3.5).
+    /// Total layer count of the target's transformer stack (32 for Qwen 3.5),
+    /// when the checkpoint declares it.
+    ///
+    /// A plain DFlash or LFM2 DSpark config that omits the key keeps the
+    /// Qwen 3.5 default of `Some(32)`. The Speculators layout never declares
+    /// it (and the OpenBMB layout may not), and there it stays `None`: the
+    /// last tapped layer need not be the target's last layer, so the depth is
+    /// not derived as `max(target_layer_ids) + 1`; the taps are validated
+    /// against the bound target's own depth instead (issue #3261).
     #[serde(default = "default_num_target_layers")]
-    pub num_target_layers: usize,
+    pub num_target_layers: Option<usize>,
 
     /// Rank of the DSpark low-rank Markov token-transition head
     /// (`markov_head.markov_w1` / `markov_w2`, issue #1339). `0`, the
@@ -151,7 +174,60 @@ pub struct DFlashConfig {
     /// on it).
     #[serde(default)]
     pub enable_confidence_head: bool,
+
+    /// Size of the vocabulary the DSpark draft head scores (issue #3261).
+    /// `None` means the target vocabulary ([`Self::draft_vocab`]). When it is
+    /// smaller than `vocab_size` the drafter owns an `lm_head` of
+    /// `[draft_vocab, hidden]`, `markov_w2` projects to `draft_vocab`, and a
+    /// sampled draft id `t` becomes the target id `t + d2t[t]`.
+    /// [`DFlashConfig::from_json`] refuses a value outside `1..=vocab_size`.
+    #[serde(default)]
+    pub draft_vocab_size: Option<usize>,
+
+    /// Attention type of each drafter layer: `full_attention` or
+    /// `sliding_attention` (issue #3261). Empty means every layer attends
+    /// the whole context, which is what every checkpoint before the
+    /// Speculators layout does.
+    #[serde(default)]
+    pub layer_types: Vec<String>,
+
+    /// Window of the `sliding_attention` layers: a proposal row attends the
+    /// newest `sliding_window` positions, itself included, so the context
+    /// cache of such a layer keeps `sliding_window - 1` rows.
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
+
+    /// With `is_causal` unset, whether a sliding layer still attends the
+    /// proposal block bidirectionally. Mirrors upstream `DFlashAttention`.
+    #[serde(default)]
+    pub sliding_window_non_causal: bool,
+
+    /// Whether proposal rows attend causally. `Some` is an explicit choice
+    /// and wins; `None` (what the Speculators layout sets) makes a layer
+    /// causal exactly when it is sliding and `sliding_window_non_causal` is
+    /// false. Defaults to `Some(false)`, the DFlash behaviour.
+    #[serde(default = "default_is_causal")]
+    pub is_causal: Option<bool>,
+
+    /// Whether the first proposal is read off the anchor row (`true`, every
+    /// published checkpoint) or the anchor row is scaffolding and the
+    /// proposals start one row later (`false`).
+    #[serde(default = "default_sample_from_anchor")]
+    pub sample_from_anchor: bool,
+
+    /// Whether the checkpoint `block_size` already counts the anchor row, so
+    /// the DSpark verify width is `block_size` rather than `block_size + 1`.
+    /// Set by `dspark_bonus_anchor`, and by [`DFlashConfig::from_json`] for a
+    /// Speculators checkpoint with `sample_from_anchor: false`.
+    #[serde(default)]
+    pub dspark_bonus_anchor: bool,
 }
+
+/// `layer_types` value of a drafter layer that attends the whole context.
+pub const LAYER_TYPE_FULL_ATTENTION: &str = "full_attention";
+
+/// `layer_types` value of a drafter layer that attends a sliding window.
+pub const LAYER_TYPE_SLIDING_ATTENTION: &str = "sliding_attention";
 
 fn default_hidden_size() -> usize {
     2560
@@ -198,8 +274,14 @@ fn default_mask_token_id() -> i32 {
 fn default_target_layer_ids() -> Vec<usize> {
     DEFAULT_TARGET_LAYER_IDS.to_vec()
 }
-fn default_num_target_layers() -> usize {
-    32
+fn default_num_target_layers() -> Option<usize> {
+    Some(32)
+}
+fn default_is_causal() -> Option<bool> {
+    Some(false)
+}
+fn default_sample_from_anchor() -> bool {
+    true
 }
 fn default_rope_is_neox_style() -> bool {
     true
@@ -252,6 +334,13 @@ impl Default for DFlashConfig {
             rope_is_neox_style: default_rope_is_neox_style(),
             runtime_block_size: None,
             enable_confidence_head: false,
+            draft_vocab_size: None,
+            layer_types: Vec::new(),
+            sliding_window: None,
+            sliding_window_non_causal: false,
+            is_causal: default_is_causal(),
+            sample_from_anchor: default_sample_from_anchor(),
+            dspark_bonus_anchor: false,
         }
     }
 }
@@ -278,16 +367,31 @@ impl DFlashConfig {
     pub fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         // Clone the input so we can rewrite top-level keys from the
         // nested `dflash_config` sub-object.
-        let mut flat = match value {
-            serde_json::Value::Object(map) => map.clone(),
+        let root = match value {
+            serde_json::Value::Object(map) => map,
             _ => {
                 return Err(format!(
                     "DFlashConfig::from_json expected a JSON object, got: {value}"
                 ));
             }
         };
+        // Speculators keeps the draft backbone (hidden size, heads, RoPE,
+        // `layer_types`, `sliding_window`, `vocab_size`) under
+        // `transformer_layer_config`; a root key of the same name wins, as in
+        // upstream `{**transformer_layer_config, **params}`.
+        let mut flat = match root.get("transformer_layer_config") {
+            Some(serde_json::Value::Object(backbone)) => {
+                let mut merged = backbone.clone();
+                merged.extend(root.iter().map(|(k, v)| (k.clone(), v.clone())));
+                merged
+            }
+            _ => root.clone(),
+        };
 
-        if let Some(serde_json::Value::Object(dflash_cfg)) = flat.remove("dflash_config") {
+        let speculators = is_speculators_dspark_config(value);
+        let official_dspark = speculators || has_architecture(value, OPENBMB_DSPARK_ARCHITECTURE);
+        let nested = flat.remove("dflash_config");
+        if let Some(serde_json::Value::Object(dflash_cfg)) = &nested {
             if let Some(v) = dflash_cfg.get("mask_token_id") {
                 flat.insert("mask_token_id".to_string(), v.clone());
             }
@@ -301,17 +405,165 @@ impl DFlashConfig {
             if let Some(v) = dflash_cfg.get("num_target_layers") {
                 flat.insert("num_target_layers".to_string(), v.clone());
             }
+        } else if official_dspark {
+            // The Speculators and OpenBMB layouts carry no `dflash_config`
+            // (issue #3261). Upstream synthesizes `{projector_type: dspark}`
+            // for them; what that changes here is the three defaults below.
+            if let Some(v) = flat.get("aux_hidden_state_layer_ids").cloned() {
+                flat.insert("target_layer_ids".to_string(), v);
+            }
+            // Never the Qwen 3.5 default of 32, and never `max(taps) + 1`:
+            // absent means "validate the taps against the bound target".
+            flat.entry("num_target_layers".to_string())
+                .or_insert(serde_json::Value::Null);
+            if speculators {
+                // Null is a value here, not an omission: causality then
+                // follows each layer's type.
+                flat.entry("is_causal".to_string())
+                    .or_insert(serde_json::Value::Null);
+                if flat
+                    .get("sample_from_anchor")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                {
+                    flat.insert(
+                        "dspark_bonus_anchor".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+            }
         }
 
         // transformers 5 keeps `rope_theta` only under `rope_parameters`
         // (#2443); without the lift the drafter would run at the default base.
         let mut flat = serde_json::Value::Object(flat);
         crate::rope_parameters::lift_rope_parameters(&mut flat);
-        serde_json::from_value(flat).map_err(|e| format!("Failed to parse DFlashConfig: {e}"))
+        if official_dspark && let Some(reason) = unsupported_dspark_field(&flat) {
+            return Err(format!("Failed to parse DFlashConfig: {reason}"));
+        }
+        let config: Self = serde_json::from_value(flat)
+            .map_err(|e| format!("Failed to parse DFlashConfig: {e}"))?;
+        config.validate_draft_shape()?;
+        Ok(config)
     }
 
-    /// Whether this checkpoint is an LFM2 / LFM2.5 DSpark drafter: a DFlash
-    /// backbone plus a low-rank Markov token-transition head (issue #1339).
+    /// Load-time checks on the fields issue #3261 added, for every layout.
+    /// Each refuses a value the drafter forward would otherwise turn into an
+    /// out-of-range gather or an MLX shape throw (which crosses the cxx
+    /// bridge as a process abort, not a load error).
+    ///
+    /// Used by: [`Self::from_json`].
+    fn validate_draft_shape(&self) -> Result<(), String> {
+        if let Some(draft_vocab) = self.draft_vocab_size
+            && !(1..=self.vocab_size).contains(&draft_vocab)
+        {
+            return Err(format!(
+                "Failed to parse DFlashConfig: draft_vocab_size {draft_vocab} is outside \
+                 1..={} (vocab_size); a draft id maps into the target vocabulary, so the \
+                 draft vocabulary cannot be empty or larger than it",
+                self.vocab_size
+            ));
+        }
+        // The layer-type fields are read for a DSpark drafter only. A plain
+        // DFlash checkpoint keeps attending its whole context whatever it
+        // declares here, exactly as before issue #3261, so its config is not
+        // held to these rules either.
+        if !self.is_dspark() {
+            return Ok(());
+        }
+        if !self.layer_types.is_empty() {
+            if self.layer_types.len() != self.num_hidden_layers {
+                return Err(format!(
+                    "Failed to parse DFlashConfig: layer_types has {} entries for \
+                     num_hidden_layers = {}",
+                    self.layer_types.len(),
+                    self.num_hidden_layers
+                ));
+            }
+            if let Some(unknown) = self.layer_types.iter().find(|t| {
+                t.as_str() != LAYER_TYPE_FULL_ATTENTION
+                    && t.as_str() != LAYER_TYPE_SLIDING_ATTENTION
+            }) {
+                return Err(format!(
+                    "Failed to parse DFlashConfig: layer type {unknown:?} is neither \
+                     {LAYER_TYPE_FULL_ATTENTION:?} nor {LAYER_TYPE_SLIDING_ATTENTION:?}"
+                ));
+            }
+        }
+        if self.has_sliding_layers() {
+            match self.sliding_window {
+                Some(window) if (2..=MAX_SLIDING_WINDOW).contains(&window) => {}
+                other => {
+                    return Err(format!(
+                        "Failed to parse DFlashConfig: sliding_window {other:?} is outside \
+                         2..={MAX_SLIDING_WINDOW} and layer_types declares a \
+                         {LAYER_TYPE_SLIDING_ATTENTION} layer; a proposal row needs at least \
+                         one context position inside its window, and the window sizes the \
+                         context cache"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The vocabulary the draft head scores: `draft_vocab_size`, or the
+    /// target vocabulary when the checkpoint declares none.
+    pub fn draft_vocab(&self) -> usize {
+        self.draft_vocab_size.unwrap_or(self.vocab_size)
+    }
+
+    /// Whether the draft head scores fewer ids than the target vocabulary.
+    pub fn has_reduced_draft_vocab(&self) -> bool {
+        self.draft_vocab() != self.vocab_size
+    }
+
+    /// Whether any layer of a DSpark drafter is a `sliding_attention` layer.
+    /// Always `false` for a plain DFlash checkpoint; see
+    /// [`Self::layer_sliding_window`].
+    pub fn has_sliding_layers(&self) -> bool {
+        self.is_dspark()
+            && self
+                .layer_types
+                .iter()
+                .any(|t| t == LAYER_TYPE_SLIDING_ATTENTION)
+    }
+
+    /// The sliding window of drafter layer `layer`, or `None` for a
+    /// full-attention layer.
+    ///
+    /// Read for a DSpark drafter only (issue #3261). A plain DFlash
+    /// checkpoint answers `None` for every layer whatever its `layer_types`
+    /// says, which is how the DFlash forward has always treated it: the
+    /// published Qwen 3.5 DFlash drafters declare sliding layers, and
+    /// narrowing their attention is a separate, separately measured change.
+    pub fn layer_sliding_window(&self, layer: usize) -> Option<usize> {
+        let sliding = self.is_dspark()
+            && self
+                .layer_types
+                .get(layer)
+                .is_some_and(|t| t == LAYER_TYPE_SLIDING_ATTENTION);
+        if sliding { self.sliding_window } else { None }
+    }
+
+    /// Whether drafter layer `layer` masks its proposal rows causally,
+    /// following upstream `DFlashAttention`: an explicit `is_causal` wins;
+    /// when it is unset the layer is causal exactly when it is sliding and
+    /// `sliding_window_non_causal` is false. DSpark only, for the reason
+    /// given on [`Self::layer_sliding_window`].
+    pub fn layer_is_causal(&self, layer: usize) -> bool {
+        if !self.is_dspark() {
+            return false;
+        }
+        match self.is_causal {
+            Some(causal) => causal,
+            None => self.layer_sliding_window(layer).is_some() && !self.sliding_window_non_causal,
+        }
+    }
+
+    /// Whether this checkpoint is a DSpark drafter: a DFlash backbone plus a
+    /// low-rank Markov token-transition head (the LFM2 / LFM2.5 drafters of
+    /// issue #1339, and the Speculators and OpenBMB ones of issue #3261).
     ///
     /// Keyed on `markov_rank > 0` rather than on `architectures`, because the
     /// head's presence is what changes the draft step (all-position logits
@@ -324,15 +576,20 @@ impl DFlashConfig {
     /// Verify width in rows, anchor included, at the trained block size.
     ///
     /// A DSpark `block_size` is the proposal count gamma (9 on the published
-    /// checkpoints), so the verify width is `gamma + 1`. A DFlash
+    /// LFM2 checkpoints, 7 on the Speculators and OpenBMB ones), so the verify
+    /// width is `gamma + 1`, unless the checkpoint says its block already
+    /// includes the anchor ([`Self::dspark_bonus_anchor`]). A DFlash
     /// `block_size` already counts the bonus row, so it is the width itself.
     pub fn verify_width(&self) -> usize {
-        if self.is_dspark() {
+        if self.is_dspark() && !self.dspark_bonus_anchor {
             // Saturating: a config is checkpoint-supplied, and `usize::MAX`
             // here would panic in a debug build and wrap to a zero-row verify
             // width in a release one.
             self.block_size.saturating_add(1)
         } else {
+            // A DFlash `block_size`, and a DSpark one whose checkpoint counts
+            // the anchor (`dspark_bonus_anchor`, or Speculators with
+            // `sample_from_anchor: false`), is the width itself.
             self.block_size
         }
     }
@@ -379,6 +636,106 @@ pub const DFLASH_DRAFT_ARCHITECTURE: &str = "DFlashDraftModel";
 /// carry a `dflash_config` block, so either marker identifies them.
 pub const DSPARK_DRAFT_ARCHITECTURE: &str = "Lfm2DSparkDraftModel";
 
+/// Architecture name the OpenBMB DSpark drafters declare
+/// (`openbmb/MiniCPM5-2B-DSpark`, issue #3261). Their config is flat and
+/// carries no `dflash_config` block, so this is their only marker.
+pub const OPENBMB_DSPARK_ARCHITECTURE: &str = "Qwen3DSparkModel";
+
+/// Value of `speculators_model_type` on a Red Hat Speculators DSpark drafter
+/// (`RedHatAI/Qwen3-4B-speculator.dspark`, issue #3261). Its `architectures`
+/// entry is `DSparkDraftModel`, which is not keyed on: this field is what
+/// upstream `DSparkConfig.from_dict` reads.
+pub const SPECULATORS_DSPARK_MODEL_TYPE: &str = "dspark";
+
+/// Largest sliding window a DSpark drafter layer may declare. The window
+/// sizes the per-layer context cache and the `[block, window + block]` mask,
+/// so an absurd checkpoint-supplied value would be an allocation rather than
+/// a load error; the published Speculators drafter declares 2048.
+pub const MAX_SLIDING_WINDOW: usize = 1 << 20;
+
+/// Whether `config.architectures` lists `name`.
+///
+/// Used by: [`DFlashConfig::from_json`], [`is_dflash_drafter_config`].
+fn has_architecture(config: &serde_json::Value, name: &str) -> bool {
+    config
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| architectures.iter().any(|arch| arch.as_str() == Some(name)))
+}
+
+/// Whether `config` is a Red Hat Speculators DSpark drafter config.
+///
+/// Used by: [`DFlashConfig::from_json`], [`is_dflash_drafter_config`].
+fn is_speculators_dspark_config(config: &serde_json::Value) -> bool {
+    config
+        .get("speculators_model_type")
+        .and_then(serde_json::Value::as_str)
+        == Some(SPECULATORS_DSPARK_MODEL_TYPE)
+}
+
+/// Why a Speculators or OpenBMB DSpark config (already flattened) asks for
+/// something this port does not implement, or `None`.
+///
+/// Upstream `DSparkConfig.validate` refuses the first three (an activation,
+/// a Markov head type or a projector type it does not know). The other four
+/// (attention sinks, logit softcapping, a RoPE scaling scheme, a bounded
+/// draft window) upstream implements and this port does not; neither
+/// published checkpoint sets them. Refusing by name beats loading a drafter
+/// that silently drafts differently from the reference.
+///
+/// Used by: [`DFlashConfig::from_json`].
+fn unsupported_dspark_field(flat: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| flat.get(key).and_then(serde_json::Value::as_str);
+    if let Some(act) = text("hidden_act")
+        && act != "silu"
+    {
+        return Some(format!(
+            "DSpark drafter hidden_act {act:?} is not supported (only \"silu\")"
+        ));
+    }
+    if let Some(head) = text("markov_head_type")
+        && head != "vanilla"
+    {
+        return Some(format!(
+            "DSpark drafter markov_head_type {head:?} is not supported (only \"vanilla\")"
+        ));
+    }
+    if let Some(projector) = text("projector_type")
+        && projector != "dspark"
+    {
+        return Some(format!(
+            "DSpark drafter projector_type {projector:?} is not supported (only \"dspark\")"
+        ));
+    }
+    if flat
+        .get("attention_sink_bias")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Some("DSpark drafter attention_sink_bias is not supported".to_string());
+    }
+    if flat
+        .get("final_logit_softcapping")
+        .is_some_and(|v| !v.is_null())
+    {
+        return Some("DSpark drafter final_logit_softcapping is not supported".to_string());
+    }
+    if flat.get("rope_scaling").is_some_and(|v| !v.is_null()) {
+        return Some(
+            "DSpark drafter rope_scaling (a non-default rope_parameters scheme) is not supported"
+                .to_string(),
+        );
+    }
+    if flat
+        .get("draft_window_size")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|w| w > 0)
+    {
+        return Some("DSpark drafter draft_window_size is not supported".to_string());
+    }
+    None
+}
+
 /// Whether a parsed `config.json` describes a DFlash speculative drafter
 /// rather than a standalone model.
 ///
@@ -405,6 +762,11 @@ pub const DSPARK_DRAFT_ARCHITECTURE: &str = "Lfm2DSparkDraftModel";
 /// keys on, and `architectures` is what HuggingFace `AutoModel` dispatch keys
 /// on. A checkpoint carrying neither is not a DFlash drafter.
 ///
+/// The two official DSpark layouts of issue #3261 carry no `dflash_config`:
+/// the Red Hat Speculators one is marked by `speculators_model_type ==
+/// "dspark"` and the OpenBMB one by `architectures: ["Qwen3DSparkModel"]`
+/// (its `model_type` is `qwen3`, like an ordinary Qwen 3 model's).
+///
 /// The Muse Glimmer assistant (issue #1343) is the one DFlash-family drafter
 /// with a dedicated `model_type`; its markers are read through
 /// [`super::muse::is_muse_assistant_config`] so the standalone-model
@@ -417,6 +779,10 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
         return true;
     }
     if super::muse::is_muse_assistant_config(config) {
+        return true;
+    }
+    if is_speculators_dspark_config(config) || has_architecture(config, OPENBMB_DSPARK_ARCHITECTURE)
+    {
         return true;
     }
 
@@ -490,7 +856,7 @@ mod tests {
         assert_eq!(c.block_size, 16);
         assert_eq!(c.mask_token_id, 248070);
         assert_eq!(c.target_layer_ids, vec![1, 8, 15, 22, 29]);
-        assert_eq!(c.num_target_layers, 32);
+        assert_eq!(c.num_target_layers, Some(32));
     }
 
     #[test]
@@ -577,12 +943,14 @@ mod tests {
     #[test]
     fn default_target_layer_ids_are_in_bounds() {
         let cfg = DFlashConfig::default();
+        let depth = cfg
+            .num_target_layers
+            .expect("the DFlash default declares a target depth");
         for &id in &cfg.target_layer_ids {
             assert!(
-                id < cfg.num_target_layers,
-                "target_layer_id={id} must be < num_target_layers={}; \
+                id < depth,
+                "target_layer_id={id} must be < num_target_layers={depth}; \
                  default config is malformed",
-                cfg.num_target_layers,
             );
         }
     }

@@ -34,7 +34,7 @@ use cxx::UniquePtr;
 
 use super::config::DFlashConfig;
 use super::layer::DFlashDecoderLayer;
-use super::markov::VanillaMarkovHead;
+use super::markov::{DraftToTarget, VanillaMarkovHead};
 
 /// LM head selector: own checkpoint weights, embedding-tied projection, or
 /// target-bound untied projection.
@@ -125,9 +125,18 @@ pub struct DFlashDraftModel {
 /// tensor bit-packs only its last axis, so the row count reads the same at any
 /// bit depth and the check needs no `bits`.
 ///
+/// `vocab_field` names the config field `vocab` came from (`vocab_size` for
+/// the embedding table, `draft_vocab_size` for a reduced draft head) so the
+/// message points at the number that disagrees.
+///
 /// Used by: [`DFlashDraftModel::from_weights`], for a DSpark checkpoint that
 /// ships its own `embed_tokens` or `lm_head` rather than binding the target's.
-fn validate_vocab_rows(weights: &WeightMap, name: &str, vocab: usize) -> Result<(), String> {
+fn validate_vocab_rows(
+    weights: &WeightMap,
+    name: &str,
+    vocab: usize,
+    vocab_field: &str,
+) -> Result<(), String> {
     let tensor = weights
         .get(name)
         .ok_or_else(|| format!("Weight not found: {name}"))?;
@@ -137,7 +146,7 @@ fn validate_vocab_rows(weights: &WeightMap, name: &str, vocab: usize) -> Result<
     };
     if usize::try_from(*rows).ok() != Some(vocab) {
         return Err(format!(
-            "{name} has {rows} rows but the DSpark drafter config declares vocab_size {vocab}; \
+            "{name} has {rows} rows but the DSpark drafter config declares {vocab_field} {vocab}; \
              the drafter gathers this table at mask_token_id and at every chained proposal, and \
              MLX range-checks no positive gather index"
         ));
@@ -184,7 +193,12 @@ impl DFlashDraftModel {
             // MLX range-checks no positive gather index, so a short table
             // would read past its own buffer into the drafter hidden state.
             if config.is_dspark() {
-                validate_vocab_rows(weights, "embed_tokens.weight", config.vocab_size)?;
+                validate_vocab_rows(
+                    weights,
+                    "embed_tokens.weight",
+                    config.vocab_size,
+                    "vocab_size",
+                )?;
             }
             Some(UnifiedEmbedding::from_weights(
                 weights,
@@ -213,7 +227,7 @@ impl DFlashDraftModel {
         for i in 0..config.num_hidden_layers {
             let prefix = format!("layers.{i}");
             layers.push(DFlashDecoderLayer::from_weights(
-                weights, &prefix, &config, group_size, bits,
+                weights, &prefix, &config, i, group_size, bits,
             )?);
         }
 
@@ -225,18 +239,43 @@ impl DFlashDraftModel {
         // upstream Python resolves that by binding the target model's
         // explicit `lm_head` during `bind()`, with an embedding-tied fallback
         // if the target has no separate head.
+        // A reduced draft vocabulary (issue #3261) is a DSpark feature: the
+        // Markov chain is where a draft id is mapped back to a target id. A
+        // plain DFlash draft reads its argmax straight off the head as target
+        // ids (`sample_block_per_position*`, the batched draft), so such a
+        // checkpoint would propose ids from the wrong id space.
+        let draft_vocab = config.draft_vocab();
+        if config.has_reduced_draft_vocab() && !config.is_dspark() {
+            return Err(format!(
+                "DFlash drafter config declares draft_vocab_size {draft_vocab} below vocab_size \
+                 {} but no Markov head (markov_rank = 0); a reduced draft vocabulary is only \
+                 supported on a DSpark drafter, whose chain maps draft ids to target ids",
+                config.vocab_size
+            ));
+        }
         let lm_head = if weights.contains_key("lm_head.weight") {
             // Same reason as `embed_tokens` above, one step later in the
             // graph: a DSpark draft step adds the Markov head's
-            // `[1, gamma, vocab_size]` transition logits to this head's
-            // output, and the Markov factors ARE measured against
-            // `config.vocab_size`. A head of a different width therefore
-            // fails inside `ffi::add` as a broadcast error, which crosses the
-            // cxx bridge as a process abort rather than a load error.
+            // `[1, gamma, draft_vocab]` transition logits to this head's
+            // output, and `markov_w2` IS measured against the draft
+            // vocabulary. A head of a different width therefore fails inside
+            // `ffi::add` as a broadcast error, which crosses the cxx bridge
+            // as a process abort rather than a load error. A shipped head is
+            // kept at full vocabulary too, rather than rebound to the
+            // target's (upstream `DSparkDraftModel.bind`).
             if config.is_dspark() {
-                validate_vocab_rows(weights, "lm_head.weight", config.vocab_size)?;
+                validate_vocab_rows(weights, "lm_head.weight", draft_vocab, "draft_vocab_size")?;
             }
             LmHead::Own(Linear::from_weights(weights, "lm_head")?)
+        } else if config.has_reduced_draft_vocab() {
+            // Neither fallback below scores the draft vocabulary: the tied
+            // projection and the target's head both emit `vocab_size` logits.
+            return Err(format!(
+                "DSpark drafter config declares draft_vocab_size {draft_vocab} below vocab_size \
+                 {} but the checkpoint ships no lm_head.weight; a reduced draft vocabulary \
+                 needs the drafter's own [draft_vocab, hidden] head",
+                config.vocab_size
+            ));
         } else if config.tie_word_embeddings {
             LmHead::Tied
         } else {
@@ -247,11 +286,31 @@ impl DFlashDraftModel {
         // a DSpark drafter, so a config that declares a rank without the
         // tensors is a broken checkpoint, not a plain DFlash one.
         let markov = if config.is_dspark() {
-            Some(VanillaMarkovHead::from_weights(
+            // `d2t` (issue #3261): the target id of draft id `t` is
+            // `t + d2t[t]`. Validated against both vocabularies here, once;
+            // `t2d`, its inverse, is never read (upstream drops it in
+            // `sanitize`). A reduced draft vocabulary without the table
+            // cannot be mapped, and guessing the identity would propose the
+            // wrong tokens.
+            let d2t = match weights.get("d2t") {
+                Some(tensor) => DraftToTarget::from_tensor(tensor, draft_vocab, config.vocab_size)?,
+                None if config.has_reduced_draft_vocab() => {
+                    return Err(format!(
+                        "DSpark drafter config declares draft_vocab_size {draft_vocab} below \
+                         vocab_size {} but the checkpoint ships no d2t table to map draft ids \
+                         to target ids",
+                        config.vocab_size
+                    ));
+                }
+                None => None,
+            };
+            Some(VanillaMarkovHead::from_weights_with_draft_vocab(
                 weights,
                 "markov_head",
                 config.vocab_size,
+                draft_vocab,
                 config.markov_rank,
+                d2t,
                 group_size,
                 bits,
             )?)
@@ -277,8 +336,8 @@ impl DFlashDraftModel {
         })
     }
 
-    /// Whether this drafter is an LFM2 / LFM2.5 DSpark drafter (DFlash
-    /// backbone plus Markov head). Decides which draft step
+    /// Whether this drafter is a DSpark drafter (DFlash backbone plus Markov
+    /// head; issues #1339 and #3261). Decides which draft step
     /// [`Self::draft_block`] runs.
     pub fn is_dspark(&self) -> bool {
         self.markov.is_some()
@@ -437,17 +496,21 @@ impl DFlashDraftModel {
     }
 
     /// One DSpark draft round as a `[1, verify_width - 1]` int32 device
-    /// array (issue #1339).
+    /// array of target ids (issue #1339).
     ///
     /// With `gamma = verify_width - 1` proposals to make, the drafter runs
-    /// one non-causal forward over `[anchor, mask, ..., mask]` (`[1,
-    /// gamma]`; the anchor is the last committed token) against
-    /// `target_hidden` (`[1, S, num_target_layers * hidden]`, the target's
-    /// residual streams for the `S` tokens committed since the last draft),
-    /// keeps the logits of every one of the `gamma` positions, and chains
-    /// them through the Markov head starting from the anchor. Unlike the
-    /// DFlash step, position 0 is a proposal, not scaffolding: the anchor
-    /// row already sits one past the committed context.
+    /// one forward over `[anchor, mask, ..., mask]` (the anchor is the last
+    /// committed token) against `target_hidden` (`[1, S, num_target_layers *
+    /// hidden]`, the target's residual streams for the `S` tokens committed
+    /// since the last draft) and chains `gamma` rows of logits through the
+    /// Markov head starting from the anchor.
+    ///
+    /// Which rows depends on `sample_from_anchor` (upstream
+    /// `DSparkDraftModel.draft_block`). `true`, every published checkpoint:
+    /// the input is `[1, gamma]` and every row is a proposal, the anchor row
+    /// included, because that row already sits one past the committed
+    /// context. `false`: the input is `[1, gamma + 1]`, the anchor row is
+    /// scaffolding as in a DFlash step, and the proposals are rows `1..`.
     pub fn draft_block_dspark_array(
         &self,
         anchor: i32,
@@ -464,15 +527,25 @@ impl DFlashDraftModel {
             .as_ref()
             .expect("draft_block_dspark_array requires a DSpark drafter (Markov head loaded)");
         let gamma = verify_width - 1;
+        let rows = if self.config.sample_from_anchor {
+            gamma
+        } else {
+            gamma + 1
+        };
         let mask_id = self.config.mask_token_id;
-        let mut block: Vec<i32> = Vec::with_capacity(gamma);
+        let mut block: Vec<i32> = Vec::with_capacity(rows);
         block.push(anchor);
-        for _ in 1..gamma {
+        for _ in 1..rows {
             block.push(mask_id);
         }
-        let inputs = ffi::from_slice_i32(&block, &[1, gamma as i32]);
+        let inputs = ffi::from_slice_i32(&block, &[1, rows as i32]);
         let logits = self.forward(&inputs, target_hidden, cache);
-        markov.sample_block_array(&logits, anchor)
+        if self.config.sample_from_anchor {
+            return markov.sample_block_array(&logits, anchor);
+        }
+        let shape = ffi::array_shape(&logits);
+        let proposals = ffi::slice(&logits, &[0, 1, 0], &[shape[0], rows as i32, shape[2]]);
+        markov.sample_block_array(&proposals, anchor)
     }
 
     /// Host-side [`Self::draft_block_dspark_array`]: `verify_width - 1`
@@ -580,6 +653,12 @@ impl DFlashDraftModel {
     }
 }
 
+/// Reduced draft vocabulary, shipped heads and the anchor layout of the
+/// Speculators and OpenBMB DSpark drafters (issue #3261).
+#[cfg(test)]
+#[path = "model_dspark_tests.rs"]
+mod dspark_layout_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,7 +690,7 @@ mod tests {
             num_key_value_heads: 1,
             head_dim: 2,
             vocab_size: 8,
-            num_target_layers: 4,
+            num_target_layers: Some(4),
             target_layer_ids: vec![0, 1, 2, 3],
             ..DFlashConfig::default()
         }

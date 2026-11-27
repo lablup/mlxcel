@@ -1189,6 +1189,30 @@ impl Llama3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.hidden_states_capturing(input_ids, input_embeddings, caches, mask, &[], &mut [])
+    }
+
+    /// [`Self::hidden_states`], also copying the residual stream after each
+    /// layer named in `capture_layer_ids` into the matching slot of
+    /// `captured` (before the final norm), for a DSpark drafter's `fc`
+    /// projection (issue #3261).
+    ///
+    /// One body for both, so a speculative verify block and a generation
+    /// step build the same graph: the capture keeps a handle to a value the
+    /// forward computes anyway and changes nothing it computes. A layer id
+    /// at or past the depth leaves its slot `None`.
+    ///
+    /// Used by: [`Self::hidden_states`], the DSpark speculative target
+    /// (`models::dense_speculative`).
+    pub(crate) fn hidden_states_capturing(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        capture_layer_ids: &[usize],
+        captured: &mut [Option<UniquePtr<MlxArray>>],
+    ) -> UniquePtr<MlxArray> {
         let _row_invariant = verify_scope(input_ids, input_embeddings, mask);
         // Use provided embeddings or compute from input_ids
         let mut h = if let Some(embeds) = input_embeddings {
@@ -1203,11 +1227,20 @@ impl Llama3Model {
             h = layer.forward(&h, &mut caches[i], mask);
             // Recorded only under the block-versus-chain diagnostic (#3418).
             crate::models::speculative_exactness_diag::capture(i, "llama3", "layer output", &h);
+            crate::models::dense_speculative::capture_layer(i, &h, capture_layer_ids, captured);
             pipeline_hint(&h, i, n);
         }
 
         // Final norm
         self.norm.forward(&h)
+    }
+
+    /// The LM head over normalized hidden states, as [`Self::forward`]
+    /// applies it.
+    ///
+    /// Used by: the DSpark speculative target (`models::dense_speculative`).
+    pub(crate) fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        row_linear(&self.lm_head, h)
     }
 
     /// Logits `[B, 1, vocab]` for position `last_pos` only.
@@ -1464,6 +1497,20 @@ impl LanguageModel for Llama3Model {
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.get_embed_tokens(input_ids))
+    }
+
+    /// The embedding table a DSpark drafter measures the target vocabulary
+    /// on and, when its checkpoint ships none, borrows (issue #3261).
+    fn embed_tokens_module(&self) -> Option<UnifiedEmbedding> {
+        Some(self.embed_tokens.clone_shared())
+    }
+
+    /// The output head, for a drafter that ships no head of its own (the
+    /// OpenBMB DSpark drafter for MiniCPM5). On a tied checkpoint this is the
+    /// embedding matrix loaded as a linear layer, which is what this model
+    /// projects through.
+    fn lm_head_module(&self) -> Option<UnifiedLinear> {
+        Some(self.lm_head.clone_shared())
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
