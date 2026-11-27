@@ -28,8 +28,8 @@
 //! * `raise_exception(msg)`: the template refusing a caller-supplied value.
 //!   Errors it raises carry a [`TemplateRejection`] source so the caller can tell
 //!   them apart from an engine-side render failure.
-//! * `strftime_now(format)`: the current date, for templates that stamp one into
-//!   a system prompt.
+//! * `strftime_now(format)`: the current time in the host zone, formatted with
+//!   `format`, for templates that stamp a date into a system prompt.
 //! * `tojson(value, ensure_ascii=..., indent=..., separators=..., sort_keys=...)`: an
 //!   mlxcel-owned filter that shadows minijinja's builtin and reproduces CPython
 //!   `json.dumps` byte for byte, defaulting to `ensure_ascii=False` the way
@@ -1795,8 +1795,8 @@ fn configure_environment(env: &mut Environment<'_>) -> std::result::Result<(), m
         },
     );
 
-    env.add_function("strftime_now", |_format: String| -> String {
-        crate::server::clock::day_month_year_now()
+    env.add_function("strftime_now", |format: String| -> String {
+        crate::server::clock::strftime_now(&format)
     });
 
     // Shadow minijinja's builtin `tojson` with a CPython `json.dumps` compatible
@@ -5362,6 +5362,35 @@ TOOL
             .apply_with_kwargs(&messages, None, &kwargs)
             .unwrap();
         assert!(out.starts_with("<think>"));
+    }
+
+    /// `strftime_now` honours its format argument on the real render path
+    /// (it used to return `%d %b %Y` whatever the template asked for).
+    #[test]
+    fn strftime_now_renders_the_requested_format() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let render = |template: &str| {
+            ChatTemplateProcessor::with_template(template.to_string())
+                .apply(&messages, None)
+                .unwrap()
+        };
+
+        let iso = render(r#"{{ strftime_now("%Y-%m-%d") }}"#);
+        let b = iso.as_bytes();
+        assert!(
+            iso.len() == 10
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b.iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()),
+            "expected YYYY-MM-DD, got {iso:?}"
+        );
+        // A malformed directive renders instead of failing the request.
+        assert_eq!(render(r#"{{ strftime_now("%J") }}"#), "%J");
     }
 }
 

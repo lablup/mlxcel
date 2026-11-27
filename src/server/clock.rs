@@ -20,15 +20,14 @@
 //! milliseconds), router-cache staging and quarantine directory names (Unix
 //! nanoseconds), RFC 3339 strings in WebUI events, lifecycle operations and
 //! runtime snapshots, and the date the `strftime_now` chat-template function
-//! returns. Until #3266 each call site asked `chrono` directly; `chrono` is
+//! returns, in the host zone and the format the template asks for. Until #3266 each call site asked `chrono` directly; `chrono` is
 //! declared unmaintained (RUSTSEC-2026-0543), so the formats live here
 //! instead and match what `chrono` produced byte for byte. `clock_tests.rs`
 //! pins every one of them at fixed instants, and the same file passed against
 //! the `chrono` implementation before the switch.
 //!
 //! Unix values come from `std::time` alone. Calendar fields come from a
-//! `jiff::Timestamp` read in UTC (`jiff` is built with `std` only, no time
-//! zone database yet), and the strings are assembled here rather than through
+//! `jiff::Timestamp` read in UTC, and the strings are assembled here rather than through
 //! `jiff`'s printers so that the `chrono` shapes (`+00:00` and a 0/3/6/9-digit
 //! fraction from `to_rfc3339`, `Z` and no fraction from
 //! `to_rfc3339_opts(Secs, true)`) are spelled out where they can be read.
@@ -36,18 +35,15 @@
 //! `chrono` for years 0 through 9999; an instant outside `jiff`'s range is
 //! clamped to its nearest end, and a system clock does not report one.
 
+use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jiff::Timestamp;
 use jiff::civil::DateTime;
-use jiff::tz::Offset;
+use jiff::fmt::strtime;
+use jiff::tz::{Offset, TimeZone};
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
-
-/// `%b` in `chrono` (and C `strftime` in the C locale).
-const MONTH_ABBREVIATIONS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
 
 /// Signed nanoseconds since the Unix epoch. Instants before the epoch are
 /// negative, so the floor divisions below round toward the past the way
@@ -129,17 +125,29 @@ pub(crate) fn rfc3339(t: SystemTime) -> String {
     format!("{}{fraction}+00:00", utc_date_time(dt))
 }
 
-/// Zero-padded day, English month abbreviation and four-digit year in UTC:
-/// `05 Mar 2026` (`chrono` `format("%d %b %Y")`).
-pub(crate) fn day_month_year(t: SystemTime) -> String {
-    let dt = utc_civil(t);
-    let month = usize::try_from(dt.month()).unwrap_or(1).clamp(1, 12);
-    format!(
-        "{:02} {} {:04}",
-        dt.day(),
-        MONTH_ABBREVIATIONS[month - 1],
-        dt.year()
-    )
+/// `format` applied to `t` in the zone `tz`, through `jiff`'s `strtime`
+/// formatter: `strftime_in(t, &utc, "%d %b %Y")` is `05 Mar 2026`.
+///
+/// An unsupported or malformed directive does not fail: `format` comes back
+/// unchanged and the first such failure is logged at debug level. An instant
+/// outside `jiff`'s range is clamped to its nearest end first.
+pub(crate) fn strftime_in(t: SystemTime, tz: &TimeZone, format: &str) -> String {
+    let ts = Timestamp::try_from(t).unwrap_or(if t < UNIX_EPOCH {
+        Timestamp::MIN
+    } else {
+        Timestamp::MAX
+    });
+    let formatted = strtime::format(format, &ts.to_zoned_datetime(tz.clone()));
+    match formatted {
+        Ok(s) => s,
+        Err(err) => {
+            static LOGGED: Once = Once::new();
+            LOGGED.call_once(|| {
+                tracing::debug!(format, %err, "strftime format not applied, returning it unchanged");
+            });
+            format.to_string()
+        }
+    }
 }
 
 /// [`unix_seconds`] of the current time.
@@ -197,11 +205,13 @@ pub(crate) fn rfc3339_now() -> String {
     rfc3339(SystemTime::now())
 }
 
-/// [`day_month_year`] of the current time.
+/// [`strftime_in`] of the current time in the host time zone (UTC when the
+/// zone cannot be determined, which is what `TimeZone::system()` falls back
+/// to).
 ///
 /// Used by: the `strftime_now` chat-template function in `chat_template.rs`.
-pub(crate) fn day_month_year_now() -> String {
-    day_month_year(SystemTime::now())
+pub(crate) fn strftime_now(format: &str) -> String {
+    strftime_in(SystemTime::now(), &TimeZone::system(), format)
 }
 
 /// Whether `s` is an RFC 3339 date-time. Test code checks emitted stamps
