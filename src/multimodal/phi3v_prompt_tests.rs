@@ -79,3 +79,20 @@ fn prepare_phi3v_prompt_tokens_interleaves_negative_image_ids() {
         })
     );
 }
+
+/// The server numbers image tags across the conversation and places each in
+/// the turn its image came from (#3265). The runtime normalization must keep
+/// that placement: a prompt that already carries every tag is left alone, and
+/// the slots follow the tags in prompt order.
+#[test]
+fn per_turn_tags_are_kept_in_place() {
+    let prompt = "<|user|>\n<|image_1|>\nA?<|end|>\n<|assistant|>\nA cat.<|end|>\n\
+                  <|user|>\n<|image_2|>\nB?<|end|>\n<|assistant|>\n";
+
+    assert_eq!(ensure_phi3v_image_tags(prompt, 2), prompt);
+
+    let prepared = prepare_phi3v_prompt_tokens(prompt, 2, |_, _| vec![0], |_| 1).unwrap();
+    assert_eq!(prepared.image_slots, 2);
+    let slots: Vec<i32> = prepared.tokens.into_iter().filter(|t| *t < 0).collect();
+    assert_eq!(slots, vec![-1, -2]);
+}

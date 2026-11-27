@@ -487,8 +487,9 @@ impl MlxcelTokenizer {
     /// `TokenizerWrapper.__init__`.  Recognizes:
     ///
     /// * **Single-token think pairs** — `<think>` / `</think>` (Qwen3.x,
-    ///   Exaone4, Hunyuan, GLM4, Nemotron-H, …) and
-    ///   `<longcat_think>` / `</longcat_think>`.
+    ///   Exaone4, Hunyuan, GLM4, Nemotron-H, …),
+    ///   `<longcat_think>` / `</longcat_think>` and the Mistral reasoning
+    ///   pair `[THINK]` / `[/THINK]` (mlx-lm#1974).
     /// * **Multi-token think pair** — `<|channel>thought` (open) /
     ///   `<channel|>` (close), used by Gemma 4 and any future model that
     ///   adopts the same channel-priming convention.  The `thought`
@@ -515,16 +516,67 @@ impl MlxcelTokenizer {
     /// peeling.  [`ThinkingMarkers::has_thinking`] is the canonical
     /// predicate for "is this a thinking model".
     ///
-    /// Used by: `server::chat_template::ChatTemplateProcessor`
-    /// (default for the `enable_thinking` Jinja kwarg),
-    /// `server::tool_calls::stream_filter` (future hookup for token-id
-    /// based marker detection on top of today's text-based scan).
+    /// This is the vocabulary-only form: it never sees a chat template, so it
+    /// misses a checkpoint whose template writes `<think>` as text. Callers
+    /// that hold the template use [`Self::infer_thinking_markers_with_template`].
+    ///
+    /// Used by: `server::startup::load_chat_front` (to log whether the markers
+    /// came from the vocabulary or the template), and the tokenizer and
+    /// K2-Horizon / Hy4 reasoning tests. It is
+    /// [`Self::infer_thinking_markers_with_template`] with no template.
     ///
     /// Note: `server::thinking_budget::resolve_thinking_token_ids` currently
     /// uses bare `<|channel>` / `<channel|>` single-token IDs directly rather
     /// than consuming this method.  Migrating it to use the multi-token
     /// sequences returned here is a separate follow-up task.
     pub fn infer_thinking_markers(&self) -> ThinkingMarkers {
+        self.infer_thinking_markers_with_template(None)
+    }
+
+    /// [`Self::infer_thinking_markers`] with the chat template as a last
+    /// resort, mirroring mlx-lm's `_infer_thinking` after mlx-lm#1974.
+    ///
+    /// The vocabulary result wins whenever it names a pair. Otherwise, when
+    /// `template` contains the text `<think>`, the markers are `<think>` /
+    /// `</think>` with whatever id sequences the tokenizer encodes them to
+    /// (several ids each when they are not added tokens). An empty encoding
+    /// falls through to the empty default, as the Gemma 4 branch does.
+    ///
+    /// The fallback makes [`ThinkingMarkers::has_thinking`] true for a
+    /// checkpoint whose template writes `<think>` without a vocabulary token,
+    /// so `server::chat_front::apply_thinking_default` turns its thinking
+    /// default on. That is upstream's behavior; `server::startup` logs the
+    /// marker source once.
+    ///
+    /// Used by: `server::chat_front::apply_thinking_default` (the
+    /// `enable_thinking` default), `server::startup::load_chat_front` (the
+    /// startup log), `server::state::AppState` (primed-open detection and the
+    /// reasoning filters of every route), `server::router_front` (the
+    /// disaggregated router's chat preparation) and `commands::generate`
+    /// (the CLI reasoning filter).
+    pub fn infer_thinking_markers_with_template(&self, template: Option<&str>) -> ThinkingMarkers {
+        let markers = self.infer_vocab_thinking_markers();
+        if markers.has_thinking() {
+            return markers;
+        }
+        if template.is_some_and(|t| t.contains("<think>")) {
+            let encode = |marker: &str| self.encode(marker, false).unwrap_or_default();
+            let start_tokens = encode("<think>");
+            let end_tokens = encode("</think>");
+            if !start_tokens.is_empty() && !end_tokens.is_empty() {
+                return ThinkingMarkers {
+                    think_start: Some("<think>".to_string()),
+                    think_end: Some("</think>".to_string()),
+                    think_start_tokens: Some(start_tokens),
+                    think_end_tokens: Some(end_tokens),
+                    ..ThinkingMarkers::default()
+                };
+            }
+        }
+        markers
+    }
+
+    fn infer_vocab_thinking_markers(&self) -> ThinkingMarkers {
         // Kimi K3 has no HF vocabulary to probe: its reasoning and tool-call
         // spans are XTML tags built from control tokens, so the markers are
         // synthesized from the control ids plus the encoded tag name. Giving
@@ -550,6 +602,9 @@ impl MlxcelTokenizer {
             // Tencent Hy4 (#2354): every structural tag carries the template's
             // `:opensource` suffix.
             ("<think:opensource>", "</think:opensource>"),
+            // Mistral reasoning checkpoints (Magistral, Ministral reasoning):
+            // added tokens, after `<longcat_think>` as in mlx-lm#1974.
+            ("[THINK]", "[/THINK]"),
         ];
         for (start, end) in SINGLE_TOKEN_PAIRS {
             if let (Some(open_id), Some(close_id)) = (hf.token_to_id(start), hf.token_to_id(end)) {
@@ -1997,6 +2052,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 
 #[cfg(test)]
 mod contains_id_tests;
+
+#[cfg(test)]
+mod thinking_markers_tests;
 
 #[cfg(test)]
 mod tests {

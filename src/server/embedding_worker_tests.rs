@@ -239,6 +239,7 @@ fn queue_full_returns_queuefull_error() {
             });
             Ok(loaded)
         },
+        mlxcel_core::memory::clear_cache,
     )
     .expect("worker spawns");
 
@@ -262,4 +263,137 @@ fn queue_full_returns_queuefull_error() {
         assert!(saw_queue_full, "a full bounded queue must reject admission");
         drop(gate_tx);
     });
+}
+
+/// Log lines captured from a scoped subscriber (#3209 item d).
+#[derive(Clone, Default)]
+struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = CapturedWriter;
+    fn make_writer(&'a self) -> CapturedWriter {
+        CapturedWriter(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl CapturedLog {
+    fn snapshot_lines(&self) -> Vec<String> {
+        let text = String::from_utf8(self.0.lock().expect("log buffer").clone()).expect("UTF-8");
+        text.lines()
+            .filter(|line| line.contains("embedding command finished"))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[test]
+fn worker_logs_memory_snapshot_per_command() {
+    let log = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let p = provider();
+        p.embed_texts(vec!["hello".to_string()], EmbedOptions::default())
+            .expect("texts embed");
+        p.embed_tokens(vec![vec![3, 4]], EmbedOptions::default())
+            .expect("tokens embed");
+        // An `Err` result is a command too.
+        p.embed_tokens(vec![vec![STUB_VOCAB_SIZE as u32]], EmbedOptions::default())
+            .expect_err("out-of-vocab id is rejected");
+        drop(p);
+
+        // So is a request whose engine call panicked and was recovered.
+        let panicky = EmbeddingWorkerProvider::from_loader(
+            "panicky".to_string(),
+            4,
+            8,
+            Duration::from_secs(30),
+            || Ok(panicking_loaded_model()),
+        )
+        .expect("worker spawns");
+        panicky
+            .embed_tokens(vec![vec![7]], EmbedOptions::default())
+            .expect_err("the sentinel id panics");
+        drop(panicky);
+    });
+    let lines = log.snapshot_lines();
+    assert_eq!(lines.len(), 4, "one snapshot per command: {lines:#?}");
+    for line in &lines {
+        assert!(line.contains("mlxcel::embeddings"), "{line}");
+        for field in ["active_bytes=", "cache_bytes=", "peak_bytes="] {
+            assert!(line.contains(field), "{field} missing: {line}");
+        }
+    }
+}
+
+/// Commands the counting hook below has seen; only
+/// `worker_clears_cache_after_each_command` installs it.
+static AFTER_COMMAND_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_after_command() {
+    AFTER_COMMAND_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[test]
+fn worker_clears_cache_after_each_command() {
+    use std::sync::atomic::Ordering;
+    AFTER_COMMAND_CALLS.store(0, Ordering::SeqCst);
+    let p = EmbeddingWorkerProvider::from_loader_with_after_command(
+        "stub-embed".to_string(),
+        4,
+        8,
+        Duration::from_secs(30),
+        || Ok(stub_loaded_model(false)),
+        count_after_command,
+    )
+    .expect("stub worker spawns");
+    // Loading is not a command.
+    assert_eq!(AFTER_COMMAND_CALLS.load(Ordering::SeqCst), 0);
+    p.embed_texts(vec!["hello".to_string()], EmbedOptions::default())
+        .expect("texts embed");
+    // The hook runs after the reply is sent, so the caller may get here
+    // first; dropping the provider joins the worker.
+    p.embed_tokens(vec![vec![3, 4]], EmbedOptions::default())
+        .expect("tokens embed");
+    p.embed_tokens(vec![vec![STUB_VOCAB_SIZE as u32]], EmbedOptions::default())
+        .expect_err("an `Err` result is a command too");
+    drop(p);
+    assert_eq!(AFTER_COMMAND_CALLS.load(Ordering::SeqCst), 3);
+
+    let panicky = EmbeddingWorkerProvider::from_loader_with_after_command(
+        "panicky".to_string(),
+        4,
+        8,
+        Duration::from_secs(30),
+        || Ok(panicking_loaded_model()),
+        count_after_command,
+    )
+    .expect("worker spawns");
+    panicky
+        .embed_tokens(vec![vec![7]], EmbedOptions::default())
+        .expect_err("the sentinel id panics");
+    panicky
+        .embed_tokens(vec![vec![3]], EmbedOptions::default())
+        .expect("the worker still serves after the panic");
+    drop(panicky);
+    assert_eq!(
+        AFTER_COMMAND_CALLS.load(Ordering::SeqCst),
+        5,
+        "once per command, including after a recovered panic"
+    );
 }

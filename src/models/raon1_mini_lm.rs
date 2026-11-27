@@ -333,6 +333,38 @@ impl LanguageModel for Raon1MiniModel {
         self.sequence_state.release_sequence_state(seq_id);
     }
 
+    /// Exact-prefix snapshots for the server prompt cache (#3458); see
+    /// `raon1_mini_snapshot.rs`. Not truncatable: the RDA state cannot rewind.
+    fn supports_snapshot_reuse(&self) -> bool {
+        true
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.sequence_state
+            .with_sequence_state_ref(seq_id, |state| {
+                super::snapshot::snapshot_layers(state, token_len)
+            })?
+            .map_err(|error| {
+                tracing::debug!(error, seq_id = %seq_id, "raon1_mini prompt-cache snapshot skipped");
+            })
+            .ok()
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        let mut state = self.make_layer_caches();
+        super::snapshot::restore_layers(&mut state, snapshot)?;
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
     fn set_sequence_reasoning_effort(
         &self,
         seq_id: Option<SequenceId>,

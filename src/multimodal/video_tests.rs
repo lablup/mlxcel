@@ -427,8 +427,9 @@ fn video_frame_knobs_num_frames_out_of_range_errors_before_decoding() {
     );
 
     // A count above the clip's own frame total is equally out of range, so a
-    // caller can never be handed a padded or duplicated sample.
-    let err = case(301).expect_err("an over-long frame count must be refused");
+    // caller can never be handed a padded or duplicated sample. (301 would
+    // round half to even down to 300, which fits, as in the reference.)
+    let err = case(303).expect_err("an over-long frame count must be refused");
     assert!(
         matches!(err, VideoError::Extract { .. }),
         "expected VideoError::Extract, got {err:?}"
@@ -501,6 +502,19 @@ fn smart_nframes_explicit_nframes_rounds_to_factor() {
     // Caller supplies an odd target — round to the nearest even.
     let n = smart_nframes(40, 30.0, None, Some(7)).unwrap();
     assert_eq!(n, 8);
+}
+
+#[test]
+fn smart_nframes_explicit_nframes_breaks_ties_to_even_like_python_round() {
+    // mlx-vlm `_round(n) = round(n / frame_factor) * frame_factor` with
+    // Python's half-to-even `round`: 5 / 2 = 2.5 -> 2, 9 / 2 = 4.5 -> 4.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(5)).unwrap(), 4);
+    assert_eq!(smart_nframes(40, 30.0, None, Some(9)).unwrap(), 8);
+    // Odd ties round up under both rules: 3 / 2 = 1.5 -> 2.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(3)).unwrap(), 4);
+    // A 5-frame clip asked for all 5 frames samples 4, as the reference does,
+    // instead of rounding to 6 and rejecting the request.
+    assert_eq!(smart_nframes(5, 30.0, None, Some(5)).unwrap(), 4);
 }
 
 #[test]
@@ -1670,6 +1684,15 @@ fn sampled_loader_reports_source_indices_and_fps() {
         sampled.frame_indices
     );
     assert!(sampled.frame_indices.iter().all(|&idx| idx < TOTAL_FRAMES));
+    // The probed frame count travels with the sample, so the achieved rate
+    // (#3234) is the frames kept over the clip's 5 seconds.
+    assert_eq!(sampled.total_frames, TOTAL_FRAMES);
+    let sampled_fps = sampled.sampled_fps().expect("a decoded clip has a rate");
+    let expected_fps = sampled.frames.len() as f64 / TOTAL_FRAMES as f64 * sampled.source_fps;
+    assert!(
+        (sampled_fps - expected_fps).abs() < 1e-9,
+        "sampled fps {sampled_fps} != {expected_fps}"
+    );
     // Frame i of the color-increment clip has R = 5 * i (clamped), so the
     // reported index must agree with the decoded pixels, not just the plan.
     for (frame, &idx) in sampled.frames.iter().zip(&sampled.frame_indices) {
@@ -1678,6 +1701,45 @@ fn sampled_loader_reports_source_indices_and_fps() {
         assert!(
             (mean_r - expected_r).abs() <= 15.0,
             "index {idx}: decoded R {mean_r:.1} != expected {expected_r:.1}"
+        );
+    }
+}
+
+fn sampled_clip(sampled_frames: usize, total_frames: usize, source_fps: f64) -> SampledVideo {
+    SampledVideo {
+        frames: (0..sampled_frames)
+            .map(|_| DynamicImage::new_rgb8(2, 2))
+            .collect(),
+        frame_indices: (0..sampled_frames).collect(),
+        source_fps,
+        total_frames,
+    }
+}
+
+/// `sampled_fps` is transformers' `VideoMetadata.sampled_fps`:
+/// `len(frames_indices) / total_num_frames * fps`. Eight frames kept from a
+/// 120-frame clip at 30 fps (4 s) are 2 frames per second.
+#[test]
+fn sampled_fps_matches_transformers_definition() {
+    assert_eq!(sampled_clip(8, 120, 30.0).sampled_fps().unwrap(), 2.0);
+    // It is the achieved rate, not the requested one: 16 frames fixed by a
+    // `num_frames` request over the same clip are 4 fps.
+    assert_eq!(sampled_clip(16, 120, 30.0).sampled_fps().unwrap(), 4.0);
+
+    let no_frames = sampled_clip(0, 120, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_frames.to_string().contains("no sampled frames"),
+        "got: {no_frames}"
+    );
+    let no_source_frames = sampled_clip(8, 0, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_source_frames.to_string().contains("zero source frames"),
+        "got: {no_source_frames}"
+    );
+    for source_fps in [0.0, -30.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            sampled_clip(8, 120, source_fps).sampled_fps().is_err(),
+            "source fps {source_fps} must not give a sampled fps"
         );
     }
 }

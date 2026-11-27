@@ -1192,6 +1192,9 @@ impl TensorParallelGemma4Model {
         let config_str = crate::models::sanitize_config_json(&config_str);
         let args: crate::models::gemma4::ModelArgs =
             serde_json::from_str(&config_str).context("failed to parse gemma4 config")?;
+        args.validate_text_config()
+            .map_err(anyhow::Error::msg)
+            .context("failed to parse gemma4 config")?;
         let config_value: serde_json::Value =
             serde_json::from_str(&config_str).context("failed to parse gemma4 config value")?;
         let text_config = args.text_args();
@@ -2605,11 +2608,15 @@ fn gemma4_force_no_batch(
         .get("text_config")
         .cloned()
         .unwrap_or_else(|| config_json.clone());
-    let Ok(text_config) =
+    let Ok(mut text_config) =
         serde_json::from_value::<crate::models::gemma4::TextConfig>(text_config_value)
     else {
         return Ok(false);
     };
+    text_config
+        .apply_per_layer_config()
+        .map_err(anyhow::Error::msg)
+        .context("failed to parse gemma4 config")?;
     Ok(gemma4_requires_loaded_model_fallback(
         &text_config,
         &summary.plan,
@@ -2812,7 +2819,9 @@ fn local_gemma4_args(
         plan.tp_size
     );
 
-    if text_config.attention_k_eq_v {
+    // Full-attention layers take the global KV-head count under
+    // `attention_k_eq_v` or a `per_layer_config` (`num_kv_heads_for_layer`).
+    if text_config.attention_k_eq_v || text_config.per_layer_config.is_some() {
         let global_kv_heads = text_config
             .num_global_key_value_heads
             .unwrap_or(text_config.num_key_value_heads);
@@ -2843,6 +2852,9 @@ fn local_gemma4_args(
         text_config.num_key_value_heads / plan.tp_size
     };
     text_config.intermediate_size /= plan.tp_size;
+    // The rank parses this config again, which re-applies `per_layer_config`;
+    // restate it so that parse resolves to the per-rank shape set above.
+    text_config.restate_per_layer_config();
 
     let mut local = args.clone();
     local.text_config =
@@ -3257,13 +3269,14 @@ fn gemma4_kv_shard_spec(
 
     let layer_idx = gemma4_layer_index(logical_name)?;
     let is_full_attention = config.layer_types[layer_idx].as_str() == "full_attention";
-    let total_kv_heads = if config.attention_k_eq_v && is_full_attention {
-        config
-            .num_global_key_value_heads
-            .unwrap_or(config.num_key_value_heads)
-    } else {
-        config.num_key_value_heads
-    };
+    let total_kv_heads =
+        if (config.attention_k_eq_v || config.per_layer_config.is_some()) && is_full_attention {
+            config
+                .num_global_key_value_heads
+                .unwrap_or(config.num_key_value_heads)
+        } else {
+            config.num_key_value_heads
+        };
     if total_kv_heads > plan.tp_size {
         return None;
     }

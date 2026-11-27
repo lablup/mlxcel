@@ -989,3 +989,60 @@ fn inkling_message_header_without_a_call_streams_unchanged() {
         );
     }
 }
+
+// -- #3209: Mistral `[THINK]` reasoning, and reasoning after an in-reasoning call --
+
+#[test]
+fn mistral_think_pair_routes_to_reasoning() {
+    // Magistral / Ministral reasoning write `[THINK]...[/THINK]` ahead of the
+    // answer; `chunkings` covers widths 1, 2, 3, 5, 7 and every two-piece split.
+    let raw = "[THINK]reasoning[/THINK]answer";
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "answer");
+    assert_eq!(reasoning, "reasoning");
+    let tools = [tool("f")];
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "answer");
+    assert_eq!(reasoning, "reasoning");
+    assert_eq!(calls, Some(Vec::new()));
+
+    // Reasoning, then a Mistral call: the call is parsed, not content.
+    let raw = r#"[THINK]need f[/THINK][TOOL_CALLS]f[ARGS]{"x": 1}"#;
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "need f");
+    let calls = calls.expect("tools requested");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "f");
+
+    // `[T` held at a fragment boundary: it could still become `[THINK]` or
+    // `[TOOL_CALLS]`, and resolves to whichever text follows.
+    let mut filter = StreamFilter::new();
+    let held = filter.feed("[T");
+    assert_eq!((held.content, held.reasoning), (None, None));
+    let out = filter.feed("HINK]r");
+    assert_eq!(out.content, None);
+    assert_eq!(out.reasoning.as_deref(), Some("r"));
+    let mut filter = StreamFilter::new();
+    assert_eq!(filter.feed("[T").content, None);
+    let out = filter.feed("o be");
+    assert_eq!(out.content.as_deref(), Some("[To be"));
+}
+
+#[test]
+fn reasoning_after_in_reasoning_call_stays_reasoning() {
+    let call = r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#;
+    let tools = [tool("f")];
+    let raw = format!("<think>plan {call} more thought</think>answer");
+    for tools in [None, Some(&tools[..])] {
+        let (content, reasoning, calls) = assert_parity(&raw, tools);
+        assert_eq!(content, "answer");
+        assert_eq!(reasoning, format!("plan {call} more thought"));
+        if let Some(calls) = calls {
+            assert!(
+                calls.is_empty(),
+                "an example inside reasoning ran: {calls:?}"
+            );
+        }
+    }
+}

@@ -330,6 +330,9 @@ pub(crate) fn load_gemma4_unified(model_path: &Path) -> Result<LoadedModel> {
     // layer_types defaults, etc.) by wrapping the full config as ModelArgs.
     let text_args: models::gemma4::ModelArgs =
         parse_vlm_config(&config_str, "Gemma4 Unified text config")?;
+    text_args
+        .validate_text_config()
+        .map_err(|e| anyhow::anyhow!("Gemma4 Unified text config: {e}"))?;
     let text_config = text_args.text_args();
 
     let (raw_weights, weight_backing) =

@@ -293,27 +293,42 @@ impl Qwen2VLProcessor {
 
         // Start with original size, round to factor. Arithmetic is u64 and
         // saturating so a huge image or a huge checkpoint bound cannot wrap.
-        let mut h = round_to(orig_h as f64, 1.0, f64::round);
-        let mut w = round_to(orig_w as f64, 1.0, f64::round);
+        // The reference's `round(height / factor)` is Python's `round`, which
+        // rounds half to even: 720 / 32 = 22.5 goes to 22, not 23.
+        let mut h = round_to(orig_h as f64, 1.0, f64::round_ties_even);
+        let mut w = round_to(orig_w as f64, 1.0, f64::round_ties_even);
 
-        // Ensure within pixel limits
+        // Out of bounds, scale the original size once as the reference does:
+        // `beta = sqrt(h * w / max_pixels)`, then `floor(h / beta / factor)`
+        // (`ceil(h * beta / factor)` under `min_pixels`). Rescaling the
+        // rounded size instead lands on another multiple (1372x772 under
+        // 1003520 pixels gives 756 rows, not 728). Operation order as upstream.
+        // A zero edge (the reference raises on it) is rescaled as one pixel,
+        // so `beta` stays finite and no edge saturates to `u32::MAX`.
+        let (orig_h, orig_w) = (orig_h.max(1), orig_w.max(1));
+        let orig_area = area(u64::from(orig_h), u64::from(orig_w)) as f64;
+        let (orig_h, orig_w) = (f64::from(orig_h), f64::from(orig_w));
+        let factor_f = factor as f64;
+        let snap = |steps: f64| (steps as u64).max(1).saturating_mul(factor);
         let pixels = area(h, w);
         if pixels > max_pixels {
-            let scale = (max_pixels as f64 / pixels as f64).sqrt();
-            h = round_to(h as f64, scale, f64::round);
-            w = round_to(w as f64, scale, f64::round);
-        }
-        if area(h, w) > max_pixels {
-            // Further reduce if needed
-            let scale = (max_pixels as f64 / area(h, w) as f64).sqrt();
-            h = round_to(h as f64, scale, f64::floor);
-            w = round_to(w as f64, scale, f64::floor);
-        }
-        let pixels = area(h, w);
-        if pixels < min_pixels {
-            let scale = (min_pixels as f64 / pixels as f64).sqrt();
-            h = round_to(h as f64, scale, f64::ceil);
-            w = round_to(w as f64, scale, f64::ceil);
+            let beta = (orig_area / max_pixels as f64).sqrt();
+            h = snap((orig_h / beta / factor_f).floor());
+            w = snap((orig_w / beta / factor_f).floor());
+            // Past 200:1 the reference raises instead of resizing. There the
+            // short side can clamp to one `factor` with the area still over
+            // the cap; trim the long side so `max_image_tokens` still holds.
+            if area(h, w) > max_pixels && orig_h.max(orig_w) / orig_h.min(orig_w) > 200.0 {
+                if h <= w {
+                    w = (max_pixels / h / factor).max(1) * factor;
+                } else {
+                    h = (max_pixels / w / factor).max(1) * factor;
+                }
+            }
+        } else if pixels < min_pixels {
+            let beta = (min_pixels as f64 / orig_area).sqrt();
+            h = snap((orig_h * beta / factor_f).ceil());
+            w = snap((orig_w * beta / factor_f).ceil());
         }
 
         (
@@ -564,6 +579,53 @@ mod tests {
 
     use super::*;
 
+    /// The Qwen3-VL-generation geometry: 16-pixel patches, 2x2 merge, and
+    /// the 65536 / 16777216 bounds those sidecars declare.
+    fn factor_32_processor() -> Qwen2VLProcessor {
+        Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216)
+    }
+
+    /// transformers' `smart_resize` rounds `edge / factor` with Python's
+    /// `round`, which breaks a tie towards the even neighbour. Expected
+    /// values are transformers 5.24.1 `image_processing_pil_qwen2_vl.
+    /// smart_resize` (and mlx-vlm's Qwen3-VL `_smart_resize_image`).
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        // Factor 28 (Qwen2-VL, Qwen2.5-VL, GLM-4V): 854 / 28 = 30.5 -> 30,
+        // 630 / 28 = 22.5 -> 22, 350 / 28 = 12.5 -> 12.
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(480, 854), (476, 840));
+        assert_eq!(p28.smart_resize(630, 1200), (616, 1204));
+        assert_eq!(p28.smart_resize(350, 350), (336, 336));
+        // Factor 32 (Qwen3-VL generation, Mage-VL): 720 / 32 = 22.5 -> 22,
+        // 3024 / 32 = 94.5 -> 94, 1680 / 32 = 52.5 -> 52, 336 / 32 = 10.5 -> 10.
+        let p32 = factor_32_processor();
+        assert_eq!(p32.smart_resize(720, 1280), (704, 1280));
+        assert_eq!(p32.smart_resize(3024, 4032), (3008, 4032));
+        assert_eq!(p32.smart_resize(1050, 1680), (1056, 1664));
+        assert_eq!(p32.smart_resize(336, 336), (320, 320));
+        // A 1280x720 image is 44x80 patches, 22 * 40 = 880 merged tokens.
+        let grid = p32.compute_grid_thw(&[DynamicImage::new_rgb8(1280, 720)]);
+        assert_eq!(grid, vec![(1, 44, 80)]);
+    }
+
+    /// Non-ties and ties whose lower neighbour is odd round the same either
+    /// way; these must not move.
+    #[test]
+    fn smart_resize_non_ties_and_odd_ties_are_unchanged() {
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p28.smart_resize(480, 640), (476, 644));
+        // 1050 / 28 = 37.5 -> 38 under both rules.
+        assert_eq!(p28.smart_resize(1050, 1680), (1064, 1680));
+        assert_eq!(p28.smart_resize(700, 1050), (700, 1064));
+        let p32 = factor_32_processor();
+        assert_eq!(p32.smart_resize(1080, 1920), (1088, 1920));
+        // 1200 / 32 = 37.5 -> 38 under both rules.
+        assert_eq!(p32.smart_resize(1200, 1920), (1216, 1920));
+    }
+
     #[test]
     fn owned_and_mlx_paths_share_spatial_merge_grouped_patch_order() {
         let processor = Qwen2VLProcessor::new(14, 2, 2);
@@ -674,5 +736,96 @@ mod tests {
             processor.compute_grid_thw(&[DynamicImage::new_rgb8(224, 224)]),
             vec![(1, 16, 16)]
         );
+    }
+
+    /// Out of bounds, transformers' `smart_resize` (and mlx-vlm's Qwen3-VL
+    /// `_smart_resize_image`) scales the original size by
+    /// `beta = sqrt(h * w / bound)` and floors (or ceils) once. Expected
+    /// values are transformers 5.24.1 `image_processing_pil_qwen2_vl.
+    /// smart_resize`. No edge is an `x.5` tie with an even lower neighbour
+    /// (2160 / 32 = 67.5 rounds to 68 either way), so tie rounding (#3463)
+    /// does not enter.
+    #[test]
+    fn smart_resize_rescales_out_of_bounds_images_from_the_original_size() {
+        // Qwen2.5-VL checkpoint bounds (3136..12845056, factor 28): a 5K
+        // screenshot and an 18 MP photo.
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(2880, 5120), (2688, 4760));
+        assert_eq!(p28.smart_resize(2690, 4782), (2688, 4760));
+        assert_eq!(p28.smart_resize(3456, 5184), (2912, 4368));
+        // The 1280-token cap (`max_pixels = 1003520`).
+        let capped = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(3136, 1_003_520);
+        assert_eq!(capped.smart_resize(772, 1372), (728, 1316));
+        assert_eq!(capped.smart_resize(3024, 4032), (840, 1148));
+        // Qwen3-VL bounds (65536..16777216, factor 32): small images grow
+        // from the original size, a 24 MP photo shrinks.
+        let p32 = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216);
+        assert_eq!(p32.smart_resize(100, 177), (224, 352));
+        assert_eq!(p32.smart_resize(120, 160), (224, 320));
+        assert_eq!(p32.smart_resize(180, 320), (192, 352));
+        assert_eq!(p32.smart_resize(4000, 6000), (3328, 4992));
+        // Mage-VL bounds (3136..4000000, factor 32): a 4K screenshot is
+        // 46 x 83 = 3818 merged tokens, as mlx-vlm counts it.
+        let mage = Qwen2VLProcessor::new_with_norm(16, 1, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(3136, 4_000_000);
+        assert_eq!(mage.smart_resize(2160, 3840), (1472, 2656));
+        assert_eq!(mage.smart_resize(4000, 6000), (1632, 2432));
+        assert_eq!(
+            mage.compute_grid_thw(&[DynamicImage::new_rgb8(3840, 2160)]),
+            vec![(1, 92, 166)]
+        );
+    }
+
+    /// In-bounds images and out-of-bounds ones where both rules land on the
+    /// same multiple must not move.
+    #[test]
+    fn smart_resize_in_bounds_and_agreeing_clamps_are_unchanged() {
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p28.smart_resize(480, 640), (476, 644));
+        assert_eq!(p28.smart_resize(4000, 6000), (2912, 4368));
+        assert_eq!(p28.smart_resize(30, 50), (56, 84));
+        let capped = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(3136, 1_003_520);
+        assert_eq!(capped.smart_resize(1080, 1920), (728, 1316));
+        let p32 = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216);
+        assert_eq!(p32.smart_resize(1080, 1920), (1088, 1920));
+        assert_eq!(p32.smart_resize(100, 100), (256, 256));
+        assert_eq!(p32.smart_resize(200, 300), (224, 320));
+        let mage = Qwen2VLProcessor::new_with_norm(16, 1, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(3136, 4_000_000);
+        assert_eq!(mage.smart_resize(1800, 2880), (1568, 2528));
+        assert_eq!(mage.smart_resize(1440, 2560), (1440, 2560));
+    }
+
+    /// Under 200:1 the reference result is kept even where the short side
+    /// clamps to one factor and the area overshoots a small cap (here 64
+    /// tokens). Past 200:1, where the reference raises, the long side is
+    /// trimmed so the area stays under the cap.
+    #[test]
+    fn smart_resize_extreme_aspect_follows_the_reference_then_keeps_the_cap() {
+        let tiny_cap = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(3136, 50_176);
+        assert_eq!(tiny_cap.smart_resize(30, 3000), (28, 2240));
+        let cap = 200_704; // 256 tokens
+        let p = Qwen2VLProcessor::new(14, 2, 2).with_pixel_bounds(3136, cap);
+        for (h, w) in [(1, 16_384), (16_384, 1), (40, 16_000)] {
+            let (rh, rw) = p.smart_resize(h, w);
+            assert_eq!((rh % 28, rw % 28), (0, 0), "{h}x{w}");
+            assert!(
+                (rh as usize) * (rw as usize) <= cap,
+                "{h}x{w} -> {rh}x{rw} exceeds {cap}"
+            );
+        }
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
     }
 }

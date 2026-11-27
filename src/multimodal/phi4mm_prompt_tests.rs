@@ -131,3 +131,30 @@ fn adjacent_audio_tags_expand_as_distinct_clip_runs() {
         5
     );
 }
+
+/// The server numbers image tags across the conversation and places each in
+/// the turn its image came from (#3265); the runtime turns each tag into a slot
+/// where it stands instead of moving it to the first user turn.
+#[test]
+fn per_turn_tags_are_kept_in_place() {
+    let prompt = "<|user|><|image_1|>A?<|end|><|assistant|>A cat.<|end|>\
+                  <|user|><|image_2|>B?<|end|><|assistant|>";
+    let prepared = prepare_phi4mm_prompt_tokens(prompt, 2, 0, encode_bytes).unwrap();
+    assert_eq!(prepared.image_slots, 2);
+    let decoded: String = prepared
+        .tokens
+        .iter()
+        .skip(1)
+        .map(|&token| {
+            if token == PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
+                "[IMG]".to_string()
+            } else {
+                char::from(u8::try_from(token).unwrap()).to_string()
+            }
+        })
+        .collect();
+    assert_eq!(
+        decoded,
+        "<|user|>[IMG]A?<|end|><|assistant|>A cat.<|end|><|user|>[IMG]B?<|end|><|assistant|>"
+    );
+}

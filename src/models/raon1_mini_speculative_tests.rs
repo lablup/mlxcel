@@ -23,6 +23,7 @@ use super::super::tests::{HIDDEN, ids, tiny_model, values};
 use super::super::{Raon1MiniLayerCache, StepMasks};
 use super::Raon1MiniModel;
 use mlxcel_core::drafter::dflash::SpeculativeTarget;
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 const STREAMS: usize = 4;
@@ -257,4 +258,134 @@ fn a_limited_prefill_captures_the_newest_rows_and_keeps_the_logits() {
         bytes(&model.concat_hidden_for_drafter(&all)),
         bytes(&whole_feats)
     );
+}
+
+/// The DFlash2 exactness gate on the two NVFP4 exports (issue #3458), on the
+/// tiny model quantized into each layout and loaded from disk: the probe
+/// gives the same verdict every time it runs, and where it allows a width,
+/// a verify block is the decode chain byte for byte (NVFP4 `gather_qmm`
+/// experts and quantized dense planes included).
+#[test]
+fn nvfp4_exports_get_a_deterministic_gate_answer_and_an_allowed_block_is_exact() {
+    use super::super::export_tests::{Export, load_pair};
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    for export in [Export::Mlx, Export::ModelOpt] {
+        // `None`: a backend without native NVFP4, where the load is refused.
+        let Some((model, _twin)) = load_pair(export) else {
+            continue;
+        };
+        let mut allowed = 0;
+        for width in [3usize, 5, 7] {
+            let verdict = model.probe_block_chain_exactness_at(width, &[8, 40]);
+            for _ in 0..2 {
+                let again = model.probe_block_chain_exactness_at(width, &[8, 40]);
+                assert_eq!(
+                    (again.is_equal(), again.reason()),
+                    (verdict.is_equal(), verdict.reason()),
+                    "{export:?} width {width}: the gate answer must not change between runs"
+                );
+            }
+            if verdict.is_equal() {
+                allowed += 1;
+            }
+        }
+        if allowed > 0 {
+            assert_block_equals_chain(&model, &format!("{export:?} export"));
+        }
+        // On Metal MLX's quantized products are per row at these widths, so
+        // the gate allows every width; a refusal here would be a regression.
+        if mlxcel_core::metal_is_available() {
+            assert_eq!(
+                allowed, 3,
+                "{export:?}: every probed width is exact on Metal"
+            );
+        }
+    }
+}
+
+/// The server burst's prefill follows the classic partition (issue #3458):
+/// split at a prompt-cache snapshot boundary, its last-row logits and its
+/// layer states are those of the classic split prefill bit for bit, and the
+/// captured rows are those of the pieces in order, with a capture window
+/// still keeping only the newest rows of the whole prompt.
+#[test]
+fn a_planned_burst_prefill_equals_the_classic_split_prefill() {
+    use mlxcel_core::prefill_plan::PrefillSplits;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = tiny_model();
+    let boundary = 4usize;
+    let taps = [0usize, 2];
+
+    // Classic decode's prefill of the same partition: the history piece,
+    // then the rest with logits for its last row only.
+    let id = mlxcel_core::cache::SequenceId::from_raw(34_584);
+    model.prepare_sequence_state(id);
+    let history = ids(&[&PROMPT[..boundary]]);
+    let _ = model.forward_with_sequence_id(&history, Some(id), &mut model.make_caches(), None);
+    let rest = model
+        .last_row_logits(
+            &ids(&[&PROMPT[boundary..]]),
+            None,
+            Some(id),
+            &mut model.make_caches(),
+            None,
+            PROMPT.len() - boundary - 1,
+        )
+        .expect("raon1_mini computes last-row logits");
+    let want_logits = row(&rest, 0);
+    let classic = model
+        .sequence_state
+        .with_existing_sequence_state(id, |caches| layer_state(caches))
+        .expect("the sequence is open");
+
+    let planned = |window: Option<usize>| {
+        let mut caches = model.make_speculative_caches(None);
+        if let Some(rows) = window {
+            model.limit_prefill_capture(&mut caches, rows);
+        }
+        let out = model.prefill_speculative_planned(
+            &ids(&[PROMPT]),
+            &mut caches,
+            &taps,
+            0,
+            PrefillSplits::from_points(&[boundary]),
+        );
+        let state: Vec<_> = caches.into_iter().map(|c| c.layer).collect();
+        (out, state)
+    };
+    let (out, state) = planned(None);
+    assert_eq!(mlxcel_core::array_shape(&out.logits)[1], 1, "last row only");
+    assert_eq!(row(&out.logits, 0), want_logits, "split prefill logits");
+    assert_eq!(layer_state(&state), classic, "split prefill state");
+    assert_eq!(out.hidden_states.len(), taps.len());
+    for hidden in &out.hidden_states {
+        assert_eq!(mlxcel_core::array_shape(hidden)[1], PROMPT.len() as i32);
+    }
+
+    // A three-row window spans the boundary's last row and the second piece.
+    let (windowed, _) = planned(Some(3));
+    for (tail, full) in windowed.hidden_states.iter().zip(&out.hidden_states) {
+        assert_eq!(mlxcel_core::array_shape(tail)[1], 3);
+        let from = PROMPT.len() as i32 - 3;
+        let want = mlxcel_core::utils::slice_axis(full, 1, from, PROMPT.len() as i32);
+        assert_eq!(
+            bytes(tail),
+            bytes(&want),
+            "the newest rows of the whole prompt"
+        );
+    }
+    assert_eq!(row(&windowed.logits, 0), want_logits);
+
+    // Without a boundary the plan is one pass, the existing prefill.
+    let mut one_pass = model.make_speculative_caches(None);
+    let single = model.prefill_speculative_planned(
+        &ids(&[PROMPT]),
+        &mut one_pass,
+        &taps,
+        0,
+        PrefillSplits::NONE,
+    );
+    let mut reference = model.make_speculative_caches(None);
+    let direct = model.prefill_forward_with_capture_layers(&ids(&[PROMPT]), &mut reference, &taps);
+    assert_eq!(bytes(&single.logits), bytes(&direct.logits));
 }

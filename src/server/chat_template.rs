@@ -256,6 +256,16 @@ pub struct ChatTemplateProcessor {
     /// boundary snapshot) and a template that already emitted the channel are
     /// both left alone.
     generation_prompt_suffix: Option<GenerationPromptSuffix>,
+    /// How the server numbers image tags in each message for a family whose
+    /// template renders `content` as a string (#3265).
+    ///
+    /// Phi-3V and Phi-4MM templates drop image parts, so the server writes each
+    /// image's `<|image_N|>` tag into the message the image came from, numbered
+    /// across the whole conversation. Without this the runtime inserts every
+    /// tag at the first user turn. Keyed on the model family, like
+    /// [`Self::generation_prompt_suffix`], and set only when the template does
+    /// not render image parts itself.
+    numbered_image_tags: Option<NumberedImageTags>,
     /// A native, code-rendered chat format that replaces the Jinja template
     /// entirely (#1338).
     ///
@@ -322,6 +332,43 @@ fn generation_prompt_suffix_for(model_path: &Path) -> Option<GenerationPromptSuf
             opener: crate::multimodal::llmjp_vl_prompt::LLMJP_ASSISTANT_OPENER,
             suffix: crate::multimodal::llmjp_vl_prompt::LLMJP_GENERATION_PROMPT_SUFFIX,
         }),
+        _ => None,
+    }
+}
+
+/// The image tag a family's runtime turns into an image slot, written by the
+/// server into each message for templates that render `content` as a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberedImageTags {
+    /// Phi-3V: `<|image_N|>` followed by a newline, the spelling
+    /// `phi3v_prompt::ensure_phi3v_image_tags` inserts.
+    Phi3V,
+    /// Phi-4MM: `<|image_N|>` with no separator, the spelling
+    /// `phi4mm_prompt::prepare_phi4mm_prompt_tokens` normalizes.
+    Phi4MM,
+}
+
+impl NumberedImageTags {
+    /// The tag for the conversation's `ordinal`-th image (1-based).
+    pub fn tag(self, ordinal: usize) -> String {
+        format!("<|image_{ordinal}|>")
+    }
+
+    /// What follows a tag the server inserts.
+    pub fn separator(self) -> &'static str {
+        match self {
+            Self::Phi3V => "\n",
+            Self::Phi4MM => "",
+        }
+    }
+}
+
+/// The per-message image tag numbering a model family needs, or `None` for
+/// every family whose runtime places image tokens some other way.
+fn numbered_image_tags_for(model_path: &Path) -> Option<NumberedImageTags> {
+    match crate::models::get_model_type(model_path).ok()? {
+        crate::models::ModelType::Phi3VLM => Some(NumberedImageTags::Phi3V),
+        crate::models::ModelType::Phi4MMVLM => Some(NumberedImageTags::Phi4MM),
         _ => None,
     }
 }
@@ -461,6 +508,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -469,6 +517,8 @@ impl ChatTemplateProcessor {
         };
         processor.wrap_string_content = template_requires_typed_text_content(&processor);
         processor.attach_reasoning_effort_steering_from(model_path);
+        processor.numbered_image_tags =
+            numbered_image_tags_for(model_path).filter(|_| !processor.supports_image_content());
         Ok(Some(processor))
     }
 
@@ -487,6 +537,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: None,
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -519,6 +570,11 @@ impl ChatTemplateProcessor {
     /// The generation-prompt completion rule in force, if any.
     pub fn generation_prompt_suffix(&self) -> Option<GenerationPromptSuffix> {
         self.generation_prompt_suffix
+    }
+
+    /// The per-message image tag numbering in force, if any.
+    pub fn numbered_image_tags(&self) -> Option<NumberedImageTags> {
+        self.numbered_image_tags
     }
 
     /// Complete a render that stopped at a bare role opener.
@@ -799,12 +855,18 @@ impl ChatTemplateProcessor {
     /// architecture name — any future template that adopts the same idiom is
     /// covered automatically.
     ///
-    /// The check requires the literal `not thinking is defined` substring, so
-    /// templates that instead declare `enable_thinking is not defined` (e.g.
-    /// GLM-5.2's `glm_moe_dsa` template) do not match: `"is not defined"` is
-    /// not the same substring as `"is defined"` preceded by `not `.
+    /// The check matches the literal `not thinking is defined` substring, or,
+    /// as mlx-lm's `_infer_thinking_kwarg` does since mlx-lm#1974, a
+    /// ` thinking is defined` test in a template that never mentions
+    /// `enable_thinking` (`{% if thinking is defined and thinking %}`). A
+    /// template that reads `enable_thinking` keeps getting that kwarg alone:
+    /// GLM-5.2's `glm_moe_dsa` template declares `enable_thinking is not
+    /// defined`, and `"is not defined"` is not `"is defined"` preceded by
+    /// `not `, so it matches neither form.
     fn wants_bare_thinking_alias(&self) -> bool {
         self.template.contains("not thinking is defined")
+            || (self.template.contains(" thinking is defined")
+                && !self.template.contains("enable_thinking"))
     }
 
     /// Detect a chat template that gates reasoning on a `thinking_mode`
@@ -2147,6 +2209,33 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// Unlimited-OCR's serving template: the messages' text, joined by one space,
+/// with nothing after the last message.
+///
+/// This is mlx-vlm's `UnlimitedOCRProcessor.default_chat_template`, which is
+/// what mlx-vlm renders whatever the checkpoint ships, and it matches
+/// `baidu/Unlimited-OCR`'s own prompts (`<image>document parsing.`) and its
+/// `format_messages`, which strips the rendered prompt. The
+/// `mlx-community/Unlimited-OCR-4bit` conversion instead ships DeepSeek-OCR's
+/// template, `{{message['content']}} ` with a space after every message, so
+/// the prompt ended in a space token (id 223) the reference never feeds: 898
+/// prompt tokens for mlx-vlm's 897 on a 1920x1280 page, and the model then
+/// opened its answer with an invented date line. Typed content renders its
+/// `text` parts; the page images reach the prompt as tokens after BOS, the
+/// position mlx-vlm's single `<image>` marker takes.
+const UNLIMITED_OCR_CHAT_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- if not loop.last %}{{- ' ' }}{%- endif %}",
+    "{%- endfor %}"
+);
+
 /// PLaMo 2.1 VL's serving template (issue #1380).
 ///
 /// `pfnet/plamo-2.1-2b-vl` ships no chat template: its processor joins the
@@ -2224,11 +2313,14 @@ const MINICPM_CHATML_TEMPLATE: &str = concat!(
 /// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
 /// every request at the task-marker parse.
 /// Families whose built-in template replaces any template the checkpoint
-/// ships (see the Nemotron-Parse note in the loader above).
+/// ships (see the Nemotron-Parse note in the loader above). Unlimited-OCR is
+/// here because its MLX conversion ships DeepSeek-OCR's template, whose
+/// trailing space the reference never renders (see
+/// [`UNLIMITED_OCR_CHAT_TEMPLATE`]).
 fn builtin_template_overrides_checkpoint(model_path: &Path) -> bool {
     matches!(
         crate::models::get_model_type(model_path),
-        Ok(crate::models::ModelType::NemotronParseVLM)
+        Ok(crate::models::ModelType::NemotronParseVLM | crate::models::ModelType::UnlimitedOcrVLM)
     )
 }
 
@@ -2241,6 +2333,7 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
         crate::models::ModelType::Plamo2VLM => Some(PLAMO2_VL_CHAT_TEMPLATE),
+        crate::models::ModelType::UnlimitedOcrVLM => Some(UNLIMITED_OCR_CHAT_TEMPLATE),
         crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
             Some(MINICPM_CHATML_TEMPLATE)
         }
@@ -5275,3 +5368,7 @@ TOOL
 #[cfg(test)]
 #[path = "chat_template_text_wrap_tests.rs"]
 mod text_wrap_tests;
+
+#[cfg(test)]
+#[path = "chat_template_thinking_alias_tests.rs"]
+mod thinking_alias_tests;

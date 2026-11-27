@@ -492,9 +492,10 @@ async fn non_stream_create_response(
 
     // Parse tool calls (reuse chat-path helpers).
     let parsed_tools = if tool_calls::should_parse_tool_calls(&translated.chat_request) {
-        Some(tool_calls::parse_tool_calls(
+        Some(tool_calls::parse_tool_calls_with_context(
             &result.text,
             translated.chat_request.tools.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None

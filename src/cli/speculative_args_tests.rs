@@ -465,8 +465,9 @@ fn draft_max_fallback_precedence_table() {
 
 #[test]
 fn resolve_draft_block_size_runs_the_raon_dflash2_drafter_at_its_measured_width() {
-    // Issue #3436: the checkpoint trains 8-row blocks, but 5 rows (four
-    // drafts) is the measured default; the flat 16 is past its trained block.
+    // Issue #3436: the checkpoint trains 8-row blocks, but the default is the
+    // measured width, 3 rows (two drafts) since #3458; the flat 16 is past its
+    // trained block.
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("config.json"),
@@ -482,6 +483,6 @@ fn resolve_draft_block_size_runs_the_raon_dflash2_drafter_at_its_measured_width(
             TargetQuantization::Unknown,
         )
     };
-    assert_eq!(resolve(None), 5);
+    assert_eq!(resolve(None), 3);
     assert_eq!(resolve(Some(7)), 7, "an explicit --draft-block-size wins");
 }

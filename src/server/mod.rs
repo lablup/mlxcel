@@ -195,7 +195,13 @@ mod got_chat_template_tests;
 mod plamo2_vl_chat_template_tests;
 
 #[cfg(test)]
+mod unlimited_ocr_chat_template_tests;
+
+#[cfg(test)]
 mod minicpm_chat_template_tests;
+
+#[cfg(test)]
+mod image_geometry_route_tests;
 
 #[cfg(test)]
 mod llama_compat_tests;

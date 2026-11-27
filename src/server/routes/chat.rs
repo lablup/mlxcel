@@ -724,7 +724,8 @@ pub(crate) async fn non_stream_chat_completion(
         // way inside `plain_chat_reply`.
         let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
         let tools = request.tools.as_deref();
-        let mut parsed = tool_calls::parse_tool_calls(&result.text, tools);
+        let mut parsed =
+            tool_calls::parse_tool_calls_with_context(&result.text, tools, primed_open_thinking);
         if answer_wrapper {
             parsed.content = tool_calls::strip_answer_wrapper(&parsed.content);
         }
@@ -1911,7 +1912,11 @@ async fn stream_chat_completion(
 
         if parse_tools && let Ok(cb) = cb_state.lock() {
             let tools_ref = tools_for_parser.as_deref();
-            let mut parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
+            let mut parsed = tool_calls::parse_tool_calls_with_context(
+                &cb.accumulated,
+                tools_ref,
+                primed_open_thinking,
+            );
             let specific_fn = tool_choice
                 .as_ref()
                 .and_then(|tc| tc.specific_function())

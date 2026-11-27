@@ -381,7 +381,12 @@ impl ToolLoop<'_> {
                 return Stop::Bound(INCOMPLETE_MAX_OUTPUT_TOKENS);
             }
             let calls = if tool_calls::should_parse_tool_calls(&chat) {
-                tool_calls::parse_tool_calls(&round.raw, chat.tools.as_deref()).tool_calls
+                tool_calls::parse_tool_calls_with_context(
+                    &round.raw,
+                    chat.tools.as_deref(),
+                    round.primed_open_thinking,
+                )
+                .tool_calls
             } else {
                 Vec::new()
             };

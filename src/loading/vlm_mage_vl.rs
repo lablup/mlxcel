@@ -51,6 +51,9 @@ pub(crate) fn remap_mage_vl_weight_key(key: &str) -> String {
         format!("model.{rest}")
     } else if let Some(rest) = key.strip_prefix("model.visual.") {
         format!("vision_tower.{rest}")
+    } else if let Some(rest) = key.strip_prefix("visual.") {
+        // Mage-VL-Cowork (`llava_onevision2`) stores the tower bare.
+        format!("vision_tower.{rest}")
     } else if let Some(rest) = key.strip_prefix("language_model.") {
         rest.to_string()
     } else {
@@ -59,7 +62,7 @@ pub(crate) fn remap_mage_vl_weight_key(key: &str) -> String {
 }
 
 /// Take `text_config`, lift its RoPE base and inherit the top-level
-/// quantization block.
+/// quantization block and `tie_word_embeddings`, which defaults to untied.
 pub(crate) fn mage_vl_text_config(full_config: &Value) -> Result<Value> {
     let mut text_config = full_config
         .get("text_config")
@@ -72,6 +75,22 @@ pub(crate) fn mage_vl_text_config(full_config: &Value) -> Result<Value> {
     {
         super::require_object_mut(&mut text_config, "Mage-VL text_config")?
             .insert("quantization".to_string(), q.clone());
+    }
+    // Mage-VL-Cowork states tying nowhere and ships an `lm_head` trained
+    // apart from `embed_tokens`. Transformers' Qwen3 config and mlx-vlm's
+    // Mage-VL config default to untied; the shared Qwen3 args default to
+    // tied, which would decode through the embedding matrix.
+    if text_config
+        .get("tie_word_embeddings")
+        .is_none_or(Value::is_null)
+    {
+        let tie = full_config
+            .get("tie_word_embeddings")
+            .filter(|tie| tie.is_boolean())
+            .cloned()
+            .unwrap_or(Value::Bool(false));
+        super::require_object_mut(&mut text_config, "Mage-VL text_config")?
+            .insert("tie_word_embeddings".to_string(), tie);
     }
     match text_config.get("model_type").and_then(Value::as_str) {
         None | Some("qwen3") => Ok(text_config),

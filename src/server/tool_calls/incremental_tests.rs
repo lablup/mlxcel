@@ -541,3 +541,47 @@ fn a_panicking_fragment_disables_the_streamer_and_keeps_the_plan_consistent() {
         .expect("sent is a prefix");
     assert_eq!(format!("{sent}{rest}"), parsed[0].arguments);
 }
+
+/// #3209 item c: a `nullable: true` string may coerce to JSON null, so the
+/// streamer holds it and sends it whole instead of streaming the text `null`.
+#[test]
+fn qwen3_coder_nullable_string_is_held_not_streamed() {
+    let tools = vec![tool(
+        "note_it",
+        json!({"type": "object", "properties": {
+            "note": {"type": "string", "nullable": true}
+        }}),
+    )];
+    let text = "<tool_call>\n<function=note_it>\n<parameter=note>\nnull\n</parameter>\n</function>\n</tool_call>";
+    let parsed = parse_tool_calls(text, Some(&tools));
+    assert_eq!(parsed.tool_calls.len(), 1);
+    assert_eq!(parsed.tool_calls[0].arguments, r#"{"note":null}"#);
+    for pieces in chunkings(text) {
+        let (_, events) = feed_pieces(&pieces, &tools, None, false);
+        let calls = collect(&events);
+        let call = calls.get(&0).expect("the call streams");
+        assert_eq!(call.name, "note_it");
+        assert_eq!(call.arguments, r#"{"note":null}"#, "chunking {pieces:?}");
+    }
+}
+
+/// #3209 item b: a call inside a reasoning block is never streamed while it is
+/// generated, including the tail call of an unclosed block that the final
+/// parse executes (the final emission sends it).
+#[test]
+fn tail_call_in_unclosed_reasoning_is_left_to_the_final_emission() {
+    let tools = tools();
+    let call = r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Warsaw"}}</tool_call>"#;
+    for (text, primed) in [
+        (format!("<think>need weather{call}"), false),
+        (format!("need weather{call}\n"), true),
+    ] {
+        let parsed =
+            crate::server::tool_calls::parse_tool_calls_with_context(&text, Some(&tools), primed);
+        assert_eq!(parsed.tool_calls.len(), 1, "{text:?}");
+        for pieces in chunkings(&text) {
+            let (_, events) = feed_pieces(&pieces, &tools, None, primed);
+            assert!(events.is_empty(), "{text:?} streamed {events:?}");
+        }
+    }
+}

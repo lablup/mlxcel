@@ -42,3 +42,9 @@ pub mod windows_rocm;
 // test-only hooks into debug and test-fast builds only (#2765).
 #[path = "../../mlxcel-core/build_support/ptx_cache_test_hooks.rs"]
 pub mod ptx_cache_test_hooks;
+
+// The build gate, SHA-256 and artifact staging of the experimental cuda-oxide
+// fused RMSNorm route (#2833), which must not add a build dependency to
+// `mlxcel-core` for the same `OUT_DIR` reason.
+#[path = "../../mlxcel-core/build_support/cuda_oxide_fused_norm.rs"]
+pub mod cuda_oxide_fused_norm;

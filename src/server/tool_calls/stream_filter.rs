@@ -26,6 +26,7 @@
 //! **Supported families:**
 //! - Qwen-style reasoning: `<think>` / `</think>` — Qwen3.x, Exaone4, Hunyuan, GLM4, etc.
 //! - Kimi-VL-Thinking reasoning: `◁think▷` / `◁/think▷`
+//! - Mistral reasoning: `[THINK]` / `[/THINK]` — Magistral, Ministral reasoning
 //! - Hermes-style tool calls: `<tool_call>` / `</tool_call>` — Qwen/DeepSeek tool call format
 //! - Mistral Nemo: `[TOOL_CALLS]` — one-shot start marker (rest of output is tool call JSON)
 //! - Gemma 4: `<|channel>thought` / `<channel|>` with a bare `<|channel>`
@@ -210,6 +211,7 @@ fn canonical_thinking_pair(delimiter: &str) -> Option<(&'static str, &'static st
         "<ifm|think_faster>" | "</ifm|think_faster>" => {
             Some(("<ifm|think_faster>", "</ifm|think_faster>"))
         }
+        "[THINK]" | "[/THINK]" => Some(("[THINK]", "[/THINK]")),
         _ => None,
     }
 }
@@ -559,6 +561,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("</atem:parameter>", DelimiterAction::ExitAtemParameter),
     // Mistral Nemo: `[TOOL_CALLS] [...]` — no exit; the rest of output is JSON.
     ("[TOOL_CALLS]", DelimiterAction::EnterToolCall),
+    // Mistral reasoning (Magistral, Ministral reasoning; #3209): added tokens
+    // `[THINK]` / `[/THINK]`. `[THINK]` shares `[T` with `[TOOL_CALLS]` and
+    // diverges at byte 2, and `[/` starts no other entry, so the
+    // partial-match window resolves both; both stay under the longest
+    // delimiter.
+    ("[/THINK]", DelimiterAction::ExitThinking),
+    ("[THINK]", DelimiterAction::EnterThinking),
     // Kimi K2: `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`.
     // Exit before enter, mirroring the Hermes convention above.
     ("<|tool_calls_section_end|>", DelimiterAction::ExitToolCall),
@@ -591,6 +600,66 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<|eom_id|>", DelimiterAction::ExitToolCall),
     ("<|python_tag|>", DelimiterAction::EnterToolCall),
 ];
+
+/// Longest tool-call block, end marker and trailing whitespace included, that
+/// the filter holds back while it is undecided whether a block opened inside
+/// a reasoning block is the model's call or text it wrote while reasoning
+/// (#3209). Past it the block is reasoning text, the same bound
+/// `incremental::MAX_HELD_BYTES` puts on held argument text.
+const MAX_REASONING_TOOL_HOLD_BYTES: usize = 1 << 20;
+
+/// Tool-call markers of families that route their own channels: Kimi K3's
+/// XTML `tools` tags and Inkling's invoke marker keep the plain `ToolCall`
+/// transitions inside a reasoning block (#3209 scope).
+const OWN_CHANNEL_TOOL_MARKERS: &[&str] = &[
+    "<|open|>tools<|sep|>",
+    "<|close|>tools<|sep|>",
+    "<|content_invoke_tool_json|>",
+];
+
+/// The tool-call open and end markers whose blocks are held inside a
+/// reasoning block (#3209): every `EnterToolCall` / `ExitToolCall` row of
+/// [`CHAT_DELIMITERS`] except [`OWN_CHANNEL_TOOL_MARKERS`]. Read by the
+/// non-streamed parser, so both paths agree on what a tail call is.
+///
+/// Used by: `tool_calls::parser::parse_tool_calls_with_context`.
+pub(super) fn reasoning_tool_markers() -> (Vec<&'static str>, Vec<&'static str>) {
+    let rows = || {
+        CHAT_DELIMITERS
+            .iter()
+            .filter(|(marker, _)| !OWN_CHANNEL_TOOL_MARKERS.contains(marker))
+    };
+    let opens = rows()
+        .filter(|(_, action)| matches!(action, DelimiterAction::EnterToolCall))
+        .map(|(marker, _)| *marker)
+        .collect();
+    let closes = rows()
+        .filter(|(_, action)| matches!(action, DelimiterAction::ExitToolCall))
+        .map(|(marker, _)| *marker)
+        .collect();
+    (opens, closes)
+}
+
+/// A tool-call block that opened inside a reasoning block (#3209).
+///
+/// Its bytes are held rather than suppressed. Text after its end marker, or a
+/// reasoning close, shows the block was reasoning (a quoted example, a plan),
+/// and it is released as reasoning in stream order. A block that ends the
+/// stream with only whitespace after its end marker is the model's call: the
+/// filter drops it and the final parse executes it
+/// (`parser::parse_tool_calls_with_context`). The non-streamed parser applies
+/// the same four rules, which is what keeps the two paths equal.
+#[derive(Debug, Default)]
+struct ReasoningToolHold {
+    /// Held bytes: the block, markers included, then any whitespace after
+    /// its end marker.
+    text: String,
+    /// Token positions the held bytes came from, reported once the hold is
+    /// released (emitted) or dropped (suppressed).
+    positions: usize,
+    /// The block's end marker has been seen.
+    closed: bool,
+}
 
 /// The state of the streaming filter state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -701,6 +770,9 @@ pub struct StreamFilter {
     /// Strip [`ANSWER_WRAPPER`] from content; see
     /// [`with_answer_wrapper`](Self::with_answer_wrapper).
     answer_wrapper: bool,
+    /// A tool-call block opened inside a reasoning block, still undecided
+    /// (#3209); see [`ReasoningToolHold`].
+    reasoning_tool: Option<ReasoningToolHold>,
 }
 
 /// A Muse recipient header found by [`StreamFilter::scan_muse_boundary_header`]
@@ -840,6 +912,7 @@ impl StreamFilter {
             muse_boundary: true,
             muse_in_tool_message: false,
             answer_wrapper: false,
+            reasoning_tool: None,
         }
     }
 
@@ -928,6 +1001,7 @@ impl StreamFilter {
         if self.buffer.is_empty()
             && self.held_ws.is_empty()
             && self.harmony_reasoning.held.is_empty()
+            && self.reasoning_tool.is_none()
         {
             self.fragment_lengths.clear();
             return FilterOutput::default();
@@ -939,6 +1013,10 @@ impl StreamFilter {
         // the remaining tail so a truncated bare `<|channel>` cannot leak as
         // visible content.
         let mut acc = self.drain_into(true);
+        if self.reasoning_tool.is_some() && !self.buffer.is_empty() {
+            self.emit_prefix(self.buffer.len(), &mut acc);
+        }
+        self.finish_reasoning_tool(&mut acc);
         let remaining = self.buffer.len();
         if remaining > 0 {
             match self.state {
@@ -1067,6 +1145,9 @@ impl StreamFilter {
                     if pos > 0 {
                         self.emit_prefix(pos, &mut acc);
                     }
+                    if self.reasoning_tool_delimiter(delim_len, action, &mut acc) {
+                        continue;
+                    }
 
                     // Consume the delimiter bytes and count how many token
                     // positions they spanned. Each position that contributed
@@ -1113,6 +1194,10 @@ impl StreamFilter {
     /// Route the first `n` buffered bytes to the current state's channel and
     /// drain them.
     fn emit_prefix(&mut self, n: usize, acc: &mut Drained) {
+        if self.reasoning_tool.is_some() {
+            self.emit_into_reasoning_tool(n, acc);
+            return;
+        }
         match self.state {
             FilterState::Content => self.emit_content_prefix(n, acc),
             FilterState::Thinking if self.harmony_active || self.muse_active => {
@@ -1129,6 +1214,135 @@ impl StreamFilter {
                 acc.consumed_positions += self.drain_fragment_lengths(n);
                 self.buffer.drain(..n);
             }
+        }
+    }
+
+    /// Act on a delimiter that bears on an in-reasoning tool-call block
+    /// (#3209). Returns `true` when the delimiter was consumed here; `false`
+    /// leaves it to the regular state machine (after any held block it
+    /// decided was reasoning has been released).
+    ///
+    /// * Inside a held block that has not ended, the reasoning close releases
+    ///   the block as reasoning and is then acted on as usual (rule 2: an
+    ///   example missing its end marker cannot swallow what follows the
+    ///   close), a tool-call end marker ends the block, and anything else is
+    ///   part of the block.
+    /// * After a held block ended, any delimiter is a non-whitespace byte, so
+    ///   the block was reasoning text and is released first.
+    /// * In a reasoning block with nothing held, a tool-call open starts a
+    ///   hold, and a stray tool-call end marker is reasoning text.
+    fn reasoning_tool_delimiter(
+        &mut self,
+        len: usize,
+        action: DelimiterAction,
+        acc: &mut Drained,
+    ) -> bool {
+        match self.reasoning_tool.as_ref().map(|hold| hold.closed) {
+            Some(false) => match action {
+                DelimiterAction::ExitThinking => {
+                    self.release_reasoning_tool(acc);
+                    return false;
+                }
+                DelimiterAction::ExitToolCall => {
+                    self.hold_reasoning_tool_bytes(len, acc);
+                    if let Some(hold) = self.reasoning_tool.as_mut() {
+                        hold.closed = true;
+                    }
+                    return true;
+                }
+                _ => {
+                    self.hold_reasoning_tool_bytes(len, acc);
+                    return true;
+                }
+            },
+            Some(true) => self.release_reasoning_tool(acc),
+            None => {}
+        }
+        let tool_action = matches!(
+            action,
+            DelimiterAction::EnterToolCall | DelimiterAction::ExitToolCall
+        );
+        if !tool_action
+            || self.state != FilterState::Thinking
+            || self.harmony_active
+            || self.muse_active
+            || self.atem_depth > 0
+            || OWN_CHANNEL_TOOL_MARKERS.contains(&&self.buffer[..len])
+        {
+            return false;
+        }
+        if matches!(action, DelimiterAction::EnterToolCall) {
+            self.reasoning_tool = Some(ReasoningToolHold::default());
+            self.hold_reasoning_tool_bytes(len, acc);
+        } else {
+            acc.reasoning.push_str(&self.buffer[..len]);
+            acc.consumed_positions += self.drain_fragment_lengths(len);
+            self.buffer.drain(..len);
+        }
+        true
+    }
+
+    /// Route the first `n` buffered bytes (no delimiter among them) while a
+    /// tool-call block opened inside reasoning is held: they join the block,
+    /// or, once its end marker was seen, whitespace joins it and the first
+    /// other byte releases it as reasoning.
+    fn emit_into_reasoning_tool(&mut self, n: usize, acc: &mut Drained) {
+        let closed = self.reasoning_tool.as_ref().is_some_and(|hold| hold.closed);
+        if !closed {
+            self.hold_reasoning_tool_bytes(n, acc);
+            return;
+        }
+        let text = &self.buffer[..n];
+        let lead = text.len() - text.trim_start().len();
+        self.hold_reasoning_tool_bytes(lead, acc);
+        if n > lead {
+            self.release_reasoning_tool(acc);
+            self.emit_prefix(n - lead, acc);
+        }
+    }
+
+    /// Move the first `n` buffered bytes into the held block, releasing it as
+    /// reasoning once it outgrows [`MAX_REASONING_TOOL_HOLD_BYTES`].
+    fn hold_reasoning_tool_bytes(&mut self, n: usize, acc: &mut Drained) {
+        if n == 0 {
+            return;
+        }
+        let positions = self.drain_fragment_lengths(n);
+        if let Some(hold) = self.reasoning_tool.as_mut() {
+            hold.text.push_str(&self.buffer[..n]);
+            hold.positions += positions;
+        }
+        self.buffer.drain(..n);
+        if self
+            .reasoning_tool
+            .as_ref()
+            .is_some_and(|hold| hold.text.len() > MAX_REASONING_TOOL_HOLD_BYTES)
+        {
+            self.release_reasoning_tool(acc);
+        }
+    }
+
+    /// Emit the held block as reasoning, in stream order, and stop holding.
+    fn release_reasoning_tool(&mut self, acc: &mut Drained) {
+        if let Some(hold) = self.reasoning_tool.take() {
+            acc.reasoning.push_str(&hold.text);
+            acc.consumed_positions += hold.positions;
+        }
+    }
+
+    /// End of stream: a held block whose end marker was seen, followed by
+    /// whitespace only, is the model's call (rule 3), so it is dropped here
+    /// and executed by the final parse; one still open is a truncated block
+    /// and stays reasoning (rule 4).
+    fn finish_reasoning_tool(&mut self, acc: &mut Drained) {
+        match self.reasoning_tool.as_ref().map(|hold| hold.closed) {
+            Some(true) => {
+                if let Some(hold) = self.reasoning_tool.take() {
+                    acc.suppress(hold.positions);
+                }
+            }
+            Some(false) => self.release_reasoning_tool(acc),
+            None => {}
         }
     }
 

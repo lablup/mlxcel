@@ -19,7 +19,10 @@
 //!
 //! 1. Patch embedding: a bias-free 16x16 stride-16 conv, applied as a Linear
 //!    over each `[C*P*P]` processor row.
-//! 2. `layernorm_pre`.
+//! 2. `layernorm_pre`. Every tower LayerNorm (`layernorm_pre`, `layer_norm1`,
+//!    `layer_norm2`, the merger's `ln_q`) and both exact GELUs run in f32 and
+//!    round once to the activation dtype, as upstream does (`layer_norm_f32`,
+//!    `gelu_f32`).
 //! 3. 24 pre-norm layers: fused `qkv` (contiguous q|k|v split), interleaved
 //!    4:6:6 3D rotary in f32 (see [`super::mage_vl_rope`]), unmasked SDPA
 //!    within one attention window, `proj`; then `fc1 -> exact GELU -> fc2`.
@@ -54,6 +57,32 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
         .get(&format!("{prefix}.bias"))
         .map(|b| mlxcel_core::copy(b));
     Ok(LayerNorm::new(weight, bias, eps))
+}
+
+/// LayerNorm on f32 input, weight and bias, rounded once to `x`'s dtype, as
+/// upstream's Mage-ViT `LayerNorm` does. The shared kernel run in half
+/// precision rounds the normalized value before the affine. The weights stay
+/// in their loaded dtype; only the arithmetic widens.
+fn layer_norm_f32(ln: &LayerNorm, x: &MlxArray) -> UniquePtr<MlxArray> {
+    let f32_dtype = mlxcel_core::dtype::FLOAT32;
+    let widened = LayerNorm::new(
+        mlxcel_core::astype(&ln.weight, f32_dtype),
+        ln.bias
+            .as_ref()
+            .map(|bias| mlxcel_core::astype(bias, f32_dtype)),
+        ln.eps,
+    );
+    let out = widened.forward(&mlxcel_core::astype(x, f32_dtype));
+    mlxcel_core::astype(&out, mlxcel_core::array_dtype(x))
+}
+
+/// Exact erf GELU on an f32 upcast, rounded once to `x`'s dtype, as upstream's
+/// Mage-ViT `GELU` does. The bridge GELU widens through its f32 constants, but
+/// the CUDA build promotes bf16 with f32 to bf16, so a bf16 activation would
+/// otherwise run the whole formula in bf16.
+fn gelu_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    let out = mlxcel_core::gelu(&mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32));
+    mlxcel_core::astype(&out, mlxcel_core::array_dtype(x))
 }
 
 /// Bring the patch-embedding kernel to the `[out, C*P*P]` Linear layout that
@@ -144,10 +173,12 @@ struct MageVlLayer {
 
 impl MageVlLayer {
     fn forward(&self, x: &MlxArray, cos: &MlxArray, sin: &MlxArray) -> UniquePtr<MlxArray> {
-        let attn = self.attn.forward(&self.layer_norm1.forward(x), cos, sin);
+        let attn = self
+            .attn
+            .forward(&layer_norm_f32(&self.layer_norm1, x), cos, sin);
         let h = mlxcel_core::add(x, &attn);
-        let mlp = self.fc1.forward(&self.layer_norm2.forward(&h));
-        let mlp = self.fc2.forward(&mlxcel_core::gelu(&mlp));
+        let mlp = self.fc1.forward(&layer_norm_f32(&self.layer_norm2, &h));
+        let mlp = self.fc2.forward(&gelu_f32(&mlp));
         mlxcel_core::add(&h, &mlp)
     }
 }
@@ -161,10 +192,10 @@ struct MageVlPatchMerger {
 
 impl MageVlPatchMerger {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let h = self.ln_q.forward(x);
+        let h = layer_norm_f32(&self.ln_q, x);
         let h = mlxcel_core::reshape(&h, &[-1, self.merged_width]);
         let h = self.mlp_0.forward(&h);
-        self.mlp_2.forward(&mlxcel_core::gelu(&h))
+        self.mlp_2.forward(&gelu_f32(&h))
     }
 }
 
@@ -303,7 +334,7 @@ impl MageVlVisionEncoder {
         let rows = mlxcel_core::astype(rows, self.weight_dtype());
         let x = mlxcel_core::matmul(&rows, &mlxcel_core::transpose(&self.patch_weight));
         let x = mlxcel_core::reshape(&x, &[1, l, self.hidden_size as i32]);
-        let mut x = self.layernorm_pre.forward(&x);
+        let mut x = layer_norm_f32(&self.layernorm_pre, &x);
 
         let angles = rotary_angles(positions, &self.inv_freq);
         let angles = mlxcel_core::from_slice_f32(&angles, &[1, 1, l, head_dim]);
