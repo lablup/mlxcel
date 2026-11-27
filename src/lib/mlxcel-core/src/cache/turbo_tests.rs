@@ -1788,6 +1788,307 @@ fn turbo3_asym_layer_modes_apply_boundary_upgrade() {
 }
 
 // ---------------------------------------------------------------------------
+// Turbo3Asym device codec against the host reference (#3274)
+// ---------------------------------------------------------------------------
+
+/// What a Turbo3Asym cache must hold, built with the host-readback codec the
+/// cache used before #3274: the fp16 keys, and the packed V and norms the host
+/// quantizer produces for every chunk appended so far.
+struct Turbo3HostMirror {
+    params: super::turbo::quant3::TurboQuantParams3,
+    keys: Option<cxx::UniquePtr<ffi::MlxArray>>,
+    packed: Option<cxx::UniquePtr<ffi::MlxArray>>,
+    norms: Option<cxx::UniquePtr<ffi::MlxArray>>,
+}
+
+impl Turbo3HostMirror {
+    fn new(head_dim: i32, seed: u32) -> Self {
+        Self {
+            params: super::turbo::quant3::TurboQuantParams3::new(head_dim as u32, seed),
+            keys: None,
+            packed: None,
+            norms: None,
+        }
+    }
+
+    /// Append one chunk through the host quantizer. A zero-token chunk leaves
+    /// the mirror as it is.
+    fn append(&mut self, k: &ffi::MlxArray, v: &ffi::MlxArray) {
+        if ffi::array_shape(k)[2] == 0 {
+            return;
+        }
+        let k16 = ffi::astype(k, dtype::FLOAT16);
+        let v16 = ffi::astype(v, dtype::FLOAT16);
+        let (packed, norms) =
+            super::turbo::quant3::host_reference::quantize_v_turbo3_host(&v16, &self.params);
+        let join = |old: &Option<cxx::UniquePtr<ffi::MlxArray>>, new: cxx::UniquePtr<_>| match old {
+            Some(old) => crate::concatenate(old, &new, 2),
+            None => new,
+        };
+        self.keys = Some(join(&self.keys, k16));
+        self.packed = Some(join(&self.packed, packed));
+        self.norms = Some(join(&self.norms, norms));
+    }
+
+    /// Drop the last `n` tokens, as `KVCache::trim` does.
+    fn trim(&mut self, n: i32) {
+        let cut = |arr: &Option<cxx::UniquePtr<ffi::MlxArray>>| {
+            let arr = arr.as_ref().expect("mirror is empty");
+            let s = ffi::array_shape(arr);
+            ffi::slice(arr, &[0, 0, 0, 0], &[s[0], s[1], s[2] - n, s[3]])
+        };
+        self.keys = Some(cut(&self.keys));
+        self.packed = Some(cut(&self.packed));
+        self.norms = Some(cut(&self.norms));
+    }
+
+    fn len(&self) -> i32 {
+        self.keys.as_ref().map_or(0, |k| ffi::array_shape(k)[2])
+    }
+
+    /// The window `update_and_fetch` must return: fp16 keys and the host
+    /// dequantizer's fp16 values.
+    fn window(&self) -> (cxx::UniquePtr<ffi::MlxArray>, cxx::UniquePtr<ffi::MlxArray>) {
+        let v = super::turbo::quant3::host_reference::dequantize_v_turbo3_host(
+            self.packed.as_ref().unwrap(),
+            self.norms.as_ref().unwrap(),
+            &self.params,
+        );
+        (ffi::copy(self.keys.as_ref().unwrap()), v)
+    }
+}
+
+fn raw_bytes(arr: &ffi::MlxArray) -> Vec<u8> {
+    ffi::eval(arr);
+    ffi::array_to_raw_bytes(arr)
+}
+
+/// The visible part of a Turbo3Asym cache's stored V: `(v_packed, v_norms)`
+/// bytes for tokens `0..offset`.
+fn turbo3_stored_bytes(cache: &KVCache) -> (Vec<u8>, Vec<u8>) {
+    let vp = cache.v_packed.as_ref().expect("v_packed");
+    let vn = cache.v_norms.as_ref().expect("v_norms");
+    let ps = ffi::array_shape(vp);
+    let ns = ffi::array_shape(vn);
+    let len = cache.seq_len();
+    (
+        raw_bytes(&ffi::slice(vp, &[0, 0, 0, 0], &[ps[0], ps[1], len, ps[3]])),
+        raw_bytes(&ffi::slice(vn, &[0, 0, 0, 0], &[ns[0], ns[1], len, ns[3]])),
+    )
+}
+
+/// Assert the cache's stored V equals the mirror's, byte for byte.
+fn assert_turbo3_stored_matches(cache: &KVCache, mirror: &Turbo3HostMirror, what: &str) {
+    assert_eq!(cache.seq_len(), mirror.len(), "{what}: length");
+    if mirror.len() == 0 {
+        return;
+    }
+    let (packed, norms) = turbo3_stored_bytes(cache);
+    assert!(
+        packed == raw_bytes(mirror.packed.as_ref().unwrap()),
+        "{what}: stored v_packed differs from the host quantizer's bytes"
+    );
+    assert!(
+        norms == raw_bytes(mirror.norms.as_ref().unwrap()),
+        "{what}: stored v_norms differ from the host quantizer's bytes"
+    );
+}
+
+/// Real-path acceptance test of #3274: a Turbo3Asym cache driven through
+/// `KVCache::attend` for a 64-token prefill and 64 single-token decode steps
+/// holds the `v_packed` and `v_norms` the host reference produces and returns
+/// the attention output the host reference returns, bit for bit, at every
+/// step. Grouped-query shape (4 query heads over 2 KV heads).
+#[test]
+fn turbo3_asym_attend_matches_host_reference_over_prefill_and_decode() {
+    let (head_dim, n_kv_heads, n_q_heads) = (128, 2, 4);
+    let (prefill_len, decode_steps) = (64, 64);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo3Asym);
+    let mut mirror = Turbo3HostMirror::new(head_dim, cache.turbo_seed);
+
+    // Prefill: causal attention over the 64 new tokens, no explicit mask.
+    let k = synth_kv_tensor(1, n_kv_heads, prefill_len, head_dim, 0x3274_0001);
+    let v = synth_kv_tensor(1, n_kv_heads, prefill_len, head_dim, 0x3274_0002);
+    let q = synth_kv_tensor(1, n_q_heads, prefill_len, head_dim, 0x3274_0003);
+    mirror.append(&k, &v);
+    let out = cache.attend(&q, k, v, scale, None);
+    let (ref_k, ref_v) = mirror.window();
+    let out_ref = crate::causal_attention(&q, &ref_k, &ref_v, scale, 0.0, 0);
+    assert_eq!(
+        ffi::array_shape(&out),
+        vec![1, n_q_heads, prefill_len, head_dim]
+    );
+    assert!(
+        raw_bytes(&out) == raw_bytes(&out_ref),
+        "prefill attention differs from the host reference"
+    );
+    assert_turbo3_stored_matches(&cache, &mirror, "after prefill");
+
+    // Decode: one token per step over the growing window.
+    for step in 0..decode_steps {
+        let k = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 0x3274_1000 + step as u32);
+        let v = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 0x3274_2000 + step as u32);
+        let q = synth_kv_tensor(1, n_q_heads, 1, head_dim, 0x3274_3000 + step as u32);
+        mirror.append(&k, &v);
+        let out = cache.attend(&q, k, v, scale, None);
+        let (ref_k, ref_v) = mirror.window();
+        let out_ref = crate::layers::attention(&q, &ref_k, &ref_v, scale, None, 0.0, 0);
+        assert!(
+            raw_bytes(&out) == raw_bytes(&out_ref),
+            "decode step {step}: attention differs from the host reference"
+        );
+        assert_turbo3_stored_matches(&cache, &mirror, &format!("decode step {step}"));
+    }
+    assert_eq!(cache.seq_len(), prefill_len + decode_steps);
+}
+
+/// Drive one cache through `chunks` (token counts per update) with
+/// `update_and_fetch`, checking after every update that the stored bytes and
+/// the fetched K/V window equal the host mirror's.
+fn turbo3_run_chunks_against_host(head_dim: i32, n_heads: i32, chunks: &[i32], seed: u32) {
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo3Asym);
+    let mut mirror = Turbo3HostMirror::new(head_dim, cache.turbo_seed);
+    for (i, &t) in chunks.iter().enumerate() {
+        let what = format!("head_dim {head_dim}, chunks {chunks:?}, update {i} (T={t})");
+        let chunk = |salt: u32| {
+            if t == 0 {
+                ffi::zeros(&[1, n_heads, 0, head_dim], dtype::FLOAT32)
+            } else {
+                synth_kv_tensor(1, n_heads, t, head_dim, seed + 2 * i as u32 + salt)
+            }
+        };
+        let (k, v) = (chunk(0), chunk(1));
+        mirror.append(&k, &v);
+        let (k_out, v_out) = cache.update_and_fetch(k, v);
+        let len = mirror.len();
+        assert_eq!(
+            ffi::array_shape(&k_out),
+            vec![1, n_heads, len, head_dim],
+            "{what}"
+        );
+        assert_eq!(
+            ffi::array_shape(&v_out),
+            vec![1, n_heads, len, head_dim],
+            "{what}"
+        );
+        assert_eq!(ffi::array_dtype(&v_out), dtype::FLOAT16, "{what}");
+        assert_turbo3_stored_matches(&cache, &mirror, &what);
+        if len == 0 {
+            assert!(raw_bytes(&v_out).is_empty(), "{what}");
+            continue;
+        }
+        let (ref_k, ref_v) = mirror.window();
+        assert!(raw_bytes(&k_out) == raw_bytes(&ref_k), "{what}: keys");
+        assert!(
+            raw_bytes(&v_out) == raw_bytes(&ref_v),
+            "{what}: dequantized window differs from the host reference"
+        );
+    }
+}
+
+/// The boundary inputs of the cache update, each against the host reference:
+/// zero new tokens (into an empty cache and into a filled one), one token at
+/// offset zero, a window that exactly fills a 256-token block, a chunk that
+/// crosses the block boundary from a partly filled buffer, a token appended to
+/// a full block, and chunks longer than a block.
+#[test]
+fn turbo3_asym_boundary_chunks_match_host_reference() {
+    let cases: &[&[i32]] = &[
+        &[0],
+        &[0, 1, 0, 5, 0],
+        &[1],
+        &[1, 1, 1],
+        &[256],
+        &[256, 1],
+        &[250, 12],
+        &[3, 253, 1],
+        &[255, 1, 1],
+        &[300, 300, 1],
+    ];
+    for (i, chunks) in cases.iter().enumerate() {
+        turbo3_run_chunks_against_host(64, 2, chunks, 0x0B0D_0000 + 97 * i as u32);
+    }
+}
+
+/// The same boundary chunks at head_dim 256, the largest V head dim a
+/// supported model uses (96 packed bytes per token), and at 128 with the
+/// eight KV heads of Llama 3.1 8B.
+#[test]
+fn turbo3_asym_boundary_chunks_match_host_reference_at_the_largest_head_dim() {
+    for chunks in [&[0, 1][..], &[1], &[256, 1], &[250, 12], &[300, 300, 1]] {
+        turbo3_run_chunks_against_host(256, 2, chunks, 0x0256_0000);
+    }
+    turbo3_run_chunks_against_host(128, 8, &[250, 12, 1], 0x0128_0000);
+}
+
+/// Trim (speculative rewind, padded-prefill pad trim) only moves stored bytes.
+/// After a trim the next append goes through the device quantizer again and
+/// the cache still equals the host reference.
+#[test]
+fn turbo3_asym_trim_then_append_matches_host_reference() {
+    let (head_dim, n_heads) = (64, 2);
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo3Asym);
+    let mut mirror = Turbo3HostMirror::new(head_dim, cache.turbo_seed);
+    let mut seed = 0x7213_0000_u32;
+    let mut append = |cache: &mut KVCache, mirror: &mut Turbo3HostMirror, t: i32| {
+        seed += 2;
+        let k = synth_kv_tensor(1, n_heads, t, head_dim, seed);
+        let v = synth_kv_tensor(1, n_heads, t, head_dim, seed + 1);
+        mirror.append(&k, &v);
+        cache.update_and_fetch(k, v)
+    };
+
+    let _ = append(&mut cache, &mut mirror, 260);
+    assert_eq!(cache.trim(7), 7);
+    mirror.trim(7);
+    assert_turbo3_stored_matches(&cache, &mirror, "after trim");
+
+    let (_, v_out) = append(&mut cache, &mut mirror, 5);
+    assert_turbo3_stored_matches(&cache, &mirror, "after trim and append");
+    let (_, ref_v) = mirror.window();
+    assert!(raw_bytes(&v_out) == raw_bytes(&ref_v), "window after trim");
+}
+
+/// Detach and adopt (prompt-cache donation, snapshot restore) move the stored
+/// buffers without touching the codec. A restored cache keeps decoding
+/// through the device codec and stays equal to the host reference, so a
+/// snapshot written before #3274 and one written after hold the same bytes.
+#[test]
+fn turbo3_asym_restored_cache_keeps_matching_host_reference() {
+    let (head_dim, n_kv_heads, n_q_heads) = (64, 2, 4);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo3Asym);
+    let mut mirror = Turbo3HostMirror::new(head_dim, cache.turbo_seed);
+
+    let k = synth_kv_tensor(1, n_kv_heads, 40, head_dim, 0xDE7A_0001);
+    let v = synth_kv_tensor(1, n_kv_heads, 40, head_dim, 0xDE7A_0002);
+    mirror.append(&k, &v);
+    cache.update(k, v);
+
+    let handle = cache.clone_handle();
+    let mut restored = KVCache::new_with_mode(KVCacheMode::Turbo3Asym);
+    restored.install_detached(handle).unwrap();
+    assert_turbo3_stored_matches(&restored, &mirror, "after adopt");
+
+    for step in 0..8 {
+        let k = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 0xDE7A_1000 + step);
+        let v = synth_kv_tensor(1, n_kv_heads, 1, head_dim, 0xDE7A_2000 + step);
+        let q = synth_kv_tensor(1, n_q_heads, 1, head_dim, 0xDE7A_3000 + step);
+        mirror.append(&k, &v);
+        let out = restored.attend(&q, k, v, scale, None);
+        let (ref_k, ref_v) = mirror.window();
+        let out_ref = crate::layers::attention(&q, &ref_k, &ref_v, scale, None, 0.0, 0);
+        assert!(
+            raw_bytes(&out) == raw_bytes(&out_ref),
+            "restored cache, decode step {step}: attention differs from the host reference"
+        );
+        assert_turbo3_stored_matches(&restored, &mirror, &format!("restored, step {step}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Turbo4Delegated decode helpers
 // ---------------------------------------------------------------------------
 //
