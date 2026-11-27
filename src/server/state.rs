@@ -863,7 +863,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
@@ -939,7 +939,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),

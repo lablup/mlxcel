@@ -232,7 +232,7 @@ impl ChatCompletionResponse {
         Self {
             id,
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![ChatChoice {
@@ -283,7 +283,7 @@ impl ChatCompletionResponse {
         Self {
             id,
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![ChatChoice {
@@ -461,7 +461,7 @@ impl CompletionResponse {
         Self {
             id,
             object: "text_completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![CompletionChoice {

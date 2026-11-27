@@ -1575,7 +1575,7 @@ impl RouterPool {
                 }
                 entry
                     .last_used
-                    .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                    .store(crate::server::clock::unix_millis_now(), Ordering::Relaxed);
                 // b10621 emits `model_status` when the instance is placed;
                 // the loaded/failed transition later arrives as
                 // `status_change` (see `notify_status`).
@@ -2452,7 +2452,7 @@ impl RouterPool {
         if stamp_last_used {
             entry
                 .last_used
-                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                .store(crate::server::clock::unix_millis_now(), Ordering::Relaxed);
         }
         let Some(router) = entry.router() else {
             return super::routes::slots::llama_invalid_request("model is not loaded");

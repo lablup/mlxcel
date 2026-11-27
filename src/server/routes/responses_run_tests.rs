@@ -205,7 +205,7 @@ impl Harness {
             request,
             translated,
             format!("resp_{}", uuid::Uuid::new_v4().simple()),
-            chrono::Utc::now().timestamp() as f64,
+            crate::server::clock::unix_seconds_now() as f64,
             Default::default(),
             ReasoningBudgetOverride::Explicit(budget),
             None,

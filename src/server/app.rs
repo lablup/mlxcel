@@ -672,7 +672,7 @@ fn single_webui_error(
                 field_errors: None,
                 operation_id: None,
             },
-            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+            request_id: format!("req_{}", crate::server::clock::unix_micros_now()),
         }),
     )
         .into_response()
@@ -694,7 +694,7 @@ fn single_invalid_field(field: &'static str, message: &'static str) -> Response 
                 }]),
                 operation_id: None,
             },
-            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+            request_id: format!("req_{}", crate::server::clock::unix_micros_now()),
         }),
     )
         .into_response()
@@ -1056,7 +1056,7 @@ mod tests {
         assert!(
             actual["emitted_at"]
                 .as_str()
-                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+                .is_some_and(crate::server::clock::is_rfc3339)
         );
         let mut expected: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/webui/examples/event.1.json"

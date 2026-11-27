@@ -540,7 +540,7 @@ impl ToolLoop<'_> {
             Stop::Bound(reason) => (ResponseStatus::Incomplete, Some(reason)),
             Stop::Finished => (ResponseStatus::Completed, None),
         };
-        let mut response = self.response(status, chrono::Utc::now().timestamp() as f64);
+        let mut response = self.response(status, crate::server::clock::unix_seconds_now() as f64);
         if status != ResponseStatus::Completed {
             response.completed_at = None;
         }

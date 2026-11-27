@@ -1796,7 +1796,7 @@ fn configure_environment(env: &mut Environment<'_>) -> std::result::Result<(), m
     );
 
     env.add_function("strftime_now", |_format: String| -> String {
-        chrono::Utc::now().format("%d %b %Y").to_string()
+        crate::server::clock::day_month_year_now()
     });
 
     // Shadow minijinja's builtin `tojson` with a CPython `json.dumps` compatible
