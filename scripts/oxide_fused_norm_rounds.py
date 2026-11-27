@@ -73,7 +73,8 @@ FIELDS = ["arm", "round", "order", "started_unix", "ci_job_running", "path", "ba
 
 def ci_job_running():
     """Whether a GitHub Actions job is executing on this host right now."""
-    out = subprocess.run(["pgrep", "-f", "Runner.Worker"], capture_output=True, text=True)
+    # -x: match the process name, not any command line that mentions it.
+    out = subprocess.run(["pgrep", "-x", "Runner.Worker"], capture_output=True, text=True)
     return bool(out.stdout.strip())
 
 

@@ -18,7 +18,7 @@
 # before the first of them ran.
 #
 #   run.sh <stage> [<stage> ...]
-#   stages: env m3 m4 m5 m6 m6b m1 m2 m7 m8
+#   stages: env m3 m4 m5 m6 m6b m1 m2 m7 m8 m9
 #   SET=<suffix> writes m4/m5 to files with that suffix (a repeat set).
 #
 # Build first, outside gpu-lock:
@@ -54,13 +54,15 @@ lock() { # lock <purpose> <command...>
     gpu-lock run --tag "issue-2834-$purpose" -- "$@"
 }
 
+# `pgrep -x`, not `-f`: a shell that merely mentions the runner's process name
+# in its command line (a monitoring loop, for instance) must not count as a job.
 wait_runner() { # never start measuring while a CI job runs on this host
     local waited=0 limit=${RUNNER_WAIT:-1800}
-    while pgrep -f Runner.Worker >/dev/null && [ "$waited" -lt "$limit" ]; do
+    while pgrep -x Runner.Worker >/dev/null && [ "$waited" -lt "$limit" ]; do
         sleep 2
         waited=$((waited + 2))
     done
-    if pgrep -f Runner.Worker >/dev/null; then
+    if pgrep -x Runner.Worker >/dev/null; then
         echo "run.sh: a CI job is still running after ${waited}s; refusing to measure" >&2
         exit 3
     fi
@@ -261,6 +263,16 @@ stage_m8() {
     cat "$out"
 }
 
+# M9, exploratory (protocol adjustment 4): host cost of building the lazy node
+# alone, nothing evaluated, so no launch and no kernel. 3 processes.
+stage_m9() {
+    wait_runner
+    for rep in 1 2 3; do
+        lock op "$opbench" --mode build --shapes model --rounds 5 --iters 2000 --warmup 20 \
+            --label "rep$rep" --csv "$here/m9-node-build-cost.csv"
+    done
+}
+
 # M1: end to end, production mode, 7 interleaved rounds with a null arm.
 stage_m1() {
     wait_runner
@@ -355,12 +367,12 @@ host_state=$here/host-state.csv
 [ -f "$host_state" ] || echo "stage,started_utc,ended_utc,load1_start,load1_end,ci_job_running_at_end" >"$host_state"
 for stage in "$@"; do
     case "$stage" in
-        env | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8)
+        env | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8 | m9)
             started=$(date -u +%FT%TZ)
             load_start=$(cut -d' ' -f1 /proc/loadavg)
             "stage_$stage"
             ci=false
-            pgrep -f Runner.Worker >/dev/null && ci=true
+            pgrep -x Runner.Worker >/dev/null && ci=true
             echo "$stage,$started,$(date -u +%FT%TZ),$load_start,$(cut -d' ' -f1 /proc/loadavg),$ci" >>"$host_state"
             ;;
         *) echo "run.sh: unknown stage $stage" >&2; exit 2 ;;

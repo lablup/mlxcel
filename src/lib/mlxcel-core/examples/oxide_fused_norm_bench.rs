@@ -24,7 +24,7 @@
 //!     --mode iso --shapes model --rounds 5 --csv op.csv
 //! ```
 //!
-//! Three modes, because they answer different questions:
+//! Four modes, because they answer different questions:
 //!
 //! - `iso`: build, `eval`, `synchronize`, once per iteration, each iteration
 //!   timed. This is also the process the profiler is attached to with
@@ -32,6 +32,8 @@
 //! - `pipe`: build and `async_eval` every iteration, one `synchronize` at the
 //!   end, which is what a decode loop does (docs/benchmarks.md, "An op-level
 //!   number is not a decode number").
+//! - `build`: build the lazy node and drop it, never evaluating: the host cost
+//!   of the launcher alone, with no launch and no kernel.
 //! - `cold`: one arm per fresh process. Times the first use of the op after the
 //!   device context exists, then the second, then the steady state, so module
 //!   load and kernel compilation are separated from kernel latency.
@@ -177,6 +179,7 @@ fn parse_shapes(spec: &str) -> Result<Vec<Shape>, String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    Build,
     Iso,
     Pipe,
     Cold,
@@ -210,6 +213,7 @@ fn parse_args() -> Result<Args, String> {
         match flag.as_str() {
             "--mode" => {
                 args.mode = match value()?.as_str() {
+                    "build" => Mode::Build,
                     "iso" => Mode::Iso,
                     "pipe" => Mode::Pipe,
                     "cold" => Mode::Cold,
@@ -525,6 +529,50 @@ fn run_pipe(args: &Args, rec: &mut Recorder) -> Result<(), String> {
     Ok(())
 }
 
+/// Host cost of building the lazy node alone: nothing is evaluated, so no
+/// kernel is launched and no CUDA API is called. This is what separates the
+/// launcher's own work (argument arrays, template arguments, kernel lookup)
+/// from the launch and the kernel.
+fn run_build(args: &Args, rec: &mut Recorder) -> Result<(), String> {
+    for &shape in &args.shapes {
+        let inp = inputs(shape);
+        for round in 0..args.rounds {
+            for slot in 0..args.arms.len() {
+                let arm = args.arms[(slot + round) % args.arms.len()];
+                select(arm)?;
+                for _ in 0..args.warmup {
+                    run_once(arm, &inp);
+                }
+                let before = counters();
+                let start = Instant::now();
+                for _ in 0..args.iters {
+                    drop(build(arm, &inp));
+                }
+                let per_call = start.elapsed().as_secs_f64() * 1e6 / args.iters as f64;
+                let delta = delta_since(before);
+                // Routed at construction, never launched.
+                let calls = args.iters as u64;
+                let valid = match arm {
+                    Arm::Oxide => delta == (calls, 0, 0),
+                    _ => route_valid(arm, calls, delta),
+                };
+                let s = Stats {
+                    mean_us: per_call,
+                    median_us: per_call,
+                    p90_us: per_call,
+                    min_us: per_call,
+                };
+                rec.push(
+                    args, "build", arm, shape, round, args.iters, &s, delta, valid,
+                );
+            }
+        }
+        drop(inp);
+        clear_memory_cache();
+    }
+    Ok(())
+}
+
 /// One arm, one fresh process: device context, then the first use of the op,
 /// then the second, then the steady state.
 fn run_cold(args: &Args, rec: &mut Recorder) -> Result<(), String> {
@@ -639,6 +687,7 @@ fn run(args: &Args) -> Result<usize, String> {
         invalid: 0,
     };
     match args.mode {
+        Mode::Build => run_build(args, &mut rec)?,
         Mode::Iso => run_iso(args, &mut rec)?,
         Mode::Pipe => run_pipe(args, &mut rec)?,
         Mode::Cold => run_cold(args, &mut rec)?,
