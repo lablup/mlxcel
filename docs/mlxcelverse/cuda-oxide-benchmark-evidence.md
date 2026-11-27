@@ -2,7 +2,9 @@
 
 Evidence for [issue #2834](https://github.com/lablup/mlxcel/issues/2834), the fourth and last gated experiment in [the cuda-oxide feasibility review](cuda-oxide-feasibility.md). Host: `spark-101`, a DGX Spark that also hosts a self-hosted CI runner; every GPU command ran under `gpu-lock`.
 
-Status: protocol frozen, no measurement collected yet. This file was committed with the Protocol section alone before any timing, logit trace or profile was taken. Results, the gate evaluation and the recommended disposition are added below it by later commits; `git log --follow` on this file shows the order.
+Status: measured. The cuda-oxide kernel is correct on the checkpoint (logit traces and greedy output identical to the existing fused kernel, every run on the intended route) and costs nothing end to end, and it brings no benefit that passes the gates: the kernel itself is not faster, the only cold-start gain is a one-time one per machine and width, and it adds a toolchain and an artifact contract without removing anything. **Recorded result and recommendation: stop. Do not expand cuda-oxide kernels on this evidence.** The maintainer makes the adoption call at merge. Nothing is enabled by default and no default-build behavior changes.
+
+Order of work: this file was committed with the Protocol section alone (`93182387`) before any timing, logit trace or profile was taken; the first raw results are `37ac8922`; four additions to the protocol were each committed before they ran (`bc1e47ff`, `70fa4f9a`). `git log --follow` on this file shows it.
 
 ## Protocol (frozen before measurement)
 
@@ -126,3 +128,240 @@ No gate, threshold, baseline, arm, checkpoint, prompt or repetition count change
 One correction to the host-state record, not to a measurement: the check for a running CI job used `pgrep -f`, which also matches any shell whose command line mentions the runner's process name. The `true` recorded at the end of the repeated M4 stage (04:08 UTC) is such a false positive, caused by a monitoring loop; `gh run list` shows no workflow run between 03:55:40 and that time. The scripts now use `pgrep -x`. The two `true` values of the first set (03:50 and 03:54 UTC) coincide with pull-request runs that were in progress, so they stand.
 
 One reporting note, also not a threshold: M5's `iso` blocks turned out bimodal on this shared host (block medians of about 30 to 50 µs or about 200 to 400 µs for the same arm and shape, depending on how long the waiting thread took to wake). The `iso` table therefore reports the minimum block median next to the median, and `pipe`, which has one wait per 200 ops, is the op-level figure the text relies on.
+
+## Environment
+
+| Component | Value |
+| --- | --- |
+| Host | `spark-101`, Linux 7.0.0-1019-nvidia, aarch64, up 22 days, CPU governor `performance` |
+| GPU | NVIDIA GB10, compute capability 12.1, driver 580.178.04, SM clock 2418 MHz at capture (max 3003) |
+| CUDA Toolkit | 13.0, V13.0.88 (`/usr/local/cuda`); Nsight Systems 2025.3.2 |
+| Rust | 1.97.1; no cuda-oxide compiler on this host |
+| MLX | pin `fc344c986c4169d99f76b5d95ae6b4a58a359a63` |
+| mlxcel | Binaries built from `b45ce7acdbc5e1c089dc66f5f3a23194bb94abd1` with a clean tree (`provenance.json`). The commits after it up to M8 changed scripts and documents only. M9 used the op-level example rebuilt at `70fa4f9a`, which added its `build` mode; the end-to-end binary was never rebuilt. |
+| Build | `--release --features cuda`, `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121`; one binary for all model arms |
+| `gpu-lock` | `/usr/local/bin/gpu-lock`, `run --tag issue-2834-<purpose> -- <cmd>` around every GPU command; builds outside the lock |
+
+`docs/benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27/provenance.json` has the binary, artifact and checkpoint digests as captured.
+
+Host state. This host is a CI runner and was shared with other work during the day, so it was never idle in the strict sense. The first attempt at the batch did not start: main-branch CI jobs occupied the runner back to back for more than 30 minutes. Each stage records its start, end, load average and whether a CI job was running at its end in `host-state.csv`. A pull-request CI run overlapped the first M4 and M5 stages, which is why both were repeated (the two sets agree where the measurement is not wait-bound, see below). The end-to-end rounds waited for the runner before every process and none of the 168 passes ran with a job active. Load average was between 1 and 4 during the stages.
+
+## Commands
+
+Everything is in [`docs/benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27/run.sh`](../benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27/run.sh), one function per measurement, with the CSVs it wrote next to it.
+
+```bash
+MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 cargo build --release --features cuda \
+    --example oxide_fused_norm_checkpoint_bench --example logit_trace
+MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 cargo build --release -p mlxcel-core \
+    --features cuda --example oxide_fused_norm_bench
+R=docs/benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27
+WORK=<private scratch dir> $R/run.sh m3 env m4 m5 m6 m7 m1 m2       # first set
+WORK=<same> SET=-repeat $R/run.sh m4 m5 m6b m7 m8                    # repeat and additions 1 to 3
+WORK=<same> $R/run.sh m9                                             # addition 4
+```
+
+The adapter test suite ran on the same commit in the release profile: `gpu-lock run --tag issue-2834-matrix -- target/release/deps/mlxcel_core-<hash> cuda_oxide --test-threads=1 --nocapture`, 31 passed.
+
+## Results
+
+### Correctness on the checkpoint (G1)
+
+| Check | Result |
+| --- | --- |
+| Route signature, 168 end-to-end passes (4 arms, 7 rounds, 6 cells) | All valid. `oxide`: `oxide_routes = launches` (1600 to 2096 per pass), `native_routes = 0`. `fused`, `fused-null`: the same counts in `native_routes`, `oxide_routes = 0`. `graph`: 0/0/0. No run was discarded. |
+| Route signature, op-level blocks | 4,365 of 4,365 valid (M5 two sets, M9). |
+| M2(a) logit traces, `oxide` against `fused` | Byte-identical files in all three shapes: 256 positions of a 256-token forward, 112 width-one decode steps, 112 width-one batched decode steps over four rows. 0 top-1 disagreements, 0 on decided positions (47, 26 and 28 of them), largest logit delta 0. The logits are bf16 values, which six decimals print exactly. Each trace process printed its route: 16, 1808 and 1856 joins on the cuda-oxide route with as many launches. |
+| M2(a) controls | `fused-null` against `fused`: byte-identical. `graph` against `fused`: byte-identical too on these three traces. |
+| M2(b) greedy token ids, `oxide` against `fused` | Identical in all 6 cells and all 7 rounds; `fused` and `fused-null` identical to each other in all of them. |
+| M2(c) op boundary | `RESULT oxide-adapter-matrix cases=130 elements=2181390 failed=0 bitwise_identical_to_fused_cuda=130 nonfinite_cases=5 oxide_routes=130 launches=130 native_routes=0`. |
+
+G1 passes.
+
+One observation outside the gate: on the 128-token prompt at B=1 the `graph` arm generates other tokens than `fused` and `oxide` (128 tokens against 98, where the two fused arms reach an end-of-generation token), on the CLI and the server path alike, although the teacher-forced traces of the three arms are byte-identical on the trace corpus. Each arm is deterministic across the seven rounds. The graph path is not the oracle here and the difference predates this experiment (it is the existing fused kernel against the graph path), so it was not investigated; it is recorded because a reader comparing `graph` and `fused` throughput on that cell is comparing runs of different length.
+
+### End to end, production mode (G2)
+
+`m1-end-to-end.csv`, summarized by `scripts/oxide_fused_norm_rounds.py summarize` into `m1-end-to-end-summary.csv`. Medians over 7 rounds; the paired column is the median of the per-round relative deltas of `oxide` against `fused`, signed so that positive is better; the null floor is the median absolute paired delta of `fused-null` against `fused`.
+
+| Cell | Metric | `graph` | `fused` | `oxide` | `fused-null` | `oxide` vs `fused`, paired median (min..max) | Rounds worse | Null floor | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CLI B=1, 128 | TTFT ms | 14.43 | 14.63 | 14.52 | 14.41 | +1.65 % (-3.12..+3.17) | 2/7 | 1.94 % | no regression |
+| CLI B=1, 128 | decode tok/s | 88.81 | 87.64 | 88.03 | 87.55 | -0.06 % (-0.89..+1.86) | 4/7 | 0.61 % | no regression |
+| CLI B=1, 2048 | TTFT ms | 67.04 | 67.30 | 67.03 | 67.05 | +0.71 % (-1.04..+1.94) | 2/7 | 0.84 % | no regression |
+| CLI B=1, 2048 | decode tok/s | 86.51 | 86.79 | 86.53 | 86.75 | -0.31 % (-1.15..+0.29) | 6/7 | 0.28 % | no regression |
+| server B=1, 128 | TTFT ms | 15.17 | 15.18 | 15.13 | 15.26 | +0.50 % (-0.64..+2.57) | 3/7 | 1.67 % | no regression |
+| server B=1, 128 | decode tok/s | 87.97 | 85.33 | 85.55 | 85.37 | +0.26 % (-0.05..+0.73) | 1/7 | 0.64 % | no regression |
+| server B=1, 2048 | TTFT ms | 78.86 | 79.45 | 79.69 | 79.64 | +0.51 % (-2.54..+1.16) | 3/7 | 0.40 % | no regression |
+| server B=1, 2048 | decode tok/s | 77.30 | 77.24 | 77.27 | 77.07 | -0.18 % (-1.26..+1.29) | 5/7 | 0.75 % | no regression |
+| server B=4, 128 | TTFT ms | 63.95 | 65.89 | 65.59 | 65.95 | +0.45 % (-15.88..+2.45) | 3/7 | 1.89 % | no regression |
+| server B=4, 128 | decode tok/s | 264.74 | 262.89 | 269.27 | 267.35 | +0.67 % (-5.92..+5.02) | 3/7 | 1.69 % | no regression |
+| server B=4, 2048 | TTFT ms | 289.80 | 291.30 | 290.51 | 289.91 | +1.18 % (-0.72..+2.55) | 1/7 | 2.14 % | unresolved (null floor above 2 %) |
+| server B=4, 2048 | decode tok/s | 255.15 | 254.57 | 255.46 | 255.42 | +0.21 % (-0.97..+1.24) | 1/7 | 0.40 % | no regression |
+
+No cell is flagged. The worst median is -0.31 % (CLI B=1, long prompt, decode), worse in 6 of 7 rounds and 0.03 points beyond that cell's null floor: a difference of that size is what the null arm itself shows there (-0.18 %), and it is far inside the 2 % threshold. One cell cannot resolve 2 % (TTFT at B=4 with the long prompt, null floor 2.14 %); its `oxide` median is on the better side. No cell shows an improvement beyond its null floor in 6 of 7 rounds either, so the kernel has no measurable end-to-end effect in either direction. G2 passes, with that one cell unresolved.
+
+Generated tokens per pass: 98 on the short prompt at B=1 for `fused`, `oxide` and `fused-null` (end of generation), 128 everywhere else, 4 x 128 at B=4. The rates are per token.
+
+Peak memory (MLX `peak_memory`, reset before the measured pass), median per cell, `fused` and `oxide`: 2.3615 and 2.3624 GiB (CLI B=1, 128), 2.9972 and 2.9972 (CLI B=1, 2048), 3.3395 and 3.3395 (server B=1, 128), 3.4894 and 3.4894 (server B=1, 2048), 3.6663 and 3.6663 (server B=4, 128), 4.6007 and 4.6007 (server B=4, 2048). The largest difference is 0.04 %. The `graph` arm's peak is 2 to 16 MiB below both.
+
+### Kernel time (G3a)
+
+Kernel durations from one profiler on both sides (M4): `nsys --trace=cuda`, the standalone program, and MLX with `MLX_USE_CUDA_GRAPHS=0`. bf16 activations and weight, width 2048, block 512 for all three fused launches. Median of three capture medians, in µs; the two values are the first set and the repeat. 821 launches per capture and shape standalone, 1100 through MLX. `MLX_USE_CUDA_GRAPHS=0` is not the production mode; these are kernel durations, not throughput.
+
+| Rows | Model step | cuda-oxide standalone, grid `rows x 1 x 1` | cuda-oxide through MLX | Existing kernel through MLX, grid `1 x 1 x rows` | cuda-oxide vs existing | Graph path: `binary_vv` + `rms_norm_small` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | decode, B=1 | 2.14, 2.11 | 2.14, 2.14 | 2.21, 2.18 | -2.9 %, -1.5 % | 1.02 + 1.44 |
+| 4 | decode, B=4 | 2.18, 2.18 | 2.21, 2.21 | 2.59, 2.59 | -14.8 %, -14.8 % | 1.47 + 1.44 |
+| 128 | prefill 128, B=1 | 6.40, 6.43 | 6.69, 6.72 | 6.53, 6.56 | +2.5 %, +2.4 % | 1.66 + 1.95 |
+| 512 | prefill 128, B=4 | 24.61, 24.70 | 24.26, 23.94 | 24.13, 23.97 | +0.5 %, -0.1 % | 4.48 + 3.81 |
+| 2048 | prefill 2048, B=1 | 120.77, 108.45 | 139.74, 141.98 | 139.68, 142.14 | +0.0 %, -0.1 % | 113 + 30 |
+
+Three things follow from the table.
+
+The two kernels take the same time. The difference is under 3 % at one row and under 3 % on the three prefill shapes, with either sign. At four rows the cuda-oxide kernel is 0.38 µs shorter (14.8 %) in both sets; the existing kernel launches its rows on the grid's z axis and the cuda-oxide kernel on x, and nothing else about that shape was examined. G3(a) needs at least 10 % on both decode shapes or on all three prefill shapes. It gets 10 % on one of five. **G3(a) is not met**, before the end-to-end condition is even asked (and that one fails too: no cell improves beyond its null floor).
+
+MLX does not change the kernel's duration at the decode shapes: 2.14 µs standalone and through MLX for the same artifact, same geometry. At 2048 rows the kernel takes 16 to 31 % longer inside MLX than standalone (140 to 142 µs against 108 to 121 µs), and the existing kernel takes exactly as long there (140 to 142 µs), so that cost belongs to how MLX runs a kernel of this size, not to either implementation. The standalone program reuses its two output buffers for every launch; MLX allocates both outputs (16 MiB together at this shape) for every evaluation. That is the likely cause and it was not isolated.
+
+The graph path's two kernels together take about as long as one fused kernel at one row (2.5 µs against 2.2 µs) and at 2048 rows (143 µs against 140 µs), and less at 128 and 512 rows (3.6 and 8.3 µs against 6.5 and 24 µs). MLX's `rms_norm_small` runs with a block of 128 where the fused kernels use 512.
+
+Standalone, CUDA events (M3, `m3-standalone-events.csv`, median of 5 processes). `warm` is #2832's definition (events around 200 back-to-back launches); the event timer resolves about 2 µs, which is why the small shapes read 4.1. `launch call` is the host time of `cuLaunchKernel` alone and `launch + sync` the host time of one launch and one stream synchronize.
+
+| act / weight | rows x dim | block | first launch µs | warm µs (min..max) | launch call µs | launch + sync µs | effective GB/s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| bf16 | 1 x 2048 | 512 | 17.0 | 4.10 (4.09..4.13) | 1.88 | 6.62 | 6.0 |
+| bf16 | 4 x 2048 | 512 | 6.0 | 4.10 (4.09..4.10) | 1.86 | 6.69 | 24.0 |
+| bf16 | 128 x 2048 | 512 | 12.1 | 8.20 (8.20..8.20) | 1.64 | 10.93 | 383.8 |
+| bf16 | 512 x 2048 | 512 | 30.5 | 26.58 (26.51..26.86) | 1.67 | 29.25 | 473.4 |
+| bf16 | 2048 x 2048 | 512 | 129.0 | 123.38 (121.68..124.54) | 3.82 | 124.95 | 407.9 |
+| f32 | 1 x 4096 | 1024 | 8.0 | 5.30 (5.26..5.59) | 1.78 | 8.29 | 18.5 |
+| f32 | 64 x 8192 | 1024 | 32.6 | 31.97 (28.89..34.40) | 1.66 | 34.57 | 393.6 |
+| bf16 | 1 x 4096 | 1024 | 6.0 | 4.78 (4.10..5.57) | 1.62 | 7.02 | 10.3 |
+| bf16 | 64 x 8192 | 1024 | 20.3 | 16.25 (15.98..16.31) | 1.58 | 20.39 | 387.1 |
+| f16 | 1 x 4096 | 1024 | 6.0 | 4.10 (4.10..4.11) | 1.59 | 6.88 | 12.0 |
+| f16 | 64 x 8192 | 1024 | 20.1 | 16.23 (15.91..17.79) | 1.61 | 18.40 | 387.5 |
+
+The other 12 shapes of #2832's list are in the CSV. Against `results/bench-sm_121.json` from `spark-d9e2` (another GB10, the cuda-oxide harness): 64 x 8192 reads 36.3, 18.5 and 18.3 µs there (f32, bf16, f16) and 32.0, 16.3 and 16.2 µs here; the launch-bound shapes read 4.1 to 6.1 µs on both. The two harnesses agree to within the timer and host differences, so the driver-API program measures the same kernel the #2832 harness did.
+
+### Op level through MLX, and where the per-op difference comes from
+
+M5, production mode (CUDA graphs on), `pipe`: build and `async_eval` 200 ops, one synchronize at the end, per-op µs. Median of 15 blocks (3 processes x 5 rotated rounds), first set, then the repeat.
+
+| act | rows x dim | `graph` | `fused` | `oxide` | `oxide` vs `fused` |
+| --- | --- | --- | --- | --- | --- |
+| bf16 | 1 x 2048 | 13.71, 14.58 | 14.50, 16.78 | 12.68, 13.80 | -1.82 µs (-12.5 %), -2.98 µs (-17.8 %) |
+| bf16 | 4 x 2048 | 14.55, 14.65 | 15.18, 16.68 | 13.41, 13.72 | -1.77 µs (-11.7 %), -2.95 µs (-17.7 %) |
+| bf16 | 128 x 2048 | 22.19, 15.65 | 25.17, 18.39 | 21.70, 14.78 | -3.47 µs (-13.8 %), -3.62 µs (-19.7 %) |
+| bf16 | 512 x 2048 | 31.28, 27.39 | 32.05, 28.92 | 31.13, 28.99 | -0.93 µs (-2.9 %), +0.07 µs (+0.2 %) |
+| bf16 | 2048 x 2048 | 168.84, 168.07 | 161.28, 161.22 | 159.08, 160.13 | -2.20 µs (-1.4 %), -1.09 µs (-0.7 %) |
+| f32 | 1 x 4096 | 15.35, 15.16 | 16.51, 19.13 | 14.26, 17.16 | -2.25 µs (-13.6 %), -1.98 µs (-10.3 %) |
+| f16 | 1 x 4096 | 13.59, 14.79 | 15.87, 17.68 | 13.25, 14.23 | -2.62 µs (-16.5 %), -3.44 µs (-19.5 %) |
+
+Through MLX the `oxide` arm is 1.8 to 3.6 µs per op cheaper than `fused` on every small shape, in both sets: on the 14 shapes of at most 33 rows and width at most 4096 the paired per-block difference is negative in 97 % and 99 % of 210 blocks, median -2.4 and -3.0 µs. It is also 0.6 to 0.9 µs cheaper than the graph path there. The other 16 shapes are in `m5-op-level-mlx.csv` and `m5-op-level-mlx-repeat.csv`.
+
+That difference is not kernel time (2.14 against 2.2 µs, above) and it is not CUDA API time. M8 profiled one arm per process, 2020 ops at 1 x 2048, and `fused` and `oxide` make the same calls per op: with graphs on, one each of `cudaGraphCreate`, `cuGraphAddKernelNode`, `cudaGraphExecUpdate`, `cudaGraphLaunch`, `cudaGraphDestroy`, `cudaLaunchHostFunc`, `cudaStreamWaitEvent` and two `cudaEventRecord`; with graphs off, one `cuLaunchKernelEx` in place of the five graph calls (`m8-cuda-api-per-arm.csv`). The graph path differs only in adding two kernel nodes and one dependency instead of one node.
+
+M9 timed the remaining candidate, the host work of building the lazy node, with nothing evaluated (2000 builds per block, 15 blocks, µs per node or node pair):
+
+| Rows x 2048, bf16 | `graph` (two nodes) | `fused` | `oxide` |
+| --- | --- | --- | --- |
+| 1 | 0.53 | 1.44 | 0.65 |
+| 4 | 0.54 | 1.47 | 0.66 |
+| 128 | 0.84 | 2.36 | 0.99 |
+| 512 | 0.87 | 2.36 | 1.00 |
+| 2048 | 0.86 | 2.35 | 1.00 |
+
+Building the existing kernel's node costs 0.8 to 1.4 µs more than building the cuda-oxide node. The existing launcher (`fused_add_rms_norm` in `kernels/fused_norm.cpp`) goes through `fast::cuda_kernel`: it creates two one-element arrays for `eps` and `weight_bias`, a vector of four named template arguments, and five inputs; the cuda-oxide primitive takes three inputs and packs the scalars itself. So about a third to a half of the per-op gap is node construction. The rest, 1 to 2 µs, is host work at evaluation that was not attributed further: `perf` is not available to this user (`perf_event_paranoid` is 4), so no CPU profile was taken, and the candidates (resolving the per-`(T, TW, Dim, Threads)` kernel by its generated name at every evaluation, registering five inputs instead of three) are named from the code, not measured.
+
+The gap is the dedicated primitive against the generic custom-kernel launcher. It does not depend on which compiler produced the kernel: a dedicated primitive that launched the NVRTC kernel would have the same host path. It is also too small to see end to end. A decode step builds 16 joins, so the gap is 30 to 50 µs per token against a step of 11.4 ms at B=1 (87.6 tok/s): 0.3 to 0.4 %, the size of the null floor in those cells (0.28 to 0.75 %). M1's paired deltas for the decode cells are between -0.31 % and +0.67 %.
+
+MLX per-op cost, matched (same artifact, bf16 1 x 2048, same geometry, kernel duration 2.14 µs on both sides per M4): the standalone program needs 6.62 µs of host time for one launch and one stream synchronize. Through MLX, `iso` mode (build, evaluate both outputs, synchronize, per op) needs 28.6 µs in its best block of the repeat set and 39.4 µs in the best block of the first set for the `oxide` arm, and 30.9 and 37.7 µs for `fused`. So a synchronously evaluated op costs 22 to 33 µs more through MLX than through the bare driver, the same for either kernel. `iso` block medians on this shared host are bimodal (the same arm and shape gives about 30 to 50 µs in one block and 200 to 400 µs in another, depending on how long the waiting thread takes to wake), which is why the best block is quoted and why `iso` decides nothing here; the full distributions are in the CSVs. Without the per-op wait (`pipe`), an op costs 12.7 to 13.8 µs through MLX against 1.88 µs for the bare launch call. M8 shows what that is made of: per evaluation, MLX creates, updates, launches and destroys a CUDA graph, records two events, waits on one and enqueues one host function, about 10 µs of API time under the profiler (medians: graph launch 2.6 to 2.9 µs, host function 2.9, event record 1.4 to 1.5 each, graph create 1.1 to 1.3, graph destroy 0.5 to 0.7, exec update 0.35 to 0.4, wait event 0.3). That cost is per evaluation, not per kernel, and a model evaluation holds many ops, so it is not what a join costs inside a decode step; it is what this one-op benchmark pays.
+
+### Cold start (G3b)
+
+M6 and its driver-cache extension: first-use cost = first build, evaluate and synchronize of the op in a fresh process, minus the steady-state median, in ms. Median (min..max) of 5 processes. The second column is the first use of a second width in the same process.
+
+| State | First use, 1 x 2048 | Then 1 x 4096 |
+| --- | --- | --- |
+| `fused`, empty disk cache (NVRTC compiles) | 697.9 (690.6..711.1) | 623.0 (616.4..636.6) |
+| `fused`, warm disk cache | 5.25 (5.05..5.48) | 5.05 (4.89..5.92) |
+| `oxide`, driver compute cache warm (this host's normal state) | 11.82 (11.43..12.22), of which 11.24 is validation and installation | -0.03 (-0.16..0.23) |
+| `graph` | 7.54 (6.80..7.71) | 0.20 (-0.01..0.54) |
+| `fused`, empty disk cache, `CUDA_CACHE_DISABLE=1` | 757.3 (751.1..772.4) | 680.7 (666.3..688.0) |
+| `fused`, warm disk cache, `CUDA_CACHE_DISABLE=1` | 5.25 (5.03..5.55) | 5.27 (4.92..5.37) |
+| `oxide`, `CUDA_CACHE_DISABLE=1` (the driver compiles the PTX) | 87.94 (84.73..116.52), of which 11.30 is validation and installation | 0.02 (0.01..0.11) |
+
+Standalone module load (`cuModuleLoadData` on the committed PTX, host wall time, 5 processes): 0.26 to 0.51 ms with the driver's compute cache warm, 73.2 to 75.6 ms with `CUDA_CACHE_DISABLE=1`. #2832 reported 255 ms on `spark-d9e2`.
+
+In the state every process after the first is in, the cuda-oxide route is slower to first use than the existing kernel: 11.8 ms against 5.25 ms at one width, about the same at two (11.8 against 10.3 ms), and it only gets ahead from the third width on. Its 11.2 ms is not the module load (0.3 ms) but the artifact validation at installation (the PTX digest, five manifests and five schemas, and the parameter layout re-derived from the PTX), paid once per process. **G3(b) is not met in the normal state.**
+
+On the first run on a machine, or after a driver update, the cuda-oxide route needs 88 ms once for every width, where the existing kernel needs 0.70 to 0.76 s for the first width and 0.62 to 0.68 s for each further one. That is a real reduction of about 0.6 s per width, once per machine. Per the frozen wording, G3(b) is **met for the first run per machine and width only**, and the disposition has to weigh it instead of counting it as a general reduction. Weighed: a model has one hidden size, so it is one compile of about 0.7 s per model family and machine, cached on disk since #2492, against 6.6 ms added to every later process. Next to a model load of seconds it is not a benefit that carries a second compiler toolchain.
+
+### Registers, code size, traffic, launch cost (M7)
+
+`cuobjdump -res-usage` and `-sass` on the committed cuda-oxide cubin and on the existing kernel's disk-cache entries (`m7-kernel-resources.csv`):
+
+| Kernel | Registers | Stack bytes | Shared bytes | Constant bank bytes | SASS instructions |
+| --- | --- | --- | --- | --- | --- |
+| cuda-oxide `fused_add_rms_norm_bf16` (any width) | 32 | 0 | 1156 | 992 | 616 |
+| cuda-oxide `_f16` | 30 | 0 | 1156 | 992 | 528 |
+| cuda-oxide `_f32` | 30 | 0 | 1156 | 992 | 496 |
+| cuda-oxide `_bf16_wf32`, `_f16_wf32` | 32, 30 | 0 | 1156 | 992 | 576, 512 |
+| existing, bf16, width 1024 and 2048 | 18 | 0 | 1156 | 952 | 264 |
+| existing, bf16, width 4096 / 8192 | 20 / 26 | 0 | 1156 | 952 | 256 / 392 |
+| existing, f16, width 1024 to 4096 / 8192 | 18 / 22 | 0 | 1156 | 952 | 256 to 272 / 392 |
+| existing, f32, width 1024 to 4096 / 8192 | 18 to 20 / 26 | 0 | 1156 | 952 | 160 to 168 / 208 |
+
+Neither kernel spills (stack 0) and both report the same shared memory. The cuda-oxide kernel uses 32 registers where the existing bf16 kernel at the checkpoint's width uses 18, and 2.3 times the instructions (616 against 264). It takes the width as a launch argument where the existing kernel is specialized on it, and it carries slice lengths; which of those accounts for how much of the extra code was not broken down. The extra code and registers cost nothing measurable: a block of 512 threads at 32 registers is far from the per-SM register limit, and the durations are equal.
+
+Why the durations are equal. At the decode shapes the kernel moves 20 KiB (one row) or 82 KiB (four rows) and takes 2.1 to 2.2 µs whatever the row count: it is bound by launch and block start-up, not by memory, so code quality in the loops cannot show. At the prefill shapes it is bound by memory: counting traffic as #2832 did (`x` and `residual` read, `new_residual` written and re-read, `normed` written, the weight read once per row), 12.6 MB in 24 µs at 512 rows and 50.3 MB in 140 µs at 2048 rows through MLX, 520 and 360 GB/s effective for both kernels alike. That count includes the re-read of `new_residual` and the per-row weight read, which a cache serves, so it is an effective figure and not DRAM bandwidth. Both implementations read and write the same bytes in the same order, so there is nothing for one of them to save.
+
+Launch and synchronization: one bare `cuLaunchKernel` costs 1.6 to 1.9 µs of host time (3.8 µs at 2048 rows), and launch plus stream synchronize 6.6 µs at the decode shapes. The MLX-side launch costs are in the op-level section. The adapter adds no CUDA API call to what the existing kernel makes.
+
+### What could not be measured, and why
+
+- **Hardware counters** (occupancy, achieved bandwidth, stall reasons). `ncu` refuses as this user: `ERR_NVGPUCTRPERM`. No counter value appears in this report. Registers and spills come from `cuobjdump`, traffic from byte counts and durations.
+- **Per-kernel time in production mode.** With CUDA graphs on, kernels do not appear in the profiler's kernel table on this setup. Kernel durations are from `MLX_USE_CUDA_GRAPHS=0`; end-to-end numbers are from graphs on. Nothing bridges the two except that the kernel is the same code.
+- **A CPU profile of the host path.** `perf_event_paranoid` is 4. The per-op gap is attributed by elimination (kernel time, CUDA API calls) and by timing node construction; the evaluation-time remainder of 1 to 2 µs is named from the code only.
+- **An idle host.** See Host state. The end-to-end rounds are interleaved with a null arm for that reason, and their null floors (0.3 to 2.1 %) are what the host allowed.
+- **The cause of the 16 to 31 % longer kernel at 2048 rows inside MLX**, and of the 0.38 µs difference at four rows. Both are reported, neither was isolated.
+- **Not run:** a second, larger checkpoint (optional in the protocol; the result leaves no question it would answer, since a larger model gives the join a smaller share); a quantized checkpoint; batches above 4; time to first token of a whole fresh process; Compute Sanitizer through the adapter; the #2832 harness itself (no cuda-oxide toolchain here).
+- **Clippy on the new examples.** `cargo clippy` starts a cold MLX build under its own build-script hash on this host, so it was stopped; `rustfmt` is clean.
+
+## Gate evaluation
+
+| Gate | Outcome | Basis |
+| --- | --- | --- |
+| G1 correctness | **Pass** | Route signatures valid in every run; logit traces byte-identical in three shapes; greedy ids identical in 6 cells x 7 rounds; 130 of 130 at the op boundary. |
+| G2 no end-to-end regression above 2 % outside noise | **Pass**, one cell unresolved | No cell flagged; worst paired median -0.31 %. TTFT at B=4 with the 2048-token prompt has a null floor of 2.14 % and cannot resolve the threshold. Peak memory equal to 0.04 %. |
+| G3(a) kernel at least 10 % faster with a useful end-to-end effect | **Not met** | Kernel durations within 3 % on four of five shapes; 14.8 % (0.38 µs) at four rows only. No end-to-end cell improves beyond its null floor. |
+| G3(b) cold-start reduction | **Not met in the normal state; met for the first run per machine and width only** | 11.8 ms against 5.25 ms with warm caches. 88 ms against 0.70 to 0.76 s on a first run. |
+| G3(c) maintenance benefit | **Not met** | See below. |
+
+G3(c), from the tree. What the route adds: a second pinned compiler toolchain to produce the artifact (Rust 1.99.1 with compiler-development components, LLVM 21, `cargo-oxide`, an alpha project), which is absent from this host and from CI; a committed PTX and cubin with five manifests and five ABI schemas, and the validation that guards them (`cuda_oxide_artifact.rs`, `cuda_oxide_abi.rs`, the build-script digest check, about 900 lines); the adapter (`fused_norm_oxide.cpp` and its header, about 590 lines, the one launcher that includes MLX's CUDA backend headers and so sits on the pin-bump checklist); an overlay parameter; and about 2,000 lines of tests. What it removes: nothing. The existing kernel stays, because Metal, ROCm and every CUDA architecture other than sm_121 use it, and because it is the fallback for dtype pairs and shapes the artifact does not cover. The one structural advantage, a module that is not compiled per width, is the first-run saving already weighed under G3(b). No net maintenance benefit.
+
+## Recorded result and recommendation
+
+**Stop.** Per the frozen rule: G1 passes and G3 is not met, so the disposition is no expansion of cuda-oxide kernels on this evidence. This is the experiment's recorded result and a recommendation; the maintainer makes the adoption call at merge.
+
+The other three dispositions do not apply. *Expand within MLX* needs a benefit through MLX, and there is none that passes a gate. *Investigate a demonstrated execution constraint* needs a kernel that is at least 10 % faster standalone and loses that inside MLX; the kernel is not faster standalone (it runs for the same 2.1 µs as the existing kernel at the decode shapes, and for the same time at the memory-bound ones), so MLX has nothing to take away. The one MLX-side cost this report did find, the longer kernel at 2048 rows, hits both implementations equally. *Resolve toolchain limitations* needs the compiler, the generated code or GPU support to be what limits the result; the toolchain did its job: the artifact loaded, validated and matched bit for bit, on GB10.
+
+What the experiment established, for the record:
+
+- cuda-oxide can produce a correct inference kernel for GB10 and run it inside MLX's lazy evaluation, CUDA graphs and allocator with no change to the backend, bit-identical to the existing kernel on a real checkpoint. The feasibility question the review asked is answered yes.
+- For this operator the implementation language buys nothing. The kernel is launch-bound at decode and memory-bound at prefill, and the Rust port does the same work as the CUDA C++ one. That is what the review predicted: "Changing the implementation language does not remove an existing launch, memory read, or graph dependency."
+- This result is about fused residual-add + RMSNorm. It is not evidence for or against cuda-oxide on attention, quantized GEMM, or a whole engine, and it says nothing about an independent inference engine being faster or slower.
+
+Follow-ups this report suggests, none of them done here and none of them a cuda-oxide expansion:
+
+- The default-off adapter from #2833 now carries a cost (the pin-bump checklist entry, the artifact, the validation code) and no user benefit. Removing it, or keeping it dormant as the reference for the artifact boundary, is the maintainer's choice.
+- The host-side gap between the generic custom-kernel launcher and a dedicated primitive (0.8 to 1.4 µs per node at construction, 1.8 to 3.6 µs per op in all) is independent of cuda-oxide and applies to every `fast::cuda_kernel` launcher on a launch-bound decode path. It is below what one checkpoint could resolve end to end here, so it is a lead for a profile of a model with more custom-kernel joins per step, not a finding to act on from this data.
+- On this checkpoint the existing fused kernel is not faster than the graph path it replaces: `graph` is 3.0 % ahead at server B=1 decode on the short prompt (a cell where the two generate different lengths) and within about 1 % elsewhere, and it is cheaper per op in `pipe` mode. That matches `FUSED_ADD_RMSNORM_DEFAULT` being off on CUDA and gives no reason to change it.
+
+## Limits
+
+- One checkpoint (Llama 3.2 1B Instruct, bf16), one GPU (GB10, sm_121), one driver, one MLX pin. The checkpoint was chosen to give the join its largest share, so a larger model would show less, not more.
+- The end-to-end resolution is the null floor: 0.3 to 0.8 % for decode at B=1, 0.4 to 1.7 % at B=4, 0.4 to 2.1 % for TTFT. An effect below that is not excluded; the op-level data put the cuda-oxide route's expected decode effect at +0.3 to +0.4 %, which is below it.
+- Kernel durations come from a mode (CUDA graphs off) that is not the one models run in.
+- The host was shared and is a CI runner. Stages that a CI run overlapped were repeated; both sets are in the tables.
+- `MLXCEL_CUDA_OXIDE_FUSED_NORM` and the fused kernel itself stay opt-in. Nothing here changes a default.
