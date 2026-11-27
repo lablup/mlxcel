@@ -3683,8 +3683,7 @@ fn prepare_qwen_vl_video_embeddings(
     let info = qwen.prompt_info();
     let policy = video_knobs.apply_to(info.processor.video_sampling_policy());
     let limits = video::VideoLimits::from_env();
-    let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
-    let mut sampled_timing: Vec<(Vec<usize>, f64)> = Vec::with_capacity(videos.len());
+    let mut sampled_videos: Vec<video::SampledVideo> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(info.processor.video_default_fps);
         let sampled = video::load_video_source_sampled_with_policy(
@@ -3701,14 +3700,16 @@ fn prepare_qwen_vl_video_embeddings(
                 err
             )
         })?;
-        sampled_timing.push((sampled.frame_indices, sampled.source_fps));
-        decoded_videos.push(sampled.frames);
+        sampled_videos.push(sampled);
     }
 
-    let total_frames: usize = decoded_videos.iter().map(Vec::len).sum();
+    let total_frames: usize = sampled_videos
+        .iter()
+        .map(|sampled| sampled.frames.len())
+        .sum();
     tracing::info!(
         "Qwen-VL video request: decoded {} video(s) ({} total frames after sampling)",
-        decoded_videos.len(),
+        sampled_videos.len(),
         total_frames
     );
 
@@ -3717,6 +3718,90 @@ fn prepare_qwen_vl_video_embeddings(
     } else {
         decode_request_images(images)?
     };
+
+    qwen_vl_embeddings_from_sampled_videos(
+        qwen,
+        tokenizer,
+        prompt_tokens,
+        &decoded_images,
+        sampled_videos,
+    )
+    .map(Some)
+}
+
+/// Seconds of source video per temporal grid of each sampled clip, in clip
+/// order: `temporal_patch_size / sampled fps`, the Qwen2.5-VL reference
+/// processor's `second_per_grid_ts` (Blaizzy/mlx-vlm#2760).
+///
+/// The rate is the one the sampler achieved ([`SampledVideo::sampled_fps`]),
+/// not the one the request asked for: frame rounding, the policy bounds and
+/// the `num_frames` knob (#3204) all encode a frame count other than
+/// `duration * requested fps`, and the encoded frames are what the positions
+/// describe.
+///
+/// `None` for a family that renders per-group `<t seconds>` markers
+/// (`video_timestamps`, the Qwen3-VL family): its real time is in the text,
+/// and each temporal group is positioned on its own.
+///
+/// [`SampledVideo::sampled_fps`]: crate::multimodal::video::SampledVideo::sampled_fps
+fn qwen_vl_video_second_per_grid(
+    video_timestamps: bool,
+    temporal_patch_size: usize,
+    sampled_videos: &[crate::multimodal::video::SampledVideo],
+) -> Result<Option<Vec<f32>>> {
+    if video_timestamps {
+        return Ok(None);
+    }
+    sampled_videos
+        .iter()
+        .enumerate()
+        .map(|(idx, sampled)| {
+            let sampled_fps = sampled
+                .sampled_fps()
+                .map_err(|err| anyhow!("Qwen-VL video {idx}: {err}"))?;
+            let second_per_grid =
+                crate::qwen_vl::qwen_video_second_per_grid(sampled_fps, temporal_patch_size)
+                    .map_err(|err| anyhow!("Qwen-VL video {idx}: {err}"))?;
+            tracing::info!(
+                "Qwen-VL video {idx}: {} of {} frame(s) at {} fps, sampled fps {sampled_fps}, \
+                 second_per_grid {second_per_grid}",
+                sampled.frame_indices.len(),
+                sampled.total_frames,
+                sampled.source_fps
+            );
+            Ok(second_per_grid)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// Everything [`prepare_qwen_vl_video_embeddings`] does once the clips are
+/// sampled: derive the per-clip timing the family needs and compute the
+/// embeddings. Split out so the timing hand-off is testable without ffmpeg.
+fn qwen_vl_embeddings_from_sampled_videos(
+    qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: &mut Vec<i32>,
+    decoded_images: &[image::DynamicImage],
+    sampled_videos: Vec<crate::multimodal::video::SampledVideo>,
+) -> Result<InputEmbeddings> {
+    let info = qwen.prompt_info();
+
+    // Qwen2.5-VL spaces a video's temporal positions by real time; the flat
+    // families that do not simply ignore this in the runtime.
+    let second_per_grid = qwen_vl_video_second_per_grid(
+        info.video_timestamps,
+        info.processor.temporal_patch_size,
+        &sampled_videos,
+    )?;
+
+    let mut decoded_videos: Vec<Vec<image::DynamicImage>> =
+        Vec::with_capacity(sampled_videos.len());
+    let mut sampled_timing: Vec<(Vec<usize>, f64)> = Vec::with_capacity(sampled_videos.len());
+    for sampled in sampled_videos {
+        sampled_timing.push((sampled.frame_indices, sampled.source_fps));
+        decoded_videos.push(sampled.frames);
+    }
 
     // Qwen3-VL renders a `<t seconds>` marker before each temporal group; the
     // times come from the frames the sampler actually kept (#2402).
@@ -3754,14 +3839,15 @@ fn prepare_qwen_vl_video_embeddings(
     let (embeddings, _stats) = crate::vlm_runtime::compute_qwen_vl_media_embeddings(
         qwen,
         prompt_tokens,
-        &decoded_images,
+        decoded_images,
         &decoded_videos,
         timestamps.as_ref(),
+        second_per_grid.as_deref(),
         None,
         None,
     )?;
 
-    Ok(Some(embeddings))
+    Ok(embeddings)
 }
 
 /// Resolve `videos` into Gemma 4 Unified (encoder-free) video embeddings.

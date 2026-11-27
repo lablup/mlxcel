@@ -50,8 +50,8 @@ const QUANTIZED_LEAVES: [&str; 15] = [
 ];
 const PROJS: [&str; 3] = ["gate_proj", "up_proj", "down_proj"];
 
-#[derive(Clone, Copy, PartialEq)]
-enum Export {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Export {
     Mlx,
     ModelOpt,
 }
@@ -353,7 +353,7 @@ fn write_safetensors(path: &std::path::Path, files: &[(String, UniquePtr<MlxArra
 
 /// Load the export from disk and its dense twin; `None` on a backend that
 /// refuses native NVFP4 (the load error must then name it).
-fn load_pair(export: Export) -> Option<(Raon1MiniModel, Raon1MiniModel)> {
+pub(super) fn load_pair(export: Export) -> Option<(Raon1MiniModel, Raon1MiniModel)> {
     let b = build(export);
     let tag = if export == Export::Mlx {
         "mlx"

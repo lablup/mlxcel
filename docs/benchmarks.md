@@ -697,6 +697,19 @@ python3 scripts/compare_logit_traces.py ref.tsv fixed.tsv --decided 2
 python3 scripts/mlx_vlm_image_logit_trace.py MODEL tests/fixtures/test_image_shapes.png fixed.tsv --float32 --mlxcel-prompt > ref.tsv
 ```
 
+A change to how video tokens are positioned needs video-conditioned text (#3234). `MLXCEL_TRACE_VIDEO=PATH` is the same arm behind one clip: it samples the clip as the Qwen-VL video path of `mlxcel generate --video` does (`MLXCEL_TRACE_VIDEO_FPS`, default the processor's rate), renders the template around one video and `MLXCEL_TRACE_VIDEO_PROMPT`, and hands the runtime the clip's `second_per_grid`. The `# video_timing` line records the frame count, the sampled fps and `second_per_grid`. `MLXCEL_TRACE_VIDEO_FRAMES_DIR=DIR` writes the sampled frames so the reference encodes those frames rather than sampling the clip again, and `scripts/mlx_vlm_image_logit_trace.py --video --video-fps SAMPLED_FPS` reads them; pass it the trace's `sampled_fps`, since the reference processor derives `second_per_grid_ts` from that rate and any other value makes the arms disagree about positions rather than about the forward pass. `MLXCEL_TRACE_VIDEO_UNTIMED=1` withholds the timing, which gives the unit-spaced positions Qwen2.5-VL used before #3234: the reverted arm. Only the flat video layout is covered (Qwen2-VL, Qwen2.5-VL, Qwen4-exp-VL, MiMo-V2-VL); the Qwen3-VL family's per-group timestamped layout is refused.
+
+```bash
+MLXCEL_TRACE_VIDEO=clip.mp4 MLXCEL_TRACE_VIDEO_FRAMES_DIR=frames \
+./target/test-fast/examples/logit_trace MODEL reply.txt 128 1 8 > fixed.tsv
+MLXCEL_TRACE_VIDEO=clip.mp4 MLXCEL_TRACE_VIDEO_UNTIMED=1 \
+./target/test-fast/examples/logit_trace MODEL reply.txt 128 1 8 > untimed.tsv
+# SAMPLED_FPS is the `sampled_fps` field of fixed.tsv's `# video_timing` line.
+python3 scripts/mlx_vlm_image_logit_trace.py MODEL frames fixed.tsv --video --video-fps SAMPLED_FPS > ref.tsv
+python3 scripts/compare_logit_traces.py ref.tsv fixed.tsv --decided 2
+python3 scripts/compare_logit_traces.py ref.tsv untimed.tsv --decided 2
+```
+
 The mlx-community Inkling 2 4-bit export is in the Transformers layout, which mlx-vlm 466069f5 cannot load. Pass `--inkling2-mlx-community` to `scripts/mlx_lm_logit_trace.py` (text) or `scripts/mlx_vlm_image_logit_trace.py` (image) to score it: the flag rewrites the export once, through `scripts/inkling2_mlx_community_remap.py`, into a temporary directory (`INKLING2_REMAP_DIR` moves it) and loads that. The rewrite only renames tensors, splits the fused `gate_up_proj`, sets `weight_scale_2 = global_scale / 2688` and declares each expert projection's NVFP4 or MXFP8 mode. The export has no `processor_config.json`, so the image script takes the missing processor files from `--inkling2-native-dir` (default: a sibling `inkling-2-mini`). Results: `docs/benchmark_results/inkling2-mini-4bit-image-trace-m3ultra-2026-11-24.md`.
 
 Image prompts against mlx-vlm 0.7.8 and transformers (#2547), for `tests/fixtures/test_image_shapes.png` (448x448) and `Describe the image.`:

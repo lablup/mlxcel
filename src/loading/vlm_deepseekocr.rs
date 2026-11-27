@@ -139,6 +139,25 @@ fn deepseekocr_language_args(
         .map_err(|e| anyhow::anyhow!("Failed to parse {} language_config: {}", family, e))
 }
 
+/// The CLIP encoder configuration [`load_deepseekocr_vlm`] builds: the
+/// DeepSeek-OCR encoder layers normalize at eps 1e-6 (mlx-vlm
+/// `deepseekocr/config.py` `VisionConfig.layer_norm_eps`).
+fn deepseekocr_clip_config() -> ClipConfig {
+    ClipConfig::default()
+}
+
+/// The CLIP encoder configuration [`load_unlimited_ocr_vlm`] builds. The
+/// released Unlimited-OCR encoder layers normalize at the PyTorch default eps
+/// 1e-5 (mlx-vlm `unlimited_ocr/config.py`, #3235). Neither
+/// `baidu/Unlimited-OCR` nor `mlx-community/Unlimited-OCR-4bit` declares
+/// `vision_config.layer_norm_eps`, so it is hardcoded as upstream does.
+fn unlimited_ocr_clip_config() -> ClipConfig {
+    ClipConfig {
+        layer_norm_eps: 1e-5,
+        ..ClipConfig::default()
+    }
+}
+
 pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
@@ -150,8 +169,14 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let sam =
         SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
-        .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR CLIP encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(
+        &weights,
+        "vision_model",
+        deepseekocr_clip_config(),
+        gs,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR projector: {}", e))?;
     let image_newline = load_required_vector(
@@ -231,8 +256,14 @@ pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let sam =
         SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
-        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(
+        &weights,
+        "vision_model",
+        unlimited_ocr_clip_config(),
+        gs,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR projector: {}", e))?;
     let image_newline = load_required_vector(

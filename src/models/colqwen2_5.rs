@@ -169,6 +169,8 @@ impl ColQwen25Model {
             video_token_id: token_id("video_token_id", DEFAULT_VIDEO_TOKEN_ID),
             vision_start_token_id: token_id("vision_start_token_id", DEFAULT_VISION_START_TOKEN_ID),
             spatial_merge_size: vision_config.spatial_merge_size,
+            // Images only: no video ever reaches this model's MRoPE.
+            video_tokens_per_second: 2.0,
         };
 
         Ok(Self {
