@@ -62,6 +62,12 @@ pub struct Qwen35MtpTextConfig {
     /// MRoPE keys the drafter ignores).
     #[serde(default)]
     pub rope_parameters: Option<serde_json::Value>,
+    /// The target's training context, mirrored from its `text_config`. Read
+    /// only as the YaRN original context when `rope_parameters` declares
+    /// `yarn` without `original_max_position_embeddings`, exactly as the
+    /// target's `Qwen35Config::yarn` reads it (issue #3479).
+    #[serde(default)]
+    pub max_position_embeddings: Option<usize>,
     /// Number of MTP decoder layers. `1` on every published Qwen 3.5 / 3.6 /
     /// 3.8 checkpoint.
     #[serde(default = "default_mtp_num_hidden_layers")]
@@ -502,6 +508,7 @@ mod tests {
             intermediate_size: 128,
             vocab_size: 512,
             rope_parameters: None,
+            max_position_embeddings: None,
             mtp_num_hidden_layers: 1,
             tie_word_embeddings: false,
             quantization: None,
