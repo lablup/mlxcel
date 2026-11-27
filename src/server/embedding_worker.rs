@@ -115,13 +115,16 @@ impl EmbeddingWorker {
     /// to that thread's MLX context. `queue_depth` bounds the command
     /// channel (clamped to at least one), `request_timeout` bounds the reply
     /// wait (a zero falls back to the default), and `batch_size` is the
-    /// micro-batch width handed to the engine.
+    /// micro-batch width handed to the engine. `after_command` runs on the
+    /// worker thread after every command's reply is sent; production passes
+    /// [`mlxcel_core::memory::clear_cache`] (#3209).
     pub(crate) fn spawn<L>(
         thread_name: &str,
         queue_depth: usize,
         request_timeout: Duration,
         batch_size: usize,
         loader: L,
+        after_command: fn(),
     ) -> anyhow::Result<Self>
     where
         L: FnOnce() -> anyhow::Result<LoadedEmbeddingModel> + Send + 'static,
@@ -135,9 +138,17 @@ impl EmbeddingWorker {
         let (command_tx, command_rx) = mpsc::sync_channel::<EmbeddingCommand>(capacity);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EmbeddingWorkerInfo, String>>();
 
+        // The worker logs through the subscriber of the thread that spawned
+        // it, which is the global one in production and a test's scoped one
+        // under `tracing::subscriber::with_default`.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let handle = thread::Builder::new()
             .name(thread_name.to_string())
-            .spawn(move || worker_loop(loader, batch_size, command_rx, ready_tx))
+            .spawn(move || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    worker_loop(loader, batch_size, command_rx, ready_tx, after_command);
+                });
+            })
             .map_err(|e| anyhow::anyhow!("failed to spawn embedding worker thread: {e}"))?;
 
         match ready_rx.recv() {
@@ -273,6 +284,7 @@ fn worker_loop<L>(
     batch_size: usize,
     commands: mpsc::Receiver<EmbeddingCommand>,
     ready: mpsc::Sender<Result<EmbeddingWorkerInfo, String>>,
+    after_command: fn(),
 ) where
     L: FnOnce() -> anyhow::Result<LoadedEmbeddingModel>,
 {
@@ -341,7 +353,31 @@ fn worker_loop<L>(
             }
             EmbeddingCommand::Shutdown => break,
         }
+        // After the reply is on its way, so the clear adds no latency.
+        log_memory_snapshot();
+        after_command();
     }
+}
+
+/// Report MLX memory after each embedding command (#3209 item d), before the
+/// cache is cleared, so the line shows what the command left behind.
+///
+/// Variable-length inputs leave buffers in the allocator cache that later
+/// requests rarely reuse. Measured on CUDA (GB10), with no cache limit and
+/// 500 requests of 1 to 2048 tokens in batches of 1 to 16, `cache_bytes` grew
+/// from 18.4 GB after 20 requests to 93.5 GB after 100 and the process was
+/// killed by the kernel's OOM killer after 127, so the worker clears the cache
+/// after every command, as mlx-vlm#2665 does. Watch it with
+/// `RUST_LOG=mlxcel::embeddings=debug`.
+fn log_memory_snapshot() {
+    let memory = mlxcel_core::memory::snapshot();
+    tracing::debug!(
+        target: "mlxcel::embeddings",
+        active_bytes = memory.active_bytes,
+        cache_bytes = memory.cache_bytes,
+        peak_bytes = memory.peak_bytes,
+        "embedding command finished"
+    );
 }
 
 /// Run one engine call under a panic boundary, then synchronize the stream.
@@ -426,12 +462,36 @@ impl EmbeddingWorkerProvider {
     where
         L: FnOnce() -> anyhow::Result<LoadedEmbeddingModel> + Send + 'static,
     {
+        Self::from_loader_with_after_command(
+            model_id,
+            batch_size,
+            queue_depth,
+            request_timeout,
+            loader,
+            mlxcel_core::memory::clear_cache,
+        )
+    }
+
+    /// [`Self::from_loader`] with the hook the worker runs after every
+    /// command; tests inject a counter in place of the cache clear.
+    pub(crate) fn from_loader_with_after_command<L>(
+        model_id: String,
+        batch_size: usize,
+        queue_depth: usize,
+        request_timeout: Duration,
+        loader: L,
+        after_command: fn(),
+    ) -> anyhow::Result<Self>
+    where
+        L: FnOnce() -> anyhow::Result<LoadedEmbeddingModel> + Send + 'static,
+    {
         let worker = EmbeddingWorker::spawn(
             "embedding-worker",
             queue_depth,
             request_timeout,
             batch_size,
             loader,
+            after_command,
         )?;
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

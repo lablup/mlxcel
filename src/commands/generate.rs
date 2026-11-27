@@ -1461,6 +1461,7 @@ pub(super) fn decode_generated_text(
 /// thinking marker the filter starts inside the channel so the primed reasoning
 /// is suppressed too.
 fn filter_reasoning_for_display(
+    model_path: &Path,
     tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
     prompt: &str,
     generated_text: &str,
@@ -1475,7 +1476,7 @@ fn filter_reasoning_for_display(
         return rendered;
     }
 
-    let markers = tokenizer.infer_thinking_markers();
+    let markers = mlxcel::server::chat_front::thinking_markers_for_model(model_path, tokenizer);
     // When the rendered prompt primed an open thinking marker (`<think>\n` for
     // Qwen-style, `<|channel>thought\n` for a thinking-on Gemma-4 channel) the
     // generated text starts already inside the channel with no open marker, so
@@ -3490,6 +3491,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
+            Path::new(&args.model.model),
             &tokenizer,
             &prompt,
             &generated_text,
@@ -3680,6 +3682,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     let visible = filter_reasoning_for_display(
+        Path::new(&args.model.model),
         &tokenizer,
         &prompt,
         &generated_text,

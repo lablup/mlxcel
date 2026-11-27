@@ -961,7 +961,9 @@ async fn route_chat(
     }
 
     // Render the chat template.
-    let thinking_markers = state.tokenizer.infer_thinking_markers();
+    let thinking_markers = state
+        .tokenizer
+        .infer_thinking_markers_with_template(Some(state.chat_template.template_source()));
     let prepared = match super::chat_request::prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &request,

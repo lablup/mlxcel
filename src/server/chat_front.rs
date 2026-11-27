@@ -48,12 +48,32 @@ pub fn apply_thinking_default(
     template: &mut ChatTemplateProcessor,
     tokenizer: &MlxcelTokenizer,
 ) -> bool {
-    let markers = tokenizer.infer_thinking_markers();
+    let markers = tokenizer.infer_thinking_markers_with_template(Some(template.template_source()));
     if markers.has_thinking() && !template.wants_thinking_default_off() {
         template.set_default_enable_thinking(true);
         return true;
     }
     false
+}
+
+/// The thinking markers of a checkpoint, inferred from its tokenizer with its
+/// own chat template as the fallback (mlx-lm#1974), as the server infers them.
+///
+/// Used by: `mlxcel generate` (the CLI reasoning filter), which renders its
+/// prompt through [`load_model_chat_template`] but does not keep the template.
+#[must_use]
+pub fn thinking_markers_for_model(
+    model_path: &Path,
+    tokenizer: &MlxcelTokenizer,
+) -> crate::tokenizer::ThinkingMarkers {
+    let template = ChatTemplateProcessor::from_model_path(model_path)
+        .ok()
+        .flatten();
+    tokenizer.infer_thinking_markers_with_template(
+        template
+            .as_ref()
+            .map(ChatTemplateProcessor::template_source),
+    )
 }
 
 /// The checkpoint's own chat template with [`apply_thinking_default`]

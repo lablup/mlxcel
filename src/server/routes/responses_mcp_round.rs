@@ -222,6 +222,9 @@ pub(super) struct RoundOutput {
     pub(super) message_text: String,
     /// The reasoning text of this turn.
     pub(super) reasoning_text: Option<String>,
+    /// The turn's prompt primed an open reasoning block, so the tool-call
+    /// parse starts inside it (#3209).
+    pub(super) primed_open_thinking: bool,
 }
 
 /// Generate one model turn on the calling (blocking) thread, streaming its
@@ -310,5 +313,6 @@ pub(super) fn run_round(
         raw,
         message_text,
         reasoning_text: Some(reasoning).filter(|text| !text.trim().is_empty()),
+        primed_open_thinking,
     })
 }
