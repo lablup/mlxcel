@@ -105,7 +105,7 @@ def write(path, rows):
     if not rows:
         sys.exit(f"nsys_kernel_table: nothing to write to {path} (empty table)")
     with open(path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 

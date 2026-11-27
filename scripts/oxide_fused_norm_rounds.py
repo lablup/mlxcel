@@ -120,7 +120,8 @@ def cmd_run(a):
     names = list(ARMS)
     new = not os.path.exists(a.out)
     with open(a.out, "a", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(fh, fieldnames=FIELDS, extrasaction="ignore",
+                                lineterminator="\n")
         if new:
             writer.writeheader()
         for r in range(a.first_round, a.first_round + a.rounds):
@@ -223,7 +224,7 @@ def cmd_summarize(a):
                   f"{', '.join(digests)} | {min(peaks):.3f}..{max(peaks):.3f} |")
     if a.out:
         with open(a.out, "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(out_rows[0]))
+            writer = csv.DictWriter(fh, fieldnames=list(out_rows[0]), lineterminator="\n")
             writer.writeheader()
             writer.writerows(out_rows)
 

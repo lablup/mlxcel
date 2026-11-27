@@ -18,7 +18,8 @@
 # before the first of them ran.
 #
 #   run.sh <stage> [<stage> ...]
-#   stages: env m3 m4 m5 m6 m1 m2 m7
+#   stages: env m3 m4 m5 m6 m6b m1 m2 m7 m8
+#   SET=<suffix> writes m4/m5 to files with that suffix (a repeat set).
 #
 # Build first, outside gpu-lock:
 #   MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 \
@@ -163,8 +164,8 @@ stage_m4() {
     done
     # One table per kind: header once, then every capture's rows.
     for kind in k a; do
-        local out=$here/m4-nsys-kernels.csv
-        [ "$kind" = a ] && out=$here/m4-nsys-cuda-api.csv
+        local out=$here/m4-nsys-kernels${SET:-}.csv
+        [ "$kind" = a ] && out=$here/m4-nsys-cuda-api${SET:-}.csv
         head -1 "$WORK/nsys/$kind-standalone-1.csv" >"$out"
         for f in "$WORK"/nsys/"$kind"-standalone-?.csv "$WORK"/nsys/"$kind"-mlx-?.csv; do
             tail -n +2 "$f" >>"$out"
@@ -178,7 +179,7 @@ stage_m5() {
     for rep in 1 2 3; do
         for mode in iso pipe; do
             lock op "$opbench" --mode "$mode" --shapes model,bench2832 --rounds 5 --iters 200 \
-                --warmup 20 --label "rep$rep" --csv "$here/m5-op-level-mlx.csv"
+                --warmup 20 --label "rep$rep" --csv "$here/m5-op-level-mlx${SET:-}.csv"
         done
     done
 }
@@ -205,6 +206,59 @@ stage_m6() {
     done
     mv "$out.cold.csv" "$here/m6-cold-start.csv"
     mv "$out" "$here/m6-cold-start-steady.csv"
+}
+
+# M6, driver compute cache off (protocol adjustment 1). The CUDA driver keeps
+# its own cache of PTX it has compiled (~/.nv/ComputeCache), so a PTX module
+# loads in well under a millisecond on a machine that has loaded it before.
+# CUDA_CACHE_DISABLE=1 shows the load a machine pays the first time, and after
+# a driver update. The existing kernel's disk-cache entries are cubins, which
+# the driver does not compile, so its two states are repeated as controls.
+stage_m6b() {
+    wait_runner
+    local shapes=bf16:bf16:1x2048,bf16:bf16:1x4096
+    local out=$here/m6b-cold-start-driver-cache-off
+    for rep in 1 2 3 4 5; do
+        local empty=$WORK/ptx-empty-nodrv-$rep
+        [ -e "$empty" ] && { echo "run.sh: $empty exists; use a fresh WORK" >&2; exit 2; }
+        mkdir -p "$empty" && chmod 700 "$empty"
+        CUDA_CACHE_DISABLE=1 MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold \
+            --arms fused --shapes "$shapes" --iters 50 --label "fused-empty-cache-rep$rep" --csv "$out"
+        CUDA_CACHE_DISABLE=1 MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold \
+            --arms fused --shapes "$shapes" --iters 50 --label "fused-warm-cache-rep$rep" --csv "$out"
+        CUDA_CACHE_DISABLE=1 MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold \
+            --arms oxide --shapes "$shapes" --iters 50 --label "oxide-rep$rep" --csv "$out"
+        CUDA_CACHE_DISABLE=1 GPU_LOCK_TAG=issue-2834-standalone "$spike/scripts/standalone-bench.sh" \
+            --shapes model --iters 200 --label "driver-cache-off-rep$rep" \
+            --csv "$here/m6b-standalone-driver-cache-off.csv"
+    done
+    mv "$out.cold.csv" "$here/m6b-cold-start-driver-cache-off.csv"
+    mv "$out" "$here/m6b-cold-start-driver-cache-off-steady.csv"
+}
+
+# M8, exploratory (protocol adjustment 3): CUDA API calls per op, one arm per
+# process, so the calls can be attributed to an arm. Graphs off and graphs on.
+stage_m8() {
+    wait_runner
+    mkdir -p "$WORK/nsys-arm"
+    local out=$here/m8-cuda-api-per-arm.csv
+    local first=1
+    for graphs in 0 1; do
+        for arm in graph fused oxide; do
+            local base=$WORK/nsys-arm/$arm-graphs$graphs
+            MLX_USE_CUDA_GRAPHS=$graphs lock nsys nsys profile --trace=cuda --sample=none \
+                --cpuctxsw=none --force-overwrite=true -o "$base" \
+                "$opbench" --mode pipe --arms "$arm" --shapes bf16:bf16:1x2048 --rounds 1 \
+                --iters 2000 --warmup 20 --label "api-$arm-graphs$graphs" \
+                --csv "$WORK/nsys-arm/pipe-under-nsys.csv"
+            nsys export --type sqlite --force-overwrite=true -o "$base.sqlite" "$base.nsys-rep" >/dev/null
+            python3 "$repo/scripts/nsys_kernel_table.py" "$base.sqlite" \
+                --label "$arm-graphs$graphs-2020-ops" --api "$base-api.csv" >/dev/null
+            if [ "$first" = 1 ]; then head -1 "$base-api.csv" >"$out"; first=0; fi
+            tail -n +2 "$base-api.csv" >>"$out"
+        done
+    done
+    cat "$out"
 }
 
 # M1: end to end, production mode, 7 interleaved rounds with a null arm.
@@ -283,7 +337,7 @@ for line in sass.splitlines():
 for m in re.finditer(r"Function (\S+?):\s*\n\s*(.*)", res):
     name, usage = m.group(1), m.group(2)
     field = lambda key: (re.search(key + r":(\d+)", usage) or [None, ""])[1]
-    cbank = sum(int(v) for v in re.findall(r"CBANK\[\d+\]:(\d+)", usage))
+    cbank = sum(int(v) for v in re.findall(r"CONSTANT\[\d+\]:(\d+)", usage))
     print(",".join([impl, os.path.basename(module), name, field("REG"), field("STACK"),
                     field("SHARED"), str(cbank), str(counts.get(name, ""))]))
 PY
@@ -301,7 +355,7 @@ host_state=$here/host-state.csv
 [ -f "$host_state" ] || echo "stage,started_utc,ended_utc,load1_start,load1_end,ci_job_running_at_end" >"$host_state"
 for stage in "$@"; do
     case "$stage" in
-        env | m1 | m2 | m3 | m4 | m5 | m6 | m7)
+        env | m1 | m2 | m3 | m4 | m5 | m6 | m6b | m7 | m8)
             started=$(date -u +%FT%TZ)
             load_start=$(cut -d' ' -f1 /proc/loadavg)
             "stage_$stage"
