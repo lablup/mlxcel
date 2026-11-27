@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# Copyright 2025-2026 Lablup Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# The commands behind every CSV in this directory (issue #2834). The protocol
+# they implement is docs/mlxcelverse/cuda-oxide-benchmark-evidence.md, frozen
+# before the first of them ran.
+#
+#   run.sh <stage> [<stage> ...]
+#   stages: env m3 m4 m5 m6 m1 m2 m7
+#
+# Build first, outside gpu-lock:
+#   MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 \
+#     cargo build --release --features cuda \
+#       --example oxide_fused_norm_checkpoint_bench --example logit_trace
+#   MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 \
+#     cargo build --release -p mlxcel-core --features cuda --example oxide_fused_norm_bench
+#
+# WORK holds everything that is not a result row (profiler captures, logit
+# traces, the PTX caches). It is outside the checkout and must be a directory
+# only the current user can write: the PTX disk cache refuses anything else.
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo=$(cd "$here/../../.." && pwd)
+WORK=${WORK:?set WORK to a private scratch directory outside the checkout}
+MODEL=${MODEL:-$repo/models/llama-3.2-1b-instruct-bf16}
+spike=$repo/spike/cuda-oxide-fused-norm
+opbench=$repo/target/release/examples/oxide_fused_norm_bench
+ckptbench=$repo/target/release/examples/oxide_fused_norm_checkpoint_bench
+trace=$repo/target/release/examples/logit_trace
+cuda=${CUDA_HOME:-/usr/local/cuda}
+corpus=$repo/tests/fixtures/bench/fused-moe-dff-prompt-439-words.txt
+
+mkdir -p "$WORK" "$WORK/ptx-warm"
+chmod 700 "$WORK" "$WORK/ptx-warm"
+export MLX_PTX_CACHE_DIR=$WORK/ptx-warm
+
+lock() { # lock <purpose> <command...>
+    local purpose=$1
+    shift
+    gpu-lock run --tag "issue-2834-$purpose" -- "$@"
+}
+
+wait_runner() { # never measure while a CI job runs on this host
+    local waited=0
+    while pgrep -f Runner.Worker >/dev/null && [ "$waited" -lt 1800 ]; do
+        sleep 10
+        waited=$((waited + 10))
+    done
+    if pgrep -f Runner.Worker >/dev/null; then
+        echo "run.sh: a CI job is still running after ${waited}s; refusing to measure" >&2
+        exit 3
+    fi
+}
+
+stage_env() {
+    python3 - "$repo" "$MODEL" "$spike" "$opbench" "$ckptbench" "$cuda" >"$here/provenance.json" <<'PY'
+import hashlib, json, os, platform, subprocess, sys
+repo, model, spike, opbench, ckptbench, cuda = sys.argv[1:7]
+def sh(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=repo).stdout.strip()
+    except OSError as exc:
+        return f"unavailable: {exc}"
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+def read(path):
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return None
+out = {
+    "issue": 2834,
+    "host": platform.node(),
+    "kernel": platform.release(),
+    "machine": platform.machine(),
+    "gpu": sh("nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"),
+    "gpu_clocks_sm_mhz": sh("nvidia-smi", "--query-gpu=clocks.current.sm,clocks.max.sm",
+                            "--format=csv,noheader"),
+    "cpu_governor": read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+    "cuda_toolkit": sh(os.path.join(cuda, "bin", "nvcc"), "--version").splitlines()[-2:],
+    "nsys": sh("nsys", "--version"),
+    "rustc": sh("rustc", "--version"),
+    "cxx": sh("g++", "--version").splitlines()[:1],
+    "mlxcel_commit": sh("git", "rev-parse", "HEAD"),
+    "mlxcel_dirty_files": sh("git", "status", "--porcelain", "--untracked-files=no").splitlines(),
+    "mlx_pin": sh("bash", "scripts/ci/mlx_pinned_commit.sh"),
+    "build": {
+        "profile": "release",
+        "features": "cuda",
+        "env": {"MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM": "1", "MLXCEL_CUDA_ARCHITECTURES": "121"},
+        "binaries_sha256": {os.path.basename(p): sha(p) for p in (opbench, ckptbench)},
+    },
+    "artifact": {
+        "ptx_sha256": sha(os.path.join(spike, "artifacts", "fused_add_rms_norm.sm_121.ptx")),
+        "cubin_sha256": sha(os.path.join(spike, "artifacts", "fused_add_rms_norm.sm_121.cubin")),
+    },
+    "checkpoint": {
+        "path": model,
+        "config_sha256": sha(os.path.join(model, "config.json")),
+        "model_safetensors_sha256": sha(os.path.join(model, "model.safetensors")),
+        "tokenizer_sha256": sha(os.path.join(model, "tokenizer.json")),
+    },
+    "gpu_lock": sh("which", "gpu-lock"),
+    "ci_job_running_at_capture": bool(sh("pgrep", "-f", "Runner.Worker")),
+}
+json.dump(out, sys.stdout, indent=2)
+print()
+PY
+    cat "$here/provenance.json"
+}
+
+# M3: standalone, CUDA events, 5 processes.
+stage_m3() {
+    wait_runner
+    for rep in 1 2 3 4 5; do
+        GPU_LOCK_TAG=issue-2834-standalone "$spike/scripts/standalone-bench.sh" \
+            --shapes all --iters 200 --label "rep$rep" --csv "$here/m3-standalone-events.csv"
+    done
+}
+
+# M4: kernel durations from one profiler, standalone and through MLX
+# (graphs off so kernels are attributable), 3 captures each.
+stage_m4() {
+    wait_runner
+    local nsys_args=(profile --trace=cuda --sample=none --cpuctxsw=none --force-overwrite=true)
+    mkdir -p "$WORK/nsys"
+    for rep in 1 2 3; do
+        GPU_LOCK_TAG=issue-2834-nsys "$spike/scripts/standalone-bench.sh" --shapes model \
+            --iters 200 --label "nsys-rep$rep" --csv "$WORK/nsys/standalone-under-nsys.csv" \
+            --wrap "nsys ${nsys_args[*]} -o $WORK/nsys/standalone-$rep"
+        nsys export --type sqlite --force-overwrite=true -o "$WORK/nsys/standalone-$rep.sqlite" \
+            "$WORK/nsys/standalone-$rep.nsys-rep" >/dev/null
+        python3 "$repo/scripts/nsys_kernel_table.py" "$WORK/nsys/standalone-$rep.sqlite" \
+            --label "standalone-rep$rep" --match fused_add_rms_norm \
+            --kernels "$WORK/nsys/k-standalone-$rep.csv" --api "$WORK/nsys/a-standalone-$rep.csv"
+
+        MLX_USE_CUDA_GRAPHS=0 lock nsys nsys "${nsys_args[@]}" -o "$WORK/nsys/mlx-$rep" \
+            "$opbench" --mode iso --shapes model --rounds 5 --iters 200 --warmup 20 \
+            --label "nsys-rep$rep" --csv "$WORK/nsys/mlx-iso-under-nsys.csv"
+        nsys export --type sqlite --force-overwrite=true -o "$WORK/nsys/mlx-$rep.sqlite" \
+            "$WORK/nsys/mlx-$rep.nsys-rep" >/dev/null
+        python3 "$repo/scripts/nsys_kernel_table.py" "$WORK/nsys/mlx-$rep.sqlite" \
+            --label "mlx-graphs-off-rep$rep" --match fused_add_rms_norm --match rms_norm \
+            --match binary_vv \
+            --kernels "$WORK/nsys/k-mlx-$rep.csv" --api "$WORK/nsys/a-mlx-$rep.csv"
+    done
+    # One table per kind: header once, then every capture's rows.
+    for kind in k a; do
+        local out=$here/m4-nsys-kernels.csv
+        [ "$kind" = a ] && out=$here/m4-nsys-cuda-api.csv
+        head -1 "$WORK/nsys/$kind-standalone-1.csv" >"$out"
+        for f in "$WORK"/nsys/"$kind"-standalone-?.csv "$WORK"/nsys/"$kind"-mlx-?.csv; do
+            tail -n +2 "$f" >>"$out"
+        done
+    done
+}
+
+# M5: op level through MLX in production mode (graphs on), 3 processes.
+stage_m5() {
+    wait_runner
+    for rep in 1 2 3; do
+        for mode in iso pipe; do
+            lock op "$opbench" --mode "$mode" --shapes model,bench2832 --rounds 5 --iters 200 \
+                --warmup 20 --label "rep$rep" --csv "$here/m5-op-level-mlx.csv"
+        done
+    done
+}
+
+# M6: cold start, a fresh process per sample, 5 samples per state.
+stage_m6() {
+    wait_runner
+    local shapes=bf16:bf16:1x2048,bf16:bf16:1x4096
+    local out=$here/m6-cold-start
+    for rep in 1 2 3 4 5; do
+        # fused, empty disk cache: NVRTC compiles the kernel.
+        local empty=$WORK/ptx-empty-$rep
+        [ -e "$empty" ] && { echo "run.sh: $empty exists; use a fresh WORK" >&2; exit 2; }
+        mkdir -p "$empty" && chmod 700 "$empty"
+        MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold --arms fused \
+            --shapes "$shapes" --iters 50 --label "fused-empty-cache-rep$rep" --csv "$out"
+        # fused, the same directory again: served from the disk cache.
+        MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold --arms fused \
+            --shapes "$shapes" --iters 50 --label "fused-warm-cache-rep$rep" --csv "$out"
+        MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold --arms oxide \
+            --shapes "$shapes" --iters 50 --label "oxide-rep$rep" --csv "$out"
+        MLX_PTX_CACHE_DIR=$empty lock cold "$opbench" --mode cold --arms graph \
+            --shapes "$shapes" --iters 50 --label "graph-rep$rep" --csv "$out"
+    done
+    mv "$out.cold.csv" "$here/m6-cold-start.csv"
+    mv "$out" "$here/m6-cold-start-steady.csv"
+}
+
+# M1: end to end, production mode, 7 interleaved rounds with a null arm.
+stage_m1() {
+    wait_runner
+    python3 "$repo/scripts/oxide_fused_norm_rounds.py" run --bin "$ckptbench" --model "$MODEL" \
+        --rounds "${ROUNDS:-7}" --first-round "${FIRST_ROUND:-0}" --out "$here/m1-end-to-end.csv"
+    python3 "$repo/scripts/oxide_fused_norm_rounds.py" summarize "$here/m1-end-to-end.csv" \
+        --out "$here/m1-end-to-end-summary.csv"
+}
+
+# M2: teacher-forced logit traces per arm, three shapes, with route counters.
+stage_m2() {
+    wait_runner
+    mkdir -p "$WORK/traces"
+    local summary=$here/m2-logit-trace-summary.csv
+    echo "shape,arm,route_line,trace_sha256,positions" >"$summary"
+    run_trace() { # run_trace <shape> <chunk tokens> <arm> [env...]
+        local shape=$1 chunk=$2 arm=$3
+        shift 3
+        local out=$WORK/traces/$shape-$arm.tsv
+        env -u MLXCEL_FUSED_ADD_RMSNORM -u MLXCEL_CUDA_OXIDE_FUSED_NORM "$@" \
+            gpu-lock run --tag issue-2834-trace -- "$trace" "$MODEL" "$corpus" "$chunk" 1 8 \
+            >"$out" 2>"$out.err"
+        local route
+        route=$(grep '^# fused_norm_route' "$out.err" | tr '\t' ' ')
+        echo "$shape,$arm,$route,$(sha256sum "$out" | cut -d' ' -f1),$(grep -vc '^#' "$out")" >>"$summary"
+    }
+    for shape in prefill256 decode-b1 decode-b4; do
+        # The corpus is 480 tokens: one 256-token forward for the prefill
+        # shape, and 112-token chunks for the decode shapes so that four rows
+        # with their own prefixes fit.
+        local chunk=256 extra=()
+        [ "$shape" = decode-b1 ] && chunk=112 && extra=(MLXCEL_TRACE_BATCH_ROWS=1)
+        [ "$shape" = decode-b4 ] && chunk=112 && extra=(MLXCEL_TRACE_BATCH_ROWS=4)
+        run_trace "$shape" "$chunk" graph "${extra[@]}"
+        run_trace "$shape" "$chunk" fused MLXCEL_FUSED_ADD_RMSNORM=1 "${extra[@]}"
+        run_trace "$shape" "$chunk" fused-null MLXCEL_FUSED_ADD_RMSNORM=1 "${extra[@]}"
+        run_trace "$shape" "$chunk" oxide MLXCEL_FUSED_ADD_RMSNORM=1 MLXCEL_CUDA_OXIDE_FUSED_NORM=1 "${extra[@]}"
+    done
+    {
+        for shape in prefill256 decode-b1 decode-b4; do
+            for cand in oxide fused-null graph; do
+                echo "== $shape: $cand against fused"
+                if cmp -s "$WORK/traces/$shape-fused.tsv" "$WORK/traces/$shape-$cand.tsv"; then
+                    echo "byte-identical traces"
+                else
+                    echo "traces differ"
+                fi
+                python3 "$repo/scripts/compare_logit_traces.py" "$WORK/traces/$shape-fused.tsv" \
+                    "$WORK/traces/$shape-$cand.tsv" --decided 2
+            done
+        done
+    } >"$here/m2-logit-trace-comparison.txt"
+    cat "$summary"
+}
+
+# M7: resource usage and instruction counts, one tool on both cubins.
+stage_m7() {
+    local out=$here/m7-kernel-resources.csv
+    echo "implementation,module,kernel,registers,stack_bytes,shared_bytes,constant_bank_bytes,sass_instructions" >"$out"
+    resources() { # resources <implementation> <module file>
+        python3 - "$1" "$2" "$cuda/bin/cuobjdump" >>"$out" <<'PY'
+import os, re, subprocess, sys
+impl, module, tool = sys.argv[1:4]
+res = subprocess.run([tool, "-res-usage", module], capture_output=True, text=True).stdout
+sass = subprocess.run([tool, "-sass", module], capture_output=True, text=True).stdout
+counts, current = {}, None
+for line in sass.splitlines():
+    m = re.search(r"Function : (\S+)", line)
+    if m:
+        current = m.group(1)
+        counts[current] = 0
+    elif current and re.search(r"/\*[0-9a-f]{4}\*/", line):
+        counts[current] += 1
+for m in re.finditer(r"Function (\S+?):\s*\n\s*(.*)", res):
+    name, usage = m.group(1), m.group(2)
+    field = lambda key: (re.search(key + r":(\d+)", usage) or [None, ""])[1]
+    cbank = sum(int(v) for v in re.findall(r"CBANK\[\d+\]:(\d+)", usage))
+    print(",".join([impl, os.path.basename(module), name, field("REG"), field("STACK"),
+                    field("SHARED"), str(cbank), str(counts.get(name, ""))]))
+PY
+    }
+    resources cuda-oxide "$spike/artifacts/fused_add_rms_norm.sm_121.cubin"
+    for f in "$MLX_PTX_CACHE_DIR"/sm121-nvrtc13.0/custom_kernel_mlxcel_fused_add_rms_norm_*.ptx; do
+        resources existing-nvrtc "$f"
+    done
+    cat "$out"
+}
+
+for stage in "$@"; do
+    case "$stage" in
+        env | m1 | m2 | m3 | m4 | m5 | m6 | m7) "stage_$stage" ;;
+        *) echo "run.sh: unknown stage $stage" >&2; exit 2 ;;
+    esac
+done
