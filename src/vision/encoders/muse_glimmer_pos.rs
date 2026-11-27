@@ -33,6 +33,11 @@ pub fn bilinear_indices_and_weights(
                 (t, h, w)
             ));
         }
+        // The reference samples the table with `meshgrid(pos_h, pos_w,
+        // indexing="xy")`, so height and width swap roles: the outer loop
+        // walks the grid width against the table height. Square grids are
+        // unaffected.
+        let (h, w) = (w, h);
         for _ in 0..t {
             for y in 0..h {
                 let (y0, y1, yw0, yw1) = axis_bilinear(y, h, table_h);
@@ -199,6 +204,68 @@ mod tests {
         for offset in [0, n, 2 * n, 3 * n] {
             assert_close(weights[offset], 0.25);
         }
+    }
+
+    fn assert_planes(actual: &[f32], expected: [&[f32]; 4]) {
+        let n = expected[0].len();
+        assert_eq!(actual.len(), 4 * n);
+        for (corner, plane) in expected.iter().enumerate() {
+            for (i, &value) in plane.iter().enumerate() {
+                assert!(
+                    (actual[corner * n + i] - value).abs() < 1e-5,
+                    "corner {corner} token {i}: actual={}, expected={value}",
+                    actual[corner * n + i]
+                );
+            }
+        }
+    }
+
+    /// The reference samples the table with `meshgrid(pos_h, pos_w,
+    /// indexing="xy")`, so a `(t, h, w)` grid walks `w` rows against the
+    /// table height and `h` columns against its width (mlx-vlm#2746). The
+    /// expected arrays are the upstream numpy code's output for this grid.
+    #[test]
+    fn position_table_uses_xy_meshgrid_order() {
+        let (indices, weights) = bilinear_indices_and_weights(&[(1, 2, 4)], 4, 4).unwrap();
+        assert_eq!(
+            indices,
+            [
+                [0, 2, 4, 6, 8, 10, 12, 14],
+                [1, 3, 5, 7, 9, 11, 13, 15],
+                [4, 6, 8, 10, 12, 14, 12, 14],
+                [5, 7, 9, 11, 13, 15, 13, 15],
+            ]
+            .concat()
+        );
+        assert_planes(&weights, [&[0.5; 8], &[0.5; 8], &[0.0; 8], &[0.0; 8]]);
+    }
+
+    /// Square grids sample the same table entries in the same order either
+    /// way; upstream numpy output for `(1, 3, 3)` on a 4x4 table.
+    #[test]
+    fn square_grid_position_table_is_unchanged() {
+        let (indices, weights) = bilinear_indices_and_weights(&[(1, 3, 3)], 4, 4).unwrap();
+        assert_eq!(
+            indices,
+            [
+                [0, 1, 2, 4, 5, 6, 8, 9, 10],
+                [1, 2, 3, 5, 6, 7, 9, 10, 11],
+                [4, 5, 6, 8, 9, 10, 12, 13, 14],
+                [5, 6, 7, 9, 10, 11, 13, 14, 15],
+            ]
+            .concat()
+        );
+        let (a, b, c) = (25.0 / 36.0, 15.0 / 36.0, 5.0 / 36.0);
+        let (d, e, f) = (9.0 / 36.0, 3.0 / 36.0, 1.0 / 36.0);
+        assert_planes(
+            &weights,
+            [
+                &[a, b, c, b, d, e, c, e, f],
+                &[c, b, a, e, d, b, f, e, c],
+                &[c, e, f, b, d, e, a, b, c],
+                &[f, e, c, e, d, b, c, b, a],
+            ],
+        );
     }
 
     #[test]

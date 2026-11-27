@@ -322,3 +322,166 @@ fn images_do_not_attend_to_each_other() {
             .any(|(a, b)| (a - b).abs() > 1e-4)
     );
 }
+
+fn half_array(values: &[f32], shape: &[i32], dtype: i32) -> UniquePtr<MlxArray> {
+    mlxcel_core::astype(&mlxcel_core::from_slice_f32(values, shape), dtype)
+}
+
+/// Raw 16-bit patterns of an f16 or bf16 array.
+fn half_bits(array: &MlxArray, dtype: i32) -> Vec<u16> {
+    assert_eq!(mlxcel_core::array_dtype(array), dtype);
+    mlxcel_core::eval(array);
+    mlxcel_core::array_to_raw_bytes(array)
+        .chunks_exact(2)
+        .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+        .collect()
+}
+
+/// Host values of a half array, widened to f32.
+fn widened(array: &MlxArray) -> Vec<f32> {
+    array_to_vec_f32(&mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32))
+}
+
+/// One rounding step of the half type relative to the value (f16 keeps 11
+/// significant bits, bf16 8), plus a floor for values near zero.
+fn half_tolerance(exact: f64, dtype: i32) -> f64 {
+    let bits = if dtype == mlxcel_core::dtype::FLOAT16 {
+        -10
+    } else {
+        -7
+    };
+    exact.abs() * f64::from(2.0f32.powi(bits)) + 1e-4
+}
+
+const HALF_DTYPES: [i32; 2] = [mlxcel_core::dtype::FLOAT16, mlxcel_core::dtype::BFLOAT16];
+
+/// Upstream runs every Mage-ViT LayerNorm on f32 input, weight and bias and
+/// rounds once (mlx-vlm `ae763da4`). The rows sit hundreds away from zero with
+/// a spread far below that, the shape of a residual stream after a few
+/// layers. The tower runs f16 (Metal, unquantized checkpoint) or bf16 (CUDA,
+/// or a quantized checkpoint), so both are checked. The spread is wider for
+/// bf16, whose step at these magnitudes is 1 to 2: a spread under one would
+/// round each row to two values.
+#[test]
+fn mage_layer_norm_rounds_once_from_f32() {
+    let (rows, width) = (8usize, 1024usize);
+    let weight: Vec<f32> = noise(width, 32, 0.5).iter().map(|v| 1.0 + v).collect();
+    let bias = noise(width, 33, 0.25);
+    let eps = 1e-6;
+    let f32_dtype = mlxcel_core::dtype::FLOAT32;
+    for dtype in HALF_DTYPES {
+        let spread_scale = if dtype == mlxcel_core::dtype::FLOAT16 {
+            0.5
+        } else {
+            8.0
+        };
+        let spread = noise(rows * width, 31, spread_scale);
+        let x: Vec<f32> = (0..rows * width)
+            .map(|i| {
+                let row = (i / width) as f32;
+                let sign = if (i / width) % 2 == 0 { 1.0 } else { -1.0 };
+                sign * (150.0 + 40.0 * row) + spread[i]
+            })
+            .collect();
+        let x = half_array(&x, &[1, rows as i32, width as i32], dtype);
+        let weight = half_array(&weight, &[width as i32], dtype);
+        let bias = half_array(&bias, &[width as i32], dtype);
+        let ln = LayerNorm::new(
+            mlxcel_core::copy(&weight),
+            Some(mlxcel_core::copy(&bias)),
+            eps,
+        );
+        let reference = LayerNorm::new(
+            mlxcel_core::astype(&weight, f32_dtype),
+            Some(mlxcel_core::astype(&bias, f32_dtype)),
+            eps,
+        )
+        .forward(&mlxcel_core::astype(&x, f32_dtype));
+        let reference = mlxcel_core::astype(&reference, dtype);
+        let expected = half_bits(&reference, dtype);
+
+        let actual = layer_norm_f32(&ln, &x);
+        assert_eq!(half_bits(&actual, dtype), expected, "dtype {dtype}");
+
+        // The reference is what an f64 LayerNorm rounds to, within one step.
+        let (xs, ws, bs) = (widened(&x), widened(&weight), widened(&bias));
+        let got = widened(&actual);
+        for (r, row) in xs.chunks_exact(width).enumerate() {
+            let mean = row.iter().map(|&v| f64::from(v)).sum::<f64>() / width as f64;
+            let var = row
+                .iter()
+                .map(|&v| (f64::from(v) - mean).powi(2))
+                .sum::<f64>()
+                / width as f64;
+            let inv = 1.0 / (var + f64::from(eps)).sqrt();
+            for c in 0..width {
+                let exact = (f64::from(row[c]) - mean) * inv * f64::from(ws[c]) + f64::from(bs[c]);
+                let value = f64::from(got[r * width + c]);
+                assert!(
+                    (value - exact).abs() <= half_tolerance(exact, dtype),
+                    "dtype {dtype} row {r} col {c}: {value} vs f64 {exact}"
+                );
+            }
+        }
+
+        // The shared kernel in half precision rounds the normalized value
+        // before the affine, so it must land elsewhere for this input.
+        let today = half_bits(&ln.forward(&x), dtype);
+        let differing = today.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        assert!(
+            differing > 0,
+            "dtype {dtype}: input-dtype LayerNorm matched the f32 reference on every element"
+        );
+    }
+}
+
+/// Abramowitz and Stegun 7.1.26, absolute error under 1.5e-7: far below the
+/// half-precision step the GELU test checks against.
+fn erf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    (1.0 - poly * (-x * x).exp()).copysign(x)
+}
+
+/// Upstream's Mage-ViT GELU is exact erf GELU on an f32 upcast, rounded once
+/// (mlx-vlm `ae763da4`). The bridge GELU widens a half input through its f32
+/// constants, except where the CUDA build's bf16 + f32 -> bf16 promotion
+/// keeps a bf16 input in bf16, which is the case this has to catch.
+#[test]
+fn mage_gelu_rounds_once_from_f32() {
+    let f32_dtype = mlxcel_core::dtype::FLOAT32;
+    for dtype in HALF_DTYPES {
+        let x = half_array(&noise(4 * 1024, 41, 6.0), &[4, 1024], dtype);
+        let reference = mlxcel_core::astype(
+            &mlxcel_core::gelu(&mlxcel_core::astype(&x, f32_dtype)),
+            dtype,
+        );
+        let expected = half_bits(&reference, dtype);
+        let actual = gelu_f32(&x);
+        assert_eq!(half_bits(&actual, dtype), expected, "dtype {dtype}");
+
+        // The reference is what an f64 erf GELU rounds to, within one step.
+        for (&input, &value) in widened(&x).iter().zip(&widened(&actual)) {
+            let input = f64::from(input);
+            let exact = 0.5 * input * (1.0 + erf(input / std::f64::consts::SQRT_2));
+            assert!(
+                (f64::from(value) - exact).abs() <= half_tolerance(exact, dtype),
+                "dtype {dtype}: gelu({input}) = {value} vs f64 {exact}"
+            );
+        }
+
+        let today = half_bits(&mlxcel_core::gelu(&x), dtype);
+        let differing = today.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        if dtype == mlxcel_core::dtype::BFLOAT16
+            && mlxcel_core::hardware::gpu_backend_kind()
+                == mlxcel_core::hardware::GpuBackendKind::Cuda
+        {
+            assert!(
+                differing > 0,
+                "bf16 bridge GELU matched the f32 reference on every element on CUDA"
+            );
+        }
+    }
+}

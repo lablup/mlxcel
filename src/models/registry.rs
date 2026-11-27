@@ -1285,7 +1285,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::YoutuVLM => &["youtu_vl"],
         ModelType::InternVLChatVLM => &["internvl_chat"],
         ModelType::LlmJpVLM => &["llmjpvl"],
-        ModelType::MageVLM => &["mage_vl"],
+        ModelType::MageVLM => &["mage_vl", "llava_onevision2"],
         ModelType::GotOcrVLM => &["got"],
         ModelType::SmolVLM => &["smolvlm", "smolvlm2", "idefics3"],
         ModelType::Idefics2 => &["idefics2"],

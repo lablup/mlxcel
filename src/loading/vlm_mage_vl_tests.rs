@@ -43,6 +43,15 @@ fn hub_and_converted_keys_remap_to_one_layout() {
             "vision_tower.layernorm_pre.bias",
             "vision_tower.layernorm_pre.bias",
         ),
+        // Mage-VL-Cowork stores the tower under bare `visual.*`.
+        (
+            "visual.merger.mlp.0.weight",
+            "vision_tower.merger.mlp.0.weight",
+        ),
+        (
+            "visual.layernorm_pre.bias",
+            "vision_tower.layernorm_pre.bias",
+        ),
     ] {
         assert_eq!(remap_mage_vl_weight_key(raw), expected, "{raw}");
     }
@@ -73,6 +82,36 @@ fn text_config_lifts_rope_and_inherits_quantization() {
     let err = mage_vl_text_config(&other).unwrap_err().to_string();
     assert!(err.contains("llama"), "{err}");
     assert!(mage_vl_text_config(&json!({})).is_err());
+}
+
+/// Mage-VL-Cowork's config states `tie_word_embeddings` nowhere and its
+/// checkpoint carries an `lm_head` that differs from `embed_tokens`; the
+/// reference decodes through `lm_head`.
+#[test]
+fn text_config_without_a_tie_flag_is_untied() {
+    let mut full = json!({
+        "model_type": "llava_onevision2",
+        "text_config": {
+            "model_type": "qwen3",
+            "hidden_size": 2560, "num_hidden_layers": 36, "intermediate_size": 9728,
+            "num_attention_heads": 32, "num_key_value_heads": 8, "head_dim": 128,
+            "rms_norm_eps": 1e-6, "vocab_size": 151936, "rope_theta": 5000000
+        }
+    });
+    let args: models::qwen3::ModelArgs =
+        serde_json::from_value(mage_vl_text_config(&full).unwrap()).unwrap();
+    assert!(!args.tie_word_embeddings);
+    assert_eq!(args.rope_theta, 5_000_000.0);
+
+    // A top-level flag is inherited; a text_config flag wins over it.
+    full["tie_word_embeddings"] = json!(true);
+    let args: models::qwen3::ModelArgs =
+        serde_json::from_value(mage_vl_text_config(&full).unwrap()).unwrap();
+    assert!(args.tie_word_embeddings);
+    full["text_config"]["tie_word_embeddings"] = json!(false);
+    let args: models::qwen3::ModelArgs =
+        serde_json::from_value(mage_vl_text_config(&full).unwrap()).unwrap();
+    assert!(!args.tie_word_embeddings);
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
