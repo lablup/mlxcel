@@ -73,9 +73,19 @@ impl AttentionResidual {
         // product of at most 6 rows in a single batch through per-row GEMV
         // and anything else through the steel GEMM tile, which sums in
         // another order, so a verify block parted from the chain there
-        // (issue #3468). Inside a verify block each position runs alone, at
-        // its decode step's shapes.
-        mlxcel_core::row_invariant::per_position(&states, |states| self.mix(states))
+        // (issue #3468). Inside a verify block on those generations each
+        // position runs alone, at its decode step's shapes. Generation 15
+        // and later have no such route, the block already matched the chain
+        // there (M3 Ultra), and the split costs a verify round several
+        // percent, so they keep the single mix.
+        if mlxcel_core::hardware::get_hardware()
+            .silicon_gen
+            .few_row_dense_gemv()
+        {
+            mlxcel_core::row_invariant::per_position(&states, |states| self.mix(states))
+        } else {
+            self.mix(&states)
+        }
     }
 
     /// The mix of one forward's `states [B, L, S, H]` (f32).

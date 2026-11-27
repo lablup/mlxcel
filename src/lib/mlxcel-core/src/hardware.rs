@@ -136,6 +136,28 @@ impl AppleSiliconGen {
         self.at_least(3)
     }
 
+    /// Whether a dense product of a few rows may run each row through the
+    /// one-row GEMV here, so its summation order depends on the row count.
+    ///
+    /// This is the generation half of the matmul overlay's few-row GEMV
+    /// route (`get_architecture_gen() < 15` in
+    /// `src/lib/mlxcelverse/overlays/metal/mlx/backend/metal/matmul.cpp`,
+    /// #2587): Apple GPU generations 13 and 14, which are M1 and M2. A verify
+    /// block that must match the single-token chain splits such products by
+    /// position where this is true (issue #3468).
+    ///
+    /// It reads the brand-string generation, not MLX's
+    /// `get_architecture_gen()`, and the two can differ (`MLX_METAL_GPU_ARCH`,
+    /// a chip `parse_silicon_gen` does not recognise). `Unknown` reads true,
+    /// so an unidentified chip keeps the exact split; a wrong false is caught
+    /// by the block-versus-chain probe, which then declines the drafter. It
+    /// does not read `MLXCEL_DENSE_GEMV_ROWS`: with the route disabled the
+    /// split is still exact, only slower.
+    #[inline]
+    pub fn few_row_dense_gemv(self) -> bool {
+        !self.at_least(3)
+    }
+
     /// Returns the expected Metal GPU family version (3 for M1–M4, 4 for M5+).
     ///
     /// Expressed as a rank comparison so a generation enumerated after M5
@@ -1586,6 +1608,19 @@ mod tests {
         // Non-Apple and not-yet-enumerated Apple parts decline rather than
         // assume; on CUDA a K-wide verify does not amortize at all (#638).
         assert!(!AppleSiliconGen::Unknown.wide_quantized_projections());
+    }
+
+    #[test]
+    fn few_row_dense_gemv_holds_below_generation_15_and_when_unknown() {
+        // The overlay's few-row GEMV route runs on generations 13 and 14.
+        assert!(AppleSiliconGen::M1.few_row_dense_gemv());
+        assert!(AppleSiliconGen::M2.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M3.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M4.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M5.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M6.few_row_dense_gemv());
+        // An unidentified part keeps the exact per-position split.
+        assert!(AppleSiliconGen::Unknown.few_row_dense_gemv());
     }
 
     #[test]
