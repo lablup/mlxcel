@@ -54,7 +54,8 @@ use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{
-    CacheKey, ModelVisionCaches, image_hash_from_pixels, request_hash_from_image_keys,
+    CacheKey, ModelVisionCaches, hash_with_grid_layout, image_hash_from_pixels,
+    request_hash_from_image_keys,
 };
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
@@ -834,13 +835,32 @@ where
 /// Used by Qwen-VL families, which pack every image of a request into a single
 /// pixel tensor and cache the vision output of the whole request under one
 /// key, so the key has to cover every image in order (#3265). Returns `Some`
-/// only when the caller supplied a key for every image; otherwise `None`, and
-/// the caller falls back to the pixel hash of the whole tensor, which already
-/// covers all images.
-fn qwen_request_cache_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
-    let keys = keys.filter(|keys| !keys.is_empty())?;
+/// only when the caller supplied exactly one key for each of the request's
+/// `image_count` images; otherwise `None`, and the caller falls back to
+/// [`qwen_pixel_cache_key`] over the whole tensor. Either key also covers the
+/// patch grids (`grid_thw`), so the same bytes encoded at another layout never
+/// share an entry.
+fn qwen_request_cache_key(
+    keys: Option<&[Option<CacheKey>]>,
+    image_count: usize,
+    grid_thw: &[(i32, i32, i32)],
+) -> Option<CacheKey> {
+    let keys = keys.filter(|keys| !keys.is_empty() && keys.len() == image_count)?;
     let keys: Option<Vec<CacheKey>> = keys.iter().cloned().collect();
-    Some(CacheKey::from_hash(request_hash_from_image_keys(&keys?)))
+    let request = request_hash_from_image_keys(&keys?);
+    Some(CacheKey::from_hash(hash_with_grid_layout(
+        &request, grid_thw,
+    )))
+}
+
+/// Fallback request key for Qwen-VL: the pixel tensor's bytes plus its patch
+/// grids. The flattened patches carry no shape, so the bytes alone cannot tell
+/// two layouts of the same patches apart.
+fn qwen_pixel_cache_key(pixel_values: &MlxArray, grid_thw: &[(i32, i32, i32)]) -> CacheKey {
+    CacheKey::from_hash(hash_with_grid_layout(
+        &image_hash_from_pixels(pixel_values),
+        grid_thw,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1127,8 +1147,8 @@ pub fn compute_qwen_vl_media_embeddings(
         None
     };
     let qwen_cache_key = if active_caches.is_some() {
-        qwen_request_cache_key(image_cache_keys)
-            .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
+        qwen_request_cache_key(image_cache_keys, images.len(), &grid_thw)
+            .or_else(|| Some(qwen_pixel_cache_key(&pixel_values, &grid_thw)))
     } else {
         None
     };

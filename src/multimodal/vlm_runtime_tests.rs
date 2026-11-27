@@ -1055,7 +1055,9 @@ fn qwen_vl_cache_key_covers_every_image() {
     use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
 
     let k = |bytes: &[u8]| Some(CacheKey::from_hash(image_hash_from_bytes(bytes)));
-    let request_key = |keys: &[Option<CacheKey>]| qwen_request_cache_key(Some(keys));
+    let grid = [(1, 4, 4)];
+    let request_key =
+        |keys: &[Option<CacheKey>]| qwen_request_cache_key(Some(keys), keys.len(), &grid);
 
     let a_c = request_key(&[k(b"A"), k(b"C")]);
     let a_b = request_key(&[k(b"A"), k(b"B")]);
@@ -1078,8 +1080,49 @@ fn qwen_vl_cache_key_needs_every_image_key() {
     use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
 
     let a = Some(CacheKey::from_hash(image_hash_from_bytes(b"A")));
-    assert_eq!(qwen_request_cache_key(Some(&[a.clone(), None])), None);
-    assert_eq!(qwen_request_cache_key(Some(&[None, a])), None);
-    assert_eq!(qwen_request_cache_key(Some(&[])), None);
-    assert_eq!(qwen_request_cache_key(None), None);
+    let grid = [(1, 4, 4), (1, 4, 4)];
+    assert_eq!(
+        qwen_request_cache_key(Some(&[a.clone(), None]), 2, &grid),
+        None
+    );
+    assert_eq!(
+        qwen_request_cache_key(Some(&[None, a.clone()]), 2, &grid),
+        None
+    );
+    assert_eq!(qwen_request_cache_key(Some(&[]), 0, &[]), None);
+    assert_eq!(qwen_request_cache_key(None, 2, &grid), None);
+    // A key list that does not name every image of the request would key the
+    // whole request's features on a subset of its images.
+    assert_eq!(qwen_request_cache_key(Some(&[a]), 2, &grid), None);
+}
+
+/// The same image keys (or the same flattened patch bytes) encoded at another
+/// patch grid produce different features, so they must not share an entry
+/// (Neywa-Labs/mlx-vlm#2529, `processed_image_key`).
+#[test]
+fn qwen_vl_cache_key_covers_grid_layout() {
+    use crate::vision::feature_cache::{CacheKey, hash_with_grid_layout, image_hash_from_bytes};
+
+    let a = Some(CacheKey::from_hash(image_hash_from_bytes(b"A")));
+    let keys = [a];
+    let wide = qwen_request_cache_key(Some(&keys), 1, &[(1, 2, 4)]);
+    let tall = qwen_request_cache_key(Some(&keys), 1, &[(1, 4, 2)]);
+    assert!(wide.is_some());
+    assert_ne!(
+        wide, tall,
+        "one image key at two grids must not share an entry"
+    );
+    assert_eq!(wide, qwen_request_cache_key(Some(&keys), 1, &[(1, 2, 4)]));
+
+    // The pixel-hash fallback: identical flattened bytes, one 4x4 grid versus
+    // two 2x4 grids.
+    let pixels = [7u8; 32];
+    assert_ne!(
+        hash_with_grid_layout(&pixels, &[(1, 4, 4)]),
+        hash_with_grid_layout(&pixels, &[(1, 2, 4), (1, 2, 4)])
+    );
+    assert_ne!(
+        hash_with_grid_layout(&pixels, &[(1, 2, 4)]),
+        hash_with_grid_layout(&pixels, &[(1, 4, 2)])
+    );
 }

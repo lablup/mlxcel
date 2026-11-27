@@ -165,6 +165,30 @@ pub fn request_hash_from_image_keys(keys: &[CacheKey]) -> [u8; 32] {
     digest
 }
 
+/// SHA-256 digest of `base` (an image or request digest) together with the
+/// patch grid layout the vision tower will encode it at.
+///
+/// Flattened Qwen-VL patches carry no shape: a uniform image at 28x56 and at
+/// 56x28, or one 56x56 image and two 28x56 images, flatten to the same bytes
+/// but encode to different features (rotary positions, window partition).
+/// Folding `grid_thw` in keeps such requests in separate entries, as upstream's
+/// `processed_image_key` does (Neywa-Labs/mlx-vlm#2529).
+pub fn hash_with_grid_layout(base: &[u8; 32], grid_thw: &[(i32, i32, i32)]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mlxcel:grid-layout:v1");
+    hasher.update(base);
+    hasher.update((grid_thw.len() as u64).to_le_bytes());
+    for &(t, h, w) in grid_thw {
+        hasher.update(t.to_le_bytes());
+        hasher.update(h.to_le_bytes());
+        hasher.update(w.to_le_bytes());
+    }
+    let out = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
 /// SHA-256 digest of an MLX pixel tensor's raw bytes.
 ///
 /// Used when the image already lives on the MLX side (e.g. the request handler
