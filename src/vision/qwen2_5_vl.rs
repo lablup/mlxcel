@@ -63,9 +63,12 @@ impl Qwen25VLModel {
     /// Qwen2.5-VL's vision tower takes a single concatenated `pixel_values`
     /// tensor covering every image in the prompt together with a matching
     /// `grid_thw` layout, so the cache key is derived per-request rather than
-    /// per-image. In a multi-turn conversation where the same image-set is
-    /// reused across turns, this still short-circuits the vision tower +
-    /// merger on subsequent turns.
+    /// per-image, and it must cover every image of the request in order: the
+    /// runtime derives it from all per-image keys when the caller supplied one
+    /// for every image, and otherwise from the pixel tensor itself. In a
+    /// multi-turn conversation where the same image-set is reused across
+    /// turns, this still short-circuits the vision tower + merger on
+    /// subsequent turns.
     ///
     /// MRoPE state depends on `input_ids` and therefore must be recomputed on
     /// every call — only the post-merger hidden states are cached.

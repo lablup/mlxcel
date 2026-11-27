@@ -256,6 +256,16 @@ pub struct ChatTemplateProcessor {
     /// boundary snapshot) and a template that already emitted the channel are
     /// both left alone.
     generation_prompt_suffix: Option<GenerationPromptSuffix>,
+    /// How the server numbers image tags in each message for a family whose
+    /// template renders `content` as a string (#3265).
+    ///
+    /// Phi-3V and Phi-4MM templates drop image parts, so the server writes each
+    /// image's `<|image_N|>` tag into the message the image came from, numbered
+    /// across the whole conversation. Without this the runtime inserts every
+    /// tag at the first user turn. Keyed on the model family, like
+    /// [`Self::generation_prompt_suffix`], and set only when the template does
+    /// not render image parts itself.
+    numbered_image_tags: Option<NumberedImageTags>,
     /// A native, code-rendered chat format that replaces the Jinja template
     /// entirely (#1338).
     ///
@@ -322,6 +332,43 @@ fn generation_prompt_suffix_for(model_path: &Path) -> Option<GenerationPromptSuf
             opener: crate::multimodal::llmjp_vl_prompt::LLMJP_ASSISTANT_OPENER,
             suffix: crate::multimodal::llmjp_vl_prompt::LLMJP_GENERATION_PROMPT_SUFFIX,
         }),
+        _ => None,
+    }
+}
+
+/// The image tag a family's runtime turns into an image slot, written by the
+/// server into each message for templates that render `content` as a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberedImageTags {
+    /// Phi-3V: `<|image_N|>` followed by a newline, the spelling
+    /// `phi3v_prompt::ensure_phi3v_image_tags` inserts.
+    Phi3V,
+    /// Phi-4MM: `<|image_N|>` with no separator, the spelling
+    /// `phi4mm_prompt::prepare_phi4mm_prompt_tokens` normalizes.
+    Phi4MM,
+}
+
+impl NumberedImageTags {
+    /// The tag for the conversation's `ordinal`-th image (1-based).
+    pub fn tag(self, ordinal: usize) -> String {
+        format!("<|image_{ordinal}|>")
+    }
+
+    /// What follows a tag the server inserts.
+    pub fn separator(self) -> &'static str {
+        match self {
+            Self::Phi3V => "\n",
+            Self::Phi4MM => "",
+        }
+    }
+}
+
+/// The per-message image tag numbering a model family needs, or `None` for
+/// every family whose runtime places image tokens some other way.
+fn numbered_image_tags_for(model_path: &Path) -> Option<NumberedImageTags> {
+    match crate::models::get_model_type(model_path).ok()? {
+        crate::models::ModelType::Phi3VLM => Some(NumberedImageTags::Phi3V),
+        crate::models::ModelType::Phi4MMVLM => Some(NumberedImageTags::Phi4MM),
         _ => None,
     }
 }
@@ -461,6 +508,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -469,6 +517,8 @@ impl ChatTemplateProcessor {
         };
         processor.wrap_string_content = template_requires_typed_text_content(&processor);
         processor.attach_reasoning_effort_steering_from(model_path);
+        processor.numbered_image_tags =
+            numbered_image_tags_for(model_path).filter(|_| !processor.supports_image_content());
         Ok(Some(processor))
     }
 
@@ -487,6 +537,7 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: None,
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -519,6 +570,11 @@ impl ChatTemplateProcessor {
     /// The generation-prompt completion rule in force, if any.
     pub fn generation_prompt_suffix(&self) -> Option<GenerationPromptSuffix> {
         self.generation_prompt_suffix
+    }
+
+    /// The per-message image tag numbering in force, if any.
+    pub fn numbered_image_tags(&self) -> Option<NumberedImageTags> {
+        self.numbered_image_tags
     }
 
     /// Complete a render that stopped at a bare role opener.

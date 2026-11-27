@@ -650,6 +650,15 @@ Note that the budget is part of the vision-feature cache identity, so the same
 image requested at two budgets is encoded twice rather than served the wrong
 cached features.
 
+mlx-vlm's per-request `min_pixels`, `max_pixels`, `resize_shape`,
+`resized_height` and `resized_width` are not taken. A request that carries an
+image or video together with any of them, at the root or under `extra_body`,
+is refused with a 400 naming the field on `/v1/chat/completions`,
+`/v1/responses` and `/v1/messages`, rather than served at the server's
+geometry as if the field had been read. Use the fields above for a per-request
+budget, or `--image-min-tokens` / `--image-max-tokens` for the server-wide
+bounds. A text-only request that sends them is not refused.
+
 #### CLI
 
 `mlxcel generate --image-soft-tokens <N>` takes the same ladder and the same

@@ -173,7 +173,8 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         reasoning_effort: None,
-        extra_body_fields: serde_json::Map::new(),
+        // Carried so the shared image-geometry refusal sees them (#3265).
+        extra_body_fields: crate::server::types::request::image_geometry_fields(&request.extra),
         response_format: None,
         params,
     };
