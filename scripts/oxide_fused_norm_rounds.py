@@ -44,6 +44,7 @@ cannot resolve the threshold and is reported as unresolved.
 import argparse
 import csv
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -186,7 +187,16 @@ def cmd_summarize(a):
             worse = sum(1 for d in d_oxide if d < 0)
             better = sum(1 for d in d_oxide if d > 0)
             n = len(d_oxide)
-            if floor > THRESHOLD:
+            # A cell without a complete set of rounds for every arm, or with a
+            # non-finite value, decides nothing: a NaN floor or median compares
+            # false against every threshold and would otherwise read as a pass.
+            rounds_in_cell = {r["round"] for r in rows
+                              if (r["path"], r["batch"], r["prompt_target_len"]) == cell}
+            complete = (n > 0 and n == len(d_null) == len(rounds_in_cell)
+                        and all(map(math.isfinite, d_oxide + d_null)))
+            if not complete:
+                verdict = "unresolved (incomplete or non-finite pairs)"
+            elif floor > THRESHOLD:
                 verdict = "unresolved (null floor above 2 %)"
             elif m_oxide < -THRESHOLD and worse >= n - 1 and abs(m_oxide) > floor:
                 verdict = "FLAGGED regression"
