@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **DeepSeek-OCR and Unlimited-OCR vision encoders match the reference numerics** (#3235). The CLIP MLP used erf GELU where the reference (the checkpoints' `deepencoder.py`, mlx-vlm after Blaizzy/mlx-vlm#2603) uses `quick_gelu`; the CLIP position grid was resized with plain bicubic where the reference uses antialiased bicubic on a float32 copy; the SAM decomposed relative-position tables were resized at `i * scale` where PyTorch `F.interpolate(mode="linear")` samples half-pixel centers; and Unlimited-OCR's CLIP encoder layers normalized at eps 1e-6 where its released encoder uses 1e-5 (DeepSeek-OCR keeps 1e-6). The resamples run on every view that is not the 1024 global view, so the 640 crops of a page wider than 1024 change, as do DeepSeek-OCR 2's 768 crops through the shared SAM tower. GOT-OCR 2.0's fixed 1024 canvas never reaches the resample branch and is unchanged.
 - **WebUI opens at `localhost` again** (#3433). `mlxcel serve --webui` and `mlxcel-server --webui` on a loopback address replaced the WebUI Host and Origin allow-list with the bound address after bind, so `http://localhost:<port>/webui/` and `[::1]` were refused with 403 `Host header is not allowed`; only `127.0.0.1` worked. The startup names are now kept and moved to the bound port, so `--port 0` still gets the real port, and unknown hosts are still refused.
 
 ## [v0.9.0-beta.2] - 2026-11-25

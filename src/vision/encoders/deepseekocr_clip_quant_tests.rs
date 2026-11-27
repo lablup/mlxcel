@@ -169,3 +169,122 @@ fn quantized_class_and_position_tables_match_explicit_dequantized_clip() {
     let patches = dense_values(&[2, 3, 3, 64], 1.1);
     assert_close(&quantized.forward(&patches), &dense.forward(&patches));
 }
+
+/// A `ClipLayer` whose output is `x + act(1)`, so the MLP activation can be
+/// read off at 1.0: the attention output projection is zero, `layer_norm2`
+/// has weight 0 and bias 1 (every normalized entry becomes 1), and `fc1` /
+/// `fc2` are identities.
+fn activation_probe_layer(dim: i32) -> ClipLayer {
+    let zeros = |shape: &[i32]| mlxcel_core::zeros(shape, mlxcel_core::dtype::FLOAT32);
+    let ones = |shape: &[i32]| mlxcel_core::ones(shape, mlxcel_core::dtype::FLOAT32);
+    let identity = || {
+        let mut v = vec![0.0f32; (dim * dim) as usize];
+        for i in 0..dim {
+            v[(i * dim + i) as usize] = 1.0;
+        }
+        mlxcel_core::from_slice_f32(&v, &[dim, dim])
+    };
+    ClipLayer {
+        layer_norm1: LayerNorm::new(ones(&[dim]), Some(zeros(&[dim])), 1e-6),
+        attn: ClipAttention {
+            qkv_proj: Linear::new(zeros(&[3 * dim, dim]), None),
+            out_proj: Linear::new(zeros(&[dim, dim]), Some(zeros(&[dim]))),
+            num_heads: 1,
+            head_dim: dim,
+            scale: (dim as f32).powf(-0.5),
+        },
+        layer_norm2: LayerNorm::new(zeros(&[dim]), Some(ones(&[dim])), 1e-6),
+        fc1: Linear::new(identity(), None),
+        fc2: Linear::new(identity(), None),
+    }
+}
+
+/// The reference CLIP `MLP` (mlx-vlm `deepseekocr/vision.py`) applies
+/// `quick_gelu(x) = x * sigmoid(1.702 x)` between `fc1` and `fc2`, not erf
+/// GELU (issue #3235). At 1.0 that is `sigmoid(1.702)` = 0.84579, where erf
+/// GELU gives 0.84134.
+#[test]
+fn clip_mlp_activation_is_quick_gelu() {
+    let dim = 64;
+    let layer = activation_probe_layer(dim);
+    let x = mlxcel_core::zeros(&[1, 2, dim], mlxcel_core::dtype::FLOAT32);
+    let out = mlxcel_core::utils::array_to_vec_f32(&layer.forward(&x));
+    let quick = 1.0 / (1.0 + (-1.702f32).exp());
+    assert!((quick - 0.8458).abs() < 1e-4);
+    for (index, got) in out.iter().enumerate() {
+        assert!(
+            (got - quick).abs() < 1e-5,
+            "entry {index}: expected quick_gelu(1) = {quick}, got {got} (erf GELU(1) = 0.8413)"
+        );
+    }
+}
+
+/// A dense 16x16 position grid (plus CLS row) of width 64, as `ClipEncoder`
+/// stores it, with the given values.
+fn position_probe_encoder(values: &MlxArray) -> ClipEncoder {
+    let prefix = "vision_model";
+    let mut weights = WeightMap::new();
+    weights.insert(
+        format!("{prefix}.embeddings.class_embedding"),
+        dense_values(&[64], 0.3),
+    );
+    weights.insert(
+        format!("{prefix}.embeddings.position_embedding.weight"),
+        mlxcel_core::copy(values),
+    );
+    weights.insert(
+        format!("{prefix}.pre_layrnorm.weight"),
+        mlxcel_core::ones(&[64], mlxcel_core::dtype::FLOAT32),
+    );
+    weights.insert(
+        format!("{prefix}.pre_layrnorm.bias"),
+        mlxcel_core::zeros(&[64], mlxcel_core::dtype::FLOAT32),
+    );
+    let config = ClipConfig {
+        hidden_size: 64,
+        num_heads: 1,
+        num_layers: 0,
+        layer_norm_eps: 1e-6,
+        pos_grid: 16,
+    };
+    ClipEncoder::from_weights(&weights, prefix, config, GROUP_SIZE, BITS)
+        .expect("dense CLIP position table")
+}
+
+/// The reference resizes the CLIP position grid with
+/// `bicubic_interpolate(..., antialias=True)` (issue #3235). Resampling the
+/// 16x16 grid to the 10x10 a 640-pixel crop needs must therefore equal
+/// `bicubic_resample(.., true)`, which differs from the plain kernel.
+#[test]
+fn clip_position_resample_is_antialiased() {
+    let (src, tgt, hidden) = (16i32, 10i32, 64i32);
+    let table = dense_values(&[src * src + 1, hidden], 0.9);
+    let encoder = position_probe_encoder(&table);
+    let pos = encoder.abs_pos(tgt * tgt + 1);
+    assert_eq!(mlxcel_core::array_shape(&pos), [1, tgt * tgt + 1, hidden]);
+
+    // The CLS row passes through unchanged; rows 1.. are the resampled grid.
+    let cls = mlxcel_core::slice(&pos, &[0, 0, 0], &[1, 1, hidden]);
+    let cls = mlxcel_core::reshape(&cls, &[1, hidden]);
+    assert_close(&cls, &mlxcel_core::slice(&table, &[0, 0], &[1, hidden]));
+    let grid = mlxcel_core::slice(&pos, &[0, 1, 0], &[1, tgt * tgt + 1, hidden]);
+    let grid = mlxcel_core::reshape(&grid, &[tgt, tgt, hidden]);
+
+    let stored = mlxcel_core::slice(&table, &[1, 0], &[src * src + 1, hidden]);
+    let stored = mlxcel_core::reshape(&stored, &[src, src, hidden]);
+    let antialiased = bicubic_resample(&stored, src, src, hidden, tgt, tgt, true);
+    let plain = bicubic_resample(&stored, src, src, hidden, tgt, tgt, false);
+    assert_close(&grid, &antialiased);
+
+    let plain = mlxcel_core::utils::array_to_vec_f32(&plain);
+    let antialiased = mlxcel_core::utils::array_to_vec_f32(&antialiased);
+    let max_gap = plain
+        .iter()
+        .zip(&antialiased)
+        .map(|(p, a)| (p - a).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_gap > 1e-3,
+        "the antialiased and plain 16 -> 10 resamples must differ, max gap {max_gap}"
+    );
+}
