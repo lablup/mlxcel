@@ -223,6 +223,70 @@ impl Raon1MiniModel {
         }
     }
 
+    /// The server burst's prefill: one forward per piece of the scheduler's
+    /// classic partition of this prompt, which splits at the prompt-cache
+    /// snapshot boundaries in `boundary` now that Raon-1 mini donates
+    /// snapshots (issue #3458). One pass over the whole prompt would round
+    /// differently from the split prefill classic decode runs, and drafted
+    /// text must equal plain text. The captures of the pieces are
+    /// concatenated; a capture window ([`Self::limit_prefill_capture`])
+    /// still keeps only the newest rows of the whole prompt.
+    ///
+    /// Used by: the server DFlash burst (`DFlashTargetModel::prefill_burst`).
+    pub fn prefill_speculative_planned(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Raon1MiniSpecCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Raon1MiniVerifyOutput {
+        use mlxcel_core::prefill_plan::{PrefillCaps, PrefillPlan};
+        let length = mlxcel_core::array_shape(input_ids)[1].max(0) as usize;
+        let caps = PrefillCaps::for_model(self, false);
+        let ranges = PrefillPlan::with_prefix(length, 0, boundary, chunk, caps).ranges();
+        if ranges.len() <= 1 {
+            return self.forward_speculative(input_ids, caches, capture_layer_ids, false, true);
+        }
+        let window = caches.first().and_then(|c| c.capture_tail);
+        let first_captured = window.map_or(0, |rows| length.saturating_sub(rows));
+        let mut parts: Vec<Vec<UniquePtr<MlxArray>>> =
+            capture_layer_ids.iter().map(|_| Vec::new()).collect();
+        let mut logits = None;
+        for range in &ranges {
+            let piece =
+                mlxcel_core::utils::slice_axis(input_ids, 1, range.start as i32, range.end as i32);
+            // Rows of this piece inside the capture window.
+            let keep = range.end.saturating_sub(first_captured.max(range.start));
+            let capture: &[usize] = if keep == 0 { &[] } else { capture_layer_ids };
+            for cache in caches.iter_mut() {
+                cache.capture_tail = Some(keep.max(1));
+            }
+            let out = self.forward_speculative(&piece, caches, capture, false, true);
+            // Each piece is evaluated before the next builds on its state,
+            // as the classic split prefill does.
+            mlxcel_core::eval(&out.logits);
+            for (slot, hidden) in parts.iter_mut().zip(out.hidden_states) {
+                slot.push(hidden);
+            }
+            logits = Some(out.logits);
+        }
+        for cache in caches.iter_mut() {
+            cache.capture_tail = window;
+        }
+        let hidden_states = parts
+            .iter()
+            .map(|pieces| {
+                let refs: Vec<&MlxArray> = pieces.iter().map(|p| &**p).collect();
+                mlxcel_core::concatenate_many(&refs, 1)
+            })
+            .collect();
+        Raon1MiniVerifyOutput {
+            logits: logits.expect("a multi-piece plan has pieces"),
+            hidden_states,
+        }
+    }
+
     /// Rewind every layer to the accepted prefix: the verify block appended
     /// `block_size` rows and `accepted + 1` of them stay. MLA latent caches
     /// are trimmed; RDA layers take the state recorded after the last kept

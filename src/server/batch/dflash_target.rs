@@ -460,6 +460,19 @@ impl DFlashTargetModel for crate::models::Raon1MiniModel {
     ) {
         crate::models::Raon1MiniModel::limit_prefill_capture(self, caches, rows);
     }
+    /// The classic partition of the prompt: Raon-1 mini's prefill splits at
+    /// the prompt-cache snapshot boundaries (issue #3458), and drafted text
+    /// must equal the text of that split prefill.
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [crate::models::raon1_mini::speculative::Raon1MiniSpecCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        self.prefill_speculative_planned(prompt, caches, capture_layer_ids, chunk, boundary)
+    }
     fn first_hidden_rows() -> FirstHiddenRows {
         FirstHiddenRows::EveryPromptRow
     }

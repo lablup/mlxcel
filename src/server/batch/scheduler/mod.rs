@@ -1162,6 +1162,10 @@ mod scheduler_model_owned_slot_tests;
 mod scheduler_reasoning_effort_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_model_owned_cache_raon_tests.rs"]
+mod scheduler_model_owned_cache_raon_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_pipeline_failure_tests.rs"]
 mod scheduler_pipeline_failure_tests;
 
