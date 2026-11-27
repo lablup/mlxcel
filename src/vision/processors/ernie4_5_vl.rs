@@ -63,15 +63,20 @@ impl Ernie45VlProcessor {
         let mut h = ((orig_h as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
         let mut w = ((orig_w as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
 
+        // Out of bounds the reference scales the original size, not the
+        // rounded one: `beta = sqrt(h * w / max_pixels)`, then
+        // `floor(h / beta / factor)` (`ceil(h * beta / factor)` under
+        // `min_pixels`). A zero edge (the reference raises on it) is
+        // rescaled as one pixel so `beta` stays finite.
+        let (orig_h, orig_w) = (orig_h.max(1), orig_w.max(1));
         if (h * w) as usize > self.max_pixels {
-            let scale = (self.max_pixels as f64 / (h * w) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-        }
-        if ((h * w) as usize) < self.min_pixels {
-            let scale = (self.min_pixels as f64 / (h * w) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
+            let beta = ((orig_h as f64 * orig_w as f64) / self.max_pixels as f64).sqrt();
+            h = ((orig_h as f64 / beta / factor as f64).floor() as u32).max(1) * factor;
+            w = ((orig_w as f64 / beta / factor as f64).floor() as u32).max(1) * factor;
+        } else if ((h * w) as usize) < self.min_pixels {
+            let beta = (self.min_pixels as f64 / (orig_h as f64 * orig_w as f64)).sqrt();
+            h = ((orig_h as f64 * beta / factor as f64).ceil() as u32).max(1) * factor;
+            w = ((orig_w as f64 * beta / factor as f64).ceil() as u32).max(1) * factor;
         }
         (h, w)
     }
@@ -256,5 +261,32 @@ mod tests {
                 "windows must be emitted row-major: {window_means:?}"
             );
         }
+    }
+
+    /// Over `max_pixels` the reference (transformers 5.24.1 `ernie4_5_vl_moe`
+    /// and mlx-vlm `ernie4_5_moe_vl`, which agree here) scales the original
+    /// size by `beta = sqrt(h * w / max_pixels)`; no input has an even `x.5`
+    /// edge, so tie rounding (#3463) does not enter.
+    #[test]
+    fn smart_resize_rescales_out_of_bounds_images_from_the_original_size() {
+        let proc = Ernie45VlProcessor::default();
+        assert_eq!(proc.smart_resize(1050, 1680), (784, 1260));
+        assert_eq!(proc.smart_resize(772, 1372), (728, 1316));
+        assert_eq!(proc.smart_resize(768, 1366), (728, 1316));
+        // In bounds, or clamped to the same multiple either way: unchanged.
+        assert_eq!(proc.smart_resize(1080, 1920), (728, 1316));
+        assert_eq!(proc.smart_resize(3000, 4000), (840, 1148));
+        assert_eq!(proc.smart_resize(480, 640), (476, 644));
+        assert_eq!(proc.smart_resize(30, 50), (56, 84));
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = Ernie45VlProcessor::default();
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
     }
 }
