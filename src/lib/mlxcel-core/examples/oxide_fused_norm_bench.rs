@@ -44,6 +44,11 @@
 //! point. The cuda-oxide arm exists only in a build made with
 //! `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1`; elsewhere it is refused.
 
+#[path = "oxide_fused_norm_bench/args.rs"]
+mod args;
+#[path = "oxide_fused_norm_bench/record.rs"]
+mod record;
+
 use std::fmt::Write as _;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -55,194 +60,10 @@ use mlxcel_core::{
     synchronize_default,
 };
 
+use args::{Args, Arm, Mode, Shape, dtype_name, parse_args};
+use record::{CSV_HEADER, Recorder, Stats, append, stats};
+
 const EPS: f32 = 1e-5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Arm {
-    Graph,
-    Fused,
-    Oxide,
-}
-
-impl Arm {
-    fn name(self) -> &'static str {
-        match self {
-            Arm::Graph => "graph",
-            Arm::Fused => "fused",
-            Arm::Oxide => "oxide",
-        }
-    }
-
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "graph" => Some(Arm::Graph),
-            "fused" => Some(Arm::Fused),
-            "oxide" => Some(Arm::Oxide),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Shape {
-    act: i32,
-    weight: i32,
-    rows: i32,
-    dim: i32,
-}
-
-fn dtype_name(dt: i32) -> &'static str {
-    match dt {
-        dtype::FLOAT32 => "f32",
-        dtype::FLOAT16 => "f16",
-        dtype::BFLOAT16 => "bf16",
-        _ => "other",
-    }
-}
-
-fn parse_dtype(s: &str) -> Option<i32> {
-    match s {
-        "f32" => Some(dtype::FLOAT32),
-        "f16" => Some(dtype::FLOAT16),
-        "bf16" => Some(dtype::BFLOAT16),
-        _ => None,
-    }
-}
-
-/// The residual joins of the #2834 checkpoint (hidden size 2048, bf16
-/// activations and weight): one decode step at B=1 and B=4, and the prefill of
-/// a 128-token and a 2048-token prompt at B=1 plus the 128-token one at B=4.
-fn model_shapes() -> Vec<Shape> {
-    [1, 4, 128, 512, 2048]
-        .into_iter()
-        .map(|rows| Shape {
-            act: dtype::BFLOAT16,
-            weight: dtype::BFLOAT16,
-            rows,
-            dim: 2048,
-        })
-        .collect()
-}
-
-/// The shape list of the #2832 standalone benchmark
-/// (`spike/cuda-oxide-fused-norm/results/bench-sm_121.json`).
-fn bench2832_shapes() -> Vec<Shape> {
-    let mut shapes = Vec::new();
-    for dt in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
-        for (rows, dim) in [
-            (1, 1024),
-            (1, 4096),
-            (1, 8192),
-            (5, 4096),
-            (33, 2048),
-            (64, 8192),
-        ] {
-            shapes.push(Shape {
-                act: dt,
-                weight: dt,
-                rows,
-                dim,
-            });
-        }
-    }
-    shapes
-}
-
-fn parse_shapes(spec: &str) -> Result<Vec<Shape>, String> {
-    let mut shapes = Vec::new();
-    for item in spec.split(',').filter(|s| !s.is_empty()) {
-        match item {
-            "model" => shapes.extend(model_shapes()),
-            "bench2832" => shapes.extend(bench2832_shapes()),
-            custom => {
-                // act:weight:ROWSxDIM
-                let parts: Vec<&str> = custom.split(':').collect();
-                let bad = || format!("shape {custom:?}: expected act:weight:ROWSxDIM");
-                if parts.len() != 3 {
-                    return Err(bad());
-                }
-                let (rows, dim) = parts[2].split_once('x').ok_or_else(bad)?;
-                shapes.push(Shape {
-                    act: parse_dtype(parts[0]).ok_or_else(bad)?,
-                    weight: parse_dtype(parts[1]).ok_or_else(bad)?,
-                    rows: rows.parse().map_err(|_| bad())?,
-                    dim: dim.parse().map_err(|_| bad())?,
-                });
-            }
-        }
-    }
-    if shapes.is_empty() {
-        return Err("no shapes selected".to_string());
-    }
-    Ok(shapes)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Build,
-    Iso,
-    Pipe,
-    Cold,
-}
-
-struct Args {
-    mode: Mode,
-    arms: Vec<Arm>,
-    shapes: Vec<Shape>,
-    iters: usize,
-    warmup: usize,
-    rounds: usize,
-    csv: Option<String>,
-    label: String,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut args = Args {
-        mode: Mode::Iso,
-        arms: vec![Arm::Graph, Arm::Fused, Arm::Oxide],
-        shapes: model_shapes(),
-        iters: 200,
-        warmup: 20,
-        rounds: 5,
-        csv: None,
-        label: String::new(),
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(flag) = it.next() {
-        let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
-        match flag.as_str() {
-            "--mode" => {
-                args.mode = match value()?.as_str() {
-                    "build" => Mode::Build,
-                    "iso" => Mode::Iso,
-                    "pipe" => Mode::Pipe,
-                    "cold" => Mode::Cold,
-                    other => return Err(format!("unknown mode {other:?}")),
-                }
-            }
-            "--arms" => {
-                args.arms = value()?
-                    .split(',')
-                    .map(|s| Arm::parse(s).ok_or_else(|| format!("unknown arm {s:?}")))
-                    .collect::<Result<_, _>>()?;
-            }
-            "--shapes" => args.shapes = parse_shapes(&value()?)?,
-            "--iters" => args.iters = value()?.parse().map_err(|e| format!("--iters: {e}"))?,
-            "--warmup" => args.warmup = value()?.parse().map_err(|e| format!("--warmup: {e}"))?,
-            "--rounds" => args.rounds = value()?.parse().map_err(|e| format!("--rounds: {e}"))?,
-            "--csv" => args.csv = Some(value()?),
-            "--label" => args.label = value()?,
-            other => return Err(format!("unknown argument {other:?}")),
-        }
-    }
-    if args.arms.is_empty() || args.iters == 0 || args.rounds == 0 {
-        return Err("--arms, --iters and --rounds must be non-empty".to_string());
-    }
-    if args.mode == Mode::Cold && args.arms.len() != 1 {
-        return Err("--mode cold measures one arm per process; pass a single --arms".to_string());
-    }
-    Ok(args)
-}
 
 /// Route counters of the adapter, `(oxide_routes, native_routes, launches)`;
 /// zeros in a build without it.
@@ -359,88 +180,6 @@ fn run_once(arm: Arm, inp: &Inputs) {
     let (normed, new_residual) = build(arm, inp);
     async_eval_pair(&normed, &new_residual);
     synchronize_default();
-}
-
-struct Stats {
-    mean_us: f64,
-    median_us: f64,
-    p90_us: f64,
-    min_us: f64,
-}
-
-fn stats(samples_us: &mut [f64]) -> Stats {
-    samples_us.sort_by(|a, b| a.partial_cmp(b).expect("timings are finite"));
-    let n = samples_us.len();
-    let median_us = if n.is_multiple_of(2) {
-        (samples_us[n / 2 - 1] + samples_us[n / 2]) / 2.0
-    } else {
-        samples_us[n / 2]
-    };
-    Stats {
-        mean_us: samples_us.iter().sum::<f64>() / n as f64,
-        median_us,
-        p90_us: samples_us[((n as f64 * 0.9).ceil() as usize).clamp(1, n) - 1],
-        min_us: samples_us[0],
-    }
-}
-
-const CSV_HEADER: &str = "label,mode,arm,act,weight,rows,dim,round,iters,warmup,mean_us,median_us,\
-p90_us,min_us,oxide_routes,native_routes,launches,route_valid";
-
-struct Recorder {
-    csv: String,
-    invalid: usize,
-}
-
-impl Recorder {
-    #[allow(clippy::too_many_arguments)]
-    fn push(
-        &mut self,
-        args: &Args,
-        mode: &str,
-        arm: Arm,
-        shape: Shape,
-        round: usize,
-        iters: usize,
-        s: &Stats,
-        delta: (u64, u64, u64),
-        valid: bool,
-    ) {
-        if !valid {
-            self.invalid += 1;
-        }
-        let _ = writeln!(
-            self.csv,
-            "{},{mode},{},{},{},{},{},{round},{iters},{},{:.3},{:.3},{:.3},{:.3},{},{},{},{valid}",
-            args.label,
-            arm.name(),
-            dtype_name(shape.act),
-            dtype_name(shape.weight),
-            shape.rows,
-            shape.dim,
-            args.warmup,
-            s.mean_us,
-            s.median_us,
-            s.p90_us,
-            s.min_us,
-            delta.0,
-            delta.1,
-            delta.2,
-        );
-        println!(
-            "{mode:<5} {:<5} {:>4}/{:<4} {:>5} x {:<5} round {round}  mean {:>9.3} us  median {:>9.3}  p90 {:>9.3}  min {:>9.3}  routes {delta:?}{}",
-            arm.name(),
-            dtype_name(shape.act),
-            dtype_name(shape.weight),
-            shape.rows,
-            shape.dim,
-            s.mean_us,
-            s.median_us,
-            s.p90_us,
-            s.min_us,
-            if valid { "" } else { "  INVALID ROUTE" },
-        );
-    }
 }
 
 fn delta_since(before: (u64, u64, u64)) -> (u64, u64, u64) {
@@ -650,22 +389,6 @@ fn run_cold(args: &Args, rec: &mut Recorder) -> Result<(), String> {
         append(&cold_path, header, &csv_extra)?;
     }
     Ok(())
-}
-
-fn append(path: &str, header: &str, body: &str) -> Result<(), String> {
-    use std::io::Write as _;
-    let exists = std::path::Path::new(path).exists();
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| format!("{path}: {e}"))?;
-    if !exists {
-        file.write_all(header.as_bytes())
-            .map_err(|e| format!("{path}: {e}"))?;
-    }
-    file.write_all(body.as_bytes())
-        .map_err(|e| format!("{path}: {e}"))
 }
 
 fn run(args: &Args) -> Result<usize, String> {
