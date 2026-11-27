@@ -20,16 +20,17 @@
 //! milliseconds), router-cache staging and quarantine directory names (Unix
 //! nanoseconds), RFC 3339 strings in WebUI events, lifecycle operations and
 //! runtime snapshots, and the date the `strftime_now` chat-template function
-//! returns, in the host zone and the format the template asks for. Until #3266 each call site asked `chrono` directly; `chrono` is
-//! declared unmaintained (RUSTSEC-2026-0543), so the formats live here
+//! returns, in the host zone and the format the template asks for. Until
+//! #3266 each call site asked `chrono` directly; `chrono` is declared
+//! unmaintained (RUSTSEC-2026-0543), so the formats live here
 //! instead and match what `chrono` produced byte for byte. `clock_tests.rs`
 //! pins every one of them at fixed instants, and the same file passed against
 //! the `chrono` implementation before the switch.
 //!
 //! Unix values come from `std::time` alone. Calendar fields come from a
-//! `jiff::Timestamp` read in UTC, and the strings are assembled here rather than through
-//! `jiff`'s printers so that the `chrono` shapes (`+00:00` and a 0/3/6/9-digit
-//! fraction from `to_rfc3339`, `Z` and no fraction from
+//! `jiff::Timestamp` read in UTC, and the strings are assembled here rather
+//! than through `jiff`'s printers so that the `chrono` shapes (`+00:00` and
+//! a 0/3/6/9-digit fraction from `to_rfc3339`, `Z` and no fraction from
 //! `to_rfc3339_opts(Secs, true)`) are spelled out where they can be read.
 //! `jiff` covers years -9999 through 9999, and the calendar formatters match
 //! `chrono` for years 0 through 9999; an instant outside `jiff`'s range is
