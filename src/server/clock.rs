@@ -26,18 +26,21 @@
 //! pins every one of them at fixed instants, and the same file passed against
 //! the `chrono` implementation before the switch.
 //!
-//! Unix values come from `std::time` alone. Calendar fields come from
-//! `time::OffsetDateTime`, and the strings are assembled here rather than
-//! through `time`'s format descriptions so that the `chrono` shapes (`+00:00`
-//! and a 0/3/6/9-digit fraction from `to_rfc3339`, `Z` and no fraction from
+//! Unix values come from `std::time` alone. Calendar fields come from a
+//! `jiff::Timestamp` read in UTC (`jiff` is built with `std` only, no time
+//! zone database yet), and the strings are assembled here rather than through
+//! `jiff`'s printers so that the `chrono` shapes (`+00:00` and a 0/3/6/9-digit
+//! fraction from `to_rfc3339`, `Z` and no fraction from
 //! `to_rfc3339_opts(Secs, true)`) are spelled out where they can be read.
-//! Like `time` without its `large-dates` feature, the calendar formatters
-//! cover years -9999 through 9999 and match `chrono` for years 0 through
-//! 9999; a system clock does not report anything outside that.
+//! `jiff` covers years -9999 through 9999, and the calendar formatters match
+//! `chrono` for years 0 through 9999; an instant outside `jiff`'s range is
+//! clamped to its nearest end, and a system clock does not report one.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use time::OffsetDateTime;
+use jiff::Timestamp;
+use jiff::civil::DateTime;
+use jiff::tz::Offset;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
@@ -78,12 +81,22 @@ pub(crate) fn unix_nanos_or_zero(t: SystemTime) -> i64 {
     i64::try_from(unix_nanos_wide(t)).unwrap_or_default()
 }
 
+/// The UTC calendar date and time of `t`, clamped to `jiff`'s range.
+fn utc_civil(t: SystemTime) -> DateTime {
+    let ts = Timestamp::try_from(t).unwrap_or(if t < UNIX_EPOCH {
+        Timestamp::MIN
+    } else {
+        Timestamp::MAX
+    });
+    Offset::UTC.to_datetime(ts)
+}
+
 /// `YYYY-MM-DDTHH:MM:SS` in UTC, the part both RFC 3339 shapes share.
-fn utc_date_time(dt: OffsetDateTime) -> String {
+fn utc_date_time(dt: DateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
         dt.year(),
-        u8::from(dt.month()),
+        dt.month(),
         dt.day(),
         dt.hour(),
         dt.minute(),
@@ -95,15 +108,15 @@ fn utc_date_time(dt: OffsetDateTime) -> String {
 /// dropped: `2026-11-26T16:07:00Z` (`chrono`
 /// `to_rfc3339_opts(SecondsFormat::Secs, true)`).
 pub(crate) fn rfc3339_seconds_z(t: SystemTime) -> String {
-    format!("{}Z", utc_date_time(OffsetDateTime::from(t)))
+    format!("{}Z", utc_date_time(utc_civil(t)))
 }
 
 /// RFC 3339 in UTC with a `+00:00` offset and the shortest of no, 3, 6 or 9
 /// fraction digits that holds the sub-second part exactly:
 /// `2026-11-26T16:07:00.123456+00:00` (`chrono` `to_rfc3339()`).
 pub(crate) fn rfc3339(t: SystemTime) -> String {
-    let dt = OffsetDateTime::from(t);
-    let nanos = dt.nanosecond();
+    let dt = utc_civil(t);
+    let nanos = dt.subsec_nanosecond();
     let fraction = if nanos == 0 {
         String::new()
     } else if nanos % 1_000_000 == 0 {
@@ -119,11 +132,12 @@ pub(crate) fn rfc3339(t: SystemTime) -> String {
 /// Zero-padded day, English month abbreviation and four-digit year in UTC:
 /// `05 Mar 2026` (`chrono` `format("%d %b %Y")`).
 pub(crate) fn day_month_year(t: SystemTime) -> String {
-    let dt = OffsetDateTime::from(t);
+    let dt = utc_civil(t);
+    let month = usize::try_from(dt.month()).unwrap_or(1).clamp(1, 12);
     format!(
         "{:02} {} {:04}",
         dt.day(),
-        MONTH_ABBREVIATIONS[usize::from(u8::from(dt.month())) - 1],
+        MONTH_ABBREVIATIONS[month - 1],
         dt.year()
     )
 }
@@ -190,13 +204,52 @@ pub(crate) fn day_month_year_now() -> String {
     day_month_year(SystemTime::now())
 }
 
-/// Whether `s` parses as an RFC 3339 date-time. Test code checks emitted
-/// stamps with it.
+/// Whether `s` is an RFC 3339 date-time. Test code checks emitted stamps
+/// with it.
+///
+/// `jiff` parses the wider Temporal / ISO 8601 grammar (minutes without
+/// seconds, the basic format without separators, bracketed annotations, a
+/// comma before the fraction), so the RFC 3339 shape is checked here first:
+/// `YYYY-MM-DD`, `T`, `t` or a space, `HH:MM:SS`, an optional fraction of
+/// one to nine digits, then `Z`, `z` or `+HH:MM` / `-HH:MM`. `jiff` then
+/// rejects impossible fields (month 13, February 30, hour 24).
 ///
 /// Used by: `app.rs` and `router_contract_test_support.rs` (test code only).
 #[cfg(test)]
 pub(crate) fn is_rfc3339(s: &str) -> bool {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).is_ok()
+    let b = s.as_bytes();
+    let digits = |from: usize, to: usize| {
+        b.get(from..to)
+            .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
+    };
+    let date_time = digits(0, 4)
+        && b.get(4) == Some(&b'-')
+        && digits(5, 7)
+        && b.get(7) == Some(&b'-')
+        && digits(8, 10)
+        && matches!(b.get(10), Some(b'T' | b't' | b' '))
+        && digits(11, 13)
+        && b.get(13) == Some(&b':')
+        && digits(14, 16)
+        && b.get(16) == Some(&b':')
+        && digits(17, 19);
+    if !date_time {
+        return false;
+    }
+    let mut rest = &b[19..];
+    if let Some(fraction) = rest.strip_prefix(b".") {
+        let n = fraction.iter().take_while(|d| d.is_ascii_digit()).count();
+        if !(1..=9).contains(&n) {
+            return false;
+        }
+        rest = &fraction[n..];
+    }
+    let offset = match rest {
+        [b'Z' | b'z'] => true,
+        [b'+' | b'-', h1, h2, b':', m1, m2] => [h1, h2, m1, m2].iter().all(|d| d.is_ascii_digit()),
+        _ => false,
+    };
+    offset && s.parse::<Timestamp>().is_ok()
 }
 
 #[cfg(test)]
