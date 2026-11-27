@@ -29,6 +29,10 @@
 //!   first draft input (the drafter's own context cache holds the whole
 //!   prompt), the block-versus-chain exactness probe as a gate, a
 //!   drafter-family requirement (DSpark only), and B = 1 only.
+//! - Qwen3 and Llama (DSpark, issue #3261): fresh FP16 `KVCache`s, every
+//!   prompt row as the first draft input, the classic prefill partition, the
+//!   exactness probe as a gate, no required drafter family (as on Qwen 3.5)
+//!   but a tap-depth and vocabulary check of their own, and B = 1 only.
 //! - Muse Glimmer (assistant, issue #1343): fresh `MuseCache`s with the
 //!   sliding ones armed with a speculative buffer, every prompt row as the
 //!   first draft input, the exactness probe as a gate, a drafter-family
@@ -71,6 +75,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::speculative_burst::{BurstOutcome, WorkerDrafterSlot};
 use crate::models::MuseGlimmerTextWrapper;
+use crate::models::dense_speculative::DenseSpeculativeTarget;
 use crate::server::model_provider::SpeculativeStats;
 
 /// Uniform access to what the burst reads off a target's verify output.
@@ -97,6 +102,17 @@ impl DFlashVerifyOutput for crate::models::qwen3_5::VerifyOutput {
 }
 
 impl DFlashVerifyOutput for crate::models::lfm2::VerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        self.logits
+            .as_ref()
+            .expect("verify logits must be non-null")
+    }
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
+impl DFlashVerifyOutput for crate::models::dense_speculative::DenseVerifyOutput {
     fn logits(&self) -> &MlxArray {
         self.logits
             .as_ref()
@@ -162,7 +178,9 @@ impl DFlashVerifyOutput for crate::models::muse_glimmer::VerifyOutput {
 pub(crate) enum DFlashDrafterFamily {
     /// The Qwen 3.5 DFlash drafter.
     Dflash,
-    /// The LFM2 / LFM2.5 DSpark drafter (issue #1339).
+    /// A DSpark drafter on the DFlash backbone: the LFM2 / LFM2.5 ones (issue
+    /// #1339) and the Red Hat Speculators and OpenBMB ones for dense Qwen3
+    /// and Llama targets (issue #3261).
     DSpark,
     /// The Muse Glimmer assistant (issue #1343).
     MuseAssistant,
@@ -301,6 +319,21 @@ pub(crate) trait DFlashTargetModel:
         None
     }
 
+    /// Why `drafter` cannot drive this target, from what the target itself
+    /// knows (its depth and vocabulary), or `None` when it has no objection.
+    ///
+    /// The family gate above is a yes/no per family, and the drafter's own
+    /// `validate_target_compat` is a no-op for a plain DFlash drafter. A
+    /// target that admits every DFlash-family drafter and whose residual
+    /// streams have a common width (Qwen3 and Llama, issue #3261) checks the
+    /// two numbers that still tell a mismatched drafter apart: every tap must
+    /// be below the target depth, and the drafter's vocabulary must be the
+    /// target's. The default has no objection, which keeps Qwen 3.5 and every
+    /// single-family target exactly as they were.
+    fn drafter_pairing_error(&self, _drafter: &dyn Drafter) -> Option<String> {
+        None
+    }
+
     /// Whether this family can be driven by the B > 1 batched burst.
     ///
     /// `true` for Qwen 3.5, whose target implements the per-row batched
@@ -365,6 +398,85 @@ impl DFlashTargetModel for crate::vision::Lfm2VlModel {
     }
     fn required_drafter_family() -> Option<DFlashDrafterFamily> {
         Some(DFlashDrafterFamily::DSpark)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
+/// Dense Qwen3 (issue #3261), driven by a DSpark drafter such as
+/// `RedHatAI/Qwen3-4B-speculator.dspark`: fresh FP16 `KVCache`s, every prompt
+/// row as the first draft input (the drafter keeps its own window of them),
+/// the classic prefill partition, the measured block-versus-chain probe as
+/// the gate, and B = 1 only. No required drafter family, as on Qwen 3.5; the
+/// tap and vocabulary bounds are checked by `drafter_pairing_error` instead.
+impl DFlashTargetModel for crate::models::Qwen3Model {
+    fn make_dflash_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
+        self.make_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        crate::models::dense_speculative::prefill_planned(
+            self,
+            prompt,
+            caches,
+            capture_layer_ids,
+            chunk,
+            boundary,
+        )
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        DenseSpeculativeTarget::dflash_exactness_allows(self, block_size)
+    }
+    fn drafter_pairing_error(&self, drafter: &dyn Drafter) -> Option<String> {
+        DenseSpeculativeTarget::dflash_drafter_pairing_error(self, drafter)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
+/// Dense Llama (issue #3261), driven by a DSpark drafter such as
+/// `openbmb/MiniCPM5-2B-DSpark` (MiniCPM5-2B is a `llama` checkpoint). Same
+/// policy as the Qwen3 target above.
+impl DFlashTargetModel for crate::models::Llama3Model {
+    fn make_dflash_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
+        self.make_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        crate::models::dense_speculative::prefill_planned(
+            self,
+            prompt,
+            caches,
+            capture_layer_ids,
+            chunk,
+            boundary,
+        )
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        DenseSpeculativeTarget::dflash_exactness_allows(self, block_size)
+    }
+    fn drafter_pairing_error(&self, drafter: &dyn Drafter) -> Option<String> {
+        DenseSpeculativeTarget::dflash_drafter_pairing_error(self, drafter)
     }
     fn supports_batched() -> bool {
         false
@@ -603,7 +715,7 @@ fn required_family_pairing_error(
     }
     let got = match actual {
         DFlashDrafterFamily::Dflash => "a plain DFlash drafter",
-        DFlashDrafterFamily::DSpark => "an LFM2 DSpark drafter",
+        DFlashDrafterFamily::DSpark => "a DSpark drafter",
         DFlashDrafterFamily::MuseAssistant => "the Muse Glimmer assistant drafter",
         DFlashDrafterFamily::Laguna => "a Laguna DFlash drafter",
         DFlashDrafterFamily::Inkling2DSpark => "the DSpark drafter bundled with Inkling 2",
@@ -617,8 +729,9 @@ fn required_family_pairing_error(
              LFM2.5-2.6B-DSpark, LFM2.5-8B-A1B with LFM2.5-8B-A1B-DSpark, and so on): another \
              drafter's fc projection reads the residual streams it was trained on, at a width \
              this target does not produce, and its mask token id indexes a different \
-             vocabulary. Point --model-draft at a DSpark drafter, or drop it to serve this \
-             model with classic decode."
+             vocabulary. Point --model-draft at the LFM2 DSpark drafter for this checkpoint \
+             (a DSpark drafter published for a Qwen3 or Llama target is refused by the \
+             drafter's own pairing gate), or drop it to serve this model with classic decode."
         ),
         DFlashDrafterFamily::MuseAssistant => format!(
             "the target is a Muse Glimmer checkpoint and the drafter passed to --model-draft is \
@@ -788,6 +901,15 @@ where
         T::required_drafter_family(),
         DFlashDrafterFamily::of(owned_drafter.as_ref()),
     ) {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(format!(
+            "DFlash drafter incompatible with target: {reason}"
+        )));
+    }
+    // The target's own numbers (issue #3261): a tap at or past its depth, or
+    // a drafter vocabulary that is not its vocabulary. A no-op for every
+    // target that names a required family or keeps the default.
+    if let Some(reason) = target.drafter_pairing_error(owned_drafter.as_ref()) {
         drafter_slot.restore_unused(owned_drafter);
         return Err(BurstOutcome::Error(format!(
             "DFlash drafter incompatible with target: {reason}"
@@ -1032,6 +1154,13 @@ where
         T::required_drafter_family(),
         DFlashDrafterFamily::of(owned_drafter.as_ref()),
     ) {
+        drafter_slot.restore_unused(owned_drafter);
+        return Err(BurstOutcome::Error(format!(
+            "DFlash drafter incompatible with target: {reason}"
+        )));
+    }
+    // And the target's own numbers, as on the B = 1 arm.
+    if let Some(reason) = target.drafter_pairing_error(owned_drafter.as_ref()) {
         drafter_slot.restore_unused(owned_drafter);
         return Err(BurstOutcome::Error(format!(
             "DFlash drafter incompatible with target: {reason}"
@@ -1325,3 +1454,9 @@ mod tests {
         );
     }
 }
+
+/// The dense Qwen3 and Llama targets (issue #3261), kept in their own file so
+/// this module stays readable.
+#[cfg(test)]
+#[path = "dflash_target_dense_tests.rs"]
+mod dense_tests;

@@ -186,6 +186,8 @@ pub mod deepseek_v2;
 pub mod deepseek_v3;
 pub mod deepseek_v32;
 pub mod deepseek_v4;
+/// Dense Qwen3 and Llama as DSpark speculative-decoding targets (issue #3261).
+pub mod dense_speculative;
 pub mod diffusion_gemma;
 pub mod dots1;
 /// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` and

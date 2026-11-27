@@ -67,7 +67,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type), and (since issue #3374) `Inkling2DsparkDraftModel` (an Inkling 2 checkpoint with `mtp.safetensors`) | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash, LFM2 DSpark, and since issue #3261 the Red Hat Speculators and OpenBMB DSpark drafters for Qwen3 and Llama targets), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type), and (since issue #3374) `Inkling2DsparkDraftModel` (an Inkling 2 checkpoint with `mtp.safetensors`) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -1332,6 +1332,20 @@ pub trait Drafter {
         None
     }
 
+    /// The vocabulary a DFlash-family drafter proposes token ids in, as its
+    /// `config.json` declares it (`vocab_size`), when known (issue #3261).
+    ///
+    /// A proposal is embedded by the target during the verify forward, so a
+    /// target whose own gate admits more than one drafter family compares
+    /// this with its vocabulary and refuses a mismatch by name. `None`, the
+    /// default, leaves that check unmeasured rather than guessed.
+    ///
+    /// Used by: the server and offline DFlash drivers for the Qwen3 and
+    /// Llama targets (`DFlashTargetModel::drafter_pairing_error`).
+    fn dflash_vocab_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Drafter checkpoint's configured speculative block size, when known.
     ///
     /// MTP uses this to mirror upstream adaptive block sizing: a user may
@@ -1388,12 +1402,15 @@ pub trait Drafter {
         false
     }
 
-    /// Whether this drafter is an LFM2 / LFM2.5 DSpark drafter (issue #1339).
+    /// Whether this drafter is a DSpark drafter on the DFlash backbone: an
+    /// LFM2 / LFM2.5 one (issue #1339), or a Red Hat Speculators or OpenBMB
+    /// one for a dense Qwen3 or Llama target (issue #3261).
     ///
     /// DSpark and the Qwen 3.5 DFlash drafters share [`DrafterKind::Dflash`],
     /// one loader and one round loop, and differ in the target they can read:
-    /// a DSpark `fc` projection is sized for the LFM2 residual streams it was
-    /// published against, a DFlash one for Qwen 3.5's. The server's DFlash
+    /// a DSpark `fc` projection is sized for the residual streams of the
+    /// target it was published against (LFM2's, in the case this gate was
+    /// written for), a DFlash one for Qwen 3.5's. The server's DFlash
     /// target gate reads this to refuse an LFM2 target paired with a plain
     /// DFlash drafter before any forward runs. [`Self::validate_target_compat`]
     /// cannot make that call itself: it sees the target as a

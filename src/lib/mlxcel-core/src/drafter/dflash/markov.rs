@@ -29,6 +29,13 @@
 //! checkpoints use rank 256, so the bias costs one gather and one
 //! `[1, 256] x [256, vocab]` matmul per step.
 //!
+//! A drafter may score a reduced draft vocabulary (issue #3261, upstream
+//! `VanillaMarkov(vocab_size, rank, draft_vocab_size)`). `markov_w1` is then
+//! still indexed by target ids (`[vocab, rank]`, `prev` is always a target
+//! id), `markov_w2` projects to the draft vocabulary (`[draft_vocab, rank]`),
+//! and each chosen draft id `t` leaves the chain as the target id
+//! `t + d2t[t]` ([`DraftToTarget`]), which is also the next step's `prev`.
+//!
 //! The chain is built as one lazy MLX graph and materialized once per round:
 //! every step's argmax stays on the device and is fed straight into the next
 //! step's gather, so a round costs one host synchronization rather than
@@ -41,12 +48,125 @@ use cxx::UniquePtr;
 
 /// DSpark vanilla Markov head: `bias(prev) = markov_w2(markov_w1[prev])`.
 pub struct VanillaMarkovHead {
-    /// `[vocab, rank]` token-to-rank embedding table.
+    /// `[vocab, rank]` token-to-rank embedding table, indexed by target ids.
     w1: UnifiedEmbedding,
-    /// `rank -> vocab` projection, stored `[vocab, rank]`.
+    /// `rank -> draft_vocab` projection, stored `[draft_vocab, rank]`.
     w2: UnifiedLinear,
     /// Rank of the factorization, from the checkpoint config.
     rank: usize,
+    /// Draft-id to target-id offsets of a reduced draft vocabulary; `None`
+    /// when a draft id is already a target id.
+    d2t: Option<DraftToTarget>,
+}
+
+/// The `d2t` table of a reduced-vocabulary DSpark drafter (issue #3261): the
+/// target id of draft id `t` is `t + d2t[t]`.
+///
+/// Built only through [`DraftToTarget::from_offsets`], which is what makes
+/// the gather in [`Self::to_target_ids`] safe: every mapped id is checked
+/// against the target vocabulary once, at load, because MLX range-checks no
+/// positive gather index and the mapped id indexes the target's embedding
+/// table and `markov_w1` on the very next step.
+pub struct DraftToTarget {
+    /// `[draft_vocab]` int32 offsets on the device.
+    offsets: UniquePtr<MlxArray>,
+    /// Number of draft ids the table covers.
+    draft_vocab: usize,
+}
+
+impl DraftToTarget {
+    /// Validate `offsets` (one per draft id) against the two vocabularies and
+    /// move them to the device.
+    ///
+    /// Returns `Ok(None)` when every offset is zero: the mapping is then the
+    /// identity, and the chain skips the gather. One pass over the table.
+    pub fn from_offsets(
+        offsets: &[i32],
+        draft_vocab: usize,
+        vocab: usize,
+    ) -> Result<Option<Self>, String> {
+        if offsets.len() != draft_vocab {
+            return Err(format!(
+                "d2t has {} entries but the drafter config declares draft_vocab_size \
+                 {draft_vocab}; the table needs one offset per draft id",
+                offsets.len()
+            ));
+        }
+        let mut identity = true;
+        for (draft_id, &offset) in offsets.iter().enumerate() {
+            identity &= offset == 0;
+            // i64 so neither a negative offset nor a sum past `i32::MAX` wraps
+            // into the valid range.
+            let target = draft_id as i64 + i64::from(offset);
+            if target < 0 || target >= vocab as i64 {
+                return Err(format!(
+                    "d2t maps draft id {draft_id} to target id {target} (offset {offset}), \
+                     outside the target vocabulary [0, {vocab}); the mapped id indexes the \
+                     target embedding table and MLX range-checks no positive gather index"
+                ));
+            }
+        }
+        if identity {
+            return Ok(None);
+        }
+        let len = i32::try_from(draft_vocab)
+            .map_err(|_| format!("draft_vocab_size {draft_vocab} does not fit an i32 shape"))?;
+        Ok(Some(Self {
+            offsets: ffi::from_slice_i32(offsets, &[len]),
+            draft_vocab,
+        }))
+    }
+
+    /// Read the checkpoint's `d2t` tensor and build the table.
+    ///
+    /// The tensor may be stored in any integer dtype (upstream casts it to
+    /// int32 in `sanitize`); a floating-point `d2t` is refused rather than
+    /// truncated.
+    pub fn from_tensor(
+        tensor: &MlxArray,
+        draft_vocab: usize,
+        vocab: usize,
+    ) -> Result<Option<Self>, String> {
+        let shape = ffi::array_shape(tensor);
+        if shape.len() != 1 {
+            return Err(format!(
+                "d2t must be a 1-D [draft_vocab] table, got shape {shape:?}"
+            ));
+        }
+        let dtype = ffi::array_dtype(tensor);
+        let integer = matches!(
+            dtype,
+            crate::dtype::UINT8
+                | crate::dtype::UINT16
+                | crate::dtype::UINT32
+                | crate::dtype::UINT64
+                | crate::dtype::INT8
+                | crate::dtype::INT16
+                | crate::dtype::INT32
+                | crate::dtype::INT64
+        );
+        if !integer {
+            return Err(format!(
+                "d2t must hold integer offsets, got a tensor of dtype code {dtype}"
+            ));
+        }
+        let as_i32 = ffi::astype(tensor, crate::dtype::INT32);
+        ffi::eval(&as_i32);
+        let offsets = super::materialize_argmax_i32_vec(&as_i32, shape[0].max(0) as usize);
+        Self::from_offsets(&offsets, draft_vocab, vocab)
+    }
+
+    /// Number of draft ids the table covers.
+    pub fn draft_vocab(&self) -> usize {
+        self.draft_vocab
+    }
+
+    /// Map draft ids (any shape, int32, each in `[0, draft_vocab)`) to
+    /// target ids on the device: `t + d2t[t]`.
+    pub fn to_target_ids(&self, draft_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        let offsets = ffi::take(&self.offsets, draft_ids, 0);
+        ffi::add(draft_ids, &offsets)
+    }
 }
 
 impl VanillaMarkovHead {
@@ -55,14 +175,9 @@ impl VanillaMarkovHead {
     /// (`.scales` / `.biases`) load through the same unified loaders the
     /// backbone uses.
     ///
-    /// Both factors are measured against the config's `vocab` and `rank`
-    /// before either is built, because neither shape is checked anywhere
-    /// downstream: `markov_w1` is gathered at a token id once per chain step
-    /// and MLX range-checks no positive gather index, so a table with fewer
-    /// rows than the vocabulary the chain draws from reads past its own
-    /// buffer into the logits; a `markov_w2` of the wrong width throws inside
-    /// MLX instead, which crosses the cxx bridge as a process abort rather
-    /// than a load error.
+    /// [`Self::from_weights_with_draft_vocab`] for a head that scores the
+    /// whole target vocabulary: both factors have `vocab` rows and a draft id
+    /// is a target id.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
@@ -71,13 +186,58 @@ impl VanillaMarkovHead {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
+        Self::from_weights_with_draft_vocab(
+            weights, prefix, vocab, vocab, rank, None, group_size, bits,
+        )
+    }
+
+    /// Load `{prefix}.markov_w1` (`[vocab, rank]`) and `{prefix}.markov_w2`
+    /// (`[draft_vocab, rank]`).
+    ///
+    /// Both factors are measured against the config before either is built,
+    /// because neither shape is checked anywhere downstream: `markov_w1` is
+    /// gathered at a target token id once per chain step and MLX range-checks
+    /// no positive gather index, so a table with fewer rows than `vocab`
+    /// reads past its own buffer into the logits; a `markov_w2` whose row
+    /// count is not `draft_vocab` throws inside MLX when its output is added
+    /// to the draft logits, which crosses the cxx bridge as a process abort
+    /// rather than a load error.
+    ///
+    /// `draft_vocab` is the vocabulary the draft head scores
+    /// (`DFlashConfig::draft_vocab`), equal to `vocab` unless the checkpoint
+    /// declares a reduced one; `d2t` is the matching id table, already
+    /// validated ([`DraftToTarget`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_weights_with_draft_vocab(
+        weights: &WeightMap,
+        prefix: &str,
+        vocab: usize,
+        draft_vocab: usize,
+        rank: usize,
+        d2t: Option<DraftToTarget>,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
         let w1_key = format!("{prefix}.markov_w1");
         let w2_key = format!("{prefix}.markov_w2");
         validate_markov_factor(weights, &w1_key, vocab, rank)?;
-        validate_markov_factor(weights, &w2_key, vocab, rank)?;
+        validate_markov_factor(weights, &w2_key, draft_vocab, rank)?;
+        if let Some(table) = &d2t
+            && table.draft_vocab() != draft_vocab
+        {
+            return Err(format!(
+                "d2t covers {} draft ids but {w2_key} scores {draft_vocab}",
+                table.draft_vocab()
+            ));
+        }
         let w1 = UnifiedEmbedding::from_weights(weights, &w1_key, group_size, bits)?;
         let w2 = UnifiedLinear::from_weights(weights, &w2_key, group_size, bits)?;
-        Ok(Self { w1, w2, rank })
+        Ok(Self { w1, w2, rank, d2t })
+    }
+
+    /// Whether chosen draft ids are remapped through a `d2t` table.
+    pub fn remaps_draft_ids(&self) -> bool {
+        self.d2t.is_some()
     }
 
     /// Rank of the transition factorization.
@@ -85,23 +245,27 @@ impl VanillaMarkovHead {
         self.rank
     }
 
-    /// Transition bias for one previous token: `[1, 1] -> [1, 1, vocab]`.
+    /// Transition bias for one previous token: `[1, 1] -> [1, 1, draft_vocab]`.
     ///
-    /// `prev` may be a host-built id array or a device-side argmax result;
+    /// `prev` is a TARGET id (the anchor, or a proposal already mapped
+    /// through `d2t`), as a host-built id array or a device-side result;
     /// either way the gather runs on the device.
     pub fn transition_logits(&self, prev: &MlxArray) -> UniquePtr<MlxArray> {
         let embedded = self.w1.forward(prev);
         self.w2.forward(&embedded)
     }
 
-    /// Chain `base_logits` (`[1, gamma, vocab]`) into `gamma` proposals,
-    /// starting from `anchor`, as a `[1, gamma]` int32 device array.
+    /// Chain `base_logits` (`[1, gamma, draft_vocab]`) into `gamma`
+    /// proposals, starting from `anchor`, as a `[1, gamma]` int32 device
+    /// array of TARGET ids.
     ///
-    /// Step `i` proposes `argmax(base_logits[:, i] + bias(prev_i))` with
-    /// `prev_0 = anchor` and `prev_{i + 1}` the step-`i` proposal. Every
-    /// position of `base_logits` is consumed, including position 0, which a
-    /// plain DFlash draft would drop as the bonus scaffold: in the DSpark
-    /// layout position 0 already sits past the anchor.
+    /// Step `i` chooses the draft id `argmax(base_logits[:, i] +
+    /// bias(prev_i))`, maps it to a target id (`t + d2t[t]`, the identity
+    /// without a table) and proposes that, with `prev_0 = anchor` and
+    /// `prev_{i + 1}` the step-`i` proposal. Every position of `base_logits`
+    /// is consumed, including position 0, which a plain DFlash draft would
+    /// drop as the bonus scaffold: in the DSpark layout position 0 already
+    /// sits past the anchor. `gamma == 0` yields an empty `[1, 0]` array.
     pub fn sample_block_array(&self, base_logits: &MlxArray, anchor: i32) -> UniquePtr<MlxArray> {
         let shape = ffi::array_shape(base_logits);
         debug_assert_eq!(
@@ -120,6 +284,9 @@ impl VanillaMarkovHead {
         );
         let gamma = shape[1];
         let vocab = shape[2];
+        if gamma <= 0 {
+            return ffi::zeros(&[1, 0], crate::dtype::INT32);
+        }
 
         let mut prev = ffi::from_slice_i32(&[anchor], &[1, 1]);
         let mut steps: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(gamma as usize);
@@ -130,6 +297,13 @@ impl VanillaMarkovHead {
             // `[1, 1, vocab] -> [1, 1]`; cast so the gather index and the
             // concatenated proposal row share one integer dtype.
             let chosen = ffi::astype(&ffi::argmax_last_axis(&combined), crate::dtype::INT32);
+            // The draft head's id space ends here: everything downstream
+            // (the next step's `markov_w1` gather, the verify input, the
+            // walk against the target argmax) reads target ids.
+            let chosen = match &self.d2t {
+                Some(table) => table.to_target_ids(&chosen),
+                None => chosen,
+            };
             prev = ffi::copy(&chosen);
             steps.push(chosen);
         }
@@ -158,7 +332,7 @@ impl VanillaMarkovHead {
 /// rank check runs against the bit depths that could produce the stored width
 /// rather than against the rank directly.
 ///
-/// Used by: [`VanillaMarkovHead::from_weights`].
+/// Used by: [`VanillaMarkovHead::from_weights_with_draft_vocab`].
 fn validate_markov_factor(
     weights: &WeightMap,
     key: &str,

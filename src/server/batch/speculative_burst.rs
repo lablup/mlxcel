@@ -91,6 +91,11 @@
 //!   one warning), B = 1 only, and gated on the block-versus-chain
 //!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
 //!   arms. The per-target plumbing lives in [`super::dflash_target`].
+//! - **DSpark / Qwen3 and Llama** (issue #3261): [`crate::LoadedModel::Qwen3`]
+//!   and [`crate::LoadedModel::Llama`], paired with a Red Hat Speculators or
+//!   OpenBMB DSpark drafter (`RedHatAI/Qwen3-4B-speculator.dspark`,
+//!   `openbmb/MiniCPM5-2B-DSpark`). Greedy, B = 1, gated on the measured
+//!   block-versus-chain probe (`models::dense_speculative::exactness_allows`).
 //! - **DSpark / Inkling 2** (issue #3374): text-only requests on
 //!   [`crate::LoadedModel::Inkling2VLM`], paired with the DSpark drafter
 //!   bundled in the checkpoint's own `mtp.safetensors` (`--model-draft` is the
@@ -1754,6 +1759,8 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => m.exactness_allows(bs),
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => m.exactness_allows(bs),
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
+        LoadedModel::Qwen3(m) => m.exactness_allows(bs),
+        LoadedModel::Llama(m) => m.exactness_allows(bs),
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
         LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
@@ -1782,6 +1789,12 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         }
         LoadedModel::Lfm2VL(_) => {
             <crate::vision::Lfm2VlModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Qwen3(_) => {
+            <crate::models::Qwen3Model as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Llama(_) => {
+            <crate::models::Llama3Model as DFlashTargetModel>::supports_batched()
         }
         LoadedModel::MuseGlimmerVLM(_) => {
             <crate::vision::MuseGlimmerVlmModel as DFlashTargetModel>::supports_batched()
@@ -1899,10 +1912,10 @@ fn run_dflash_burst(
         tracing::warn!(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
-             LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), Laguna (Laguna DFlash drafter), Inkling 2 (its bundled \
-             DSpark drafter), or Raon-1 mini (DFlash2 drafter); falling back to \
-             classic decode",
+             LFM2-VL text-only (DSpark drafter), dense Qwen3 or Llama (DSpark drafter), Muse \
+             Glimmer text-only (Muse Glimmer assistant drafter), Laguna (Laguna DFlash \
+             drafter), Inkling 2 (its bundled DSpark drafter), or Raon-1 mini (DFlash2 \
+             drafter); falling back to classic decode",
             model_variant_label(ctx.model),
         );
         return Err(BurstOutcome::DeclineToClassic);
@@ -2035,6 +2048,8 @@ fn run_dflash_burst(
         LoadedModel::Qwen35VLM(m) | LoadedModel::Qwen35MoeVLM(m) => drive!(m),
         LoadedModel::Lfm2(m) | LoadedModel::Lfm2Moe(m) => drive!(m),
         LoadedModel::Lfm2VL(m) => drive!(m),
+        LoadedModel::Qwen3(m) => drive!(m),
+        LoadedModel::Llama(m) => drive!(m),
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
         LoadedModel::Inkling2VLM(m) => drive!(m),
