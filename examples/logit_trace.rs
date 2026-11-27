@@ -157,6 +157,14 @@
 // is judged, since only image-conditioned text can move (#2388).
 // `MLXCEL_TRACE_ENABLE_THINKING=0`/`1` renders that template with
 // `enable_thinking` off or on instead of the server default (#2761).
+//
+// `MLXCEL_TRACE_VIDEO=PATH` is the same arm behind one video clip, sampled as
+// the Qwen-VL video path of `mlxcel generate --video` samples it
+// (`MLXCEL_TRACE_VIDEO_PROMPT`, `MLXCEL_TRACE_VIDEO_FPS`; see
+// `logit_trace/video.rs`). `MLXCEL_TRACE_VIDEO_FRAMES_DIR=DIR` writes the
+// sampled frames for the reference arm, and `MLXCEL_TRACE_VIDEO_UNTIMED=1`
+// withholds the clip's `second_per_grid`, the unit-spaced positions Qwen2.5-VL
+// used before #3234.
 
 #[path = "logit_trace/audio.rs"]
 mod audio;
@@ -166,6 +174,8 @@ mod gemma4;
 mod image_arm;
 #[path = "logit_trace/kv_mode.rs"]
 mod kv_mode;
+#[path = "logit_trace/video.rs"]
+mod video_arm;
 
 use anyhow::{Context, Result};
 use mlxcel::{LanguageModel, distributed::ShardConfig};
@@ -426,6 +436,48 @@ fn main() -> Result<()> {
         println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
         let (row_offset, target, logits) = arm.forward(&model, &tokenizer, &text)?;
         return emit_rows(0, &logits, row_offset as i32, &target, topk);
+    }
+
+    if let Some(arm) = video_arm::VideoArm::from_env()? {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && prefill == 0
+                && !contiguous
+                && start_token == 0
+                && batch_rows.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none(),
+            "MLXCEL_TRACE_VIDEO runs alone: no image arm, Gemma 4 mode, prefill, start token, \
+             or batch rows"
+        );
+        let traced = video_arm::trace(&arm, &model, &tokenizer, model_dir, &text, chunk_tokens)?;
+        println!("# model\t{model_dir}");
+        println!("# device\t{}", runtime.device);
+        println!("# video\t{}\tprompt\t{}", arm.video_path, arm.prompt);
+        // What the reference arm needs to see the same clip: the frame count,
+        // and the sampled fps to pass as `--video-fps`.
+        println!(
+            "# video_timing\tframes\t{}\ttotal_frames\t{}\tsource_fps\t{}\tsampled_fps\t{}\t\
+             second_per_grid\t{}\ttimed\t{}",
+            traced.sampled_frames,
+            traced.total_frames,
+            traced.source_fps,
+            traced.sampled_fps,
+            traced.second_per_grid,
+            !arm.untimed
+        );
+        let traced = traced.trace;
+        println!("# prompt_tokens\t{}", traced.prompt_ids.len());
+        let ids: Vec<String> = traced.prompt_ids.iter().map(i32::to_string).collect();
+        println!("# prompt_ids\t{}", ids.join(","));
+        println!("# corpus\t{text_file}\ttokens\t{}", traced.targets.len());
+        println!(
+            "# chunks\t1\tchunk_tokens\t{}\ttopk\t{topk}\tprefill\t0",
+            traced.targets.len()
+        );
+        println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
+        emit_rows(0, &traced.logits, 0, &traced.targets, topk)?;
+        eprintln!("  video arm traced ({} positions)", traced.targets.len());
+        return Ok(());
     }
 
     if let Some(arm) = image_arm::ImageArm::from_env()? {

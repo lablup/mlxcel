@@ -293,8 +293,10 @@ impl Qwen2VLProcessor {
 
         // Start with original size, round to factor. Arithmetic is u64 and
         // saturating so a huge image or a huge checkpoint bound cannot wrap.
-        let mut h = round_to(orig_h as f64, 1.0, f64::round);
-        let mut w = round_to(orig_w as f64, 1.0, f64::round);
+        // The reference's `round(height / factor)` is Python's `round`, which
+        // rounds half to even: 720 / 32 = 22.5 goes to 22, not 23.
+        let mut h = round_to(orig_h as f64, 1.0, f64::round_ties_even);
+        let mut w = round_to(orig_w as f64, 1.0, f64::round_ties_even);
 
         // Out of bounds, scale the original size once as the reference does:
         // `beta = sqrt(h * w / max_pixels)`, then `floor(h / beta / factor)`
@@ -573,6 +575,53 @@ mod tests {
     use image::{DynamicImage, Rgb, RgbImage};
 
     use super::*;
+
+    /// The Qwen3-VL-generation geometry: 16-pixel patches, 2x2 merge, and
+    /// the 65536 / 16777216 bounds those sidecars declare.
+    fn factor_32_processor() -> Qwen2VLProcessor {
+        Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216)
+    }
+
+    /// transformers' `smart_resize` rounds `edge / factor` with Python's
+    /// `round`, which breaks a tie towards the even neighbour. Expected
+    /// values are transformers 5.24.1 `image_processing_pil_qwen2_vl.
+    /// smart_resize` (and mlx-vlm's Qwen3-VL `_smart_resize_image`).
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        // Factor 28 (Qwen2-VL, Qwen2.5-VL, GLM-4V): 854 / 28 = 30.5 -> 30,
+        // 630 / 28 = 22.5 -> 22, 350 / 28 = 12.5 -> 12.
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(480, 854), (476, 840));
+        assert_eq!(p28.smart_resize(630, 1200), (616, 1204));
+        assert_eq!(p28.smart_resize(350, 350), (336, 336));
+        // Factor 32 (Qwen3-VL generation, Mage-VL): 720 / 32 = 22.5 -> 22,
+        // 3024 / 32 = 94.5 -> 94, 1680 / 32 = 52.5 -> 52, 336 / 32 = 10.5 -> 10.
+        let p32 = factor_32_processor();
+        assert_eq!(p32.smart_resize(720, 1280), (704, 1280));
+        assert_eq!(p32.smart_resize(3024, 4032), (3008, 4032));
+        assert_eq!(p32.smart_resize(1050, 1680), (1056, 1664));
+        assert_eq!(p32.smart_resize(336, 336), (320, 320));
+        // A 1280x720 image is 44x80 patches, 22 * 40 = 880 merged tokens.
+        let grid = p32.compute_grid_thw(&[DynamicImage::new_rgb8(1280, 720)]);
+        assert_eq!(grid, vec![(1, 44, 80)]);
+    }
+
+    /// Non-ties and ties whose lower neighbour is odd round the same either
+    /// way; these must not move.
+    #[test]
+    fn smart_resize_non_ties_and_odd_ties_are_unchanged() {
+        let p28 = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p28.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p28.smart_resize(480, 640), (476, 644));
+        // 1050 / 28 = 37.5 -> 38 under both rules.
+        assert_eq!(p28.smart_resize(1050, 1680), (1064, 1680));
+        assert_eq!(p28.smart_resize(700, 1050), (700, 1064));
+        let p32 = factor_32_processor();
+        assert_eq!(p32.smart_resize(1080, 1920), (1088, 1920));
+        // 1200 / 32 = 37.5 -> 38 under both rules.
+        assert_eq!(p32.smart_resize(1200, 1920), (1216, 1920));
+    }
 
     #[test]
     fn owned_and_mlx_paths_share_spatial_merge_grouped_patch_order() {

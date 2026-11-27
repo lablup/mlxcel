@@ -29,10 +29,13 @@ pub const RAON_DFLASH2_ARCHITECTURE: &str = "DFlash2DraftModel";
 /// Largest draft block (bonus plus proposals) the drafter serves. The vendor
 /// runtime drafts 5 or 7 tokens (blocks of 6 or 8); the target's
 /// row-invariant verify covers up to 16 rows.
-/// Verify width (one bonus row and four drafts) when `--draft-block-size`
-/// is not given: the fastest or tied-fastest width of 3, 5 and 7 across the
-/// prompts of `docs/benchmark_results/raon-dflash2-m3ultra-2026-11-26.md`.
-pub const DEFAULT_VERIFY_WIDTH: usize = 5;
+/// Verify width (one bonus row and two drafts) when `--draft-block-size` is
+/// not given: the fastest width of 3, 5 and 7 on the mean of the prompts and
+/// checkpoints of `docs/benchmark_results/raon-perf-m3ultra-2026-11-26.md`.
+/// It was 5 while a decode step took 30 ms; with the 18 ms step of #3458 a
+/// verify block costs about 2.4 decode steps at width 5 and 1.9 at width 3,
+/// and width 5 fell below plain decode on low-acceptance prose.
+pub const DEFAULT_VERIFY_WIDTH: usize = 3;
 
 pub const MAX_BLOCK_SIZE: usize = 16;
 

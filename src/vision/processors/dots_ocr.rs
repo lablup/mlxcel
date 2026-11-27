@@ -56,7 +56,9 @@ impl DotsOcrProcessor {
     /// area into `[min_pixels, max_pixels]`. Returns `(height, width)` in pixels.
     fn smart_resize(&self, h: u32, w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.merge_size) as f64; // 28
-        let round = |x: f64| ((x / factor).round().max(1.0) * factor) as u32;
+        // The reference (transformers' Qwen2-VL `smart_resize`) uses Python's
+        // `round`, which rounds half to even.
+        let round = |x: f64| ((x / factor).round_ties_even().max(1.0) * factor) as u32;
         let mut rh = round(h as f64);
         let mut rw = round(w as f64);
         let pixels = (rh as usize) * (rw as usize);
@@ -156,6 +158,20 @@ impl DotsOcrProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expected values are transformers 5.24.1 `qwen2_vl` `smart_resize` with
+    /// the dots.ocr bounds (the processor mlx-vlm's `dots_ocr` loads). Its
+    /// Python `round` breaks a tie towards the even neighbour.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let p = DotsOcrProcessor::default();
+        // 854 / 28 = 30.5 -> 30; 630 / 28 = 22.5 -> 22.
+        assert_eq!(p.smart_resize(480, 854), (476, 840));
+        assert_eq!(p.smart_resize(630, 1200), (616, 1204));
+        // Non-ties and an odd tie (1050 / 28 = 37.5 -> 38) do not move.
+        assert_eq!(p.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p.smart_resize(1050, 1680), (1064, 1680));
+    }
 
     #[test]
     fn smart_resize_rounds_to_factor_and_clamps() {

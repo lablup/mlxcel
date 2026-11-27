@@ -74,8 +74,12 @@ impl MiniCPMOProcessor {
         }
     }
 
+    /// Upstream's `max(round(length / divisor) * divisor, divisor)`. Python's
+    /// `round` rounds half to even, so a length exactly between two multiples
+    /// goes to the even one rather than always up.
     fn ensure_divide(&self, length: usize, divisor: usize) -> usize {
-        ((length.max(divisor) + divisor / 2) / divisor) * divisor
+        let multiples = (length.max(divisor) as f64 / divisor as f64).round_ties_even() as usize;
+        multiples * divisor
     }
 
     pub(crate) fn find_best_resize(&self, width: usize, height: usize) -> (usize, usize) {

@@ -8072,6 +8072,96 @@ std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxAr
     return std::make_unique<MlxArray>(fn({branch.inner, weights.inner, hyper.inner})[0]);
 }
 
+// Raon_mHC site graphs for a decode step (issue #3458). The eager path in
+// `models/raon_mhc.rs` issues about 45 small ops per site and a Raon-1 mini
+// token crosses 50 sites; these two graphs replay the same ops in the same
+// order from one compiled tape each, so the float32 compute and the single
+// rounding to the model dtype are those of the eager path, bit for bit.
+//
+// Compiled with fixed shapes (not shapeless): the graphs reshape and slice by
+// the stream count. The Rust side calls them for single-position steps only,
+// so the trace cache holds one entry per batch width.
+namespace {
+    // inputs: streams [B, L, n, D] and proj [B, L, 2n + (n-1)^2] in the model
+    // dtype; float32 alpha and bias [2n + (n-1)^2], eps [1], post_factor [1],
+    // basis [n, n-1], basis_t [n-1, n], chart0 [n, n], identity
+    // ((1 - gamma) I, [n, n]) and gamma [1].
+    // outputs: branch input [B, L, D] (model dtype), h_post [B, L, n] and
+    // h_res [B, L, n, n] (float32).
+    std::vector<array> raon_mhc_route_aggregate_graph(const std::vector<array>& in) {
+        using namespace mlx::core;
+        const auto& streams = in[0];
+        const int b = streams.shape(0);
+        const int l = streams.shape(1);
+        const int n = streams.shape(2);
+        const int d = streams.shape(3);
+        const int nm = n - 1;
+        auto sf = astype(streams, float32);
+        auto flat = reshape(sf, {b, l, n * d});
+        auto inv = rsqrt(add(mean(square(flat), -1, true), in[4]));
+        auto t = add(multiply(multiply(astype(in[1], float32), inv), in[2]), in[3]);
+        auto h_pre = sigmoid(slice(t, {0, 0, 0}, {b, l, n}));
+        auto h_post = multiply(sigmoid(slice(t, {0, 0, n}, {b, l, 2 * n})), in[5]);
+        auto z = reshape(slice(t, {0, 0, 2 * n}, {b, l, 2 * n + nm * nm}), {b, l, nm, nm});
+        auto error = matmul(matmul(in[6], z), in[7]);
+        auto ratio = reshape(divide(negative(error), in[8]), {b, l, n * n});
+        auto rho = maximum(max(ratio, -1, true), zeros({1}, float32));
+        auto denom = expand_dims(add(rho, full({1}, 1.0f, float32)), -1);
+        auto chart = add(in[8], divide(error, denom));
+        auto h_res = add(in[9], multiply(chart, in[10]));
+        auto x = astype(squeeze(matmul(expand_dims(h_pre, -2), sf), -2), streams.dtype());
+        return {x, h_post, h_res};
+    }
+
+    // inputs: streams [B, L, n, D] (model dtype), branch [B, L, D] (any float
+    // dtype), h_post [B, L, n] and h_res [B, L, n, n] (float32).
+    // output: h_res @ streams + h_post * branch in float32, rounded once.
+    std::vector<array> raon_mhc_mix_graph(const std::vector<array>& in) {
+        using namespace mlx::core;
+        auto sf = astype(in[0], float32);
+        auto mixed = matmul(in[3], sf);
+        auto branch = expand_dims(astype(in[1], float32), -2);
+        auto written = add(mixed, multiply(expand_dims(in[2], -1), branch));
+        return {astype(written, in[0].dtype())};
+    }
+}
+
+void raon_mhc_route_aggregate(
+    const MlxArray& streams,
+    const MlxArray& proj,
+    const MlxArray& alpha,
+    const MlxArray& bias,
+    const MlxArray& eps,
+    const MlxArray& post_factor,
+    const MlxArray& basis,
+    const MlxArray& basis_t,
+    const MlxArray& chart0,
+    const MlxArray& identity,
+    const MlxArray& gamma,
+    std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_post_out,
+    std::unique_ptr<MlxArray>& h_res_out
+) {
+    static auto fn = mlx::core::compile(raon_mhc_route_aggregate_graph, /*shapeless=*/false);
+    auto out = fn({streams.inner, proj.inner, alpha.inner, bias.inner, eps.inner,
+                   post_factor.inner, basis.inner, basis_t.inner, chart0.inner,
+                   identity.inner, gamma.inner});
+    x_out = std::make_unique<MlxArray>(std::move(out[0]));
+    h_post_out = std::make_unique<MlxArray>(std::move(out[1]));
+    h_res_out = std::make_unique<MlxArray>(std::move(out[2]));
+}
+
+std::unique_ptr<MlxArray> raon_mhc_mix(
+    const MlxArray& streams,
+    const MlxArray& branch,
+    const MlxArray& h_post,
+    const MlxArray& h_res
+) {
+    static auto fn = mlx::core::compile(raon_mhc_mix_graph, /*shapeless=*/false);
+    auto out = fn({streams.inner, branch.inner, h_post.inner, h_res.inner});
+    return std::make_unique<MlxArray>(std::move(out[0]));
+}
+
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps) {
     static auto compiled_fn = compile_shapeless_audited("compiled_scaled_rms_norm",
         [](const std::vector<array>& inputs) -> std::vector<array> {
