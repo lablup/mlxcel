@@ -1210,6 +1210,10 @@ mod scheduler_qwen35_slice_guard_tests;
 mod scheduler_completion_snapshot_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_quantized_snapshot_tests.rs"]
+mod scheduler_quantized_snapshot_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_state_checkpoint_tests.rs"]
 mod scheduler_state_checkpoint_tests;
 

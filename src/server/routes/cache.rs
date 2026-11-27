@@ -81,6 +81,7 @@ pub(crate) struct RejectReasonStats {
     pub block_boundary_floor: u64,
     pub snapshot_diverged: u64,
     pub model_owned_state: u64,
+    pub kv_mode_not_snapshotable: u64,
     pub last_reason: Option<String>,
     pub last_seq_id: Option<u64>,
     pub last_context_len: Option<u64>,
@@ -104,6 +105,7 @@ impl RejectReasonStats {
             block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
             snapshot_diverged: snap.prompt_cache_reject_snapshot_diverged,
             model_owned_state: snap.prompt_cache_reject_model_owned_state,
+            kv_mode_not_snapshotable: snap.prompt_cache_reject_kv_mode_not_snapshotable,
             last_reason: last.map(|r| r.reason.to_string()),
             last_seq_id: last.and_then(|r| r.seq_id),
             last_context_len: last.map(|r| r.context_len),
@@ -302,6 +304,17 @@ pub struct CacheStatsResponse {
     /// counters above stay separable, so use those rather than `last_reject_*`
     /// when diagnosing a model-owned family.
     pub reject_model_owned_state: u64,
+    /// Count of snapshot donations declined because a layer of the model
+    /// stores a KV mode a model-state snapshot cannot carry: `Turbo4Delegated`
+    /// or `Turbo3Asym` on a full-attention layer (issue #3250).
+    ///
+    /// A non-zero value means prefix reuse is off for this model under its
+    /// `kv_cache_mode_effective`: no snapshot is ever stored, so
+    /// `snapshot_inserts` stays at zero and every request prefills cold. The
+    /// server also logs one warning at startup that names the mode. Serving
+    /// with `--cache-type-k fp16 --cache-type-v fp16`, or with a mode a
+    /// snapshot carries (`int8`, `fp16+turbo4`, `turbo4`), turns reuse back on.
+    pub reject_kv_mode_not_snapshotable: u64,
     /// Reason label of the most recent reject/decline event, if any has
     /// happened yet.
     pub last_reject_reason: Option<String>,
@@ -476,6 +489,7 @@ pub(crate) fn build_stats_response(
                 reject_block_boundary_floor: reject.block_boundary_floor,
                 reject_snapshot_diverged: reject.snapshot_diverged,
                 reject_model_owned_state: reject.model_owned_state,
+                reject_kv_mode_not_snapshotable: reject.kv_mode_not_snapshotable,
                 last_reject_reason: reject.last_reason,
                 last_reject_seq_id: reject.last_seq_id,
                 last_reject_context_len: reject.last_context_len,
@@ -547,6 +561,7 @@ pub(crate) fn build_stats_response(
             reject_block_boundary_floor: reject.block_boundary_floor,
             reject_snapshot_diverged: reject.snapshot_diverged,
             reject_model_owned_state: reject.model_owned_state,
+            reject_kv_mode_not_snapshotable: reject.kv_mode_not_snapshotable,
             last_reject_reason: reject.last_reason,
             last_reject_seq_id: reject.last_seq_id,
             last_reject_context_len: reject.last_context_len,

@@ -884,6 +884,9 @@ impl BatchObservability {
             prompt_cache_reject_memory_reserve: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::MemoryReserve),
+            prompt_cache_reject_kv_mode_not_snapshotable: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::KvModeNotSnapshotable),
             mtp_policy: self.mtp_policy_snapshot(),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
@@ -1010,6 +1013,11 @@ pub struct ObservabilitySnapshot {
     /// (issue #3146). A non-zero value with `prompt_cache_inserts` at zero
     /// means the host, not the request, kept the store empty.
     pub prompt_cache_reject_memory_reserve: u64,
+    /// Snapshot donations declined because a layer of the model stores a KV
+    /// mode a model-state snapshot cannot carry (`Turbo4Delegated` or
+    /// `Turbo3Asym` on a full-attention layer, issue #3250). A non-zero value
+    /// means prefix reuse is off for this model under its KV cache mode.
+    pub prompt_cache_reject_kv_mode_not_snapshotable: u64,
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,

@@ -145,6 +145,33 @@ impl BatchScheduler {
             kv_cache_mode_stateless_layers = summary.stateless,
             "resolved KV cache mode applied to model caches"
         );
+        // A family that reuses prefixes only through model-state snapshots
+        // never stores one under a KV mode a snapshot cannot carry, and the
+        // only other sign of that is `cached_tokens` staying at zero (issue
+        // #3250). The prompt cache is installed before the KV mode in the
+        // server's builder chain, so it is known here.
+        if self.prompt_cache.is_some()
+            && self.engine.model().supports_snapshot_reuse()
+            && let Some(mode) = self.snapshot_unsupported_kv_mode()
+        {
+            tracing::warn!(
+                kv_cache_mode = %mode,
+                "prompt-cache prefix reuse is disabled for this model: its {mode} KV cache cannot be stored in a model-state snapshot, so every request prefills its whole prompt. Use `--cache-type-k fp16 --cache-type-v fp16` to turn prefix reuse back on"
+            );
+        }
+    }
+
+    /// The first KV mode a layer of the model stores that a model-state
+    /// snapshot cannot carry (`Turbo4Delegated` or `Turbo3Asym` on a
+    /// full-attention layer), or `None`.
+    ///
+    /// Read from the model's own storage table and from nothing else. A model
+    /// that reports no table is not judged: the configured table says what was
+    /// requested, not what a family that ignores it stores, and declining a
+    /// donation on a guess would turn off reuse that works.
+    pub(super) fn snapshot_unsupported_kv_mode(&self) -> Option<KVCacheMode> {
+        let modes = self.engine.model().kv_cache_storage_modes()?;
+        crate::models::kv_snapshot::first_snapshot_unsupported_mode(&modes)
     }
 
     pub(super) fn validate_dense_detached_kv_modes(

@@ -136,6 +136,12 @@ mod prefill_rewind;
 #[path = "cache/prefill_rewind_tests.rs"]
 mod prefill_rewind_tests;
 pub mod ring;
+/// The buffers and scalars a model-state snapshot carries for one attention
+/// cache, quantized modes included (issue #3250).
+mod snapshot_parts;
+#[cfg(test)]
+#[path = "cache/snapshot_parts_tests.rs"]
+mod snapshot_parts_tests;
 /// Sparse attention expressed as a `page_size = 1` page table over a
 /// contiguous KV allocation (issue #904).
 pub mod sparse_csr;
@@ -165,6 +171,10 @@ pub use paged_batch_decode::{
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
 pub use ring::RingSlidingKVCache;
+pub use snapshot_parts::{
+    KV_SIDECAR_FIELDS, KVCacheSnapshotOwned, KVCacheSnapshotParts, ROTATING_SIDECAR_FIELDS,
+    RotatingKVCacheSnapshotBuffers, RotatingKVCacheSnapshotParts, kv_mode_is_snapshotable,
+};
 pub use sparse_csr::{
     ContiguousCacheLayout, SparseCsrStructure, SparseIndices, SparseSelection,
     selection_from_positions, shared_row_mapping,
@@ -4507,13 +4517,32 @@ impl RotatingKVCacheSnapshotState {
     ///
     /// Follows the upstream mlx-lm `can_trim_prompt_cache` precedent
     /// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py),
-    /// which allows a rotating trim only while the cache is unwrapped. Only
-    /// FP16 storage is snapshot-capable today, so any other mode declines.
+    /// which allows a rotating trim only while the cache is unwrapped.
+    ///
+    /// The mode that decides is the one the ring stores
+    /// ([`RotatingKVCache::stored_mode`]), not its label: a ring labelled
+    /// `Int8`, `Turbo4`, `Turbo4Delegated` or `Turbo3Asym` holds plain rows and
+    /// truncates like an FP16 one (issue #3250). A storage mode a snapshot
+    /// cannot carry declines.
     pub fn can_truncate_to(&self, target_len: i32) -> bool {
-        self.mode == KVCacheMode::Fp16
+        self.stores_snapshotable_rows()
             && target_len >= 0
             && target_len <= self.offset
             && self.is_unwrapped()
+    }
+
+    /// Whether the ring this state describes stores rows a model-state
+    /// snapshot carries: plain rows, or the `Turbo4Asym` packed-V layout.
+    ///
+    /// [`RotatingKVCache::stored_mode`] returns only those two today, so this
+    /// holds for every ring that can be built. It is spelled out so that a
+    /// storage mode added to the ring later declines until its snapshot
+    /// exists.
+    pub fn stores_snapshotable_rows(&self) -> bool {
+        matches!(
+            RotatingKVCache::stored_mode(self.max_size, self.mode),
+            KVCacheMode::Fp16 | KVCacheMode::Turbo4Asym
+        )
     }
 }
 
@@ -5729,46 +5758,48 @@ impl RotatingKVCache {
         }
     }
 
-    /// Restore this cache from copied FP16 K/V tensors and scalar metadata.
+    /// Restore this cache from a snapshot's ring buffers and scalar metadata.
     ///
-    /// The current snapshot container captures only attention-ready FP16
-    /// tensors, so non-FP16 rotating-cache modes are rejected rather than
-    /// restoring an incomplete sidecar set.
+    /// The mode the ring stores ([`Self::stored_mode`]), not its label, says
+    /// which buffers are expected (issue #3250). A ring that stores plain rows
+    /// takes `keys` and `values`; that is every label but an aligned
+    /// `Turbo4Asym`, since `Int8`, `Turbo4`, `Turbo4Delegated` and
+    /// `Turbo3Asym` fall back to FP16 storage here. An aligned `Turbo4Asym`
+    /// ring takes FP16 `keys` and the packed-V sidecars and no `values`. The
+    /// label itself is kept as the snapshot recorded it.
     ///
-    /// Used by: Gemma 4 exact-prefix model-owned snapshot prompt-cache reuse.
-    pub fn restore_fp16_snapshot_state(
+    /// Everything is validated before anything is assigned, so an `Err`
+    /// leaves the cache as it was.
+    ///
+    /// Used by: `models::kv_snapshot::restore_rotating` (the sliding-window
+    /// layers of Gemma 3, AFMoE, Kolibri-1, Gemma 4 and Muse Glimmer).
+    pub fn restore_snapshot_state(
         &mut self,
         state: RotatingKVCacheSnapshotState,
-        keys: Option<UniquePtr<MlxArray>>,
-        values: Option<UniquePtr<MlxArray>>,
+        mut buffers: RotatingKVCacheSnapshotBuffers,
     ) -> Result<(), String> {
-        if state.mode != KVCacheMode::Fp16 {
+        let stored = Self::stored_mode(state.max_size, state.mode);
+        if state.mode == KVCacheMode::Turbo4Asym && stored != KVCacheMode::Turbo4Asym {
             return Err(format!(
-                "RotatingKVCache::restore_fp16_snapshot_state only supports FP16 snapshots; got {:?}",
-                state.mode
+                "RotatingKVCache::restore_snapshot_state: a Turbo4Asym ring cannot have a window of {}",
+                state.max_size
             ));
-        }
-        if keys.is_some() != values.is_some() {
-            return Err(
-                "RotatingKVCache::restore_fp16_snapshot_state requires keys and values together"
-                    .into(),
-            );
         }
         if state.max_size <= 0 {
             return Err(format!(
-                "RotatingKVCache::restore_fp16_snapshot_state requires positive max_size; got {}",
+                "RotatingKVCache::restore_snapshot_state requires positive max_size; got {}",
                 state.max_size
             ));
         }
         if state.buffer_size < 0 {
             return Err(format!(
-                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative buffer_size; got {}",
+                "RotatingKVCache::restore_snapshot_state requires non-negative buffer_size; got {}",
                 state.buffer_size
             ));
         }
         if state.offset < 0 || state.idx < 0 || state.start_position < 0 {
             return Err(format!(
-                "RotatingKVCache::restore_fp16_snapshot_state requires non-negative offset/start/idx; got offset={}, start_position={}, idx={}",
+                "RotatingKVCache::restore_snapshot_state requires non-negative offset/start/idx; got offset={}, start_position={}, idx={}",
                 state.offset, state.start_position, state.idx
             ));
         }
@@ -5784,56 +5815,57 @@ impl RotatingKVCache {
         }
         if state.step <= 0 {
             return Err(format!(
-                "RotatingKVCache::restore_fp16_snapshot_state requires positive step; got {}",
+                "RotatingKVCache::restore_snapshot_state requires positive step; got {}",
                 state.step
             ));
         }
+        // `enable_speculative_buffer` refuses every label but FP16, so a
+        // buffered ring under another label was not written by this cache.
+        if state.mode != KVCacheMode::Fp16
+            && (state.buffer_size != 0 || state.speculative_ring_origin.is_some())
+        {
+            return Err(format!(
+                "RotatingKVCache snapshot of a {:?} ring carries speculative buffer state",
+                state.mode
+            ));
+        }
 
-        if let Some(keys_ref) = keys.as_ref().and_then(|a| a.as_ref()) {
-            let k_shape = ffi::array_shape(keys_ref);
-            if k_shape.len() != 4 {
-                return Err(format!(
-                    "RotatingKVCache::restore_fp16_snapshot_state expected rank-4 keys, got shape {:?}",
-                    k_shape
-                ));
-            }
-            let values_ref = values
-                .as_ref()
-                .and_then(|array| array.as_ref())
-                .ok_or_else(|| "RotatingKVCache snapshot has a null value buffer".to_string())?;
-            let v_shape = ffi::array_shape(values_ref);
-            if v_shape.len() != 4
-                || k_shape[..3] != v_shape[..3]
-                || ffi::array_dtype(keys_ref) != ffi::array_dtype(values_ref)
-            {
-                return Err("RotatingKVCache snapshot K/V shapes or dtypes disagree".into());
-            }
-            let physical_len = k_shape[2];
-            // The write position has to land inside the buffer it is being
-            // restored against, and that is the whole of the constraint. It is
-            // deliberately not `idx <= max_size`: `update_concat` stores more
-            // than the window after a prefill longer than it and pins `idx` to
-            // the stored length, so a snapshot captured between that prefill
-            // and the next single-token step legitimately carries
-            // `idx == physical_len > max_size` (#1335). Rejecting that shape
-            // sent every over-window first turn down a cold prefill. The
-            // physical bound still catches a genuinely corrupt idx, and it is
-            // the tighter check while the buffer is still growing towards
-            // `max_size`.
-            if state.idx > physical_len {
-                return Err(format!(
-                    "RotatingKVCache::restore_fp16_snapshot_state idx {} exceeds physical length {}",
-                    state.idx, physical_len
-                ));
-            }
+        let physical_len = snapshot_parts::check_ring_layout(
+            stored,
+            buffers.keys.as_deref(),
+            buffers.values.as_deref(),
+            [
+                buffers.v_packed.as_deref(),
+                buffers.v_norms.as_deref(),
+                buffers.v_rescale.as_deref(),
+            ],
+        )?;
+        // The write position has to land inside the buffer it is being
+        // restored against, and that is the whole of the constraint. It is
+        // deliberately not `idx <= max_size`: `update_concat` stores more
+        // than the window after a prefill longer than it and pins `idx` to
+        // the stored length, so a snapshot captured between that prefill
+        // and the next single-token step legitimately carries
+        // `idx == physical_len > max_size` (#1335). Rejecting that shape
+        // sent every over-window first turn down a cold prefill. The
+        // physical bound still catches a genuinely corrupt idx, and it is
+        // the tighter check while the buffer is still growing towards
+        // `max_size`.
+        if let Some(physical_len) = physical_len
+            && state.idx > physical_len
+        {
+            return Err(format!(
+                "RotatingKVCache::restore_snapshot_state idx {} exceeds physical length {}",
+                state.idx, physical_len
+            ));
         }
 
         if state.buffer_size > 0 && state.speculative_ring_origin.is_none() {
             return Err("RotatingKVCache buffered snapshot lacks its reference ring origin".into());
         }
         self.clear_decode_undo();
-        self.keys = keys;
-        self.values = values;
+        self.keys = buffers.keys.take();
+        self.values = buffers.values.take();
         self.max_size = state.max_size;
         self.buffer_size = state.buffer_size;
         self.speculative_ring_origin = state.speculative_ring_origin;
@@ -5841,14 +5873,12 @@ impl RotatingKVCache {
         self.start_position = state.start_position;
         self.idx = state.idx;
         self.step = state.step;
-        self.mode = KVCacheMode::Fp16;
-        self.key_scales = None;
-        self.val_scales = None;
-        self.v_packed = None;
-        self.v_norms = None;
-        self.v_rescale = None;
-        self.turbo_params = None;
+        self.mode = state.mode;
+        self.install_snapshot_sidecars(&mut buffers, state.turbo_seed);
         self.turbo_seed = state.turbo_seed;
+        // The restored buffers are shared with the snapshot, so they are not
+        // rows this cache's own last write produced.
+        self.inplace_marker = None;
         Ok(())
     }
 
@@ -7850,13 +7880,34 @@ mod rotating_truncation_tests {
     }
 
     #[test]
-    fn non_fp16_storage_is_refused() {
-        // Only FP16 is snapshot-capable; the quantized sidecars do not travel
-        // in the snapshot container, so a truncating restore has nothing to
-        // rebuild them from.
-        let mut s = state(1024, 400, 400);
-        s.mode = KVCacheMode::Int8;
-        assert!(!s.can_truncate_to(200));
+    fn the_label_does_not_decide_truncation_the_ring_does() {
+        // The ring stores plain rows under every label but an aligned
+        // `Turbo4Asym`, whose packed V is carried too (issue #3250), so the
+        // wrap rule is the whole rule whatever the label says.
+        for mode in [
+            KVCacheMode::Int8,
+            KVCacheMode::Turbo4,
+            KVCacheMode::Turbo4Delegated,
+            KVCacheMode::Turbo3Asym,
+            KVCacheMode::Turbo4Asym,
+        ] {
+            let mut unwrapped = state(1024, 400, 400);
+            unwrapped.mode = mode;
+            assert!(unwrapped.stores_snapshotable_rows(), "{mode:?}");
+            assert!(unwrapped.can_truncate_to(200), "{mode:?} unwrapped");
+            assert!(unwrapped.can_truncate_to(0), "{mode:?} to zero");
+            assert!(unwrapped.can_truncate_to(400), "{mode:?} to its own length");
+            assert!(!unwrapped.can_truncate_to(401), "{mode:?} past its length");
+            assert!(!unwrapped.can_truncate_to(-1), "{mode:?} negative");
+
+            let mut full = state(1024, 1024, 1024);
+            full.mode = mode;
+            assert!(full.can_truncate_to(1000), "{mode:?} full, not yet wrapped");
+
+            let mut wrapped = state(1024, 1500, 476);
+            wrapped.mode = mode;
+            assert!(!wrapped.can_truncate_to(1200), "{mode:?} wrapped");
+        }
     }
 
     #[test]

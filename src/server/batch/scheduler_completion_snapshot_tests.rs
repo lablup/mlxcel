@@ -55,7 +55,7 @@ fn run_request(
 
 /// [`run_request`] for a chat turn whose history boundary is `history`;
 /// also returns how many prompt tokens the request adopted.
-fn run_chat_request(
+pub(super) fn run_chat_request(
     sched: &mut BatchScheduler,
     first: &[i32],
     history: Option<&[i32]>,

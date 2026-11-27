@@ -289,10 +289,12 @@ fn a_snapshot_of_a_trimmed_first_fill_restores_and_decodes() {
     assert!(!state.can_truncate_to(299), "as before, no partial restore");
     let mut restored = RotatingKVCache::new(window);
     restored
-        .restore_fp16_snapshot_state(
+        .restore_snapshot_state(
             state,
-            Some(ffi::copy(cache.keys.as_ref().unwrap())),
-            Some(ffi::copy(cache.values.as_ref().unwrap())),
+            RotatingKVCacheSnapshotBuffers::fp16(
+                Some(ffi::copy(cache.keys.as_ref().unwrap())),
+                Some(ffi::copy(cache.values.as_ref().unwrap())),
+            ),
         )
         .expect("idx equals the stored length");
     for step in 0..10u32 {

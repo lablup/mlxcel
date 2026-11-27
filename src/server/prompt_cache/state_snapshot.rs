@@ -39,8 +39,11 @@
 
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::{hybrid_snapshot, kv_ring_checkpoint};
-use mlxcel_core::cache::{LayerState, LayerStateEncoding, LayerStateKind, LayerStateSnapshotSpec};
+use mlxcel_core::cache::{
+    KVCacheMode, LayerState, LayerStateEncoding, LayerStateKind, LayerStateSnapshotSpec,
+};
 use mlxcel_core::generate::ModelStateSnapshot;
+use mlxcel_core::layers::RotatingKVCache;
 
 /// What the generic snapshot code needs to know about a family: its snapshot
 /// vocabulary and its per-layer kinds.
@@ -380,7 +383,34 @@ impl StatePolicy {
 /// no buffer must be at offset 0 (a ring's offset counts every token it has
 /// seen, so it is not bounded by its rows). A snapshot that fails this was
 /// not written by this layer's encoder.
+///
+/// That is the layout of a layer that stores plain rows. A quantized layer
+/// (issue #3250) holds a different set of buffers, of different dtypes: an
+/// `Int8` full layer keeps scales beside int8 rows, `Turbo4Asym` has packed V
+/// and no values, symmetric `Turbo4` has neither keys nor values. Those are
+/// checked against their own mode's layout instead, by the same check the
+/// encoder ran. A sliding ring is judged by the mode it stores, since every
+/// label but an aligned `Turbo4Asym` leaves it holding plain rows.
 fn check_kv_tensors(layer: &LayerState) -> Result<(), String> {
+    match layer {
+        LayerState::Kv(cache) if cache.mode != KVCacheMode::Fp16 => {
+            let parts = cache.snapshot_parts();
+            if !parts.holds_no_rows() {
+                return parts.validate();
+            }
+            return if parts.offset > 0 {
+                Err(format!("no rows behind an offset of {}", parts.offset))
+            } else {
+                Ok(())
+            };
+        }
+        LayerState::Rotating(cache)
+            if RotatingKVCache::stored_mode(cache.max_size, cache.mode) != KVCacheMode::Fp16 =>
+        {
+            return cache.snapshot_parts().check_layout();
+        }
+        _ => {}
+    }
     let (keys, values, full_offset) = match layer {
         LayerState::Kv(cache) => (
             cache.keys.as_deref(),

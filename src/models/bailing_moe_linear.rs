@@ -1594,30 +1594,9 @@ impl BailingLinearCache {
         prefix: &str,
     ) -> Result<(), String> {
         match self {
-            Self::Attention(kv) => {
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                super::recurrent_snapshot::push_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                    kv.mode,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                    &kv.keys,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                    &kv.values,
-                );
-                Ok(())
-            }
+            // The attention + recurrent hybrids share one attention encoding,
+            // quantized modes included (issue #3250).
+            Self::Attention(kv) => super::hybrid_snapshot::snapshot_attention(kv, snapshot, prefix),
             Self::Linear(linear) => {
                 super::recurrent_snapshot::push_optional(
                     snapshot,
@@ -1635,35 +1614,7 @@ impl BailingLinearCache {
         prefix: &str,
     ) -> Result<(), String> {
         match self {
-            Self::Attention(kv) => {
-                let snapshot_mode = super::recurrent_snapshot::restore_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                )?
-                .unwrap_or(KVCacheMode::Fp16);
-                if snapshot_mode != kv.mode {
-                    return Err(format!(
-                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
-                        snapshot_mode, kv.mode
-                    ));
-                }
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                kv.keys = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                );
-                kv.values = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                );
-                kv.offset = snapshot.token_len() as i32;
-                Ok(())
-            }
+            Self::Attention(kv) => super::hybrid_snapshot::restore_attention(kv, snapshot, prefix),
             Self::Linear(linear) => {
                 linear.state = super::recurrent_snapshot::restore_optional(
                     snapshot,
