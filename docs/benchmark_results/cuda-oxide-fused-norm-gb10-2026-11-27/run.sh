@@ -53,11 +53,11 @@ lock() { # lock <purpose> <command...>
     gpu-lock run --tag "issue-2834-$purpose" -- "$@"
 }
 
-wait_runner() { # never measure while a CI job runs on this host
-    local waited=0
-    while pgrep -f Runner.Worker >/dev/null && [ "$waited" -lt 1800 ]; do
-        sleep 10
-        waited=$((waited + 10))
+wait_runner() { # never start measuring while a CI job runs on this host
+    local waited=0 limit=${RUNNER_WAIT:-1800}
+    while pgrep -f Runner.Worker >/dev/null && [ "$waited" -lt "$limit" ]; do
+        sleep 2
+        waited=$((waited + 2))
     done
     if pgrep -f Runner.Worker >/dev/null; then
         echo "run.sh: a CI job is still running after ${waited}s; refusing to measure" >&2
@@ -295,9 +295,20 @@ PY
     cat "$out"
 }
 
+# One row per stage run: when it ran, the load average around it, and whether
+# a CI job was running on the host when it ended (one can start mid-stage).
+host_state=$here/host-state.csv
+[ -f "$host_state" ] || echo "stage,started_utc,ended_utc,load1_start,load1_end,ci_job_running_at_end" >"$host_state"
 for stage in "$@"; do
     case "$stage" in
-        env | m1 | m2 | m3 | m4 | m5 | m6 | m7) "stage_$stage" ;;
+        env | m1 | m2 | m3 | m4 | m5 | m6 | m7)
+            started=$(date -u +%FT%TZ)
+            load_start=$(cut -d' ' -f1 /proc/loadavg)
+            "stage_$stage"
+            ci=false
+            pgrep -f Runner.Worker >/dev/null && ci=true
+            echo "$stage,$started,$(date -u +%FT%TZ),$load_start,$(cut -d' ' -f1 /proc/loadavg),$ci" >>"$host_state"
+            ;;
         *) echo "run.sh: unknown stage $stage" >&2; exit 2 ;;
     esac
 done
