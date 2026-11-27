@@ -58,8 +58,10 @@ impl Ernie45VlProcessor {
     fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.spatial_merge_size) as u32;
 
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
+        // The reference's `round_by_factor` uses Python's `round`, which
+        // rounds half to even.
+        let mut h = ((orig_h as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
+        let mut w = ((orig_w as f64 / factor as f64).round_ties_even() as u32).max(1) * factor;
 
         if (h * w) as usize > self.max_pixels {
             let scale = (self.max_pixels as f64 / (h * w) as f64).sqrt();
@@ -163,6 +165,21 @@ impl ImageProcessor for Ernie45VlProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expected values are the reference `smart_resize` (transformers 5.24.1
+    /// `ernie4_5_vl_moe` and mlx-vlm `ernie4_5_moe_vl`, which agree), whose
+    /// `round_by_factor` uses Python's `round`: a tie goes to the even side.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let proc = Ernie45VlProcessor::default();
+        // 854 / 28 = 30.5 -> 30; 630 / 28 = 22.5 -> 22; 350 / 28 = 12.5 -> 12.
+        assert_eq!(proc.smart_resize(480, 854), (476, 840));
+        assert_eq!(proc.smart_resize(630, 1200), (616, 1204));
+        assert_eq!(proc.smart_resize(350, 350), (336, 336));
+        // A non-tie and an odd tie (1050 / 28 = 37.5 -> 38) do not move.
+        assert_eq!(proc.smart_resize(480, 640), (476, 644));
+        assert_eq!(proc.smart_resize(700, 1050), (700, 1064));
+    }
 
     #[test]
     fn grid_is_multiple_of_merge_and_rows_are_588_wide() {

@@ -49,6 +49,33 @@ fn smart_resize_divisible_by_total_and_clamped() {
     assert!((h2 / 32) * (w2 / 32) <= 256, "over max tokens");
 }
 
+/// Expected values are transformers 5.24.1 `Lfm2VlImageProcessor.smart_resize`
+/// (and mlx-vlm `_smart_resize`, which agrees), whose `round_by_factor` uses
+/// Python's `round`: a tie goes to the even side. Upstream returns
+/// `(width, height)`; this port returns `(height, width)`.
+#[test]
+fn smart_resize_breaks_ties_to_even_like_python_round() {
+    let p = processor();
+    // 336 / 32 = 10.5 -> 10; 400 / 32 = 12.5 -> 12.
+    assert_eq!(p.smart_resize(336, 336), (320, 320));
+    assert_eq!(p.smart_resize(400, 600), (384, 608));
+    // A non-tie and the over-budget path do not move.
+    assert_eq!(p.smart_resize(480, 640), (416, 576));
+    assert_eq!(p.smart_resize(720, 1280), (384, 672));
+}
+
+/// The single-tile / split decision rounds the same way. Expected values are
+/// transformers 5.24.1 `Lfm2VlImageProcessor._is_image_too_large`.
+#[test]
+fn too_large_check_breaks_ties_to_even_like_python_round() {
+    // 720 / 32 = 22.5 -> 22: 704 * 704 stays under 256 * 32^2 * 2.0.
+    assert!(!is_image_too_large(720, 720, 16, 2, 256, 2.0));
+    // 656 / 32 = 20.5 -> 20 and 784 / 32 = 24.5 -> 24: 640 * 768 is under.
+    assert!(!is_image_too_large(656, 784, 16, 2, 256, 2.0));
+    assert!(is_image_too_large(720, 752, 16, 2, 256, 2.0));
+    assert!(is_image_too_large(688, 784, 16, 2, 256, 2.0));
+}
+
 #[test]
 fn target_tile_ratios_for_2_to_10() {
     let ratios = target_tile_ratios(2, 10);
