@@ -166,7 +166,7 @@ MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121 cargo test --
 WORK=<same> LIB=<that binary> $R/run.sh m2c                          # M2(c), correctness rerun
 ```
 
-M2(c) is the `m2c` stage: the 31 `cuda_oxide` tests of the opted-in `mlxcel-core` lib test binary (release profile), run as `gpu-lock run --tag issue-2834-finalize -- $LIB cuda_oxide --test-threads=1 --nocapture`. An earlier run of the same command, during the measurements, was quoted in this report without its output being kept; the stage was rerun at the end of the review (2026-11-27 05:22 UTC, tree at `5939da7f`, whose Rust sources are those the measurements used) and its full output is `m2c-adapter-matrix-test.log` in the results directory, with the binary's SHA-256. It is a correctness rerun and carries no timing.
+M2(c) is the `m2c` stage: the 31 `cuda_oxide` tests of the opted-in `mlxcel-core` lib test binary (release profile), run as `gpu-lock run --tag issue-2834-finalize -- $LIB cuda_oxide --test-threads=1 --nocapture`. An earlier run of the same command, during the measurements, was quoted in this report without its output being kept; the stage was rerun at the end of the review (2026-11-27 05:22 UTC, tree at `5939da7f`, whose Rust sources are those the measurements used) and `m2c-adapter-matrix.csv` in the results directory records it, reduced from the test binary's capture by `scripts/oxide_fused_norm_m2c_summarize.py`: the command, the commit, the binary's SHA-256, each test's outcome, every field of the matrix `RESULT` line and the libtest totals (the capture itself is not committed, per the results tree's no-raw-logs rule). It is a correctness rerun and carries no timing.
 
 ## Results
 
@@ -179,7 +179,7 @@ M2(c) is the `m2c` stage: the 31 `cuda_oxide` tests of the opted-in `mlxcel-core
 | M2(a) logit traces, `oxide` against `fused` | Byte-identical files in all three shapes: 256 positions of a 256-token forward, 112 width-one decode steps, 112 width-one batched decode steps over four rows. 0 top-1 disagreements, 0 on decided positions (47, 26 and 28 of them), largest logit delta 0. The logits are bf16 values, which six decimals print exactly. Each trace process printed its route: 16, 1808 and 1856 joins on the cuda-oxide route with as many launches. |
 | M2(a) controls | `fused-null` against `fused`: byte-identical. `graph` against `fused`: byte-identical too on these three traces. |
 | M2(b) greedy token ids, `oxide` against `fused` | Identical in all 6 cells and all 7 rounds; `fused` and `fused-null` identical to each other in all of them. |
-| M2(c) op boundary (31 of 31 `cuda_oxide` tests passed in 74 s; raw output in `m2c-adapter-matrix-test.log`) | `RESULT oxide-adapter-matrix cases=130 elements=2181390 failed=0 bitwise_identical_to_fused_cuda=130 nonfinite_cases=5 oxide_routes=130 launches=130 native_routes=0`. |
+| M2(c) op boundary (31 of 31 `cuda_oxide` tests passed in 74 s; recorded in `m2c-adapter-matrix.csv`) | `RESULT oxide-adapter-matrix cases=130 elements=2181390 failed=0 bitwise_identical_to_fused_cuda=130 nonfinite_cases=5 oxide_routes=130 launches=130 native_routes=0`. |
 
 G1 passes.
 

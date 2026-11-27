@@ -369,7 +369,9 @@ stage_m2c() {
     # No wait_runner: this checks outputs, it does not time anything, so a CI
     # job on the host does not affect the result.
     local lib=${LIB:?set LIB to the opted-in mlxcel_core lib test binary}
-    local out=$here/m2c-adapter-matrix-test.log
+    # The raw capture stays in WORK (raw logs are not committed under
+    # docs/benchmark_results/); the compact CSV derived from it is committed.
+    local out=$WORK/m2c-adapter-matrix-test.log
     local status=0
     {
         echo "# command: gpu-lock run --tag issue-2834-finalize -- $lib cuda_oxide --test-threads=1 --nocapture"
@@ -381,6 +383,7 @@ stage_m2c() {
     } >"$out.part"
     mv "$out.part" "$out"
     grep -E 'RESULT |^test result' "$out"
+    python3 "$repo/scripts/oxide_fused_norm_m2c_summarize.py" "$out" "$here/m2c-adapter-matrix.csv"
     return "$status"
 }
 
