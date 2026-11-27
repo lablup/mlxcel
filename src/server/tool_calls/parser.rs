@@ -393,6 +393,12 @@ fn unclosed_reasoning(text: &str, primed: bool) -> Option<(usize, usize)> {
     // The block the scan is inside: (open_at, body_at, its close marker, or
     // `None` for a primed block any family's close ends).
     let mut inside: Option<(usize, usize, Option<&str>)> = primed.then_some((0, 0, None));
+    // Next occurrence of each pair's open marker at or after the scan
+    // position, re-searched only once the scan has moved past it, so an
+    // output with many blocks is scanned once per pair rather than once per
+    // pair per block.
+    let mut next_open: [Option<Option<usize>>; THINKING_MARKER_PAIRS.len()] =
+        [None; THINKING_MARKER_PAIRS.len()];
     if !primed {
         // `strip_thinking`'s primed pass: a close before any open ends a
         // block the prompt opened.
@@ -425,8 +431,12 @@ fn unclosed_reasoning(text: &str, primed: bool) -> Option<(usize, usize)> {
             None => {
                 let (at, open, close) = THINKING_MARKER_PAIRS
                     .iter()
-                    .filter_map(|&(open, close)| {
-                        text[pos..].find(open).map(|i| (pos + i, open, close))
+                    .zip(next_open.iter_mut())
+                    .filter_map(|(&(open, close), cached)| {
+                        if cached.is_none_or(|found| found.is_some_and(|at| at < pos)) {
+                            *cached = Some(text[pos..].find(open).map(|i| pos + i));
+                        }
+                        cached.flatten().map(|at| (at, open, close))
                     })
                     .min_by_key(|&(at, open, _)| (at, std::cmp::Reverse(open.len())))?;
                 inside = Some((at, at + open.len(), Some(close)));

@@ -315,3 +315,33 @@ fn oversized_in_reasoning_block_is_released_as_reasoning() {
     assert_eq!(reasoning, format!("a<tool_call>{body}</tool_call>b"));
     assert_eq!(content, "Done.");
 }
+
+#[test]
+fn many_reasoning_blocks_are_scanned_in_linear_time() {
+    // Every closed block sends the unclosed-reasoning scan back to look for
+    // the next open marker of each family. Absent families must not be
+    // re-searched to the end of the text for every block, or a long
+    // generation of short blocks costs blocks x length x families.
+    let blocks = 200_000;
+    let mut raw = "<think>a</think>b".repeat(blocks);
+    raw.push_str("<think>need weather");
+    raw.push_str(&hermes_call("Warsaw"));
+    let started = std::time::Instant::now();
+    let parsed = parse_tool_calls_with_context(&raw, Some(&tools()), false);
+    let elapsed = started.elapsed();
+    let cities: Vec<_> = parsed
+        .tool_calls
+        .iter()
+        .map(|call| {
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap()["city"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(cities, ["Warsaw"]);
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "{blocks} blocks took {elapsed:?}"
+    );
+}
