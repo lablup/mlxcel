@@ -281,9 +281,10 @@ futures = "0.3"
 uuid = { version = "1.23", features = ["v4"] }
 # Calendar fields for the server's timestamp strings (`src/server/clock.rs`),
 # replacing the unmaintained `chrono` (RUSTSEC-2026-0543, #3266). Unix values
-# come from `std::time`. `std` only: the time zone database features can be
-# turned on when the server needs local or named time zones.
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+# come from `std::time`. `tz-system` resolves the host zone for the chat
+# template `strftime_now`; `tzdb-zoneinfo` reads the host zoneinfo database
+# on Unix and `tzdb-bundle-platform` bundles one on Windows only.
+jiff = { version = "1", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The `cors` feature is deliberately absent: #1432 replaced the tower-http

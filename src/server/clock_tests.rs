@@ -19,8 +19,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jiff::tz::{Offset, TimeZone};
+
 use super::{
-    day_month_year, is_rfc3339, rfc3339, rfc3339_seconds_z, unix_micros, unix_millis,
+    is_rfc3339, rfc3339, rfc3339_seconds_z, strftime_in, unix_micros, unix_millis,
     unix_nanos_or_zero, unix_seconds,
 };
 
@@ -128,7 +130,7 @@ fn rfc3339_uses_plus_zero_offset_and_three_six_or_nine_fraction_digits() {
 }
 
 #[test]
-fn day_month_year_pads_the_day_and_abbreviates_the_month() {
+fn strftime_day_month_year_pads_the_day_and_abbreviates_the_month() {
     for (t, expected) in [
         (at(LATE_NOV, 0), "26 Nov 2026"),
         (at(MAR_05, 0), "05 Mar 2026"),
@@ -139,7 +141,7 @@ fn day_month_year_pads_the_day_and_abbreviates_the_month() {
         (at(Y2300, 0), "01 Jan 2300"),
         (at(Y0999_END, 0), "31 Dec 0999"),
     ] {
-        assert_eq!(day_month_year(t), expected);
+        assert_eq!(strftime_in(t, &TimeZone::UTC, "%d %b %Y"), expected);
     }
     // The 15th of every month of 2026, 00:00:00Z.
     let months: Vec<String> = [
@@ -157,13 +159,46 @@ fn day_month_year_pads_the_day_and_abbreviates_the_month() {
         1_797_292_800,
     ]
     .into_iter()
-    .map(|secs| day_month_year(at(secs, 0)))
+    .map(|secs| strftime_in(at(secs, 0), &TimeZone::UTC, "%d %b %Y"))
     .collect();
     assert_eq!(
         months.join(","),
         "15 Jan 2026,15 Feb 2026,15 Mar 2026,15 Apr 2026,15 May 2026,15 Jun 2026,\
          15 Jul 2026,15 Aug 2026,15 Sep 2026,15 Oct 2026,15 Nov 2026,15 Dec 2026"
     );
+}
+
+#[test]
+fn strftime_in_applies_the_requested_format() {
+    let t = at(MAR_05, 0);
+    assert_eq!(strftime_in(t, &TimeZone::UTC, "%d %b %Y"), "05 Mar 2026");
+    assert_eq!(strftime_in(t, &TimeZone::UTC, "%Y-%m-%d"), "2026-03-05");
+    assert_eq!(
+        strftime_in(t, &TimeZone::UTC, "%B %d, %Y"),
+        "March 05, 2026"
+    );
+}
+
+#[test]
+fn strftime_in_applies_the_zone() {
+    // 2026-03-05T23:30:00Z is already 6 March at +09:00.
+    let late = at(1_772_753_400, 0);
+    assert_eq!(
+        strftime_in(late, &TimeZone::UTC, "%Y-%m-%d %H:%M"),
+        "2026-03-05 23:30"
+    );
+    let tokyo = TimeZone::fixed(Offset::from_seconds(9 * 3600).unwrap());
+    assert_eq!(
+        strftime_in(late, &tokyo, "%Y-%m-%d %H:%M"),
+        "2026-03-06 08:30"
+    );
+}
+
+#[test]
+fn strftime_in_returns_an_unsupported_format_unchanged() {
+    let t = at(MAR_05, 0);
+    assert_eq!(strftime_in(t, &TimeZone::UTC, "%J"), "%J");
+    assert_eq!(strftime_in(t, &TimeZone::UTC, "100%"), "100%");
 }
 
 #[test]
