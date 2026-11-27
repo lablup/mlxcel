@@ -2,6 +2,9 @@
 // Modified by mlxcel: the inputs of the fused paged-attention kernels do not
 // count toward the graph's byte budget, since they read only the visible pages
 // of a pool slab (lablup/mlxcel#3256).
+// Modified by mlxcel: the expert stacks of the fused decode-MoE kernels count
+// for the experts their index names, since they read only those
+// (lablup/mlxcel#3387).
 // Modified from upstream MLX fc344c986c4169d99f76b5d95ae6b4a58a359a63 mlx/backend/cuda/custom_kernel.cpp
 
 #include <iostream>
@@ -19,11 +22,75 @@
 namespace mlx::core::cu {
 // Defined in the device.cpp overlay.
 void set_input_bytes_uncounted(bool uncounted);
+void set_input_rows_read(uint64_t rows_read, uint64_t rows);
 } // namespace mlx::core::cu
 
 namespace mlx::core::fast {
 
 namespace {
+
+// [mlxcel] How much of one input of a custom kernel counts toward the graph's
+// byte budget: `rows_read` of the `rows` leading rows it holds. `{1, 1}` is
+// an input read whole, `{0, 1}` one left out.
+struct RowsRead {
+  uint64_t rows_read{1};
+  uint64_t rows{1};
+};
+
+// [mlxcel] The inputs a custom kernel reads only part of (lablup/mlxcel#3256,
+// lablup/mlxcel#3387).
+//
+// `CommandEncoder::set_input_array` counts every input at its full
+// `data_size()`, and the graph commits once the count passes the device's
+// budget (25 "MB", in fact 25 << 20 elements, on DGX Spark). A kernel that is
+// handed a whole preallocated buffer and reads only the rows an index input
+// names is charged for elements it never touches, and on DGX Spark that alone
+// cuts the graph after every such launch. Only such inputs are listed here. A
+// kernel that reads its inputs whole must stay counted in full: the budget
+// exists to bound what one graph reads.
+//
+// - `mlxcel_paged_attention*` (v1 decode, v2 partial, merge): the K and V
+//   pool slabs hold every block of a layer and the kernel reads the pages its
+//   page table names. Every input is left out, as #3256 measured it.
+// - `moe_gateup_kernel_cu`, inputs {x, indices, gate_w, gate_s, gate_b, up_w,
+//   up_s, up_b}, and `moe_down_kernel_cu`, inputs {indices, down_w, down_s,
+//   down_b, act_g, scores}: each weight, scale and bias stack holds every
+//   expert of the layer, `[E, rows, ...]`, and both bodies address a stack
+//   only as `stack + (indices[eslot] * rows + row) * width` with
+//   `eslot < K = indices.size()`, so a launch reads K of the E experts (8 of
+//   128 on Qwen3-30B-A3B). Each stack counts for K of its E experts. An index
+//   that names every expert reads the stacks whole and counts them whole, as
+//   before. `x`, `indices`, `act_g` and `scores` are read whole and counted
+//   whole.
+std::vector<RowsRead> rows_read_of_inputs(
+    const std::string& name,
+    const std::vector<array>& inputs) {
+  std::vector<RowsRead> counted(inputs.size());
+  if (name.find("mlxcel_paged_attention") != std::string::npos) {
+    counted.assign(inputs.size(), RowsRead{0, 1});
+    return counted;
+  }
+  // The index input, and the first and last stack input, of the MoE kernels.
+  size_t index = 0, first = 0, last = 0;
+  if (name.find("moe_gateup_kernel_cu") != std::string::npos &&
+      inputs.size() == 8) {
+    index = 1, first = 2, last = 7;
+  } else if (
+      name.find("moe_down_kernel_cu") != std::string::npos &&
+      inputs.size() == 6) {
+    index = 0, first = 1, last = 3;
+  } else {
+    return counted;
+  }
+  const uint64_t selected = inputs[index].size();
+  for (size_t i = first; i <= last; ++i) {
+    const auto& stack = inputs[i];
+    if (stack.ndim() == 3 && stack.shape(0) > 0) {
+      counted[i] = RowsRead{selected, static_cast<uint64_t>(stack.shape(0))};
+    }
+  }
+  return counted;
+}
 
 constexpr const char* default_header = R"(
 #include "mlx/backend/cuda/device/utils.cuh"
@@ -353,12 +420,13 @@ void CustomKernel::eval_gpu(
   // layer) as input but reads only the pages its page table names. Counting
   // the slab at full size makes the graph commit after every such launch on
   // a device with a small per-graph byte budget (DGX Spark: 25), which on
-  // Gemma 3 1B doubled the graphs per decode step (lablup/mlxcel#3256).
-  const bool paged_pool_kernel =
-      name_.find("mlxcel_paged_attention") != std::string::npos;
-  cu::set_input_bytes_uncounted(paged_pool_kernel);
-  for (const auto& in : checked_inputs) {
-    encoder.set_input_array(in);
+  // Gemma 3 1B doubled the graphs per decode step (lablup/mlxcel#3256). The
+  // fused decode-MoE kernels do the same with a layer's expert stacks
+  // (lablup/mlxcel#3387). `rows_read_of_inputs` holds the list.
+  const auto counted = rows_read_of_inputs(name_, checked_inputs);
+  for (size_t i = 0; i < checked_inputs.size(); ++i) {
+    cu::set_input_rows_read(counted[i].rows_read, counted[i].rows);
+    encoder.set_input_array(checked_inputs[i]);
   }
   cu::set_input_bytes_uncounted(false);
   for (const auto& out : outputs) {

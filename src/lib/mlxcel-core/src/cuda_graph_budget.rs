@@ -320,6 +320,52 @@ pub fn apply_cuda_graph_budget_default(model_dir: Option<&Path>) {
     let _ = APPLIED.set(record);
 }
 
+/// How many CUDA graphs this process has launched, and the two budgets that
+/// cut a graph on the default GPU device (issue #3387).
+///
+/// MLX commits the graph it is capturing after any op that takes it past
+/// either budget (`CommandEncoder::needs_commit`), and again when an eval
+/// ends. Reading `graphs_launched` before and after one eval therefore says
+/// whether a launch inside it cut the graph: a single graph means none did.
+/// The counter is process-wide, so a caller that needs an exact difference
+/// must keep other GPU work out of the measured region.
+///
+/// Used by: `cuda_graph_commit_tests`, which holds the fused decode-MoE
+/// kernels' expert stacks to the byte-budget exemption in the
+/// `custom_kernel.cpp` CUDA overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaGraphCommitStats {
+    /// Graphs launched by every encoder of the process so far.
+    pub graphs_launched: u64,
+    /// `max_ops_per_graph_`: a graph is committed once it holds more ops.
+    pub max_ops: u64,
+    /// `max_mb_per_graph_`: a graph is committed once the summed
+    /// `data_size()` of its inputs, in elements `>> 20`, exceeds this.
+    pub max_mb: u64,
+}
+
+impl CudaGraphCommitStats {
+    /// The current counters, or `None` on a build without the CUDA backend or
+    /// with no CUDA device.
+    #[must_use]
+    pub fn snapshot() -> Option<Self> {
+        let mut raw = [0u64; 3];
+        crate::ffi::cuda_graph_commit_stats(&mut raw).then_some(Self {
+            graphs_launched: raw[0],
+            max_ops: raw[1],
+            max_mb: raw[2],
+        })
+    }
+
+    /// The smallest summed input element count that cuts a graph:
+    /// `needs_commit` compares `bytes_in_graph_ >> 20` with the budget, so the
+    /// first count past it is `(max_mb + 1) << 20`.
+    #[must_use]
+    pub fn elements_that_cut_a_graph(&self) -> u64 {
+        (self.max_mb + 1) << 20
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
