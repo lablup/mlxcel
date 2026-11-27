@@ -57,6 +57,7 @@ fn tiny_qwen2_5_vl_wrapper() -> super::qwen2_5_vl::Qwen25VLModel {
         video_token_id: 30,
         vision_start_token_id: 28,
         spatial_merge_size: 1,
+        video_tokens_per_second: 2.0,
     }
 }
 
