@@ -917,11 +917,13 @@ impl From<&Path> for VideoSource {
 // ─── Helper functions ────────────────────────────────────────────────────────
 
 /// Round `value` to the nearest multiple of `factor`. Mirrors
-/// `round_by_factor` from `video_generate.py`.
+/// `round_by_factor` from `video_generate.py` (mlx-vlm `utils.py` `_round`),
+/// whose Python `round` breaks a tie towards the even neighbour: 5 frames at
+/// factor 2 is 2.5 multiples and becomes 4, not 6.
 #[inline]
 fn round_by_factor(value: f64, factor: usize) -> usize {
     let factor_f = factor as f64;
-    ((value / factor_f).round() as usize) * factor
+    ((value / factor_f).round_ties_even() as usize) * factor
 }
 
 /// Floor `value` to the nearest multiple of `factor` from below. Mirrors

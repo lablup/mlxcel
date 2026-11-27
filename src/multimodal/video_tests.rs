@@ -427,8 +427,9 @@ fn video_frame_knobs_num_frames_out_of_range_errors_before_decoding() {
     );
 
     // A count above the clip's own frame total is equally out of range, so a
-    // caller can never be handed a padded or duplicated sample.
-    let err = case(301).expect_err("an over-long frame count must be refused");
+    // caller can never be handed a padded or duplicated sample. (301 would
+    // round half to even down to 300, which fits, as in the reference.)
+    let err = case(303).expect_err("an over-long frame count must be refused");
     assert!(
         matches!(err, VideoError::Extract { .. }),
         "expected VideoError::Extract, got {err:?}"
@@ -501,6 +502,19 @@ fn smart_nframes_explicit_nframes_rounds_to_factor() {
     // Caller supplies an odd target — round to the nearest even.
     let n = smart_nframes(40, 30.0, None, Some(7)).unwrap();
     assert_eq!(n, 8);
+}
+
+#[test]
+fn smart_nframes_explicit_nframes_breaks_ties_to_even_like_python_round() {
+    // mlx-vlm `_round(n) = round(n / frame_factor) * frame_factor` with
+    // Python's half-to-even `round`: 5 / 2 = 2.5 -> 2, 9 / 2 = 4.5 -> 4.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(5)).unwrap(), 4);
+    assert_eq!(smart_nframes(40, 30.0, None, Some(9)).unwrap(), 8);
+    // Odd ties round up under both rules: 3 / 2 = 1.5 -> 2.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(3)).unwrap(), 4);
+    // A 5-frame clip asked for all 5 frames samples 4, as the reference does,
+    // instead of rounding to 6 and rejecting the request.
+    assert_eq!(smart_nframes(5, 30.0, None, Some(5)).unwrap(), 4);
 }
 
 #[test]
