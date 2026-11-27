@@ -65,8 +65,9 @@ impl DotsOcrProcessor {
         // Out of bounds the reference scales the original size, not the
         // rounded one: `beta = sqrt(h * w / max_pixels)`, then
         // `floor(h / beta / factor)` (`ceil(h * beta / factor)` under
-        // `min_pixels`).
-        let (h, w) = (h as f64, w as f64);
+        // `min_pixels`). A zero edge (the reference raises on it) is
+        // rescaled as one pixel so `beta` stays finite.
+        let (h, w) = (f64::from(h.max(1)), f64::from(w.max(1)));
         if pixels > self.max_pixels {
             let beta = (h * w / self.max_pixels as f64).sqrt();
             let floor = |x: f64| (((x / factor).floor()).max(1.0) * factor) as u32;
@@ -224,5 +225,15 @@ mod tests {
         assert_eq!(p.smart_resize(3000, 4000), (2884, 3864));
         assert_eq!(p.smart_resize(1080, 1920), (1092, 1932));
         assert_eq!(p.smart_resize(40, 60), (56, 84));
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
     }
 }

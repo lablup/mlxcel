@@ -303,6 +303,9 @@ impl Qwen2VLProcessor {
         // (`ceil(h * beta / factor)` under `min_pixels`). Rescaling the
         // rounded size instead lands on another multiple (1372x772 under
         // 1003520 pixels gives 756 rows, not 728). Operation order as upstream.
+        // A zero edge (the reference raises on it) is rescaled as one pixel,
+        // so `beta` stays finite and no edge saturates to `u32::MAX`.
+        let (orig_h, orig_w) = (orig_h.max(1), orig_w.max(1));
         let orig_area = area(u64::from(orig_h), u64::from(orig_w)) as f64;
         let (orig_h, orig_w) = (f64::from(orig_h), f64::from(orig_w));
         let factor_f = factor as f64;
@@ -814,5 +817,15 @@ mod tests {
                 "{h}x{w} -> {rh}x{rw} exceeds {cap}"
             );
         }
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = Qwen2VLProcessor::new(14, 2, 2);
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
     }
 }
