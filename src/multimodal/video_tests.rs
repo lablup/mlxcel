@@ -1597,12 +1597,13 @@ fn extract_frames_preserves_color_increment_per_frame() {
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
     // Compute the expected source-frame indices for the sampled frames.
-    // uniform_indices(50, 25) → linspace(0, 49, 25).round() = [0,2,4,...,48].
+    // uniform_indices(50, 25) → linspace(0, 49, 25).round() =
+    // [0, 2, ..., 24, 27, ..., 49]; numpy rounds the 24.5 at i = 12 to 24.
     let expected_indices: Vec<usize> = (0..frames.len())
         .map(|i| {
             let last = (TOTAL_FRAMES - 1) as f64;
             let step = last / (frames.len() as f64 - 1.0);
-            (i as f64 * step).round() as usize
+            (i as f64 * step).round_ties_even() as usize
         })
         .collect();
 
@@ -1983,6 +1984,29 @@ fn subsample_evenly_identity_when_under_cap() {
             "a clip that sampled to {count} frame(s) must pass through untouched under a cap of 16"
         );
     }
+}
+
+/// numpy's `np.linspace(0, T - 1, n).round()` rounds half to even, so a tie
+/// samples the even neighbour: `np.linspace(0, 5, 3).round()` is `[0, 2, 5]`
+/// and `np.linspace(0, 49, 25).round()` puts 24.5 on 24.
+#[test]
+fn frame_indices_round_ties_to_even_like_numpy() {
+    assert_eq!(uniform_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(evenly_spaced_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(uniform_indices(50, 25)[12], 24);
+    assert_eq!(evenly_spaced_indices(50, 25)[12], 24);
+    // Non-ties are unchanged.
+    assert_eq!(uniform_indices(12, 4), vec![0, 4, 7, 11]);
+}
+
+/// Inkling's anchor formula is `round(i * (padded - 2) / (pairs - 1))` with
+/// Python's `round` (half to even): 12 frames in 5 pairs give anchors at
+/// 0, 2.5, 5, 7.5, 10, which round to 0, 2, 5, 8, 10.
+#[test]
+fn pair_adjacent_frame_anchors_round_ties_to_even() {
+    let plan = pair_adjacent_frame_indices(12, 5).unwrap();
+    assert_eq!(plan.anchors, vec![0, 2, 5, 8, 10]);
+    assert_eq!(plan.pairs, vec![[0, 1], [2, 3], [5, 6], [8, 9], [10, 11]]);
 }
 
 #[test]

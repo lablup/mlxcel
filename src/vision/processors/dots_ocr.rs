@@ -57,8 +57,10 @@ impl DotsOcrProcessor {
     fn smart_resize(&self, h: u32, w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.merge_size) as f64; // 28
         // The reference (transformers' Qwen2-VL `smart_resize`) uses Python's
-        // `round`, which rounds half to even.
-        let round = |x: f64| ((x / factor).round_ties_even().max(1.0) * factor) as u32;
+        // `round`, which rounds half to even, and puts no floor on it: a thin
+        // edge rounding to 0 drops the area under `min_pixels`, which then
+        // rescales the original size (10x1000 gives 28x560, not 28x1008).
+        let round = |x: f64| ((x / factor).round_ties_even() * factor) as u32;
         let mut rh = round(h as f64);
         let mut rw = round(w as f64);
         let pixels = (rh as usize) * (rw as usize);
@@ -79,7 +81,10 @@ impl DotsOcrProcessor {
             rh = ceil(h * beta);
             rw = ceil(w * beta);
         }
-        (rh, rw)
+        // Deviation: with `min_pixels == 0` an edge rounding to 0 passes both
+        // checks and the reference returns a zero edge; floor it to `factor`.
+        let factor = factor as u32;
+        (rh.max(factor), rw.max(factor))
     }
 
     /// `(temporal=1, h_patches, w_patches)` per image.
@@ -235,5 +240,24 @@ mod tests {
         assert_eq!(p.smart_resize(0, 10), (28, 196));
         assert_eq!(p.smart_resize(10, 0), (196, 28));
         assert_eq!(p.smart_resize(0, 0), (56, 56));
+    }
+
+    /// A thin edge rounds to 0 in the reference's first step, so the area
+    /// falls under `min_pixels` and the original size is rescaled. Expected
+    /// values are transformers 5.16.1 `qwen2_vl` `smart_resize(10, 1000, 28,
+    /// 3136, 11289600)`: `beta = sqrt(3136 / 10000) = 0.56`, then
+    /// `ceil(10 * 0.56 / 28) = 1` and `ceil(1000 * 0.56 / 28) = 20`, so
+    /// 28x560 (a one-factor floor on the first step kept 28x1008).
+    #[test]
+    fn smart_resize_thin_edge_rescales_like_the_reference() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(10, 1000), (28, 560));
+        assert_eq!(p.smart_resize(1000, 10), (560, 28));
+        // `min_pixels == 0`: the reference returns a zero edge; one factor here.
+        let p0 = DotsOcrProcessor {
+            min_pixels: 0,
+            ..DotsOcrProcessor::default()
+        };
+        assert_eq!(p0.smart_resize(10, 1000), (28, 1008));
     }
 }
