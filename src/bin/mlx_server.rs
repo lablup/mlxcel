@@ -51,8 +51,9 @@ use mlxcel::server::{
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
-    resolve_image_only_mode, resolve_llama_model_source, start_server, superseded_model_notice,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, env_fallback_value_less_server_flags,
+    long_cli_flag_was_set, resolve_image_only_mode, resolve_llama_model_source, start_server,
+    superseded_model_notice,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -589,7 +590,7 @@ struct ServerArgs {
     /// Allow multiple sockets to bind to the same port (SO_REUSEPORT)
     ///
     /// Also reads `LLAMA_ARG_REUSE_PORT`.
-    #[arg(long = "reuse-port", env = "LLAMA_ARG_REUSE_PORT")]
+    #[arg(long = "reuse-port")]
     reuse_port: bool,
 
     /// Path to a file with a PEM-encoded SSL certificate
@@ -1202,11 +1203,15 @@ struct ServerArgs {
     _no_slots: bool,
 
     /// Enable /props endpoint
-    #[arg(long = "props", env = "LLAMA_ARG_ENDPOINT_PROPS")]
+    ///
+    /// Also reads `LLAMA_ARG_ENDPOINT_PROPS`.
+    #[arg(long = "props")]
     props: bool,
 
     /// Enable /metrics endpoint
-    #[arg(long = "metrics", env = "LLAMA_ARG_ENDPOINT_METRICS")]
+    ///
+    /// Also reads `LLAMA_ARG_ENDPOINT_METRICS`.
+    #[arg(long = "metrics")]
     metrics: bool,
 
     /// Enable authenticated GET/PATCH /v1/settings endpoints
@@ -2490,6 +2495,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         long_cli_flag_was_set("no-slots"),
         &mut startup_notices,
     );
+    env_fallback_value_less_server_flags(&mut args.metrics, &mut args.props, &mut args.reuse_port);
     env_fallback_api_keys(&mut args.api_key);
     env_fallback_api_key_files(&mut args.api_key_file);
     env_fallback_cors_credentials(
@@ -3995,6 +4001,11 @@ mod tests {
         env_fallback_draft_model(&mut args.model_draft, &mut Vec::new());
         env_fallback_log_file(&mut args.log_file, &mut Vec::new());
         env_fallback_endpoint_slots(&mut args.slots, false, false, &mut Vec::new());
+        env_fallback_value_less_server_flags(
+            &mut args.metrics,
+            &mut args.props,
+            &mut args.reuse_port,
+        );
         assert_eq!(args.batch_size, Some(111));
         assert_eq!(args.ubatch_size, Some(22));
         assert_eq!(

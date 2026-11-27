@@ -2373,7 +2373,7 @@ pub(crate) struct ServeArgs {
     /// Allow multiple sockets to bind to the same port (SO_REUSEPORT)
     ///
     /// Also reads `LLAMA_ARG_REUSE_PORT`.
-    #[arg(long = "reuse-port", env = "LLAMA_ARG_REUSE_PORT")]
+    #[arg(long = "reuse-port")]
     reuse_port: bool,
 
     /// Path to a file with a PEM-encoded SSL certificate
@@ -2488,11 +2488,15 @@ pub(crate) struct ServeArgs {
     _no_slots: bool,
 
     /// Enable /props endpoint
-    #[arg(long, env = "LLAMA_ARG_ENDPOINT_PROPS")]
+    ///
+    /// Also reads `LLAMA_ARG_ENDPOINT_PROPS`.
+    #[arg(long)]
     props: bool,
 
     /// Enable /metrics endpoint
-    #[arg(long, env = "LLAMA_ARG_ENDPOINT_METRICS")]
+    ///
+    /// Also reads `LLAMA_ARG_ENDPOINT_METRICS`.
+    #[arg(long)]
     metrics: bool,
 
     /// Enable authenticated GET/PATCH /v1/settings endpoints
