@@ -101,6 +101,7 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         | ModelType::Jamba
         | ModelType::FalconH1
         | ModelType::Lfm2
+        | ModelType::Lfm3
         | ModelType::Lfm2Moe
         | ModelType::Plamo2
         | ModelType::GraniteMoeHybrid
@@ -201,6 +202,13 @@ pub(crate) fn try_load_special_model_from_weights(
                 models::lfm2::ModelArgs,
                 models::Lfm2Model::from_weights,
                 LoadedModel::Lfm2
+            ),
+            ModelType::Lfm3 => load_owned_model_from_config!(
+                config_str,
+                weights,
+                models::lfm3::Lfm3Args,
+                models::Lfm3Model::from_weights,
+                LoadedModel::Lfm3
             ),
             ModelType::Lfm2Moe => load_owned_model_from_config!(
                 config_str,

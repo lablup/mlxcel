@@ -254,6 +254,7 @@ pub mod laguna_sanitize;
 pub mod laguna_speculative;
 pub mod lfm2;
 pub mod lfm2_embedding;
+pub mod lfm3;
 pub mod limite;
 pub(crate) mod limite_layers;
 pub mod llada2_moe;
@@ -445,6 +446,7 @@ pub use klear::KlearModel;
 pub use kolibri1::Kolibri1Model;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
+pub use lfm3::Lfm3Model;
 pub use limite::{LimiteModel, LimiteWrapper};
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
@@ -797,6 +799,7 @@ pub enum ModelType {
 
     // Liquid Foundation Models (short-conv + attention hybrid)
     Lfm2,
+    Lfm3,
     Lfm2Moe,
     Lfm2VL, // LFM2-VL (lfm2_vl): packed-patch SigLIP2 ViT + LFM2 hybrid text
 
@@ -1060,6 +1063,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::FalconH1,
     // Liquid Foundation Models
     ModelType::Lfm2,
+    ModelType::Lfm3,
     ModelType::Lfm2Moe,
     ModelType::Lfm2VL,
     ModelType::Inkling,
@@ -1352,9 +1356,13 @@ impl ModelType {
             ModelType::FalconH1 => ("Falcon-H1 (Mamba2 + Attention parallel hybrid)", "Falcon"),
 
             // ----- Liquid Foundation Models -----
-            ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "LFM2"),
-            ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "LFM2"),
-            ModelType::Lfm2VL => ("LFM2-VL (packed-patch ViT + LFM2 hybrid text)", "LFM2"),
+            ModelType::Lfm2 => ("LFM2 (short-conv + attention hybrid)", "Liquid"),
+            ModelType::Lfm3 => (
+                "LFM3 (gated full/sliding attention and short conv)",
+                "Liquid",
+            ),
+            ModelType::Lfm2Moe => ("LFM2-MoE (sigmoid-gated experts)", "Liquid"),
+            ModelType::Lfm2VL => ("LFM2-VL (packed-patch ViT + LFM2 hybrid text)", "Liquid"),
             ModelType::Inkling => (
                 "Inkling (relative-bias attention + shared-expert MoE)",
                 "Inkling",
@@ -1755,6 +1763,7 @@ mod metadata_tests {
             NemotronNAS,
             FalconH1,
             Lfm2,
+            Lfm3,
             Lfm2Moe,
             Lfm2VL,
             Inkling,

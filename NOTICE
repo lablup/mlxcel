@@ -406,3 +406,12 @@ below:
     CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
     For any questions regarding this license, please contact <license@moonshot.ai>.
+
+LFM3
+----
+
+The LFM3 text backbone in src/models/lfm3.rs derives from mlx-vlm
+(https://github.com/Blaizzy/mlx-vlm, MIT project license) and its LFM3
+module, adapted from the LFM3 checkpoint reference implementation,
+Copyright 2026 The HuggingFace Team, licensed under the Apache License,
+Version 2.0 (mlx_vlm/models/lfm3/LICENSE).

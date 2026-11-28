@@ -776,7 +776,7 @@ pub(crate) enum Cache {
 impl Cache {
     /// Copy this layer's state into `snapshot` under `prefix` (issue #1335).
     ///
-    /// Used by: Gemma 3, AFMoE, Kolibri-1.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1, LFM3.
     pub(crate) fn snapshot_into(
         &self,
         snapshot: &mut ModelStateSnapshot,
@@ -795,7 +795,7 @@ impl Cache {
 
     /// Restore this layer's state from `snapshot` under `prefix` (issue #1335).
     ///
-    /// Used by: Gemma 3, AFMoE, Kolibri-1.
+    /// Used by: Gemma 3, AFMoE, Kolibri-1, LFM3.
     pub(crate) fn restore_from(
         &mut self,
         snapshot: &ModelStateSnapshot,

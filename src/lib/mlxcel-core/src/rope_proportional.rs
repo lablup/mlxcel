@@ -26,7 +26,7 @@
 //! `fast::rope` computes `inv_freqs = 1 / freqs` internally, so those tail
 //! entries become zero phase and pass through unchanged.
 //!
-//! Used by: Gemma4
+//! Used by: Gemma4, Lfm3
 
 use crate::{
     MlxArray, UniquePtr, array_shape, compiled_proportional_rope, concatenate, copy,

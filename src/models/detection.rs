@@ -1108,6 +1108,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "jamba" => Ok(ModelType::Jamba),
         "falcon_h1" => Ok(ModelType::FalconH1),
         "lfm2" => Ok(ModelType::Lfm2),
+        "lfm3" => Ok(ModelType::Lfm3),
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
         // A directory holding only the native `mtp.safetensors` head (no

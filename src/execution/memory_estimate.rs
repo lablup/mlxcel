@@ -1373,6 +1373,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::NemotronNAS => "nemotron_nas",
         ModelType::FalconH1 => "falcon_h1",
         ModelType::Lfm2 => "lfm2",
+        ModelType::Lfm3 => "lfm3",
         ModelType::Lfm2Moe => "lfm2_moe",
         ModelType::Lfm2VL => "lfm2_vl",
         ModelType::Inkling => "inkling",

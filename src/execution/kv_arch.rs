@@ -707,6 +707,28 @@ fn classify(
     // every remaining class. Bail to "unavailable" if they cannot be parsed.
     let dims = attn_dims(text)?;
 
+    // LFM3 interleaves two attention cache lifetimes with a fixed conv tail.
+    if mt == "lfm3" {
+        let schedule = text.get("layer_types")?.as_array()?;
+        let window = get_u64(text, &["sliding_window"]).unwrap_or(256);
+        let groups = [
+            ("full_attention", None),
+            ("sliding_attention", Some(window)),
+        ]
+        .into_iter()
+        .filter_map(|(kind, window)| {
+            let layers = schedule.iter().filter(|t| t.as_str() == Some(kind)).count() as u64;
+            (layers > 0).then(|| KvGroup {
+                layers,
+                window,
+                elems_per_token: standard_elems(&dims),
+                fixed_bytes_per_token: None,
+            })
+        })
+        .collect();
+        return Some((groups, KvArchKind::Hybrid));
+    }
+
     // 3. Hybrid attention + recurrent/SSM — only attention layers hold KV.
     let n_attn = match &nemotron_h_codes {
         Some(codes) => Some(codes.iter().filter(|code| **code == "*").count() as u64),

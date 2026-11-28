@@ -577,6 +577,31 @@ fn qwen3_next_checkpoint_bytes(config: &Value) -> usize {
 
 /// The per-entry state a family carries besides its attention KV.
 fn recurrent_fixed_state_bytes(config: &Value, representative_tokens: u64) -> usize {
+    let text = text_config(config);
+    if text.get("model_type").and_then(Value::as_str) == Some("lfm3") {
+        let conv_layers = text
+            .get("layer_types")
+            .and_then(Value::as_array)
+            .map_or(0, |types| {
+                types.iter().filter(|t| t.as_str() == Some("conv")).count() as u64
+            });
+        let taps = get_u64(text, &["conv_L_cache"]).unwrap_or(7);
+        // Conv history keeps the activation dtype. Released checkpoints use
+        // bf16 (two bytes per element); a float32 stream stores four.
+        let stream_bytes = match text
+            .get("dtype")
+            .or_else(|| text.get("torch_dtype"))
+            .and_then(Value::as_str)
+        {
+            Some("float32" | "fp32" | "f32") => 4,
+            _ => 2,
+        };
+        let bytes = conv_layers
+            .saturating_mul(taps.saturating_sub(1))
+            .saturating_mul(get_u64(text, HIDDEN_SIZE_KEYS).unwrap_or(2048))
+            .saturating_mul(stream_bytes);
+        return usize::try_from(bytes).unwrap_or(usize::MAX);
+    }
     qwen3_next_fixed_state_bytes(config)
         .saturating_add(qwen4_exp_state_bytes(config, representative_tokens))
 }

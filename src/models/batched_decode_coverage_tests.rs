@@ -197,6 +197,7 @@ const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
     "Granite4VisionVLModel@src/vision/granite4_vision.rs",
     "HyV4Model@src/models/hy_v4.rs",
+    "Lfm3Model@src/models/lfm3.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
