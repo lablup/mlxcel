@@ -122,6 +122,12 @@
 // traced forward's wall time, which with a nonzero `PREFILL` measures the
 // multi-token continuation itself rather than the context pass.
 //
+// A build made with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1` also prints a
+// `# fused_norm_route` line to stderr after the trace: which implementation of
+// the fused residual join the traced forwards used (graph path, existing
+// kernel, or cuda-oxide node) and the adapter's counters (issue #2834). Other
+// builds print nothing.
+//
 // `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` requires
 // `MLXCEL_TRACE_BATCH_ROWS=1` and routes each decode step through
 // `forward_with_sequence_id`. Use it to build a scalar reference trace for a
@@ -719,6 +725,20 @@ fn main() -> Result<()> {
 fn print_mla_stats() {
     if std::env::var("MLXCEL_TRACE_MLA_STATS").as_deref() == Ok("1") {
         eprintln!("# mla_paths\t{}", mlxcel_core::mla::stats::take().summary());
+    }
+    // In a build with the cuda-oxide fused-norm adapter (#2833), say which
+    // implementation of the residual join the traced forwards used, so a trace
+    // that claims the cuda-oxide route can be checked against its counters
+    // (#2834). Other builds have no counters and print nothing.
+    if let Some(route) = mlxcel_core::fused_norm_route::fused_norm_route_snapshot() {
+        eprintln!(
+            "# fused_norm_route\t{}\toxide_routes\t{}\tnative_routes\t{}\tlaunches\t{}\tinstalled\t{}",
+            route.route(),
+            route.oxide_routes,
+            route.native_routes,
+            route.launches,
+            route.installed
+        );
     }
 }
 

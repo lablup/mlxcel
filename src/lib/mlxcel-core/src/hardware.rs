@@ -136,6 +136,30 @@ impl AppleSiliconGen {
         self.at_least(3)
     }
 
+    /// Whether a dense product of a few rows may run each row through the
+    /// one-row GEMV here, so its summation order depends on the row count.
+    ///
+    /// This is the generation half of the matmul overlay's few-row GEMV
+    /// route (`get_architecture_gen() < 15` in
+    /// `src/lib/mlxcelverse/overlays/metal/mlx/backend/metal/matmul.cpp`,
+    /// #2587): Apple GPU generations 13 and 14, which are M1 and M2. A verify
+    /// block that must match the single-token chain splits such products by
+    /// position where this is true (issue #3468).
+    ///
+    /// It reads the brand-string generation, not MLX's
+    /// `get_architecture_gen()`, and the two can differ (`MLX_METAL_GPU_ARCH`,
+    /// a chip `parse_silicon_gen` does not recognise). `Unknown` reads true,
+    /// so an unidentified Apple chip keeps the exact split (callers ask
+    /// [`HardwareCapabilities::few_row_dense_gemv`], which also requires the
+    /// Apple vendor, since CUDA and ROCm read `Unknown` too); a wrong false is caught
+    /// by the block-versus-chain probe, which then declines the drafter. It
+    /// does not read `MLXCEL_DENSE_GEMV_ROWS`: with the route disabled the
+    /// split is still exact, only slower.
+    #[inline]
+    pub fn few_row_dense_gemv(self) -> bool {
+        !self.at_least(3)
+    }
+
     /// Returns the expected Metal GPU family version (3 for M1–M4, 4 for M5+).
     ///
     /// Expressed as a rank comparison so a generation enumerated after M5
@@ -463,6 +487,20 @@ impl HardwareCapabilities {
     #[must_use]
     pub fn is_apple_silicon(&self) -> bool {
         self.silicon_gen != AppleSiliconGen::Unknown
+    }
+
+    /// Whether the Metal matmul overlay's few-row GEMV route can run here, so
+    /// a dense product's summation order depends on its row count.
+    ///
+    /// The route exists only in the Metal backend, so this needs the Apple
+    /// vendor tag as well as [`AppleSiliconGen::few_row_dense_gemv`]. CUDA and
+    /// ROCm leave `silicon_gen` at `Unknown`, which the generation predicate
+    /// reads as true; without the vendor half a verify block there would pay
+    /// the per-position split for a route it never takes. An Apple host whose
+    /// chip `parse_silicon_gen` does not recognise still answers true.
+    #[must_use]
+    pub fn few_row_dense_gemv(&self) -> bool {
+        self.vendor == GpuVendor::Apple && self.silicon_gen.few_row_dense_gemv()
     }
 }
 
@@ -1586,6 +1624,42 @@ mod tests {
         // Non-Apple and not-yet-enumerated Apple parts decline rather than
         // assume; on CUDA a K-wide verify does not amortize at all (#638).
         assert!(!AppleSiliconGen::Unknown.wide_quantized_projections());
+    }
+
+    #[test]
+    fn few_row_dense_gemv_holds_below_generation_15_and_when_unknown() {
+        // The overlay's few-row GEMV route runs on generations 13 and 14.
+        assert!(AppleSiliconGen::M1.few_row_dense_gemv());
+        assert!(AppleSiliconGen::M2.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M3.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M4.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M5.few_row_dense_gemv());
+        assert!(!AppleSiliconGen::M6.few_row_dense_gemv());
+        // An unidentified part keeps the exact per-position split.
+        assert!(AppleSiliconGen::Unknown.few_row_dense_gemv());
+    }
+
+    #[test]
+    fn few_row_dense_gemv_needs_the_metal_vendor() {
+        // CUDA and ROCm report `Unknown` for the Apple generation, and the
+        // overlay route is Metal-only, so they must not take the split.
+        for vendor in [GpuVendor::Nvidia, GpuVendor::Amd, GpuVendor::Unknown] {
+            let hw = HardwareCapabilities {
+                vendor,
+                ..Default::default()
+            };
+            assert!(!hw.few_row_dense_gemv(), "{vendor:?}");
+        }
+        let apple = |silicon_gen| HardwareCapabilities {
+            vendor: GpuVendor::Apple,
+            silicon_gen,
+            ..Default::default()
+        };
+        assert!(apple(AppleSiliconGen::Unknown).few_row_dense_gemv());
+        assert!(apple(AppleSiliconGen::M1).few_row_dense_gemv());
+        assert!(apple(AppleSiliconGen::M2).few_row_dense_gemv());
+        assert!(!apple(AppleSiliconGen::M3).few_row_dense_gemv());
+        assert!(!apple(AppleSiliconGen::M5).few_row_dense_gemv());
     }
 
     #[test]

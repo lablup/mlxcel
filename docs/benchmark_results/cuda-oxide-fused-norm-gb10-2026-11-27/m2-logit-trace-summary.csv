@@ -1,0 +1,13 @@
+shape,arm,route_line,trace_sha256,positions
+prefill256,graph,# fused_norm_route graph oxide_routes 0 native_routes 0 launches 0 installed false,8febe80224050c280a74f6eb464a9c48a42f57ae491749c7d365f949cc36dc56,256
+prefill256,fused,# fused_norm_route fused oxide_routes 0 native_routes 16 launches 0 installed false,8febe80224050c280a74f6eb464a9c48a42f57ae491749c7d365f949cc36dc56,256
+prefill256,fused-null,# fused_norm_route fused oxide_routes 0 native_routes 16 launches 0 installed false,8febe80224050c280a74f6eb464a9c48a42f57ae491749c7d365f949cc36dc56,256
+prefill256,oxide,# fused_norm_route oxide oxide_routes 16 native_routes 0 launches 16 installed true,8febe80224050c280a74f6eb464a9c48a42f57ae491749c7d365f949cc36dc56,256
+decode-b1,graph,# fused_norm_route graph oxide_routes 0 native_routes 0 launches 0 installed false,cf8caa354827e822cbfd5bb0c3d9bee631ce827f96c22643ef0bfefddbe133b1,112
+decode-b1,fused,# fused_norm_route fused oxide_routes 0 native_routes 1808 launches 0 installed false,cf8caa354827e822cbfd5bb0c3d9bee631ce827f96c22643ef0bfefddbe133b1,112
+decode-b1,fused-null,# fused_norm_route fused oxide_routes 0 native_routes 1808 launches 0 installed false,cf8caa354827e822cbfd5bb0c3d9bee631ce827f96c22643ef0bfefddbe133b1,112
+decode-b1,oxide,# fused_norm_route oxide oxide_routes 1808 native_routes 0 launches 1808 installed true,cf8caa354827e822cbfd5bb0c3d9bee631ce827f96c22643ef0bfefddbe133b1,112
+decode-b4,graph,# fused_norm_route graph oxide_routes 0 native_routes 0 launches 0 installed false,f5e8fe1f13982411e403efc0b2d306090c4633b6575c80d34958c0abaa6e2f6f,112
+decode-b4,fused,# fused_norm_route fused oxide_routes 0 native_routes 1856 launches 0 installed false,f5e8fe1f13982411e403efc0b2d306090c4633b6575c80d34958c0abaa6e2f6f,112
+decode-b4,fused-null,# fused_norm_route fused oxide_routes 0 native_routes 1856 launches 0 installed false,f5e8fe1f13982411e403efc0b2d306090c4633b6575c80d34958c0abaa6e2f6f,112
+decode-b4,oxide,# fused_norm_route oxide oxide_routes 1856 native_routes 0 launches 1856 installed true,f5e8fe1f13982411e403efc0b2d306090c4633b6575c80d34958c0abaa6e2f6f,112

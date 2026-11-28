@@ -48,6 +48,11 @@ fn verify_block_vs_chain_per_visit() {
     let _ = crate::execution::runtime::initialize_runtime();
     let (model, _) = Inkling2Model::load(&path).unwrap();
     report(&model, &path, width, verify);
+    // The verdict the DSpark gate reads (`dflash_exactness_allows`).
+    println!(
+        "probe_block_chain_exactness({width}): {:?}",
+        model.probe_block_chain_exactness(width)
+    );
 }
 
 /// The same comparison on the synthetic model of `tiny_tests`.
