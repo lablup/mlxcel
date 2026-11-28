@@ -117,7 +117,7 @@ const MAGIC: &[u8; 8] = b"MLXCAUTH";
 /// verdict authenticator `tag_v` to the verdict byte (#2714), so a version-4
 /// client would read a 1-byte verdict where a 33-byte record is sent. Mixed
 /// versions are unsupported (discovery beacons and stage assignments already
-/// pin `CARGO_PKG_VERSION`), so v0.9.0-beta.1 and v0.9.0-beta.2 cannot share
+/// pin `CARGO_PKG_VERSION`), so v0.9.0-beta.2 and v0.9.0-beta.3 cannot share
 /// a cluster.
 pub const PROTOCOL_VERSION: u16 = 5;
 const NONCE_LEN: usize = 32;

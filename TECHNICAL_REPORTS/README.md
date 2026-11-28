@@ -35,7 +35,7 @@ A report belongs to the minor line of the first release that contains its PR.
 For a new report, that is the `MAJOR.MINOR` of the workspace `version` in the root `Cargo.toml` on the PR's base branch:
 
 ```bash
-grep -m1 '^version' Cargo.toml   # version = "0.9.0-beta.2"  ->  TECHNICAL_REPORTS/0.9/
+grep -m1 '^version' Cargo.toml   # version = "0.9.0-beta.3"  ->  TECHNICAL_REPORTS/0.9/
 ```
 
 This holds across the release cycle because the version only moves forward. While `0.9.0-beta.N` is the version, the PR ships in a 0.9 pre-release or in `0.9.0`. After `v0.9.0` is tagged and before the next bump, the PR ships in `0.9.1` at the latest, which is still `0.9/`. Once release preparation bumps the version to `0.10.0-beta.1`, new reports go to `0.10/`. Create the folder with the first report filed there.
