@@ -1,6 +1,6 @@
 # CUDA fused add+RMSNorm made byte-identical to the graph, GB10, 2026-11-28 (issue #3510)
 
-After #3510 the CUDA fused residual-add + RMSNorm kernel (`MLXCEL_FUSED_ADD_RMSNORM=1`), the regenerated cuda-oxide artifact and the default `add` + `fast_rms_norm` pair produce the same bytes. This directory holds the rows behind that statement and the kernel time after the change. Host `spark-101` (NVIDIA GB10, sm_121, driver 580.178.04, kernel 7.0.0-1019-nvidia), `MLXCEL_CUDA_ARCHITECTURES=121`, MLX pin `fc344c986c4169d99f76b5d95ae6b4a58a359a63`, one release build made with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1`, checkpoint `llama-3.2-1b-instruct-bf16`. Every GPU command ran under `gpu-lock`. The host is also a self-hosted CI runner and a CI job was running during the correctness runs; the kernel-time stage waits for the runner to be idle (see Kernel time).
+After #3510 the CUDA fused residual-add + RMSNorm kernel (`MLXCEL_FUSED_ADD_RMSNORM=1`), the regenerated cuda-oxide artifact and the default `add` + `fast_rms_norm` pair produce the same bytes. This directory holds the rows behind that statement and the kernel time after the change. Host `spark-101` (NVIDIA GB10, sm_121, driver 580.178.04, kernel 7.0.0-1019-nvidia), `MLXCEL_CUDA_ARCHITECTURES=121`, MLX pin `fc344c986c4169d99f76b5d95ae6b4a58a359a63`, one release build made with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1`, checkpoint `llama-3.2-1b-instruct-bf16`. Every GPU command ran under `gpu-lock`. The binaries were built from the sources of commit `2e9c078d7`. The host is also a self-hosted CI runner, and CI jobs ran during the correctness runs and during part of the kernel-time stage (see Kernel time).
 
 Before the change the same commands gave two digests on two of the six cells and a one or two ulp `normed` difference on 2 of 2048 prefill rows: [`cuda-oxide-fused-norm-gb10-2026-11-27/`](../cuda-oxide-fused-norm-gb10-2026-11-27/) and [`issue-3501-fused-norm-divergence-gb10-2026-11-28/`](../issue-3501-fused-norm-divergence-gb10-2026-11-28/README.md). Those directories are left as measured.
 
@@ -60,3 +60,53 @@ The cuda-oxide artifact was regenerated from the same contract: PTX SHA-256 `ed4
 The fused arms now generate 128 tokens at B=1 / 128, where they stopped after 98. Route counters per pass: `graph` 0 native and 0 oxide joins; `fused` and `fused-null` 2048 native joins at B=1 (2080 and 2096 at B=4) and 0 oxide; `oxide` the same counts on the cuda-oxide route with as many launches and 0 native.
 
 The probe, teacher-forced on the graph arm's tokens with `--dump-layers 0`: `--compare graph/step0 fused/step0` reports the dumps byte-identical on all 82 tensors (`dump-compare-prefill.csv`), and `--op-diff` reports 0 differing elements of `new_residual` and `normed` on all 16 layers, on the fused arm's dump and on the graph arm's (`op-diff-prefill.csv`).
+
+## Kernel time
+
+The #2834 M4 method, unchanged: `cuda-oxide-fused-norm-gb10-2026-11-27/run.sh m4`, that is `nsys --trace=cuda`, the standalone driver-API program, and `oxide_fused_norm_bench --mode iso` through MLX with `MLX_USE_CUDA_GRAPHS=0`, three captures each, 821 launches per capture and shape standalone and 1100 through MLX. bf16 activations and weight, width 2048. Median of the three capture medians in µs; "before" is `cuda-oxide-fused-norm-gb10-2026-11-27/m4-nsys-kernels.csv`, first set, same host and method. Graphs off is not the production mode, so these are kernel durations, not throughput.
+
+| Rows | Model step | Fused kernel through MLX, before (block 512) | after (block 128) | Change | cuda-oxide through MLX, before | after | Change | Graph path after: `binary_vv` + `rms_norm_small` (block 128) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | decode, B=1 | 2.21 | 3.39 | +53 % | 2.14 | 4.06 | +90 % | 1.02 + 1.44 |
+| 4 | decode, B=4 | 2.59 | 3.90 | +51 % | 2.21 | 4.06 | +84 % | 1.47 + 1.44 |
+| 128 | prefill 128, B=1 | 6.53 | 12.74 | +95 % | 6.69 | 12.80 | +91 % | 1.66 + 1.92 |
+| 512 | prefill 128, B=4 | 24.13 | 43.94 | +82 % | 24.26 | 43.71 | +80 % | 4.48 + 3.94 |
+| 2048 | prefill 2048, B=1 | 139.68 | 185.50 | +33 % | 139.74 | 182.83 | +31 % | 114.62 + 31.58 |
+
+Standalone, the cuda-oxide kernel reads 4.03, 4.06, 11.58, 41.89 and 179.90 µs at the five shapes, against 2.14, 2.18, 6.40, 24.61 and 120.77 µs before.
+
+The fused kernel is slower after the change: 1.3 to 2 times the earlier kernel time at every shape. The cause is the geometry the identity needs. At width 2048 the kernel used to spread a row over 512 threads of four elements and now uses MLX's 128 threads of sixteen, and it still reads elements one at a time and reads `new_residual` back for the second pass, where `rms_norm_small` loads 16-byte vectors and keeps the row in registers. `rms_norm_small` itself takes 1.4 to 32 µs with the same 128-thread block, so the block width is not what costs the time; the scalar loads and the second read at that width are the likely cause, and that was not isolated. The graph path's two kernels now take less time than the fused kernel at every shape (2.5 against 3.4 µs at one row, 146 against 186 µs at 2048 rows).
+
+Two controls bound the noise. The graph path's kernels, which this change does not touch, read the same as on 2026-11-27 (`binary_vv` 1.02, 1.47, 1.66, 4.48, 114.62 against 1.02, 1.47, 1.66, 4.48, 114.05; `rms_norm_small` 1.44, 1.44, 1.92, 3.94, 31.58 against 1.44, 1.44, 1.95, 4.03, 30.27), and the three captures of each fused row agree within 5 %. A CI job was running when the stage ended and other GPU jobs held `gpu-lock` between its captures, so the stage was not repeated on an idle host; the unchanged controls are the reason the changes are attributed to the kernel.
+
+End to end the cost does not show at this model size: in the one round of `end-to-end-cells.csv` the fused arm decodes within 1.5 % of the graph arm in every cell (for example 91.6 against 92.0 tok/s at CLI B=1 / 128). One round under a CI job is not a throughput measurement and no claim is made from it. `MLXCEL_FUSED_ADD_RMSNORM` stays off by default on CUDA; with this kernel time there is no shape here at which opting in is faster than the graph path.
+
+The spike's own harness (`spike/cuda-oxide-fused-norm/results/bench-sm_121.json`, CUDA events around 200 back-to-back launches) shows the same direction on wide single rows, for example bf16 1 x 8192 at 17.3 µs and 64 x 8192 at 28.6 µs. The earlier file read 6.2 and 18.5 µs, but it was recorded on another GB10 (`spark-d9e2`), so that pair is not a same-host comparison.
+
+## Not covered
+
+- One host and one architecture (GB10, sm_121). The identity rests on NVRTC and MLX's nvcc build contracting the same FMA and on the same `rsqrt`; another CUDA architecture or toolkit was not run. `cuda_byte_identity` fails there if it does not hold.
+- Metal: the parity tests were not run on Metal. The Metal body, its threadgroup rule and its template arguments are unchanged in the diff.
+- Compute Sanitizer was not rerun on the regenerated artifact.
+- A faster fused kernel with the same summation order (vector loads, the row kept in registers, as `rms_norm_small` does) was not attempted.
+
+## Reproduce
+
+```bash
+export MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1 MLXCEL_CUDA_ARCHITECTURES=121
+cargo test --release -p mlxcel-core --lib --features cuda --no-run
+cargo build --release -p mlxcel-core --features cuda --example oxide_fused_norm_bench
+cargo build --release --features cuda --example oxide_fused_norm_checkpoint_bench --example fused_norm_divergence_probe
+T=target/release/deps/mlxcel_core-<hash>; P=target/release/examples/fused_norm_divergence_probe; M=models/llama-3.2-1b-instruct-bf16; O=/tmp/issue-3510
+gpu-lock run --tag issue-3510 -- $T fused_norm_parity_tests --test-threads=1
+gpu-lock run --tag issue-3510 -- $T cuda_oxide --test-threads=1 --nocapture
+python3 scripts/oxide_fused_norm_rounds.py run --model $M --rounds 1 --tag issue-3510-e2e --out $O/end-to-end.csv
+# graph-tokens.txt: first_row_tokens of the graph arm, CLI B=1 / 128
+env -u MLXCEL_FUSED_ADD_RMSNORM gpu-lock run --tag issue-3510 -- $P --model $M --tokens graph-tokens.txt --dump-layers 0 --expect-route graph --out $O/graph
+MLXCEL_FUSED_ADD_RMSNORM=1 gpu-lock run --tag issue-3510 -- $P --model $M --tokens graph-tokens.txt --dump-layers 0 --expect-route fused --out $O/fused
+$P --compare $O/graph/step0 $O/fused/step0
+gpu-lock run --tag issue-3510 -- $P --model $M --op-diff $O/fused/step0 --out $O/opdiff
+WORK=$O/work SET=-issue3510 docs/benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27/run.sh m4
+```
+
+The last command writes `m4-nsys-*-issue3510.csv` and a `host-state.csv` row into the 2026-11-27 directory; the two CSVs were moved here and the row was not kept.
