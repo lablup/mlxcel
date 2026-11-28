@@ -77,11 +77,9 @@ impl AttentionResidual {
         // position runs alone, at its decode step's shapes. Generation 15
         // and later have no such route, the block already matched the chain
         // there (M3 Ultra), and the split costs a verify round several
-        // percent, so they keep the single mix.
-        if mlxcel_core::hardware::get_hardware()
-            .silicon_gen
-            .few_row_dense_gemv()
-        {
+        // percent, so they keep the single mix. CUDA and ROCm have no such
+        // route and keep it too.
+        if mlxcel_core::hardware::get_hardware().few_row_dense_gemv() {
             mlxcel_core::row_invariant::per_position(&states, |states| self.mix(states))
         } else {
             self.mix(&states)

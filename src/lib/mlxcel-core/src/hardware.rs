@@ -149,7 +149,9 @@ impl AppleSiliconGen {
     /// It reads the brand-string generation, not MLX's
     /// `get_architecture_gen()`, and the two can differ (`MLX_METAL_GPU_ARCH`,
     /// a chip `parse_silicon_gen` does not recognise). `Unknown` reads true,
-    /// so an unidentified chip keeps the exact split; a wrong false is caught
+    /// so an unidentified Apple chip keeps the exact split (callers ask
+    /// [`HardwareCapabilities::few_row_dense_gemv`], which also requires the
+    /// Apple vendor, since CUDA and ROCm read `Unknown` too); a wrong false is caught
     /// by the block-versus-chain probe, which then declines the drafter. It
     /// does not read `MLXCEL_DENSE_GEMV_ROWS`: with the route disabled the
     /// split is still exact, only slower.
@@ -485,6 +487,20 @@ impl HardwareCapabilities {
     #[must_use]
     pub fn is_apple_silicon(&self) -> bool {
         self.silicon_gen != AppleSiliconGen::Unknown
+    }
+
+    /// Whether the Metal matmul overlay's few-row GEMV route can run here, so
+    /// a dense product's summation order depends on its row count.
+    ///
+    /// The route exists only in the Metal backend, so this needs the Apple
+    /// vendor tag as well as [`AppleSiliconGen::few_row_dense_gemv`]. CUDA and
+    /// ROCm leave `silicon_gen` at `Unknown`, which the generation predicate
+    /// reads as true; without the vendor half a verify block there would pay
+    /// the per-position split for a route it never takes. An Apple host whose
+    /// chip `parse_silicon_gen` does not recognise still answers true.
+    #[must_use]
+    pub fn few_row_dense_gemv(&self) -> bool {
+        self.vendor == GpuVendor::Apple && self.silicon_gen.few_row_dense_gemv()
     }
 }
 
@@ -1621,6 +1637,29 @@ mod tests {
         assert!(!AppleSiliconGen::M6.few_row_dense_gemv());
         // An unidentified part keeps the exact per-position split.
         assert!(AppleSiliconGen::Unknown.few_row_dense_gemv());
+    }
+
+    #[test]
+    fn few_row_dense_gemv_needs_the_metal_vendor() {
+        // CUDA and ROCm report `Unknown` for the Apple generation, and the
+        // overlay route is Metal-only, so they must not take the split.
+        for vendor in [GpuVendor::Nvidia, GpuVendor::Amd, GpuVendor::Unknown] {
+            let hw = HardwareCapabilities {
+                vendor,
+                ..Default::default()
+            };
+            assert!(!hw.few_row_dense_gemv(), "{vendor:?}");
+        }
+        let apple = |silicon_gen| HardwareCapabilities {
+            vendor: GpuVendor::Apple,
+            silicon_gen,
+            ..Default::default()
+        };
+        assert!(apple(AppleSiliconGen::Unknown).few_row_dense_gemv());
+        assert!(apple(AppleSiliconGen::M1).few_row_dense_gemv());
+        assert!(apple(AppleSiliconGen::M2).few_row_dense_gemv());
+        assert!(!apple(AppleSiliconGen::M3).few_row_dense_gemv());
+        assert!(!apple(AppleSiliconGen::M5).few_row_dense_gemv());
     }
 
     #[test]
