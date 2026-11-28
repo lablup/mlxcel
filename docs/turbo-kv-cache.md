@@ -198,7 +198,7 @@ quality gate in the same change.
 
 Some families do not use the homogeneous `&mut [KVCache]` slice handed to `forward`; they keep heterogeneous attention, sliding-window, recurrent, or convolutional state inside the model wrapper. The CLI generator and server scheduler resolve the effective per-layer KV-mode table once (including Boundary-V and `--kv-bits` / batch-KV policy) and inject that table into model-owned attention-cache constructors too. The CLI banner and server startup log report the effective mode and `applied to N of M layers`, and `GET /v1/cache/stats` includes `kv_cache_mode_effective`.
 
-Attention KV caches owned by Gemma 3, AFMoE, Gemma 4 text/VLM/Unified, Qwen 3.5 text/MoE/VLM, Qwen3-Next, Bailing MoE Linear, LFM2/LFM2-VL, and the regular-attention arms of Llama 4 use the injected mode for their layer index and fall back to FP16 only when no table is available. Recurrent, convolutional, and gated-delta state is not a KV tensor and remains unchanged. For families that donate full model-state snapshots, non-FP16 attention KV modes are deliberately fail-closed for snapshot serialization today: the model logs a warning that names the mode (for example `cache mode Turbo4Asym is not supported by model-state snapshots`) and skips donating that snapshot rather than storing a partial or mislabeled state. An empty quantized layer, such as a KV-shared layer that never populates its own cache, is skipped without an error. The mode is still applied to live attention layers and reported as the effective mode.
+Attention KV caches owned by Gemma 3, AFMoE, Gemma 4 text/VLM/Unified, Qwen 3.5 text/MoE/VLM, Qwen3-Next, Bailing MoE Linear, LFM2/LFM2-VL, and the regular-attention arms of Llama 4 use the injected mode for their layer index and fall back to FP16 only when no table is available. Recurrent, convolutional, and gated-delta state is not a KV tensor and remains unchanged. For families that donate full model-state snapshots, a snapshot carries the quantized state of an attention layer in `int8`, `fp16+turbo4` and `turbo4`, so prompt-cache prefix reuse works under those modes (#3250). A sliding-window layer is judged by what its ring stores, not by the configured mode: it holds plain rows under every mode except `fp16+turbo4` on a window that is a multiple of 32, where its packed V is stored too. `turbo4-delegated` and `fp16+turbo3` on a full-attention layer are still not stored. For those the server warns once at startup that prefix reuse is disabled for the model, naming the mode, and each skipped donation is counted as `kv_mode_not_snapshotable` in `GET /v1/cache/stats` and `mlxcel_prompt_cache_reject_total`. An empty quantized layer, such as a KV-shared layer that never populates its own cache, is skipped without an error. The mode is still applied to live attention layers and reported as the effective mode.
 
 Llama 4 `ChunkedKVCache` layers remain FP16. They do not yet have quantized sidecar storage, and the wrapper warns once when a non-FP16 table would otherwise apply to those chunked layers. Muse Glimmer still rejects non-FP16 modes at startup rather than silently running a partial mode.
 
@@ -442,16 +442,42 @@ ring buffer back, so no pad key survives the next decode step) and keeps the
 aligned path. Gemma 4, AFMoE and Llama 4 do not implement it yet and answer
 `supports_padded_prefill()` with `false`. Pool-backed families are unaffected.
 
-Snapshot reuse is deliberately conservative with quantized attention caches.
-Every family listed above serializes FP16 model-owned attention KV state only;
-if a live layer is configured for Int8 or Turbo mode, the shared serializer
-refuses donation and restoration with an explicit error rather than copying only
-`keys`/`values` and restoring them as FP16. Restores also compare the serialized
-snapshot mode with the live per-layer table, so a snapshot captured under a
-different KV mode falls back to cold prefill instead of corrupting the cache.
-`ChunkedKVCache` has no quantized variant, so its Llama 4 layers are FP16 by
-construction and the quantized-mode request is warned about once at cache
-construction instead.
+A snapshot carries a quantized attention cache as the buffers its mode holds
+(#3250), not as FP16. A full-attention `KVCache` stores, beside its mode tag:
+
+| Mode | Stored buffers |
+|---|---|
+| `fp16` | `keys`, `values` (unchanged) |
+| `int8` | int8 `keys` and `values`, `key_scales`, `val_scales` |
+| `fp16+turbo4` | FP16 `keys`, `v_packed`, `v_norms`, `v_rescale` |
+| `turbo4` | `k_packed`, `k_norms`, `v_packed`, `v_norms`, `v_rescale` |
+
+The quantized modes also store the cache's Turbo seed and live-window start. A
+restore validates the whole set against the mode (presence, rank, dtype, packed
+width, and that every buffer covers the stored length) before it assigns
+anything, so a snapshot that lacks a buffer falls back to a cold prefill with
+the cache untouched. The truncation rules above hold for the quantized modes as
+they do for FP16: each token is quantized on its own, so a full-attention layer
+truncates to any earlier length, except after a front trim (`--max-kv-size`),
+when the rows a shorter prefix starts with are gone.
+
+A sliding-window `RotatingKVCache` follows the mode its ring stores. Under
+`int8`, `turbo4`, `turbo4-delegated` and `fp16+turbo3` the ring holds plain
+rows, so its snapshot is an FP16 ring snapshot that keeps the configured mode
+as a label; before #3250 that label alone refused the snapshot. Under
+`fp16+turbo4` on a window that is a multiple of 32 the ring holds packed V and
+stores `v_packed`, `v_norms` and `v_rescale` beside its keys. Either way it
+truncates only while the ring is unwrapped.
+
+`turbo4-delegated` (a hot and a cold V) and `fp16+turbo3` (3-bit packing) on a
+full-attention layer are not stored. A model with such a layer donates nothing:
+the server warns once at startup, and each skipped donation is counted under
+`kv_mode_not_snapshotable` rather than `empty_set`. Restores also compare the
+serialized snapshot mode with the live per-layer table, so a snapshot captured
+under a different KV mode falls back to cold prefill instead of corrupting the
+cache. `ChunkedKVCache` has no quantized variant, so its Llama 4 layers are
+FP16 by construction and the quantized-mode request is warned about once at
+cache construction instead.
 
 The snapshot bucket has its own byte cap, entry cap, TTL, LRU counters, and
 hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while

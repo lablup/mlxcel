@@ -171,3 +171,7 @@ pub(crate) fn restore_rotating_from_checkpoint(
 #[cfg(test)]
 #[path = "kv_ring_checkpoint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kv_ring_checkpoint_quantized_tests.rs"]
+mod quantized_tests;

@@ -1428,10 +1428,16 @@ impl Cache {
     /// leaves it fresh, so any per-layer operation that follows a restore has
     /// to tolerate an empty cache rather than assume a populated one.
     ///
+    /// A full-attention layer is asked about every buffer, not about `keys`
+    /// alone: under symmetric `Turbo4` it holds K packed and has no `keys`,
+    /// and reading that as "empty" would skip the truncation of a populated
+    /// layer and leave it covering the whole snapshot (issue #3250). A ring
+    /// keeps `keys` in both layouts it can hold.
+    ///
     /// Used by: Gemma 4 [`Self::truncate_to`].
     pub(crate) fn is_populated(&self) -> bool {
         match self {
-            Self::Standard(cache) => cache.keys.is_some(),
+            Self::Standard(cache) => !cache.snapshot_parts().holds_no_rows(),
             Self::Rotating(cache) => cache.keys.is_some(),
         }
     }
@@ -7810,14 +7816,17 @@ mod gemma4_unified_mask_tests {
         );
     }
 
-    /// Prompt-cache donation under `--kv-cache-mode fp16+turbo4` must say why
-    /// it skips: the mode. `Turbo4Asym` keeps V in `v_packed`, so a populated
-    /// cache holds keys and no values, and `snapshot_into` used to report "has
-    /// only one of keys/values" because it checked the pairing before the mode
-    /// (issue #2422). Both cache kinds Gemma 4 donates go through the same
-    /// `Cache::snapshot_into` call as `snapshot_sequence_state`.
+    /// Prompt-cache donation under `--kv-cache-mode fp16+turbo4` is decided by
+    /// the mode, not by what the mode leaves in `keys` and `values`.
+    /// `Turbo4Asym` keeps V in `v_packed`, so a populated cache holds keys and
+    /// no values, and `snapshot_into` used to report "has only one of
+    /// keys/values" because it checked the pairing before the mode (issue
+    /// #2422). Since issue #3250 that state is donated, packed V included,
+    /// for both cache kinds Gemma 4 holds; they go through the same
+    /// `Cache::snapshot_into` call as `snapshot_sequence_state`. A mode that
+    /// is still not carried is refused by name.
     #[test]
-    fn turbo4_snapshot_donation_names_the_mode() {
+    fn turbo4_snapshot_donation_is_decided_by_the_mode() {
         use mlxcel_core::cache::KVCacheMode;
         const H: i32 = 2;
         const D: i32 = 64;
@@ -7833,14 +7842,7 @@ mod gemma4_unified_mask_tests {
             mlxcel_core::astype(&arr, mlxcel_core::dtype::BFLOAT16)
         }
 
-        let mut caches = [
-            Cache::Rotating(RotatingKVCache::new_with_mode(
-                WINDOW,
-                KVCacheMode::Turbo4Asym,
-            )),
-            Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Asym)),
-        ];
-        for cache in caches.iter_mut() {
+        fn fill(cache: &mut Cache) {
             let _ = match cache {
                 Cache::Rotating(cache) => {
                     cache.update_and_fetch(bf16_tensor(0.0), bf16_tensor(1.0))
@@ -7851,23 +7853,64 @@ mod gemma4_unified_mask_tests {
             };
         }
 
-        for (idx, cache) in caches.iter().enumerate() {
+        let mut caches = [
+            (
+                "rotating",
+                Cache::Rotating(RotatingKVCache::new_with_mode(
+                    WINDOW,
+                    KVCacheMode::Turbo4Asym,
+                )),
+            ),
+            (
+                "standard",
+                Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Asym)),
+            ),
+        ];
+        for (idx, (kind, cache)) in caches.iter_mut().enumerate() {
+            fill(cache);
+            let prefix = format!("layer{idx}");
+            let mut snapshot = ModelStateSnapshot::new("gemma4", TOKENS as usize);
+            cache
+                .snapshot_into(&mut snapshot, &prefix)
+                .unwrap_or_else(|error| {
+                    panic!("{prefix}: a Turbo4Asym {kind} cache is donated: {error}")
+                });
+            assert!(
+                snapshot.tensor(&format!("{prefix}.{kind}.keys")).is_some()
+                    && snapshot
+                        .tensor(&format!("{prefix}.{kind}.v_packed"))
+                        .is_some(),
+                "{prefix}: the snapshot holds the keys and the packed values"
+            );
+            assert!(
+                snapshot
+                    .tensor(&format!("{prefix}.{kind}.values"))
+                    .is_none(),
+                "{prefix}: Turbo4Asym holds no FP16 values to store"
+            );
+        }
+
+        for (mode, name) in [
+            (KVCacheMode::Turbo4Delegated, "Turbo4Delegated"),
+            (KVCacheMode::Turbo3Asym, "Turbo3Asym"),
+        ] {
+            let mut cache = Cache::Standard(KVCache::new_with_mode(mode));
+            fill(&mut cache);
             let mut snapshot = ModelStateSnapshot::new("gemma4", TOKENS as usize);
             let error = cache
-                .snapshot_into(&mut snapshot, &format!("layer{idx}"))
-                .expect_err("a populated Turbo4Asym cache must not be donated");
+                .snapshot_into(&mut snapshot, "layer0")
+                .expect_err("a mode a snapshot does not carry must not be donated");
             assert!(
-                error.contains("Turbo4Asym")
-                    && error.contains("not supported by model-state snapshots"),
-                "layer{idx}: the skip reason must name the mode, got: {error}"
+                error.contains(name) && error.contains("not supported by model-state snapshots"),
+                "{name}: the skip reason must name the mode, got: {error}"
             );
             assert!(
                 !error.contains("only one of keys/values"),
-                "layer{idx}: misleading skip reason: {error}"
+                "{name}: misleading skip reason: {error}"
             );
             assert!(
                 snapshot.is_empty(),
-                "layer{idx}: a refused snapshot stores nothing"
+                "{name}: a refused snapshot stores nothing"
             );
         }
 

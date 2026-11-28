@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Prompt-cache prefix reuse with a quantized KV cache** (#3250). Families that reuse prefixes through model-state snapshots (Gemma 3, Gemma 4, AFMoE, Kolibri-1, Llama 4, Qwen 3.5, Qwen3-Next, Qwen4-Exp, LFM2, Bailing MoE Linear) stored nothing once the server ran with a non-FP16 KV mode, so every turn prefilled its whole prompt (`snapshot_inserts=0`, `last_reject_reason=empty_set`). A snapshot now carries the quantized state of a full-attention layer in `int8`, `fp16+turbo4` and `turbo4` (int8 rows with their scales, or packed K/V with norms, plus the Turbo seed), and of a sliding-window ring in `fp16+turbo4`; a ring that only carries a quantized label over plain rows is stored as the FP16 ring it is. `turbo4-delegated` and `fp16+turbo3` on a full-attention layer are still not stored: the server warns once at startup and counts each skipped donation as `kv_mode_not_snapshotable` in `/v1/cache/stats` and `mlxcel_prompt_cache_reject_total`.
+
 ## [v0.9.0-beta.3] - 2026-11-28
 
 ### Added

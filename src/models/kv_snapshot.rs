@@ -36,16 +36,33 @@
 //!   which is wider than the `[start_position, target_len)` a trimmed buffer
 //!   can offer.
 //!
-//! Only [`KVCacheMode::Fp16`] is snapshot-capable. The quantized modes carry
-//! sidecar buffers the snapshot container does not model, so both snapshot and
-//! restore refuse them and the caller falls back to a cold prefill rather than
-//! restoring a mismatched layout.
+//! An FP16 cache is stored as its `keys` and `values`, under the names and
+//! with the scalars it has always had. The quantized modes keep part of their
+//! state outside those two buffers, and that state travels too (issue #3250):
+//!
+//! * A [`KVCache`] in `Int8`, `Turbo4Asym` or `Turbo4` stores the buffers its
+//!   mode writes (see [`KV_SIDECAR_FIELDS`]) plus its `turbo_seed` and
+//!   `live_start`. `Turbo4Delegated` (a hot and a cold V) and `Turbo3Asym`
+//!   (3-bit packing) are still refused, by name.
+//! * A [`RotatingKVCache`] is judged by the mode it stores, not by its label.
+//!   Under `Int8`, `Turbo4`, `Turbo4Delegated` and `Turbo3Asym` the ring holds
+//!   plain rows, so its snapshot is an FP16 ring snapshot that keeps the
+//!   label. An aligned `Turbo4Asym` ring holds packed V and stores the three
+//!   V sidecars beside its keys.
+//!
+//! A restore lands only in a cache built for the mode the snapshot was taken
+//! in, and a snapshot that lacks a buffer its mode needs is refused before
+//! anything is assigned, so the caller falls back to a cold prefill rather
+//! than running on a mismatched layout.
 
 use crate::models::recurrent_snapshot::{
     kv_cache_mode_from_i32, kv_cache_mode_to_i32, push_i32, push_optional, restore_i32,
     restore_optional,
 };
-use mlxcel_core::cache::{KVCacheMode, RotatingKVCacheSnapshotState};
+use mlxcel_core::cache::{
+    KV_SIDECAR_FIELDS, KVCacheMode, KVCacheSnapshotOwned, ROTATING_SIDECAR_FIELDS,
+    RotatingKVCacheSnapshotBuffers, RotatingKVCacheSnapshotState, kv_mode_is_snapshotable,
+};
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{ChunkedKVCache, KVCache, RotatingKVCache};
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -92,27 +109,6 @@ impl KvSnapshotNames {
 /// Tensor-name segment and error-message word for [`ChunkedKVCache`] state.
 const CHUNKED: &str = "chunked";
 
-/// Whether a cache in a quantized mode holds anything, which a model-state
-/// snapshot cannot carry.
-///
-/// Checked before the keys/values pairing because the quantized modes keep
-/// part of their state outside `keys`/`values`: `Turbo4Asym` holds V in
-/// `v_packed`, so a populated cache has keys and no values and the pairing
-/// check reported "has only one of keys/values" instead of the mode, and
-/// symmetric `Turbo4` holds both sides packed, so a populated cache has
-/// neither and the emptiness check skipped it as if it were a KV-shared layer
-/// (issue #2422). `offset` covers the packed-only case. An empty quantized
-/// cache (a KV-shared layer) still stores nothing and is not an error, as
-/// before.
-fn holds_quantized_state(
-    mode: KVCacheMode,
-    offset: i32,
-    keys: &Option<UniquePtr<MlxArray>>,
-    values: &Option<UniquePtr<MlxArray>>,
-) -> bool {
-    mode != KVCacheMode::Fp16 && (offset > 0 || keys.is_some() || values.is_some())
-}
-
 /// The snapshot error for a cache whose mode the container does not model.
 /// It names the mode, which is the reason the caller logs when it skips
 /// donating the snapshot.
@@ -120,6 +116,119 @@ fn unsupported_mode(family: &str, prefix: &str, kind: &str, mode: KVCacheMode) -
     format!(
         "{family} snapshot {prefix}: {kind} cache mode {mode:?} is not supported by model-state snapshots"
     )
+}
+
+/// The first KV mode in a model's storage table that a model-state snapshot
+/// cannot carry, or `None` when every layer can be stored.
+///
+/// `modes` is `LanguageModel::kv_cache_storage_modes()`: the mode each layer
+/// really stores, with `None` for a layer that holds no attention KV. A
+/// sliding layer reports what its ring holds (plain rows, or packed V for an
+/// aligned `Turbo4Asym`), so only a full-attention layer can report
+/// `Turbo4Delegated` or `Turbo3Asym` here.
+///
+/// Used by: the batch scheduler, for the startup warning and for the reject
+/// reason of a snapshot donation that cannot happen (issue #3250).
+pub(crate) fn first_snapshot_unsupported_mode(
+    modes: &[Option<KVCacheMode>],
+) -> Option<KVCacheMode> {
+    modes
+        .iter()
+        .flatten()
+        .copied()
+        .find(|mode| !kv_mode_is_snapshotable(*mode))
+}
+
+// ---------------------------------------------------------------------------
+// Quantized KVCache state shared by every encoder of a full-attention layer
+// ---------------------------------------------------------------------------
+
+/// Push what a quantized [`KVCache`] holds beside its `keys` and `values`
+/// under `{base}.`: the sidecars of its mode, in [`KV_SIDECAR_FIELDS`] order,
+/// and the `turbo_seed` and `live_start` scalars.
+///
+/// `Int8` has `key_scales` and `val_scales`; `Turbo4Asym` has `v_packed`,
+/// `v_norms` and `v_rescale`; symmetric `Turbo4` adds `k_packed` and
+/// `k_norms`. The caller stores `keys`, `values` and the mode tag itself,
+/// under the names its family already uses, so an FP16 snapshot of that family
+/// is unchanged. Nothing is pushed unless the cache holds exactly the layout
+/// its mode writes.
+///
+/// # Errors
+///
+/// A mode a snapshot does not carry (`Turbo4Delegated`, `Turbo3Asym`), or
+/// buffers that are not that mode's layout: for example an `Int8` cache
+/// holding a quantized MLA latent, which keeps one uint32 buffer instead of
+/// int8 rows and scales.
+///
+/// Used by: `snapshot_standard` (Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4,
+/// Muse Glimmer, Qwen4-Exp, Raon-1 mini) and the attention arms of
+/// `hybrid_snapshot` (Qwen3-Next, Qwen4-Exp, Qwen 3.5), LFM2 and Bailing MoE
+/// Linear.
+pub(crate) fn push_kv_sidecars(
+    cache: &KVCache,
+    snapshot: &mut ModelStateSnapshot,
+    base: &str,
+) -> Result<(), String> {
+    let parts = cache.snapshot_parts();
+    parts.validate()?;
+    for name in KV_SIDECAR_FIELDS {
+        if let Some(array) = parts.sidecar(name) {
+            snapshot.push_tensor(format!("{base}.{name}"), array);
+        }
+    }
+    push_i32(
+        snapshot,
+        format!("{base}.turbo_seed"),
+        parts.turbo_seed as i32,
+    );
+    push_i32(snapshot, format!("{base}.live_start"), parts.live_start);
+    Ok(())
+}
+
+/// Restore a quantized [`KVCache`] of `mode` holding `offset` tokens from the
+/// tensors under `{base}.`: `keys`, `values`, the sidecars and the two
+/// scalars [`push_kv_sidecars`] wrote.
+///
+/// The cache takes the snapshot's `turbo_seed`, since packed rows only decode
+/// under the seed they were written with. Everything is validated before the
+/// first assignment (`KVCache::restore_snapshot_parts`), so an `Err` leaves
+/// the cache untouched and the caller prefills cold.
+///
+/// # Errors
+///
+/// A missing `turbo_seed` or `live_start` scalar, a missing or extra buffer
+/// for the mode, a shape, dtype or length the mode does not write, or a cache
+/// that is not empty or not configured for `mode`.
+///
+/// Used by: `restore_standard` (Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4,
+/// Muse Glimmer, Qwen4-Exp, Raon-1 mini) and the attention arms of
+/// `hybrid_snapshot` (Qwen3-Next, Qwen4-Exp, Qwen 3.5), LFM2 and Bailing MoE
+/// Linear.
+pub(crate) fn restore_kv_sidecars(
+    cache: &mut KVCache,
+    snapshot: &ModelStateSnapshot,
+    base: &str,
+    mode: KVCacheMode,
+    offset: i32,
+) -> Result<(), String> {
+    let scalar = |name: &str| {
+        restore_i32(snapshot, format!("{base}.{name}"))
+            .ok_or_else(|| format!("a {mode:?} snapshot has no {name}"))
+    };
+    let mut parts = KVCacheSnapshotOwned {
+        mode,
+        offset,
+        live_start: scalar("live_start")?,
+        turbo_seed: scalar("turbo_seed")? as u32,
+        keys: restore_optional(snapshot, format!("{base}.keys")),
+        values: restore_optional(snapshot, format!("{base}.values")),
+        ..KVCacheSnapshotOwned::default()
+    };
+    for name in KV_SIDECAR_FIELDS {
+        parts.set_sidecar(name, restore_optional(snapshot, format!("{base}.{name}")));
+    }
+    cache.restore_snapshot_parts(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +244,14 @@ fn unsupported_mode(family: &str, prefix: &str, kind: &str, mode: KVCacheMode) -
 /// An empty cache stores nothing and is not an error: KV-shared layers never
 /// populate their own cache, and `restore_standard` leaves such a layer fresh.
 ///
-/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer.
+/// A quantized cache additionally stores the sidecars its mode holds and the
+/// `.turbo_seed` and `.live_start` scalars ([`push_kv_sidecars`]). In
+/// `Turbo4Asym` there is no `.values` tensor and in symmetric `Turbo4` no
+/// `.keys` either, because the cache holds none. An FP16 cache stores exactly
+/// what it stored before quantized snapshots existed.
+///
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer,
+/// Qwen4-Exp, Raon-1 mini.
 pub(crate) fn snapshot_standard(
     cache: &KVCache,
     snapshot: &mut ModelStateSnapshot,
@@ -143,8 +259,36 @@ pub(crate) fn snapshot_standard(
     names: KvSnapshotNames,
 ) -> Result<(), String> {
     let (family, kind) = (names.family, names.standard);
-    if holds_quantized_state(cache.mode, cache.offset, &cache.keys, &cache.values) {
-        return Err(unsupported_mode(family, prefix, kind, cache.mode));
+    if cache.mode != KVCacheMode::Fp16 {
+        // Checked before the keys/values pairing because the quantized modes
+        // keep part of their state outside `keys`/`values`: a populated
+        // `Turbo4Asym` cache has keys and no values, and a symmetric `Turbo4`
+        // one has neither (issue #2422). An empty quantized cache (a
+        // KV-shared layer) still stores nothing.
+        let parts = cache.snapshot_parts();
+        if parts.holds_no_rows() && parts.offset == 0 {
+            return Ok(());
+        }
+        if !kv_mode_is_snapshotable(cache.mode) {
+            return Err(unsupported_mode(family, prefix, kind, cache.mode));
+        }
+        let base = format!("{prefix}.{kind}");
+        // Validate before the first push, so a refused layer leaves nothing
+        // of itself in the snapshot.
+        parts
+            .validate()
+            .map_err(|err| format!("{family} snapshot {prefix}: {kind} cache: {err}"))?;
+        push_optional(snapshot, format!("{base}.keys"), &cache.keys);
+        push_optional(snapshot, format!("{base}.values"), &cache.values);
+        push_kv_sidecars(cache, snapshot, &base)
+            .map_err(|err| format!("{family} snapshot {prefix}: {kind} cache: {err}"))?;
+        push_i32(snapshot, format!("{base}.offset"), cache.offset);
+        push_i32(
+            snapshot,
+            format!("{base}.mode"),
+            kv_cache_mode_to_i32(cache.mode),
+        );
+        return Ok(());
     }
     if cache.keys.is_none() && cache.values.is_none() {
         return Ok(());
@@ -167,11 +311,13 @@ pub(crate) fn snapshot_standard(
 
 /// Restore a full-attention cache from `snapshot` under `prefix`.
 ///
-/// Assigns `keys`, `values` and `offset`. Both the stored mode and the live
-/// cache's configured mode must be [`KVCacheMode::Fp16`]; a mismatch is an
+/// Assigns `keys`, `values` and `offset`, and for a quantized snapshot the
+/// sidecars, `turbo_seed` and `live_start` as well ([`restore_kv_sidecars`]).
+/// The stored mode must be the live cache's configured mode; a mismatch is an
 /// error rather than a silent reinterpretation of a quantized buffer.
 ///
-/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer.
+/// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4, Muse Glimmer,
+/// Qwen4-Exp, Raon-1 mini.
 pub(crate) fn restore_standard(
     cache: &mut KVCache,
     snapshot: &ModelStateSnapshot,
@@ -179,6 +325,23 @@ pub(crate) fn restore_standard(
     names: KvSnapshotNames,
 ) -> Result<(), String> {
     let (family, kind) = (names.family, names.standard);
+    // The stored mode picks the layout, not the presence of `keys`: a
+    // symmetric `Turbo4` snapshot has no `keys` tensor at all.
+    let stored_mode = snapshot_mode(snapshot, &format!("{prefix}.{kind}.mode"))?;
+    if stored_mode != KVCacheMode::Fp16 {
+        if cache.mode != stored_mode {
+            return Err(format!(
+                "{family} restore {prefix}: {kind} snapshot mode {stored_mode:?} does not match configured cache mode {:?}",
+                cache.mode
+            ));
+        }
+        let base = format!("{prefix}.{kind}");
+        let offset = restore_i32(snapshot, format!("{base}.offset")).ok_or_else(|| {
+            format!("{family} restore {prefix}: {kind} snapshot of a {stored_mode:?} cache has no offset")
+        })?;
+        return restore_kv_sidecars(cache, snapshot, &base, stored_mode, offset)
+            .map_err(|err| format!("{family} restore {prefix}: {kind} snapshot: {err}"));
+    }
     let keys = restore_optional(snapshot, format!("{prefix}.{kind}.keys"));
     let values = restore_optional(snapshot, format!("{prefix}.{kind}.values"));
     if keys.is_none() && values.is_none() {
@@ -189,12 +352,7 @@ pub(crate) fn restore_standard(
             "{family} restore {prefix}: {kind} snapshot has only one of keys/values"
         ));
     }
-    let mode = snapshot_mode(snapshot, &format!("{prefix}.{kind}.mode"))?;
-    if mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "{family} restore {prefix}: {kind} snapshot mode {mode:?} is not supported"
-        ));
-    }
+    let mode = stored_mode;
     if cache.mode != mode {
         return Err(format!(
             "{family} restore {prefix}: {kind} snapshot mode {mode:?} does not match configured cache mode {:?}",
@@ -215,10 +373,18 @@ pub(crate) fn restore_standard(
 /// Whether the full-attention state stored under `prefix` can be restored
 /// covering only its first `target_len` tokens.
 ///
-/// Every token sits at its own slot, so the only constraints are the mode and
-/// `target_len <= offset`. A prefix with no stored tensors is vacuously
-/// truncatable: the layer captured nothing, `restore_standard` leaves a fresh
-/// cache, and there is no tail to drop.
+/// Every token sits at its own slot, so the constraints are a mode a snapshot
+/// carries, an untrimmed front and `target_len <= offset`. That holds for the
+/// quantized modes too: they quantize each token on its own, and
+/// [`KVCache::trim`] rewinds every sidecar with the rows. A prefix with no
+/// stored rows is vacuously truncatable: the layer captured nothing,
+/// `restore_standard` leaves a fresh cache, and there is no tail to drop.
+///
+/// "No stored rows" means neither a `keys` nor a `k_packed` tensor, the same
+/// pair [`KVCache::is_empty`] reads, because symmetric `Turbo4` keeps K packed
+/// and stores no `keys`. A cache whose front was trimmed (`live_start > 0`)
+/// truncates to nothing shorter than its own length: it no longer holds the
+/// rows a shorter prefix starts with, as for a chunked cache.
 ///
 /// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4.
 pub(crate) fn standard_truncatable_to(
@@ -231,26 +397,40 @@ pub(crate) fn standard_truncatable_to(
     if target_len < 0 {
         return false;
     }
-    if snapshot.tensor(&format!("{prefix}.{kind}.keys")).is_none() {
+    if snapshot.tensor(&format!("{prefix}.{kind}.keys")).is_none()
+        && snapshot
+            .tensor(&format!("{prefix}.{kind}.k_packed"))
+            .is_none()
+    {
         return true;
     }
     let Ok(mode) = snapshot_mode(snapshot, &format!("{prefix}.{kind}.mode")) else {
         return false;
     };
-    if mode != KVCacheMode::Fp16 {
+    if !kv_mode_is_snapshotable(mode) {
         return false;
     }
     let Some(offset) = restore_i32(snapshot, format!("{prefix}.{kind}.offset")) else {
         return false;
     };
+    if restore_i32(snapshot, format!("{prefix}.{kind}.live_start")).unwrap_or(0) != 0 {
+        // Nothing shorter than the whole snapshot: the front rows are gone.
+        return target_len == offset;
+    }
     target_len <= offset
 }
 
 /// Drop everything past `target_len` tokens from a full-attention cache.
 ///
-/// Rewinds through [`KVCache::trim`], which is a logical rewind: the physical
-/// buffer keeps its capacity and the next update overwrites the rewound tail
-/// in place.
+/// Rewinds through [`KVCache::trim`]. For `Fp16` and `Int8` that is a logical
+/// rewind: the physical buffers keep their capacity and the next update
+/// overwrites the rewound tail in place. The `Turbo4` modes slice their
+/// buffers and sidecars back to the new length.
+///
+/// A cache with no buffer at all has nothing to drop. That is asked of every
+/// buffer, not of `keys` and `values` only: a populated symmetric `Turbo4`
+/// cache holds neither, and skipping it would return a cache that still
+/// covers the whole snapshot.
 ///
 /// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Llama 4.
 pub(crate) fn truncate_standard(
@@ -258,7 +438,7 @@ pub(crate) fn truncate_standard(
     target_len: i32,
     names: KvSnapshotNames,
 ) -> Result<(), String> {
-    if cache.keys.is_none() && cache.values.is_none() {
+    if cache.snapshot_parts().holds_no_rows() {
         return Ok(());
     }
     let offset = cache.offset;
@@ -277,10 +457,17 @@ pub(crate) fn truncate_standard(
 /// Copy a sliding-window cache into `snapshot` under `prefix`.
 ///
 /// Stores `{prefix}.{rotating}.keys` and `.values` as the physical ring buffer
-/// is held, plus every scalar
-/// [`RotatingKVCache::restore_fp16_snapshot_state`] needs to reproduce the ring
-/// geometry: `.max_size`, `.buffer_size`, `.offset`, `.start_position`, `.idx`,
-/// `.step`, `.mode`, `.turbo_seed` and the optional reference ring origin.
+/// is held, plus every scalar [`RotatingKVCache::restore_snapshot_state`]
+/// needs to reproduce the ring geometry: `.max_size`, `.buffer_size`,
+/// `.offset`, `.start_position`, `.idx`, `.step`, `.mode`, `.turbo_seed` and
+/// the optional reference ring origin.
+///
+/// What is stored follows the mode the ring holds
+/// ([`RotatingKVCache::stored_mode`]), not its label. A ring labelled `Int8`,
+/// `Turbo4`, `Turbo4Delegated` or `Turbo3Asym` holds plain rows, so it stores
+/// the tensors an FP16 ring stores and differs only in the `.mode` scalar,
+/// which keeps the label. An aligned `Turbo4Asym` ring has no `.values`: it
+/// stores `.v_packed`, `.v_norms` and `.v_rescale` beside its keys.
 ///
 /// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Muse Glimmer.
 pub(crate) fn snapshot_rotating(
@@ -290,20 +477,36 @@ pub(crate) fn snapshot_rotating(
     names: KvSnapshotNames,
 ) -> Result<(), String> {
     let (family, kind) = (names.family, names.rotating);
-    if holds_quantized_state(cache.mode, cache.offset, &cache.keys, &cache.values) {
+    let parts = cache.snapshot_parts();
+    let state = parts.state;
+    if !state.stores_snapshotable_rows() {
         return Err(unsupported_mode(family, prefix, kind, cache.mode));
     }
     if cache.keys.is_none() && cache.values.is_none() {
         return Ok(());
     }
-    if cache.keys.is_some() != cache.values.is_some() {
+    let packed_v =
+        RotatingKVCache::stored_mode(state.max_size, state.mode) == KVCacheMode::Turbo4Asym;
+    if packed_v {
+        // Validate before the first push, so a refused layer leaves nothing
+        // of itself in the snapshot.
+        parts
+            .check_layout()
+            .map_err(|err| format!("{family} snapshot {prefix}: {kind} cache: {err}"))?;
+    } else if cache.keys.is_some() != cache.values.is_some() {
         return Err(format!(
             "{family} snapshot {prefix}: {kind} cache has only one of keys/values"
         ));
     }
-    let state = cache.snapshot_state();
     push_optional(snapshot, format!("{prefix}.{kind}.keys"), &cache.keys);
     push_optional(snapshot, format!("{prefix}.{kind}.values"), &cache.values);
+    if packed_v {
+        for name in ROTATING_SIDECAR_FIELDS {
+            if let Some(array) = parts.sidecar(name) {
+                snapshot.push_tensor(format!("{prefix}.{kind}.{name}"), array);
+            }
+        }
+    }
     push_i32(
         snapshot,
         format!("{prefix}.{kind}.max_size"),
@@ -354,8 +557,12 @@ pub(crate) fn snapshot_rotating(
 /// snapshot without its reference ring origin is declined for a cold prefill,
 /// because its former physical reduction order cannot be reconstructed.
 /// The assignment itself goes through
-/// [`RotatingKVCache::restore_fp16_snapshot_state`], which validates the ring
-/// geometry against the copied buffers.
+/// [`RotatingKVCache::restore_snapshot_state`], which validates the ring
+/// geometry and the buffers of the stored mode before it assigns anything.
+///
+/// The snapshot's label must be the live ring's label, even between labels
+/// that store the same plain rows: the label is model configuration, and a
+/// snapshot taken under another one came from another configuration.
 ///
 /// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4, Muse Glimmer.
 pub(crate) fn restore_rotating(
@@ -368,20 +575,21 @@ pub(crate) fn restore_rotating(
     let keys = restore_optional(snapshot, format!("{prefix}.{kind}.keys"));
     let values = restore_optional(snapshot, format!("{prefix}.{kind}.values"));
     if keys.is_none() && values.is_none() {
+        // A layer that stored nothing. Packed V with no keys is not that: it
+        // is a quantized ring that lost its keys.
+        if ROTATING_SIDECAR_FIELDS.iter().any(|name| {
+            snapshot
+                .tensor(&format!("{prefix}.{kind}.{name}"))
+                .is_some()
+        }) {
+            return Err(format!(
+                "{family} restore {prefix}: {kind} snapshot holds packed values and no keys"
+            ));
+        }
         return Ok(());
-    }
-    if keys.is_some() != values.is_some() {
-        return Err(format!(
-            "{family} restore {prefix}: {kind} snapshot has only one of keys/values"
-        ));
     }
     let current = cache.snapshot_state();
     let mode = snapshot_mode(snapshot, &format!("{prefix}.{kind}.mode"))?;
-    if mode != KVCacheMode::Fp16 {
-        return Err(format!(
-            "{family} restore {prefix}: {kind} snapshot mode {mode:?} is not supported"
-        ));
-    }
     if current.mode != mode {
         return Err(format!(
             "{family} restore {prefix}: {kind} snapshot mode {mode:?} does not match configured cache mode {:?}",
@@ -399,6 +607,21 @@ pub(crate) fn restore_rotating(
             "{family} restore {prefix}: {kind} snapshot window {max_size} does not match configured window {}",
             current.max_size
         ));
+    }
+    let packed_v = RotatingKVCache::stored_mode(max_size, mode) == KVCacheMode::Turbo4Asym;
+    if !packed_v && keys.is_some() != values.is_some() {
+        return Err(format!(
+            "{family} restore {prefix}: {kind} snapshot has only one of keys/values"
+        ));
+    }
+    let mut buffers = RotatingKVCacheSnapshotBuffers::fp16(keys, values);
+    if packed_v {
+        for name in ROTATING_SIDECAR_FIELDS {
+            buffers.set_sidecar(
+                name,
+                restore_optional(snapshot, format!("{prefix}.{kind}.{name}")),
+            );
+        }
     }
     let state = RotatingKVCacheSnapshotState {
         max_size,
@@ -423,7 +646,7 @@ pub(crate) fn restore_rotating(
             .map(|seed| seed as u32)
             .unwrap_or(current.turbo_seed),
     };
-    cache.restore_fp16_snapshot_state(state, keys, values)
+    cache.restore_snapshot_state(state, buffers)
 }
 
 /// Whether the sliding-window state stored under `prefix` can be restored
@@ -431,7 +654,9 @@ pub(crate) fn restore_rotating(
 ///
 /// Defers to [`RotatingKVCacheSnapshotState::can_truncate_to`], which is the
 /// load-bearing check: it holds only while the ring has not wrapped, because a
-/// wrapped ring no longer keeps logical token `t` at slot `t`.
+/// wrapped ring no longer keeps logical token `t` at slot `t`. The label does
+/// not enter into it: the rule is the same for a ring of plain rows under any
+/// label and for a `Turbo4Asym` ring, whose rewind moves cursors only.
 ///
 /// Used by: Gemma 3, AFMoE, Kolibri-1, Gemma 4.
 pub(crate) fn rotating_truncatable_to(
@@ -741,7 +966,7 @@ fn check_trimmed(trimmed: i32, drop: i32, names: KvSnapshotNames) -> Result<(), 
 /// about to declare for it.
 ///
 /// The sliding-window path gets this for free:
-/// [`RotatingKVCache::restore_fp16_snapshot_state`] checks the ring geometry
+/// [`RotatingKVCache::restore_snapshot_state`] checks the ring geometry
 /// against the buffers it is handed. The full-attention and chunked paths
 /// assign their scalars directly, so the same class of check has to live here.
 /// Without it a state whose declared length runs past its own buffer installs
@@ -836,3 +1061,15 @@ fn slice_leading_tokens(
 #[cfg(test)]
 #[path = "kv_snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kv_snapshot_test_support.rs"]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+#[path = "kv_snapshot_quantized_tests.rs"]
+mod quantized_tests;
+
+#[cfg(test)]
+#[path = "kv_snapshot_parts_tests.rs"]
+mod parts_tests;

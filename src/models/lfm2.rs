@@ -56,9 +56,7 @@ use std::path::Path;
 
 use super::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use super::recurrent_batch::{optional_rows_uniform, split_rows, stack_optional_rows};
-use super::recurrent_snapshot::{
-    push_kv_cache_mode, push_optional, restore_kv_cache_mode, restore_optional,
-};
+use super::recurrent_snapshot::{push_optional, restore_optional};
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
 // The single-step short-conv decode fast path (issue #748) now lives in the
@@ -1050,23 +1048,18 @@ impl Lfm2LayerCache {
         }
     }
 
-    fn snapshot_into(
+    // `pub(crate)`, like `restore_from` below, so `lfm2_tests` can drive the
+    // attention arm directly.
+    pub(crate) fn snapshot_into(
         &self,
         snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
     ) -> Result<(), String> {
         match self {
+            // The attention + recurrent hybrids share one attention encoding,
+            // quantized modes included (issue #3250).
             Lfm2LayerCache::Attention(kv) => {
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                push_kv_cache_mode(snapshot, format!("{prefix}.attention.mode"), kv.mode);
-                push_optional(snapshot, format!("{prefix}.attention.keys"), &kv.keys);
-                push_optional(snapshot, format!("{prefix}.attention.values"), &kv.values);
-                Ok(())
+                super::hybrid_snapshot::snapshot_attention(kv, snapshot, prefix)
             }
             Lfm2LayerCache::Conv(state) => {
                 push_optional(snapshot, format!("{prefix}.conv.state"), state);
@@ -1075,32 +1068,14 @@ impl Lfm2LayerCache {
         }
     }
 
-    fn restore_from(
+    pub(crate) fn restore_from(
         &mut self,
         snapshot: &mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
     ) -> Result<(), String> {
         match self {
             Lfm2LayerCache::Attention(kv) => {
-                let snapshot_mode =
-                    restore_kv_cache_mode(snapshot, format!("{prefix}.attention.mode"))?
-                        .unwrap_or(KVCacheMode::Fp16);
-                if snapshot_mode != kv.mode {
-                    return Err(format!(
-                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
-                        snapshot_mode, kv.mode
-                    ));
-                }
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                kv.keys = restore_optional(snapshot, format!("{prefix}.attention.keys"));
-                kv.values = restore_optional(snapshot, format!("{prefix}.attention.values"));
-                kv.offset = snapshot.token_len() as i32;
-                Ok(())
+                super::hybrid_snapshot::restore_attention(kv, snapshot, prefix)
             }
             Lfm2LayerCache::Conv(state) => {
                 *state = restore_optional(snapshot, format!("{prefix}.conv.state"));
