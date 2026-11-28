@@ -4,6 +4,10 @@
 // Modified by mlxcel: set_input_bytes_uncounted lets a kernel that reads a
 // small part of a large input leave it out of the graph byte budget
 // (lablup/mlxcel#3256).
+// Modified by mlxcel: set_input_rows_read charges an input for the rows a
+// kernel reads of it, and graph_launch_count and default_graph_limits let a
+// test see whether a launch cut the graph it was encoded into
+// (lablup/mlxcel#3387).
 // Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/cuda/device.cpp
 
 #include "mlx/backend/cuda/device.h"
@@ -14,6 +18,7 @@
 #include <fmt/format.h>
 #include <nvtx3/nvtx3.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <string>
@@ -357,6 +362,26 @@ std::pair<int, int> get_graph_limits(Device& d) {
   return {env::max_ops_per_buffer(ops), env::max_mb_per_buffer(mb)};
 }
 
+namespace {
+// [mlxcel] Graphs launched by every encoder of the process.
+std::atomic<uint64_t> graphs_launched{0};
+} // namespace
+
+// [mlxcel] Test hooks (lablup/mlxcel#3387): the number of graphs launched so
+// far, and the two budgets `needs_commit` holds a graph of the default GPU
+// device to. A test evaluates a few launches and reads the count around them:
+// one graph means no launch cut the graph, more means a budget did.
+uint64_t graph_launch_count() {
+  return graphs_launched.load(std::memory_order_relaxed);
+}
+
+void default_graph_limits(int* max_ops, int* max_mb) {
+  auto [ops, mb] =
+      get_graph_limits(device(mlx::core::Device(mlx::core::Device::gpu)));
+  *max_ops = ops;
+  *max_mb = mb;
+}
+
 CommandEncoder::CommandEncoder(Device& d)
     : device_(d),
       stream_(d),
@@ -386,23 +411,47 @@ void CommandEncoder::add_completed_handler(std::function<void()> task) {
 }
 
 namespace {
-// Set by the custom-kernel overlay around the inputs of a kernel that reads
-// only part of them; thread-local because each stream encodes on its own
-// thread.
-thread_local bool input_bytes_uncounted = false;
+// Set by the custom-kernel overlay around an input of a kernel that reads
+// only part of it: the rows the kernel reads, out of the rows the input
+// holds. `1 of 1` is an input read whole, `0 of 1` one left out. Thread-local
+// because each stream encodes on its own thread.
+thread_local uint64_t input_rows_read = 1;
+thread_local uint64_t input_rows = 1;
 } // namespace
 
+// [mlxcel] The elements of a `data_size`-element input that count toward the
+// graph's byte budget when a kernel reads `rows_read` of its `rows` leading
+// rows (lablup/mlxcel#3387). An input with no leading rows, and an index that
+// names every row or more than every row (it may repeat one), count whole.
+// Otherwise the quotient is taken first, so no product can overflow and the
+// result never exceeds `data_size`; it is short of the exact share by less
+// than `rows_read` elements, which is nothing against a budget counted in
+// units of 1 << 20.
+uint64_t counted_input_elements(
+    uint64_t data_size,
+    uint64_t rows_read,
+    uint64_t rows) {
+  if (rows == 0 || rows_read >= rows) {
+    return data_size;
+  }
+  return data_size / rows * rows_read;
+}
+
+void set_input_rows_read(uint64_t rows_read, uint64_t rows) {
+  input_rows_read = rows_read;
+  input_rows = rows;
+}
+
 void set_input_bytes_uncounted(bool uncounted) {
-  input_bytes_uncounted = uncounted;
+  set_input_rows_read(uncounted ? 0 : 1, 1);
 }
 
 void CommandEncoder::set_input_array(const array& arr) {
   if (!use_cuda_graphs()) {
     return;
   }
-  if (!input_bytes_uncounted) {
-    bytes_in_graph_ += arr.data_size();
-  }
+  bytes_in_graph_ +=
+      counted_input_elements(arr.data_size(), input_rows_read, input_rows);
   auto id = reinterpret_cast<std::uintptr_t>(arr.buffer().ptr());
   active_deps_.push_back(id);
 #ifndef NDEBUG
@@ -737,6 +786,7 @@ void CommandEncoder::commit_impl() {
       CudaGraphExec graph_exec;
       graph_exec.instantiate(graph_);
       CHECK_CUDA_ERROR(cudaGraphLaunch(graph_exec, stream_));
+      graphs_launched.fetch_add(1, std::memory_order_relaxed);
     } else {
       auto graph_key = graph_nodes_key_ + ":" + graph_deps_key_;
       auto& graph_exec = graph_cache_[graph_key];
@@ -761,6 +811,7 @@ void CommandEncoder::commit_impl() {
       }
 
       CHECK_CUDA_ERROR(cudaGraphLaunch(graph_exec, stream_));
+      graphs_launched.fetch_add(1, std::memory_order_relaxed);
     }
 
     // Save cuda graph to dot file

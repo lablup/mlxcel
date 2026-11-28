@@ -21,6 +21,18 @@
 #include "mlx/backend/rocm/load_staging.h"  // weight upload counters (#1564).
 #endif
 
+#ifdef MLXCEL_BRIDGE_CUDA_BACKEND
+#include "mlx/backend/cuda/cuda.h"  // cu::is_available
+
+namespace mlx::core::cu {
+// Defined in the device.cpp overlay (lablup/mlxcel#3387).
+uint64_t graph_launch_count();
+void default_graph_limits(int* max_ops, int* max_mb);
+uint64_t counted_input_elements(
+    uint64_t data_size, uint64_t rows_read, uint64_t rows);
+} // namespace mlx::core::cu
+#endif
+
 namespace mlx_cxx {
 
 // ── Native safetensors loading ────────────────────────────────────────
@@ -458,6 +470,47 @@ bool weight_load_transfer_stats(rust::Slice<uint64_t> out) {
 #else
     (void)out;
     return false;
+#endif
+}
+
+// CUDA graph commits (lablup/mlxcel#3387): `out` receives the graphs launched
+// by this process so far, then the op budget and the byte budget
+// `CommandEncoder::needs_commit` applies on the default GPU device. The
+// counter lives in the `device.cpp` overlay.
+bool cuda_graph_commit_stats(rust::Slice<uint64_t> out) {
+#ifdef MLXCEL_BRIDGE_CUDA_BACKEND
+    if (!mlx::core::cu::is_available()) {
+        return false;
+    }
+    int max_ops = 0;
+    int max_mb = 0;
+    mlx::core::cu::default_graph_limits(&max_ops, &max_mb);
+    const uint64_t fields[] = {
+        mlx::core::cu::graph_launch_count(),
+        static_cast<uint64_t>(std::max(max_ops, 0)),
+        static_cast<uint64_t>(std::max(max_mb, 0)),
+    };
+    const size_t n = std::min(out.size(), sizeof(fields) / sizeof(fields[0]));
+    for (size_t i = 0; i < n; ++i) {
+        out[i] = fields[i];
+    }
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+// The encoder's own byte-budget arithmetic for a partly read input, so a test
+// can hold it to its boundaries without a GPU launch (lablup/mlxcel#3387).
+uint64_t cuda_graph_counted_input_elements(
+    uint64_t data_size, uint64_t rows_read, uint64_t rows) {
+#ifdef MLXCEL_BRIDGE_CUDA_BACKEND
+    return mlx::core::cu::counted_input_elements(data_size, rows_read, rows);
+#else
+    (void)rows_read;
+    (void)rows;
+    return data_size;
 #endif
 }
 

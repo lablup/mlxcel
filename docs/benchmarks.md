@@ -231,6 +231,12 @@ cargo run --release --features cuda --example verify_width_cost -- models/mlx/qw
 python3 scripts/bench_serving_concurrency.py --port <port> \
     --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128 --metrics
 
+# CUDA graphs per decode step, and the kernels held by the graphs that were
+# cut short, from an nsys trace taken with --cuda-graph-trace=node (issue
+# #3387). The script's docstring has the collection commands. Method and GB10
+# results: docs/benchmark_results/cuda-graph-commit-audit-gb10-2026-11-27.md.
+scripts/nsys_cuda_graph_launches.py trace.sqlite
+
 # Embedding and rerank ladder. One server per checkpoint; writes its own CSV.
 python3 scripts/bench_embeddings.py --bin target/release/mlxcel-server \
     --out benchmarks/{backend}_{hw}_embeddings_{date}.csv --repeats 5 --port 18091
