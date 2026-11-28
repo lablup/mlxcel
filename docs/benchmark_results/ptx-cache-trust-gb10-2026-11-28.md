@@ -4,15 +4,15 @@ Issue: [#3503](https://github.com/lablup/mlxcel/issues/3503). Question: with the
 
 ## Setup
 
-- Host: NVIDIA GB10 (spark-101), 20 cores, driver 580.178.04, CUDA 13.0.3, kernel 7.0.0-1019-nvidia. Not quiet: 1-minute load between 2.0 and 6.0 during the runs (other users' jobs), recorded per arm below.
-- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arm at `5a9c96f2`; control arm from `main` at `7ab71f92`. Review changes after `5a9c96f2` (the device subdirectory opened from a kept descriptor, the sweep through the descriptor, no Rust-side directory creation under the opt-in) were re-checked at `2a62154c` with the child tests and the short pass under "Re-check after review", not with the full table.
+- Host: NVIDIA GB10 (spark-101), 20 cores, driver 580.178.04, CUDA 13.0.3, kernel 7.0.0-1019-nvidia. Not quiet: 1-minute load between 3.7 and 8.0 during the runs (other users' jobs), recorded per arm below.
+- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arms at `2a62154c`, the last commit that changes compiled code; control arms from `main` at `7ab71f92`. An earlier pass at `5a9c96f2`, before the review changes, gave the same picture (warm 1.99 s and 1.94 s against cold 18.77 s and 19.55 s) and is not tabulated.
 - Model: `mlx-community/Qwen3-4B-4bit` (local `models/qwen3-4b-4bit`).
 - Volume roots, created as root through a container so their owner and mode match what a nonroot pod gets: `vol-0777` is `root:root` mode `0777`; `vol-fsgroup` is `root:1000` mode `2775`, where 1000 is the test user's own group. The user is uid 1000, gid 1000; `/etc/nsswitch.conf` lists `files systemd` for `passwd` and `group`, `/etc/group` has no other member of gid 1000 and no other `/etc/passwd` account has it as primary group, so the group is provably private.
 - Harness: `scripts/bench/ptx_cache_trust_ttft.py`, run under `gpu-lock run --tag issue-3503`. One run starts the server with `MLXCEL_CACHE_DIR` set to the volume root, waits for `/health`, sends one streaming chat request (`max_tokens` 16, temperature 0) and stops the server. A cold run deletes `<root>/cuda-ptx` first. Five runs per cell.
 
 ## Attribution
 
-Timing is not the evidence that the cache was hit. Each run records two signals that move only one way: the `Compiling CUDA kernels` notice on stderr, and whether any file under `<root>/cuda-ptx` was created, replaced or touched (inode and mtime of every file before and after). The harness exits without a table when a cold run lacks either, when a warm run shows either, or when a refused arm does not print exactly one refusal line and leave the cache empty. All 30 timed runs and the two populating runs agreed with their arm.
+Timing is not the evidence that the cache was hit. Each run records two signals that move only one way: the `Compiling CUDA kernels` notice on stderr, and whether any file under `<root>/cuda-ptx` was created, replaced or touched (inode and mtime of every file before and after). The harness exits without a table when a cold run lacks either, when a warm run shows either, or when a refused arm does not print exactly one refusal line and leave the cache empty. All 35 timed runs and the two populating runs agreed with their arm.
 
 ## Results
 
@@ -20,32 +20,26 @@ Seconds, median (min, max), n = 5 per cell.
 
 | Arm | Binary | Volume root | Environment | Cache | Start to first token | Start to ready | Request to first token | JIT notice | Runs that wrote cache files | Load (1 min) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| A cold | branch | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | accepted | 18.77 (18.71, 19.12) | 5.72 (5.66, 7.29) | 13.09 (11.83, 13.13) | 5/5 | 5/5 | 3.86-5.90 |
-| A warm | branch | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | accepted | 1.99 (1.93, 2.04) | 1.77 (1.72, 1.82) | 0.22 (0.21, 0.22) | 0/5 | 0/5 | 4.52-4.82 |
-| B cold | branch | `root:1000 2775` | none (Rule 1) | accepted | 19.55 (17.91, 19.86) | 5.81 (5.57, 5.88) | 13.73 (12.34, 13.98) | 5/5 | 5/5 | 5.08-5.94 |
-| B warm | branch | `root:1000 2775` | none (Rule 1) | accepted | 1.94 (1.93, 2.05) | 1.72 (1.72, 1.82) | 0.22 (0.21, 0.23) | 0/5 | 0/5 | 5.87-6.03 |
-| C | branch | `root:root 0777` | no opt-in | refused | 18.53 (17.25, 19.83) | 5.72 (5.42, 5.85) | 12.68 (11.83, 14.00) | 5/5 | 0/5 | 3.55-5.32 |
-| D | main | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | refused | 18.09 (17.59, 19.88) | 5.66 (5.55, 5.80) | 12.43 (11.90, 14.08) | 5/5 | 0/5 | 3.23-4.44 |
-| E | main | `root:1000 2775` | none | refused | 17.06 (17.01, 19.14) | 5.42 (5.38, 6.47) | 11.66 (11.63, 12.68) | 5/5 | 0/5 | 1.98-3.87 |
+| A cold | branch | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | accepted | 17.98 (17.63, 19.27) | 5.67 (5.57, 5.77) | 12.31 (12.05, 13.55) | 5/5 | 5/5 | 4.84-5.31 |
+| A warm | branch | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | accepted | 2.10 (2.04, 2.10) | 1.87 (1.82, 1.88) | 0.23 (0.22, 0.23) | 0/5 | 0/5 | 5.10-5.12 |
+| B cold | branch | `root:1000 2775` | none (Rule 1) | accepted | 17.96 (17.89, 19.31) | 5.65 (5.60, 5.81) | 12.36 (12.27, 13.54) | 5/5 | 5/5 | 5.06-6.16 |
+| B warm | branch | `root:1000 2775` | none (Rule 1) | accepted | 1.99 (1.94, 2.05) | 1.77 (1.72, 1.82) | 0.22 (0.22, 0.24) | 0/5 | 0/5 | 5.51-5.81 |
+| C | branch | `root:root 0777` | no opt-in | refused | 18.13 (17.03, 18.65) | 5.51 (5.42, 5.66) | 12.47 (11.61, 13.20) | 5/5 | 0/5 | 4.66-6.52 |
+| D | main | `root:root 0777` | `MLXCEL_CACHE_TRUSTED_ROOT=<root>` | refused | 17.35 (16.92, 22.06) | 5.50 (5.42, 5.73) | 11.73 (11.50, 16.33) | 5/5 | 0/5 | 4.14-8.00 |
+| E | main | `root:1000 2775` | none | refused | 19.51 (16.92, 22.01) | 5.67 (5.41, 8.03) | 13.63 (11.50, 15.23) | 5/5 | 0/5 | 3.66-6.36 |
 
 Refused arms printed `mlxcel: CUDA kernel disk cache disabled: <root> is group- or other-writable` once per run. In the accepted arms `cuda-ptx` and `cuda-ptx/<mlx-commit>` were created `0700`, owned by the user.
 
-## Re-check after review
+## The recommended layout for a root that may be shared
 
-At `2a62154c`, two runs per cell, same harness and attribution rule. Arm F is the layout the documentation recommends where the root may be shared: `MLXCEL_CACHE_DIR=<root>/mlxcel` with `MLXCEL_CACHE_TRUSTED_ROOT=<root>` on the `0777` root.
-
-| Arm | Start to first token, cold | Start to first token, warm | JIT notice cold / warm | Runs that wrote cache files cold / warm | Load (1 min) |
-|---|---|---|---|---|---|
-| A, opt-in on the `0777` root | 17.89 (17.51, 18.28) | 2.02 (1.99, 2.05) | 2/2, 0/2 | 2/2, 0/2 | 3.1-3.6 |
-| B, Rule 1 on the `2775` root | 18.45 (18.20, 18.69) | 1.94 (1.89, 2.00) | 2/2, 0/2 | 2/2, 0/2 | 2.4-2.6 |
-| F, mlxcel one level below the `0777` root | 18.16 (17.15, 19.16) | 1.99 (1.99, 1.99) | 2/2, 0/2 | 2/2, 0/2 | 1.9-3.4 |
+Arm F puts mlxcel one level below the trusted root, `MLXCEL_CACHE_DIR=<root>/mlxcel` with `MLXCEL_CACHE_TRUSTED_ROOT=<root>` on the `0777` root, so that the model store does not sit beside the cache directly in the root. Two runs per cell, same binary, harness and attribution rule: cold 18.16 (17.15, 19.16) s with the JIT notice and new cache files in 2/2, warm 1.99 (1.99, 1.99) s with neither in 0/2, load 1.9 to 3.4.
 
 ## Reading
 
 - Both rules turn a refused cache into a hit. On `main` (D, E), and on the branch without the opt-in on a `0777` root (C), every start compiles and nothing is written: every start is a cold start. With the rule that applies, the second start compiles nothing and writes nothing.
-- A warm start reaches the first token in about 2.0 s against about 19 s cold, for this model on this host. Kernel compilation is paid in two places: about 4 s before `/health` answers and about 13 s inside the first request.
-- The absolute numbers come from a loaded host and should not be quoted as GB10 start-up times. The cold-to-warm ratio (about 9x to 10x) is far outside the spread within either cell, and the hit signals do not depend on load at all.
-- The refused arms are a little faster than the accepted cold arms (17 to 18.5 s against 18.8 to 19.6 s). They ran later, under lower load, and do not publish entries; the two effects were not separated.
+- A warm start reaches the first token in about 2.0 s against about 18 s cold, for this model on this host. Kernel compilation is paid in two places: about 4 s before `/health` answers and about 12 s inside the first request.
+- The absolute numbers come from a loaded host and should not be quoted as GB10 start-up times. The cold-to-warm ratio (about 9x) is far outside the spread within either cell, and the hit signals do not depend on load at all.
+- The refused arms and the accepted cold arms are not distinguishable in time (medians 17.4 to 19.5 s against 18.0 s, with a 5 s spread inside arms D and E under load up to 8). Publishing the entries on a cold start was not shown to cost anything measurable.
 
 ## Not measured
 
@@ -57,4 +51,4 @@ At `2a62154c`, two runs per cell, same harness and attribution rule. Arm F is th
 
 ## Correctness evidence
 
-`tests/cuda_ptx_cache_trust.rs` (29 scenarios through a real kernel, test-fast profile, GB10, under the GPU lock): all pass, including a symlink planted at the cache's first component below the trusted root, a group-writable and a root-owned directory below it, a group-writable entry, and each unusable value of the variable. `scripts/mlxcelverse/cuda_runtime_dir_test.sh` runs the same rules against real directories without a GPU.
+`tests/cuda_ptx_cache_trust.rs` (30 scenarios through a real kernel, test-fast profile, GB10, under the GPU lock): all pass, including a symlink planted at the cache's first component below the trusted root, a group-writable and a root-owned directory below it, a group-writable entry, the stale-temporary sweep through the pinned descriptor, and each unusable value of the variable. `scripts/mlxcelverse/cuda_runtime_dir_test.sh` runs the same rules against real directories without a GPU.
