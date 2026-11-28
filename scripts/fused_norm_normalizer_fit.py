@@ -1,6 +1,21 @@
+#!/usr/bin/env python3
+# Copyright 2025-2026 Lablup Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Explain the rows where the CUDA graph and the fused add+RMSNorm disagree (issue #3501).
 
-Usage: python3 normalizer_fit.py MODEL_DIR GRAPH_DUMP FUSED_DUMP LAYER
+Usage: python3 scripts/fused_norm_normalizer_fit.py MODEL_DIR GRAPH_DUMP FUSED_DUMP LAYER
 
 GRAPH_DUMP and FUSED_DUMP are the graph/ and fused/ directories that
 `examples/fused_norm_divergence_probe.rs --op-diff DUMP --out DIR` writes, so
