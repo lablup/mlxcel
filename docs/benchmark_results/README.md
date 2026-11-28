@@ -31,6 +31,7 @@ These remain standalone because their reports leave a substantive measurement ga
 - [Qwen3.8 snapshot capacity](qwen38-snapshot-capacity-default-2026-08-30.md): sizing unit tests are not a rerun of the Apple Silicon multi-turn benchmark.
 - [GB10 fused decode-MoE Dff crossover](fused-moe-dff-crossover-gb10-2026-11-11.md): the 8192 bound is confirmed by the decision rule, but no fused-path model has been measured between Dff 6400 and 14336, and the fast models' run-to-run spread is unexplained.
 - [ROCm flash prefill](sdpa-flash-prefill-gfx1151-2026-10-13.md): kernel timings exist, but model-level before/after was not measured.
+- [PTX cache under a container volume root, GB10](ptx-cache-trust-gb10-2026-11-28.md): both trust rules of #3503 turn a refused kernel cache into a second-start hit (about 2 s against 19 s to first token for Qwen3-4B), on directories shaped like volume roots; a real Kubernetes pod and a minimal image were not run.
 - [Fused tanh-GELU f32 on CUDA](fused-gelu-tanh-f32-cuda-gb10-2026-11-11.md): the `xla-iree` StableHLO twin re-check was not run on the measuring host, and the new tests were not run on Metal.
 - [cuda-oxide fused residual-add + RMSNorm on GB10](../mlxcelverse/cuda-oxide-benchmark-evidence.md) ([raw rows and commands](cuda-oxide-fused-norm-gb10-2026-11-27/)): same kernel time as the existing fused kernel, no end-to-end effect, recommendation stop (#2834). Hardware counters, a CPU profile of the host path and an idle host were not available; one end-to-end cell could not resolve the 2 % threshold.
 
