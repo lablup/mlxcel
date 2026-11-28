@@ -672,3 +672,8 @@ fn fused_add_rms_norm_keeps_the_rocm_graph_sign_of_zero() {
         );
     }
 }
+
+// CUDA: not byte-identical to the graph, and pinned to differ only by the
+// normalizer's reduction order (#3501).
+#[path = "fused_norm_parity_tests/cuda_near_tie.rs"]
+mod cuda_near_tie;

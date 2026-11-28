@@ -1,0 +1,3 @@
+layer,row,normed_elements_differing,graph_fits_normalizer_offsets_fp32_ulps,fused_fits_normalizer_offsets_fp32_ulps,intermediate_max_ulp,intermediate_elements_differing,outputs_1ulp,outputs_2ulp,sum_sq_mlx_order,sum_sq_fused_order,sum_sq_fp32_ulps_apart
+1,124,19,0..+24,-24..-1,1,19,19,0,3.1238654,3.1238656,1
+11,47,27,+1..+24,-24..0,1,28,25,2,74.0694,74.069405,1

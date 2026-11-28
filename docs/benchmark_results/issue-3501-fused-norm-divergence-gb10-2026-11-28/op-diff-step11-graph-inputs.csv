@@ -1,0 +1,17 @@
+inputs,layer,new_residual_differing,elements,normed_differing,normed_max_ulp,normed_max_abs,normed_rms,graph_f64_reference_misses,fused_f64_reference_misses
+graph-arm step 11,00,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,01,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,02,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,03,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,04,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,05,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,06,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,07,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,08,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,09,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,10,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,11,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,12,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,13,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,14,0,2048,0,0,0.000000e0,0.000000e0,0,0
+graph-arm step 11,15,0,2048,0,0,0.000000e0,0.000000e0,0,0

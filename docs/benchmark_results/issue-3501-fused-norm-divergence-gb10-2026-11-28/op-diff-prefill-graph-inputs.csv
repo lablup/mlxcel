@@ -1,0 +1,17 @@
+inputs,layer,new_residual_differing,elements,normed_differing,normed_max_ulp,normed_max_abs,normed_rms,graph_f64_reference_misses,fused_f64_reference_misses
+graph-arm prefill,00,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,01,0,262144,19,1,1.953125e-3,7.024250e-6,19,0
+graph-arm prefill,02,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,03,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,04,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,05,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,06,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,07,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,08,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,09,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,10,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,11,0,262144,27,2,3.906250e-3,2.247467e-5,0,27
+graph-arm prefill,12,0,262144,0,0,0.000000e0,0.000000e0,40,40
+graph-arm prefill,13,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,14,0,262144,0,0,0.000000e0,0.000000e0,0,0
+graph-arm prefill,15,0,262144,0,0,0.000000e0,0.000000e0,0,0
