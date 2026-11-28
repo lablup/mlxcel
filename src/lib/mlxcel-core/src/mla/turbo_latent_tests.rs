@@ -228,9 +228,25 @@ fn on_device_codec_matches_the_host_turbo4_codec() {
     let x = fx.ckv_array(dtype::FLOAT32);
     let codec = TurboLatentCodec::new(G.kv_lora_rank, TURBO_DEFAULT_SEED);
     let params = TurboQuantParams::new(G.kv_lora_rank as u32, TURBO_DEFAULT_SEED);
-    let (packed, _norms, rescale) = crate::cache::turbo::quant::quantize_v_turbo4(&x, &params);
+    let (packed, _norms, rescale) = crate::cache::turbo::quant::host_reference::quantize(
+        &x,
+        &params,
+        &params.signs1,
+        &params.signs2,
+    );
     let ours = codec.quantize(&x);
     assert_eq!(bytes(&ours.packed), bytes(&packed));
     let err = max_rel_error(&to_vec_f32(&ours.rescale), &to_vec_f32(&rescale));
     assert!(err < 1e-3, "rescale off the host codec by {err}");
+}
+
+#[test]
+fn turbo_latent_quantizes_an_empty_sequence() {
+    let _guard = serial();
+    let codec = TurboLatentCodec::new(128, 42);
+    let rows = codec.quantize(&ffi::zeros(&[1, 1, 0, 128], dtype::FLOAT16));
+    assert_eq!(ffi::array_shape(&rows.packed), [1, 1, 0, 64]);
+    assert_eq!(ffi::array_shape(&rows.rescale), [1, 1, 0, 1]);
+    assert_eq!(ffi::array_size(&rows.packed), 0);
+    assert_eq!(ffi::array_size(&rows.rescale), 0);
 }

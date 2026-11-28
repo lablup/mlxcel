@@ -44,14 +44,12 @@
 //! rotation in front of the #3155 affine codec at 4 bits, decoded through
 //! `quantized_absorbed_attention` on the rotated query.
 //!
-//! The codec runs on device (`greater` against the codebook boundaries, then
-//! nibble packing), unlike `turbo::quant::quantize_v_turbo4`, which reads the
-//! rotated rows back to the host on every call.
+//! Latent and dense Turbo4 rows share the on-device index, packing and scale computation.
 
 use cxx::UniquePtr;
 
 use crate::cache::latent_quant::QuantizedLatentRows;
-use crate::cache::turbo::quant::TurboQuantParams;
+use crate::cache::turbo::quant::{TurboQuantParams, pack_rotated_turbo4, rotate_turbo4_f32};
 use crate::dtype;
 use crate::ffi::{self, MlxArray};
 use crate::mla::quant_latent::{
@@ -114,7 +112,7 @@ impl TurboLatentCodec {
     /// `R x` in f32.
     pub(crate) fn rotate(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = ffi::astype(x, dtype::FLOAT32);
-        ffi::multiply(&wht(&ffi::multiply(&x, &self.signs1)), &self.signs2)
+        rotate_turbo4_f32(&x, &self.signs1, &self.signs2)
     }
 
     /// `R^T x`, cast to `out_dtype`.
@@ -127,7 +125,6 @@ impl TurboLatentCodec {
     /// Quantize `[B, 1, L, rank]` latent rows.
     pub(crate) fn quantize(&self, ckv: &MlxArray) -> TurboLatentRows {
         let s = ffi::array_shape(ckv);
-        let (b, h, l) = (s[0], s[1], s[2]);
         assert_eq!(s[3], self.rank, "turbo latent: rank mismatch");
         let x = ffi::astype(ckv, dtype::FLOAT32);
         let norm = ffi::sqrt(&ffi::sum_axis(&ffi::multiply(&x, &x), -1, true));
@@ -136,27 +133,9 @@ impl TurboLatentCodec {
         let one = ffi::full_f32(&[1], 1.0, dtype::FLOAT32);
         let safe = ffi::where_cond(&ffi::greater(&norm, &zero), &norm, &one);
         let unit = self.rotate(&ffi::divide(&x, &safe));
-        // Index = number of boundaries strictly below the value, the same rule
-        // as `nearest_centroid_indices_with_boundaries`.
-        let above = ffi::greater(&ffi::expand_dims(&unit, -1), &self.boundaries);
-        let idx = ffi::astype(&ffi::sum_axis(&above, -1, false), dtype::UINT8);
-        let y = ffi::take(&self.centroids, &idx, 0);
-        let y_norm = ffi::sqrt(&ffi::sum_axis(&ffi::multiply(&y, &y), -1, true));
-        let eps = ffi::full_f32(&[1], 1e-10, dtype::FLOAT32);
-        let rescale = ffi::divide(&norm, &ffi::maximum(&y_norm, &eps));
-        let pairs = ffi::reshape(&idx, &[b, h, l, self.rank / 2, 2]);
-        let half = |i: i32| {
-            ffi::reshape(
-                &ffi::slice(&pairs, &[0, 0, 0, 0, i], &[b, h, l, self.rank / 2, i + 1]),
-                &[b, h, l, self.rank / 2],
-            )
-        };
-        let four = ffi::full_f32(&[1], 4.0, dtype::UINT8);
-        let packed = ffi::bitwise_or(&half(0), &ffi::left_shift(&half(1), &four));
-        TurboLatentRows {
-            packed,
-            rescale: ffi::astype(&rescale, dtype::FLOAT16),
-        }
+        let (packed, rescale) =
+            pack_rotated_turbo4(&unit, &norm, &self.centroids, &self.boundaries);
+        TurboLatentRows { packed, rescale }
     }
 
     /// Unscaled codebook values `[B, 1, S, rank]` in `out_dtype`.

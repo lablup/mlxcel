@@ -196,6 +196,7 @@ fn main() {
         // #123). Reads scattered KV blocks out of the global pool via a block
         // table with no separate gather copy; the gather-then-SDPA path stays
         // the correctness reference and fallback.
+        .file("../mlxcelverse/kernels/turbo_packed_attention.cpp")
         .file("../mlxcelverse/kernels/paged_attention.cpp")
         // Paged-attention decode v2 (#898): CSR page table plus cross-CTA
         // split-KV in `paged_attention_v2.cpp`, and the variable-length
@@ -500,6 +501,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/turbo4_delegated_sdpa.cpp");
     // Fused paged-attention decode kernel launcher (#123).
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/turbo_packed_attention.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/turbo_packed_attention.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.cpp");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.metal");
     // HIP bodies of the three paged-attention kernels (#2068).

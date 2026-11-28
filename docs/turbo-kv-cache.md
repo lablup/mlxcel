@@ -92,6 +92,8 @@ The same trade holds on CUDA, and the numbers were measured on GB10 (sm_121) wit
 
 Int8 decode vs fp16 is 0.74x at 2K, 0.53x at 8K, and 0.31x at 32K, so it is slower at every length and the gap widens with context, because the path dequantizes the whole INT8 window to fp16 each step and then runs the standard fp16 SDPA (no fused INT8-KV kernel cuts the read bandwidth). What Int8 buys is memory: at 32K the MLX peak drops from 10.37 GB to 8.18 GB, matching a halved fp16 KV cache. Recommendation for CUDA: keep fp16 (default) for speed, and reach for `int8` only when an fp16 KV cache will not fit a long context or you need to pack more concurrent sequences into unified memory, accepting the decode-rate cost. The Turbo modes add V-quantization quality loss with no CUDA speed benefit today, so they stay experimental on CUDA. A fused INT8-KV / paged-attention kernel (#634) is the prerequisite for turning the smaller footprint into a decode win.
 
+`turbo3-asym` on GB10 was measured separately (2026-11-27, `llama-3.1-8b-4bit`, [record](benchmark_results/turbo3-readback-share-gb10-2026-11-27.md)). Until #3274 its codec read back to the host on every layer of every decode step, and that host segment was 76% / 78% / 82% of the step at 4096 / 16384 / 32768 tokens (4.35 / 1.25 / 0.57 tok/s, 0.10x / 0.04x / 0.02x of fp16). With the index, pack and unpack steps on the device it decodes at 18.01 / 4.75 / 2.48 tok/s (0.41x / 0.14x / 0.10x of fp16). It remains the slowest mode: the dequantize of the whole visible window still runs every step. The M1 Ultra table above predates this change and was not re-measured.
+
 ## CLI and server flags
 
 The same TurboQuant flag group is flattened into `mlxcel generate`,

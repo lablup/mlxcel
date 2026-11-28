@@ -129,6 +129,7 @@ EXPECTED_IN_SCOPE = frozenset(
         "src/lib/mlxcelverse/kernels/paged_attention_v2_merge.cpp",
         "src/lib/mlxcelverse/kernels/sampling.cpp",
         "src/lib/mlxcelverse/kernels/sampling_rejection.cpp",
+        "src/lib/mlxcelverse/kernels/turbo_packed_attention.cpp",
         # The #1804 ROCm fault probe (`rocm_fault_probe_array`) and the #2149
         # JIT-key probe (`rocm_jit_key_probe`): `fast::hip_kernel` launches in
         # a file with no CUDA launch, so it was out of scope while only
