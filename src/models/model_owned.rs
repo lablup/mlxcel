@@ -89,8 +89,12 @@ impl KvCacheLayerModes {
     /// that is not a positive multiple of `turbo::BLOCK_SIZE`, so that case
     /// falls back to FP16 with one warning per table. Every other mode passes
     /// through unchanged on purpose: the cache already stores FP16 for them,
-    /// and rewriting the mode would change `can_truncate_to` and snapshot
-    /// reuse for those caches.
+    /// and the label is what `kv_cache_storage_modes` reporting and a
+    /// snapshot's mode tag are compared against. Snapshots and
+    /// `can_truncate_to` no longer depend on it: they read the mode the ring
+    /// stores (`RotatingKVCache::stored_mode`), so a ring under `Int8`,
+    /// `Turbo4`, `Turbo4Delegated` or `Turbo3Asym` snapshots and truncates
+    /// like the FP16 ring it is (issue #3250).
     pub(crate) fn rotating_mode_for_layer(&self, layer_idx: usize, window: i32) -> KVCacheMode {
         let mode = self.mode_for_layer(layer_idx);
         if mode == KVCacheMode::Turbo4Asym

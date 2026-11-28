@@ -1257,6 +1257,10 @@ mod vlm_external_mask;
 #[path = "gemma3_layer_state_tests.rs"]
 mod layer_state;
 
+// Snapshot donation and restore under a quantized KV mode table (issue #3250).
+#[path = "gemma3_quantized_snapshot_tests.rs"]
+mod quantized_snapshot;
+
 // A ModelOpt NVFP4 MLP: each projection carries a per-tensor scale beside its
 // block scales. The fused forward has no argument for it and ran all three
 // projections unscaled, with no error.

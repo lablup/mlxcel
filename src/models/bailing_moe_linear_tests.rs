@@ -1290,3 +1290,60 @@ fn bailing_moe_linear_last_row_logits_match_the_full_forward() {
         crate::models::last_row_logits_harness::TOKENS,
     );
 }
+
+/// A Ling / Ring global-attention layer snapshots and restores in the
+/// quantized KV modes (issue #3250). It used to be refused with "do not yet
+/// serialize". The restored cache returns the K/V the uninterrupted one
+/// returns, byte for byte.
+#[test]
+fn a_bailing_attention_cache_round_trips_in_the_quantized_modes() {
+    use crate::models::kv_snapshot::test_support::{assert_same_bytes, keys, values};
+    use mlxcel_core::cache::KVCacheMode;
+    use mlxcel_core::generate::ModelStateSnapshot;
+    use mlxcel_core::layers::KVCache;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    for mode in [
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo4,
+    ] {
+        let mut kv = KVCache::new_with_mode(mode);
+        let _ = kv.update_and_fetch(keys(0, 37), values(0, 37));
+        let mut source = BailingLinearCache::Attention(kv);
+        let mut snapshot = ModelStateSnapshot::new("bailing_moe_linear", 37);
+        source
+            .snapshot_into(&mut snapshot, "layer1")
+            .unwrap_or_else(|err| panic!("{mode:?} Bailing attention snapshot: {err}"));
+
+        let mut restored = BailingLinearCache::Attention(KVCache::new_with_mode(mode));
+        restored
+            .restore_from(&snapshot, "layer1")
+            .unwrap_or_else(|err| panic!("{mode:?} Bailing attention restore: {err}"));
+        assert_eq!(restored.offset(), 37, "{mode:?}");
+        let (BailingLinearCache::Attention(source), BailingLinearCache::Attention(restored)) =
+            (&mut source, &mut restored)
+        else {
+            unreachable!("both are attention caches");
+        };
+        for t in 37..41 {
+            let (sk, sv) = source.update_and_fetch(keys(t, 1), values(t, 1));
+            let (rk, rv) = restored.update_and_fetch(keys(t, 1), values(t, 1));
+            assert_same_bytes(&rk, &sk, &format!("{mode:?} Bailing: keys after token {t}"));
+            assert_same_bytes(
+                &rv,
+                &sv,
+                &format!("{mode:?} Bailing: values after token {t}"),
+            );
+        }
+    }
+
+    // The modes a snapshot does not carry are still refused, by the old text.
+    let mut kv = KVCache::new_with_mode(KVCacheMode::Turbo4Delegated);
+    let _ = kv.update_and_fetch(keys(0, 8), values(0, 8));
+    let mut snapshot = ModelStateSnapshot::new("bailing_moe_linear", 8);
+    let err = BailingLinearCache::Attention(kv)
+        .snapshot_into(&mut snapshot, "layer1")
+        .expect_err("Turbo4Delegated is not carried");
+    assert!(err.contains("do not yet serialize"), "{err}");
+}

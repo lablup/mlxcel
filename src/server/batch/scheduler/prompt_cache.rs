@@ -701,6 +701,24 @@ impl BatchScheduler {
             );
             return;
         }
+        // A KV mode no snapshot can carry is recorded as that, before the
+        // capture is attempted: the capture would fail on its first such
+        // layer and read as `EmptySet`, "nothing to store" (issue #3250).
+        if let Some(mode) = self.snapshot_unsupported_kv_mode() {
+            tracing::debug!(
+                seq_id = %seq_id,
+                token_len = tokens.len(),
+                origin = ?origin,
+                kv_cache_mode = %mode,
+                "prompt-cache snapshot skipped: the model's KV cache mode cannot be stored in a snapshot"
+            );
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::KvModeNotSnapshotable,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
+            return;
+        }
         let snapshot = match state_snapshot::snapshot_sequence_state(
             self.engine.model(),
             self.engine.pool(),

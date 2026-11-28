@@ -2996,16 +2996,36 @@ mod cache_tests {
         }
     }
 
+    /// An Int8 attention layer is stored since issue #3250 (a layer that has
+    /// seen no token stores its mode tag only; a populated one round-trips in
+    /// `hybrid_snapshot_tests.rs`). The modes a snapshot does not carry are
+    /// still refused, and the refusal names the mode.
     #[test]
-    fn qwen3_next_attention_snapshot_refuses_non_fp16_modes() {
+    fn qwen3_next_attention_snapshot_stores_int8_and_refuses_what_it_cannot_carry() {
         let cache = Qwen3NextCache::Attention(KVCache::new_with_mode(
             mlxcel_core::cache::KVCacheMode::Int8,
         ));
-        let mut snapshot = ModelStateSnapshot::new("qwen3_next", 1);
-        let err = cache
+        let mut snapshot = ModelStateSnapshot::new("qwen3_next", 0);
+        cache
             .snapshot_into(&mut snapshot, "layer0")
-            .expect_err("non-fp16 attention snapshot must be refused");
-        assert!(err.contains("Int8"));
+            .expect("an Int8 attention layer is stored");
+        assert!(snapshot.tensor("layer0.attention.mode").is_some());
+
+        for (mode, name) in [
+            (
+                mlxcel_core::cache::KVCacheMode::Turbo4Delegated,
+                "Turbo4Delegated",
+            ),
+            (mlxcel_core::cache::KVCacheMode::Turbo3Asym, "Turbo3Asym"),
+        ] {
+            let cache = Qwen3NextCache::Attention(KVCache::new_with_mode(mode));
+            let mut snapshot = ModelStateSnapshot::new("qwen3_next", 1);
+            let err = cache
+                .snapshot_into(&mut snapshot, "layer0")
+                .expect_err("a mode a snapshot does not carry must be refused");
+            assert!(err.contains(name), "{err}");
+            assert!(snapshot.is_empty(), "{name}: nothing is stored");
+        }
     }
 
     #[test]
