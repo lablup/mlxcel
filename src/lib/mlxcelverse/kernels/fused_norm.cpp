@@ -156,13 +156,20 @@ constexpr const char* FUSED_ADD_RMS_NORM_SOURCE = R"(
 
 // CUDA port of the fused residual-add + RMSNorm kernel.
 //
-// UNVALIDATED. This host has no CUDA device and no `nvcc`, so this string has
-// never been compiled or executed; it is a structural transliteration of the
-// Metal body above, kept deliberately line-for-line parallel so a reviewer with
-// a CUDA box can diff the two rather than re-derive the algorithm. The first
-// CUDA run should be checked against `fused_add_rms_norm_matches_graph_*` in
-// `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs` before the kill switch
-// is left on by default there.
+// Validated on GB10 (sm_121) since #2832 / #2834: `fused_norm_parity_tests`
+// passes against `graph_add_rms_norm` at f32 / f16 / bf16, the cuda-oxide
+// artifact is checked bitwise against this kernel (130-case matrix), and
+// Llama 3.2 1B end to end runs on it. It is not byte-identical to MLX's CUDA
+// `rms_norm` (#3501): `new_residual` matches exactly, but MLX reduces the sum
+// of squares with its own launch geometry (at bf16 dim 2048,
+// `rms_norm_small` with a 128-thread block and 8-wide chunks; the `ALIGNED`
+// argument selects only the load function, not the summation order), while this kernel runs
+// `fused_norm_threads(dim)` lanes of 4 elements, so the fp32 normalizer can
+// differ in its last bits and a `normed` element lands one or two bf16 ulps
+// away. `cuda_near_tie.rs` in the parity tests pins exactly that. Matching
+// MLX bit for bit would mean copying its per-dim block size, chunk count and
+// 16-byte vector loads, and the cuda-oxide artifact, a bitwise port of this
+// body, would have to be regenerated with it.
 //
 // Same one-block-per-row mapping, same `N_READS = 4` sweep, same two-stage
 // reduction with `__shfl_xor_sync` standing in for `simd_sum` (a butterfly

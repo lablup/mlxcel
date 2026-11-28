@@ -866,3 +866,123 @@ async fn over_context_prompt_is_refused_before_sse_headers() {
     );
     assert!(options_rx.try_recv().is_err(), "the worker saw no request");
 }
+
+/// A router whose one-token admission bound no prompt fits, as in
+/// [`over_context_prompt_is_refused_before_sse_headers`].
+fn over_context_app() -> (
+    axum::Router,
+    ScriptedStreamHandle,
+    mpsc::Receiver<ServerGenerateOptions>,
+) {
+    let (options_tx, options_rx) = mpsc::channel();
+    let (provider, handle) = ModelProvider::scripted_streaming_for_route_tests(options_tx);
+    let provider = Arc::new(
+        provider.with_prompt_tokenizer_for_route_tests(MlxcelTokenizer::stub_with_byte_fallback()),
+    );
+    let batch_metrics = provider.batch_metrics().clone();
+    batch_metrics.publish_prompt_admission_bound(Some(1));
+    let app = create_app(AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template("Hello Hello Hello".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    ));
+    (app, handle, options_rx)
+}
+
+fn messages_request(stream: bool) -> Request<Body> {
+    let body = serde_json::json!({
+        "model": "route-test-model",
+        "max_tokens": 8,
+        "stream": stream,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    post_json("/v1/messages", body.to_string(), None)
+}
+
+/// The Anthropic surface refuses the same prompt as a client error in its own
+/// envelope. Anthropic answers a prompt longer than the context window with
+/// 400 `invalid_request_error`, and its SDKs retry every 5xx, so the 500
+/// `api_error` this used to return made a client repeat a request that can
+/// never fit and then report a server fault.
+async fn assert_over_context_messages_refusal(stream: bool) {
+    let (app, _handle, options_rx) = over_context_app();
+    let response = app
+        .oneshot(messages_request(stream))
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&collect_body(response).await).expect("json error body");
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("exceeds the available context size")),
+        "{body}"
+    );
+    assert!(options_rx.try_recv().is_err(), "the worker saw no request");
+}
+
+#[tokio::test]
+async fn over_context_messages_prompt_is_a_client_error() {
+    assert_over_context_messages_refusal(false).await;
+}
+
+#[tokio::test]
+async fn over_context_messages_stream_is_refused_before_sse_headers() {
+    assert_over_context_messages_refusal(true).await;
+}
+
+/// The `error` event of a `/v1/messages` stream that failed with `message`.
+async fn messages_stream_error(message: &str) -> serde_json::Value {
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.fail(message);
+    let response = app
+        .oneshot(messages_request(true))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let frames = sse_frames(&collect_body(response).await);
+    frames
+        .iter()
+        .find(|frame| frame["type"] == "error")
+        .unwrap_or_else(|| panic!("no error event: {frames:?}"))["error"]
+        .clone()
+}
+
+/// A refusal the scheduler can only report after the headers keeps the class
+/// the pre-header refusal has.
+#[tokio::test]
+async fn messages_stream_failure_matches_the_non_streaming_classification() {
+    let message = crate::server::model_provider::context_exceeded_message(9, 4);
+
+    let error = messages_stream_error(&message).await;
+
+    assert_eq!(error["type"], "invalid_request_error");
+    assert_eq!(error["message"], message.as_str());
+}
+
+/// Only the over-context refusal is the client's to fix: any other generation
+/// failure stays a server error on both the response and the stream.
+#[tokio::test]
+async fn messages_failure_of_another_kind_stays_an_api_error() {
+    let (app, handle, _options) = scripted_app(ServerConfig::default());
+    handle.fail("decode exploded");
+    let response = app
+        .oneshot(messages_request(false))
+        .await
+        .expect("router responds");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value =
+        serde_json::from_slice(&collect_body(response).await).expect("json error body");
+    assert_eq!(body["error"]["type"], "api_error", "{body}");
+
+    let error = messages_stream_error("decode exploded").await;
+    assert_eq!(error["type"], "api_error");
+}

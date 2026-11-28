@@ -25,7 +25,7 @@ use std::time::Duration;
 use super::scheduler_model_owned_cache_tests::{cache_ctx, options, test_store};
 use super::*;
 use crate::LoadedModel;
-use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
+use crate::server::config::{DecodeStorageBackend, PreemptionPolicy, PromptCacheRequestContext};
 use crate::server::model_provider::GenerateEvent;
 use crate::server::prompt_cache::PromptCacheStore;
 use crate::server::prompt_cache::key::fold_model_reasoning_effort;
@@ -66,13 +66,20 @@ fn prompt() -> Vec<i32> {
     (0..BOUNDARY + 3).map(|i| (i * 7 + 3) as i32 % 30).collect()
 }
 
+/// The cache context of a request at `effort`: the level on the context, and
+/// folded into the cache key's template signature.
+fn effort_ctx(effort: &str) -> PromptCacheRequestContext {
+    let mut ctx = cache_ctx();
+    ctx.template_sig = fold_model_reasoning_effort(ctx.template_sig, Some(effort));
+    ctx.model_reasoning_effort = Some(effort.to_string());
+    ctx
+}
+
 /// A chat turn of `prompt()` at `effort`, as the server builds it: the level
 /// on the request, and folded into the cache key's template signature.
 fn enqueue(sched: &mut BatchScheduler, effort: &str) -> mpsc::Receiver<GenerateEvent> {
     let tokens = prompt();
-    let mut ctx = cache_ctx();
-    ctx.template_sig = fold_model_reasoning_effort(ctx.template_sig, Some(effort));
-    ctx.model_reasoning_effort = Some(effort.to_string());
+    let mut ctx = effort_ctx(effort);
     ctx.history_prefix_tokens = Some(tokens[..BOUNDARY].to_vec());
     let mut options = options();
     options.prompt_cache_ctx = Some(ctx);
@@ -220,4 +227,57 @@ fn a_repeated_raon_turn_restores_its_snapshot_and_reproduces_the_cold_run() {
     assert_eq!(store.stats().snapshot_hits, 2);
     assert_eq!(queued(&sched).1, BOUNDARY);
     assert_eq!(run(&mut sched, &rx), cold);
+}
+
+/// The identical turn again after its background warm-up ran (issue #3467):
+/// the warm-up stores the next turn's history prefix and must leave the
+/// boundary snapshot it restored from, so the retry restores that one.
+#[test]
+fn a_repeated_raon_turn_restores_its_boundary_after_the_warmup() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+
+    let rx = enqueue(&mut sched, "low");
+    assert_eq!(queued(&sched).1, 0, "a cold store restores nothing");
+    let cold = run(&mut sched, &rx);
+    assert_eq!(cold.len(), MAX_TOKENS);
+
+    // The next turn's history prefix: the history, then the reply.
+    let mut target = prompt()[..BOUNDARY].to_vec();
+    target.extend_from_slice(&cold);
+    assert!(!prompt().starts_with(&target));
+    let warmups = sched
+        .batch_observability
+        .snapshot()
+        .prompt_cache_warmups_run;
+    sched.enqueue_prompt_cache_warmup(target, effort_ctx("low"));
+    sched.run_next_prompt_cache_warmup();
+    assert_eq!(
+        sched
+            .batch_observability
+            .snapshot()
+            .prompt_cache_warmups_run,
+        warmups + 1,
+        "the warm-up restored the boundary snapshot and stored its target"
+    );
+    assert_eq!(
+        store.stats().snapshot_hits,
+        0,
+        "a warm-up lookup is not a request hit"
+    );
+
+    let rx = enqueue(&mut sched, "low");
+    let (seq_id, start) = queued(&sched);
+    assert_eq!(
+        (store.stats().snapshot_hits, start),
+        (1, BOUNDARY),
+        "the retried turn restores its history-boundary snapshot"
+    );
+    assert_eq!(
+        restored_suffix_logits(&sched, seq_id, "low"),
+        cold_suffix_logits("low"),
+        "the restored state gives the cold run's logits bit for bit"
+    );
+    assert_eq!(run(&mut sched, &rx), cold, "and the same greedy tokens");
 }

@@ -2986,6 +2986,11 @@ bool cuda_graph_commit_stats(rust::Slice<uint64_t> out);
 uint64_t cuda_graph_counted_input_elements(
     uint64_t data_size, uint64_t rows_read, uint64_t rows);
 
+// Hand the PTX disk cache the gid whose write access on a cache path
+// component counts as the user's own, or a negative value for none (#3503).
+// A no-op without the CUDA backend and on Windows.
+void set_ptx_cache_trusted_group(int64_t gid);
+
 std::unique_ptr<MlxArray> inplace_slice_write(
     const MlxArray& dst,
     const MlxArray& rows,

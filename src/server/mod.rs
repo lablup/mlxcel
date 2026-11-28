@@ -35,6 +35,7 @@ pub mod conversation_store;
 mod cors;
 pub mod decision_model;
 pub mod decision_worker;
+mod deepseek_vl2_chat;
 pub(crate) mod diffusion_worker;
 pub(crate) mod dry_breakers;
 pub mod embedding_model;
@@ -140,9 +141,9 @@ pub use cli_input::{
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_settings_endpoint, env_fallback_ubatch_size, kv_mode_for_batch, long_cli_flag_in,
-    long_cli_flag_was_set, resolve_batch_kv_quant_config, resolve_compat_toggle,
-    resolve_kv_cache_mode, resolve_n_parallel,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, env_fallback_value_less_server_flags,
+    kv_mode_for_batch, long_cli_flag_in, long_cli_flag_was_set, resolve_batch_kv_quant_config,
+    resolve_compat_toggle, resolve_kv_cache_mode, resolve_n_parallel,
 };
 pub use config::{
     DEFAULT_KV_ADMISSION_WATERMARK, MAX_KV_ADMISSION_WATERMARK, clamp_kv_admission_watermark,

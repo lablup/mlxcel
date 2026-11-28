@@ -426,9 +426,29 @@ for user private groups on Ubuntu) creates group-writable directories, so
 release created them that way: `cuda-ptx` and `cuda-ptx/<mlx-commit>`, plus
 `~/.cache/mlxcel` itself when `MLXCEL_CACHE_DIR` is unset. Only directories you
 own are changed. Other write access is not something a `umask` leaves behind, so
-it is not repaired and stays refused with the notice, like a group-writable
-explicit `MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, or a group-writable
-`~/.cache`.
+it is not repaired and stays refused with the notice.
+
+A directory mlxcel does not manage that its group can write (an explicit
+`MLX_PTX_CACHE_DIR` or `MLXCEL_CACHE_DIR`, `~/.cache`, a volume root with
+`fsGroup`) is accepted only when others cannot write it, the group is your
+process's own group, and that group is provably yours alone: local accounts
+only in `/etc/nsswitch.conf`, no other member in `/etc/group`, no other account
+in `/etc/passwd` with it as primary group (lablup/mlxcel#3503). Otherwise it is
+refused with the notice.
+
+In a container, the volume root is often root-owned and mode `0777`, or the
+image has no passwd entry for the uid, and neither can be fixed from inside a
+nonroot pod. Set `MLXCEL_CACHE_TRUSTED_ROOT` to the volume root (it may equal
+`MLXCEL_CACHE_DIR`): the root and what is above it are then not checked, and
+everything below it must be a real directory you own that no one else can
+write. Use it only where no other uid can write that root. Where that is not
+certain, put mlxcel one level down (`MLXCEL_CACHE_DIR=/cache/mlxcel` with
+`MLXCEL_CACHE_TRUSTED_ROOT=/cache`), so that no other directory of yours, the
+model store included, sits beside the cache directly in the root; see the
+variable's entry in [environment-variables.md](environment-variables.md) for
+what the opt-in gives up. The private-group rule above looks at the image's
+account files only, so do not give the pod's `fsGroup` or `runAsGroup` to a
+container that runs as another uid.
 
 `MLX_PTX_CACHE_DIR` and `MLXCEL_CACHE_DIR` must be absolute paths for this cache: a relative one would resolve against the current directory, which anyone can pick for you. The notice then reads `MLX_PTX_CACHE_DIR must be an absolute path, got "<value>"`, and nothing is created. On Windows, `\cache` and `C:cache` count as relative. `MLXCEL_CACHE_DIR` is not consulted when `MLX_PTX_CACHE_DIR` is set, and an empty value of either counts as unset.
 

@@ -48,8 +48,8 @@ use mlxcel::server::{
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
-    resolve_parallel_context_size, start_server,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, env_fallback_value_less_server_flags,
+    long_cli_flag_was_set, resolve_parallel_context_size, start_server,
 };
 
 /// Run the `mlxcel serve` subcommand.
@@ -631,6 +631,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         long_cli_flag_was_set("no-slots"),
         &mut args.startup_notices,
     );
+    env_fallback_value_less_server_flags(&mut args.metrics, &mut args.props, &mut args.reuse_port);
     env_fallback_api_keys(&mut args.api_key);
     env_fallback_api_key_files(&mut args.api_key_file);
     env_fallback_cors_credentials(

@@ -41,9 +41,12 @@ pub const MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS: u64 = 8192;
 pub const MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES: u64 = 6;
 /// Target number of representative snapshots when
 /// `MLXCEL_PROMPT_CACHE_KEEP_PREVIOUS_TURN` is on (#3035). A conversation
-/// normally holds two snapshots (history boundary and completion); the switch
-/// keeps a third, the previous turn's restore source, so the same number of
-/// conversations needs half as many entries again.
+/// normally holds its history-boundary snapshot (and its completion snapshot
+/// when one is stored), and from its background warm-up until the next turn
+/// also the next turn's history prefix, kept beside the boundary it extends
+/// so a retry of the turn still restores that one (#3467). The switch keeps
+/// one more through each turn, the previous turn's restore source, so the
+/// same number of conversations needs half as many entries again.
 pub const MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES_KEEP_PREVIOUS_TURN: u64 =
     MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES * 3 / 2;
 

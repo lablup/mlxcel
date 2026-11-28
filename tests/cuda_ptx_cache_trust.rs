@@ -24,6 +24,10 @@
 //! by a `sm<cc>-nvrtc<version>` subdirectory, orphaned publish temporaries are
 //! swept, and temporaries are opened with `O_CREAT|O_EXCL|O_NOFOLLOW`.
 //!
+//! Two rules accept a directory under a container volume root (#3503, the
+//! `trusted_root` module): group write by a group that is provably private to
+//! the user, and the `MLXCEL_CACHE_TRUSTED_ROOT` opt-in.
+//!
 //! `MLX_PTX_CACHE_DIR` and `TMPDIR` are read once per process, so every
 //! scenario re-runs this binary as a child with its own environment; the
 //! child launches the fused MoE kernel pair and prints its output. The parent
@@ -61,6 +65,11 @@ const REFUSAL: &str = "mlxcel: CUDA kernel disk cache disabled: ";
 /// Compiled in only for the `debug` and `test-fast` profiles (#2765), see
 /// `mlxcel_core::cuda_arch::PTX_CACHE_TEST_HOOKS`.
 const TMP_SUFFIX_ENV: &str = "MLXCEL_PTX_CACHE_TEST_TMP_SUFFIX";
+/// The overlay's test-only hook that replaces the trusted gid of Rule 1
+/// (#3503): `none` or a decimal gid. Compiled in like [`TMP_SUFFIX_ENV`].
+const TRUSTED_GID_ENV: &str = "MLXCEL_PTX_CACHE_TEST_TRUSTED_GID";
+/// The opt-in of Rule 2 (#3503).
+const TRUSTED_ROOT_ENV: &str = "MLXCEL_CACHE_TRUSTED_ROOT";
 const TWO_HOURS: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// The child side of every scenario: launch the fused MoE pair and print its
@@ -117,8 +126,8 @@ impl ChildRun {
     }
 }
 
-/// Re-run this binary as a child with `MLX_PTX_CACHE_DIR`, `MLXCEL_CACHE_DIR`
-/// and the temporary-suffix hook cleared, then `envs` applied. `None` when the
+/// Re-run this binary as a child with `MLX_PTX_CACHE_DIR`, `MLXCEL_CACHE_DIR`,
+/// `MLXCEL_CACHE_TRUSTED_ROOT` and the test hooks cleared, then `envs` applied. `None` when the
 /// child found no CUDA device (the scenario is skipped).
 fn run_child(envs: &[(&str, &OsStr)]) -> Option<ChildRun> {
     run_child_in(&std::env::current_dir().expect("current dir"), envs)
@@ -134,7 +143,9 @@ fn run_child_in(cwd: &Path, envs: &[(&str, &OsStr)]) -> Option<ChildRun> {
         .env_remove("MLX_PTX_CACHE_DIR")
         .env_remove("MLXCEL_CACHE_DIR")
         .env_remove("MLXCEL_QUIET_JIT")
-        .env_remove(TMP_SUFFIX_ENV);
+        .env_remove(TMP_SUFFIX_ENV)
+        .env_remove(TRUSTED_GID_ENV)
+        .env_remove(TRUSTED_ROOT_ENV);
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -223,7 +234,14 @@ fn group_writable_cache_dir_is_refused() {
     let tmp = private_tempdir();
     let cache = tmp.path().join("cache");
     make_dir(&cache, 0o770);
-    let Some(run) = run_with_cache(&cache) else {
+    // Pinned to no trusted group (#3503), so a host with user private groups
+    // cannot turn this into an accepted directory. Without the hook (a
+    // profile that does not compile it in) nothing sets a trusted group
+    // either: this child does not call `ensure_persistent_ptx_cache`.
+    let Some(run) = run_child(&[
+        ("MLX_PTX_CACHE_DIR", cache.as_os_str()),
+        (TRUSTED_GID_ENV, OsStr::new("none")),
+    ]) else {
         return;
     };
     eprintln!("{}", run.refusals().join("\n"));
@@ -612,3 +630,11 @@ fn symlinked_per_user_fallback_root_is_refused() {
 // Cache path normalization and per-entry checks (#2765).
 #[path = "cuda_ptx_cache_trust/entries.rs"]
 mod entries;
+
+// The trusted group and the trusted root (#3503).
+#[path = "cuda_ptx_cache_trust/trusted_root.rs"]
+mod trusted_root;
+
+// I/O through the descriptor of a directory below a trusted root (#3503).
+#[path = "cuda_ptx_cache_trust/pinned_dir.rs"]
+mod pinned_dir;

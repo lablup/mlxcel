@@ -1038,12 +1038,23 @@ pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = cfg!(feature = "rocm");
 /// switch is not meant to change mid-run.
 ///
 /// Greedy temp-0 output is not guaranteed byte-identical to the unfused path
-/// over long generation. The two differ only by the rounding of the residual
-/// sum feeding the sum of squares (see `fused_norm.cpp`), which is far below
-/// the argmax-flip scale, but a near-tie argmax can still land on the other
-/// side. That is a tie-break difference, not a regression. The ROCm HIP port
-/// (#2063) measured byte-identical to the ROCm graph instead: every on/off
-/// logit-trace pair in its results page matched.
+/// over long generation. On CUDA the residual sum is byte-identical; what
+/// differs is the fp32 summation order of the sum of squares. MLX's
+/// `rms_norm_small` at bf16 dim 2048 runs 128 threads over two 8-wide chunks
+/// each, the fused kernel 512 threads of 4, so the normalizer can differ in
+/// its last bits and an element of the rounded intermediate `bf16(x * inv)` lands
+/// one bf16 ulp away; `normed`, the output after the gain multiply, can then be
+/// up to two ulps away. A near-tie argmax can then land on the other side. That
+/// is a tie-break difference, not a regression: measured on GB10 with
+/// `llama-3.2-1b-instruct-bf16` (#3501), two of 2048 prefill rows differed,
+/// the fused kernel matched a float64 reference on one and the graph on the
+/// other, and the one argmax flip in 128 steps was a step where the graph's
+/// top two were an exact bf16 tie (margin 0, fused margin 0.125). See
+/// `docs/benchmark_results/issue-3501-fused-norm-divergence-gb10-2026-11-28/`
+/// and `examples/fused_norm_divergence_probe.rs`. The ROCm HIP port (#2063)
+/// copies its overlay's launch geometry and measured byte-identical to the
+/// ROCm graph instead: every on/off logit-trace pair in its results page
+/// matched.
 pub fn fused_add_rmsnorm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
