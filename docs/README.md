@@ -55,6 +55,10 @@ The [cuda-oxide feasibility review](mlxcelverse/cuda-oxide-feasibility.md) evalu
 
 `adr/` holds numbered Architecture Decision Records, one significant decision per file, immutable once Accepted. See `adr/README.md` for the index.
 
+## Technical reports
+
+`../TECHNICAL_REPORTS/` holds one technical report per merged change, in English and Korean, recording what the change did, how it was validated and what it left open. Reports are grouped into one folder per minor release line (`0.8/`, `0.9/`); `../TECHNICAL_REPORTS/README.md` describes the layout and the filing rule. Each released line has a generated index by PR number at `<X.Y>/README.md` (`make reports-index`), and `make reports-index-current` prints the index of the line under development.
+
 ## The MkDocs manual
 
 The manual published at <https://mlxcel.lablup.ai/en/manual/> is not built from

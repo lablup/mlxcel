@@ -164,7 +164,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-used-by|verify-env-var-docs|verify-binary-assets|verify-windows-paths|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-used-by|verify-env-var-docs|verify-binary-assets|verify-windows-paths|verify-report-layout|reports-index|reports-index-current|verify-reports-index|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -992,6 +992,34 @@ verify-windows-paths: ## Assert no tracked path is a Windows device name such as
 	@python3 scripts/ci/check_windows_reserved_paths.py
 	@bash scripts/ci/check_windows_reserved_paths_test.sh
 
+# Each released line's TECHNICAL_REPORTS/<X.Y>/README.md is generated from its
+# report files (issue #1708); the line under development has no committed index,
+# because every report PR would conflict on it. Run `reports-index` in the PR
+# that bumps the workspace version to a new minor line, and after backfilling a
+# report into a released line. `reports-index-current` prints the current line's
+# index without writing it. The staleness check also runs in
+# `verify-python-tooling` (and so in CI's python-tooling job) through
+# tests/test_gen_reports_index.py, which holds its negative coverage.
+.PHONY: reports-index
+reports-index: ## Regenerate the released lines' TECHNICAL_REPORTS/<X.Y>/README.md indexes (issue #1708)
+	@python3 scripts/ci/gen_reports_index.py
+
+.PHONY: reports-index-current
+reports-index-current: ## Print the current release line's report index; writes nothing
+	@python3 scripts/ci/gen_reports_index.py --print
+
+.PHONY: verify-reports-index
+verify-reports-index: ## Assert the released lines' report indexes are current (issue #1708)
+	@echo "$(CYAN)[verify] technical reports index...$(RESET)"
+	@python3 scripts/ci/gen_reports_index.py --check
+	@python3 -m unittest tests/test_gen_reports_index.py
+
+.PHONY: verify-report-layout
+verify-report-layout: ## Assert every tracked report sits in its <MAJOR>.<MINOR>/ folder
+	@echo "$(CYAN)[verify] technical reports layout...$(RESET)"
+	@python3 scripts/ci/check_technical_reports_layout.py
+	@python3 scripts/ci/check_technical_reports_layout.py --self-test
+
 # Offline structural half of the llama-server b10621 compatibility gate
 # (issue #1443, epic #1431): validates the checked-in manifest under
 # compat/llama-server/b10621/ without network or the b10621 archive. The
@@ -1133,6 +1161,8 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@python3 scripts/ci/check_crate_versions.py --set "$(VERSION)"
 	@$(CARGO) update $$(python3 scripts/ci/check_crate_versions.py --print-update-args)
 	@$(MAKE) --no-print-directory verify-versions
+	@# A new minor line turns the previous one into a released line, which needs its index (issue #1708).
+	@python3 scripts/ci/gen_reports_index.py
 
 .PHONY: verify
 verify: verify-versions verify-kernel-dtype-keys verify-used-by verify-env-var-docs verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-cuda-runtime-dir verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)

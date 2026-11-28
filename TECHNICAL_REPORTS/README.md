@@ -8,7 +8,8 @@ Per-PR bilingual (English and Korean) technical reports for merged pull requests
 TECHNICAL_REPORTS/
   README.md            <- this file: layout and filing rules
   .keep-reports        <- opts the directory into git tracking
-  <MAJOR>.<MINOR>/     <- e.g. 0.9/
+  <MAJOR>.<MINOR>/     <- e.g. 0.8/
+    README.md          <- generated index, released lines only
     <PR>-<slug>-<YYYYMMDD>.en.md
     <PR>-<slug>-<YYYYMMDD>.ko.md
 ```
@@ -17,6 +18,15 @@ TECHNICAL_REPORTS/
 - Folder names are exact versions without the `v` prefix (`0.9`, `0.10`), so a plain alphabetical listing puts `0.10` before `0.2`.
 - Filename: `<PR-number>-<kebab-title>-<merge-date>.<lang>.md`. A few older reports are keyed by the closed issue number, or use a `pr-<number>-` prefix without a date.
 - No report lives at the directory root. `scripts/ci/check_technical_reports_layout.py` fails CI when one does.
+
+## Index
+
+Each released line has a generated index by PR number (title, date, English and Korean links) at `<MAJOR>.<MINOR>/README.md`, for example [`0.8/README.md`](0.8/README.md). The line under development has none: every merged PR commits its own report (`.keep-reports`), so a committed index of that folder would be one file that every open PR rewrites at the same spot, and concurrent PRs would conflict on it in turn. lablup/backend.ai-go stopped tracking its report table for the same reason. Run `make reports-index-current` to print it instead.
+
+A released line no longer receives reports, so its index is written once and then stays fixed. `scripts/ci/gen_reports_index.py --check` (run by the `python-tooling` CI job) fails when a released line's index is stale or missing, and when the current line has a committed one. Two moments need `make reports-index`:
+
+- The PR that bumps the root `Cargo.toml` to a new minor line, which turns the previous line into a released one. `make bump-version` already runs it.
+- A report backfilled into a released line.
 
 ## Which folder
 
