@@ -3792,7 +3792,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Mamba / SSM",
     "Hybrid",
     "Falcon",
-    "LFM2",
+    "Liquid",
     "Inkling",
     "PLaMo",
     "Aleph Alpha",

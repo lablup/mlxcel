@@ -61,7 +61,8 @@ BINARY_SNIFF_BYTES = 8000
 # Depth Anything, SAM 3.1, Objects, PP-DocLayoutV3, SAM 3D Body,
 # RF-DETR, FLUX.2, Z-Image, Bonsai, ERNIE-Image, Mage-Flow, Qwen-Image,
 # and Ideogram 4 fixture bytes.
-TOTAL_BUDGET_BYTES = 42_749_699
+# Three full 128k-vocabulary LFM3 fp32 reference rows.
+TOTAL_BUDGET_BYTES = 44_286_211
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,6 +75,11 @@ class Rule:
 
 
 DECLARED = (
+    Rule(
+        pattern="tests/fixtures/lfm3/last_logits.safetensors",
+        max_bytes=1_536_512,
+        why="Three full-vocabulary float32 last-row logits from mlx-vlm for LFM3.",
+    ),
     Rule(
         pattern="tests/fixtures/bonsai/generate_512_seed9909.safetensors",
         max_bytes=524_480,

@@ -80,6 +80,10 @@ pub(crate) fn try_load_nonstandard_model_from_dir(
             super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
                 .map(LoadedModel::Lfm2)?,
         ),
+        ModelType::Lfm3 => Some(
+            super::load_pair_from_dir(path_str, |path| models::Lfm3Model::load(&path))
+                .map(LoadedModel::Lfm3)?,
+        ),
         ModelType::Lfm2Moe => Some(
             super::load_pair_from_dir(path_str, |path| models::Lfm2Model::load(&path))
                 .map(LoadedModel::Lfm2Moe)?,

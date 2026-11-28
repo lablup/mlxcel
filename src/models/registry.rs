@@ -837,6 +837,7 @@ impl ModelType {
             ModelType::NemotronNAS => "nemotron_nas",
             ModelType::FalconH1 => "falcon_h1",
             ModelType::Lfm2 => "lfm2",
+            ModelType::Lfm3 => "lfm3",
             ModelType::Lfm2Moe => "lfm2_moe",
             ModelType::Lfm2VL => "lfm2_vl",
             ModelType::Inkling => "inkling",
@@ -1009,6 +1010,7 @@ impl ModelType {
             | ModelType::NemotronH
             | ModelType::FalconH1
             | ModelType::Lfm2
+            | ModelType::Lfm3
             | ModelType::Lfm2Moe
             | ModelType::Qwen35
             | ModelType::Plamo2
@@ -1243,6 +1245,7 @@ pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] 
         ModelType::Jamba => &["jamba"],
         ModelType::FalconH1 => &["falcon_h1"],
         ModelType::Lfm2 => &["lfm2"],
+        ModelType::Lfm3 => &["lfm3"],
         ModelType::Lfm2VL => &["lfm2_vl", "lfm2-vl"],
         ModelType::Lfm2Moe => &["lfm2_moe"],
         ModelType::Inkling | ModelType::InklingVLM => &["inkling_mm_model", "inkling"],

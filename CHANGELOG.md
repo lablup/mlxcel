@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **LiquidAI LFM3 text generation and serving** (#3206). The LFM3-1.7B backbone supports gated full and sliding attention, causal short convolutions, and exact-prefix prompt-cache snapshots.
+
 ## [v0.9.0-beta.3] - 2026-11-28
 
 ### Added

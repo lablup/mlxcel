@@ -437,6 +437,30 @@ impl Attention {
 // bidirectional padding differ only in where the zeros go, which a whole-model
 // forward pass would hide behind sixteen layers of mixing.
 
+pub(crate) struct ShortConvParams {
+    pub hidden_size: i32,
+    pub l_cache: i32,
+    pub require_conv_bias: bool,
+    pub causal: bool,
+    pub group_size: i32,
+    pub bits: i32,
+}
+
+impl From<&ModelArgs> for ShortConvParams {
+    fn from(args: &ModelArgs) -> Self {
+        Self {
+            hidden_size: args.hidden_size as i32,
+            l_cache: args.conv_l_cache as i32,
+            // LFM2 has always inferred this optional bias from the weight map.
+            require_conv_bias: false,
+            causal: args.conv_causal,
+            group_size: args.group_size(),
+            bits: args.bits(),
+        }
+    }
+}
+
+// Used by: LFM2, LFM2-MoE, LFM2-VL, LFM2.5-Embedding and LFM3.
 pub(crate) struct ShortConv {
     in_proj: UnifiedLinear,
     out_proj: UnifiedLinear,
@@ -462,16 +486,27 @@ impl ShortConv {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
-        let gs = args.group_size();
-        let bits = args.bits();
+        Self::from_parts(weights, prefix, &args.into())
+    }
 
+    pub(crate) fn from_parts(
+        weights: &WeightMap,
+        prefix: &str,
+        params: &ShortConvParams,
+    ) -> Result<Self, String> {
+        let gs = params.group_size;
+        let bits = params.bits;
         let in_proj = UnifiedLinear::from_weights(weights, &format!("{prefix}.in_proj"), gs, bits)?;
         let out_proj =
             UnifiedLinear::from_weights(weights, &format!("{prefix}.out_proj"), gs, bits)?;
         let conv_weight = get_weight_copy(weights, &format!("{prefix}.conv.weight"))?;
-        let conv_bias = weights
-            .get(&format!("{prefix}.conv.bias"))
-            .map(|w| mlxcel_core::copy(w));
+        let bias_name = format!("{prefix}.conv.bias");
+        let conv_bias = if params.require_conv_bias {
+            Some(get_weight_copy(weights, &bias_name)?)
+        } else {
+            // Preserve the LFM2 loader's tensor-driven optional bias.
+            weights.get(&bias_name).map(|w| mlxcel_core::copy(w))
+        };
 
         // Precompute the decode fast-path weight off Metal (issue #748). On
         // Metal `conv1d` already dispatches a fast small-conv kernel, so keep
@@ -487,10 +522,10 @@ impl ShortConv {
             out_proj,
             conv_weight,
             conv_bias,
-            hidden_size: args.hidden_size as i32,
-            l_cache: args.conv_l_cache as i32,
+            hidden_size: params.hidden_size,
+            l_cache: params.l_cache,
             decode_weight,
-            causal: args.conv_causal,
+            causal: params.causal,
         })
     }
 
@@ -1419,6 +1454,19 @@ impl Lfm2Model {
     }
 }
 
+/// PyTorch depthwise convs store [channels, 1, taps]. MLX stores [channels, taps, 1].
+/// Used by: LFM2 and LFM3.
+pub(crate) fn transpose_short_conv_weights(weights: &mut WeightMap) {
+    for (name, weight) in weights.iter_mut() {
+        if name.ends_with("conv.conv.weight") {
+            let shape = mlxcel_core::array_shape(weight);
+            if matches!(shape.as_slice(), [_, 1, taps] if *taps > 1) {
+                *weight = mlxcel_core::transpose_axes(weight, &[0, 2, 1]);
+            }
+        }
+    }
+}
+
 // Weight sanitize (mirrors the reference `sanitize`).
 //
 // 1. Depthwise conv weight orientation: PyTorch stores `[hidden, 1, L_cache]`;
@@ -1431,21 +1479,7 @@ impl Lfm2Model {
 //    The 4-bit mlx-community MoE checkpoint already ships the stacked
 //    `switch_mlp` tensors, so this only fires for non-pre-stacked exports.
 pub(crate) fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
-    // 1. Conv weight orientation.
-    let conv_keys: Vec<String> = weights
-        .keys()
-        .filter(|k| k.contains("conv.conv.weight"))
-        .cloned()
-        .collect();
-    for k in conv_keys {
-        if let Some(v) = weights.get(&k) {
-            let shape = mlxcel_core::array_shape(v);
-            if shape.len() == 3 && shape[shape.len() - 1] > shape[1] {
-                let transposed = mlxcel_core::transpose_axes(v, &[0, 2, 1]);
-                weights.insert(k, transposed);
-            }
-        }
-    }
+    transpose_short_conv_weights(&mut weights);
 
     // 2. MLP w1/w2/w3 → gate/down/up rename (covers weight + quantized
     //    scales/biases by matching the `.wN.` key segment).

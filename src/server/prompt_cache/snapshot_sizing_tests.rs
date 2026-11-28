@@ -20,6 +20,29 @@ use mlxcel_core::cache::KVCacheMode;
 use serde_json::json;
 
 #[test]
+fn lfm3_snapshot_counts_conv_tails_at_the_stream_dtype() {
+    let mut cfg: Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/lfm3/config.json")).unwrap();
+    for (dtype, expected) in [("bfloat16", 319_488), ("float32", 638_976)] {
+        cfg["dtype"] = json!(dtype);
+        let rec = recommend_model_snapshot_capacity_from_config(
+            &cfg,
+            8192,
+            PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES,
+            None,
+            KVCacheMode::Fp16,
+        )
+        .unwrap();
+        // 13 conv layers, 6 history rows and 2048 hidden elements per row.
+        assert_eq!(rec.fixed_state_bytes, expected, "{dtype}");
+        assert_eq!(
+            rec.entry_bytes,
+            rec.kv_bytes_at_representative_tokens + expected
+        );
+    }
+}
+
+#[test]
 fn qwen38_27b_default_holds_multiple_representative_snapshots() {
     let cfg = json!({
         "model_type": "qwen3_next",
