@@ -402,6 +402,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // PLaMo 2.1 VL's text backbone is PLaMo 2; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Plamo2 | ModelType::Plamo2VLM => "plamo2",
+        // Not shardable by the generic transformer plan: packed qkv and
+        // rotating sliding caches. This arm only keeps the dispatch table total.
+        ModelType::Plamo3 => "plamo3",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",
         ModelType::NemotronHNanoOmniVLM => "nemotron_h_nano_omni",

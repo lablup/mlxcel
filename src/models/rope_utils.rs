@@ -31,7 +31,8 @@
 //! (text and VLM, through `llama4_helpers::Llama4Rope`), InternLM3 /
 //! InternLM2 through `dynamic_ntk_rope`, IQuest-Loop-Coder
 //! (`iquestloopcoder`), Muse Glimmer (`muse_glimmer_config`,
-//! `muse_glimmer_layers`), Nemotron-NAS (`nemotron_nas`), and the
+//! `muse_glimmer_layers`), Nemotron-NAS (`nemotron_nas`), PLaMo 3's
+//! full-attention layers (`plamo3`, `plamo3_layers`), and the
 //! DeepSeek-style MLA families through `mla_rope::MlaRope` (#3295):
 //! DeepSeek-V3 / Kimi-K2 / JoyAI (`deepseek_v3`, and through it Kimi-VL's text
 //! model and the DeepSeek-V3 pipeline stage executor), Xing4.0, DeepSeek V3.2
@@ -606,8 +607,8 @@ impl YarnParams {
 /// block without `truncate: false` builds a bit-identical table
 /// (`rope_utils_tests::yarn_truncate_default_is_bit_identical`).
 ///
-/// Used by: [`RopeScalingKind::resolve`] (every family in the module header)
-/// and Qwen 3.5 (`qwen3_5::Qwen35Config::yarn`, which takes the table and
+/// Used by: [`RopeScalingKind::resolve`] (every family in the module header,
+/// including PLaMo 3's full-attention layers with `truncate: false`) and Qwen 3.5 (`qwen3_5::Qwen35Config::yarn`, which takes the table and
 /// computes the transformers attention factor itself). Not used by GptOss,
 /// OpenAIPrivacyFilter and Ministral3: they build their YaRN table with
 /// `gpt_oss_common::yarn_rope_freqs`, a second builder that takes no

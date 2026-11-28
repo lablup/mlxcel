@@ -90,6 +90,7 @@ use super::ssd_scan::{SSD_CHUNK_SIZE, SSD_SCHEDULE_TOKENS, SsdEval, chunked_ssd_
 
 // Per-norm offsets (folded into the stored weight at construction time).
 // Exposed to `plamo2_tests` so the exact PLaMo 2 offset values stay pinned.
+// Used by: PLaMo 2, PLaMo 3 (identical offsets; PLaMo 3 adds q/k norms at 1.0).
 pub(crate) const PRE_MIXER_NORM_OFFSET: f32 = 1.0;
 pub(crate) const PRE_MLP_NORM_OFFSET: f32 = 1.0;
 pub(crate) const FINAL_NORM_OFFSET: f32 = 1.0;
@@ -1254,7 +1255,9 @@ fn sanitize_weights(mut weights: WeightMap) -> WeightMap {
 
 /// Load a norm weight and fold the additive offset into it so the standard
 /// [`RMSNorm`] (`x_normed * weight`) reproduces `rms_norm(x, weight + offset)`.
-fn offset_rms_norm(
+///
+/// Used by: PLaMo 2, PLaMo 3 (`plamo3_layers`, which shares the offsets above).
+pub(crate) fn offset_rms_norm(
     weights: &WeightMap,
     name: &str,
     eps: f32,

@@ -118,6 +118,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "PhiMoeModel@src/models/phimoe.rs",
     "PhixtralModel@src/models/phixtral.rs",
     "Plamo2Model@src/models/plamo2.rs",
+    "Plamo3Model@src/models/plamo3_lm.rs",
     "Qwen25VLModel@src/vision/qwen2_5_vl.rs",
     "Qwen2MoeModel@src/models/qwen2_moe.rs",
     "Qwen2VLModel@src/models/qwen2_vl.rs",

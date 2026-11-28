@@ -808,3 +808,25 @@ fn reads_truncate_flag() {
     assert_ne!(table("false"), table("true"));
     assert_eq!(table(r#""false""#), table("true"));
 }
+
+/// PLaMo 3's full-attention geometry (issue #2374): head_dim 128, base 1e6,
+/// factor 256 over an original 4096. Its fractional band is where
+/// `truncate: false` changes the table, while an absent flag still builds the
+/// floored-and-ceiled table bit for bit.
+#[test]
+fn yarn_truncate_toggle_on_the_plamo3_geometry() {
+    let case = YarnCase {
+        dims: 128,
+        factor: 256.0,
+        base: 1e6,
+        original_ctx: 4096.0,
+        beta_fast: 32.0,
+        beta_slow: 1.0,
+    };
+    let bits = |table: Vec<f32>| table.into_iter().map(f32::to_bits).collect::<Vec<u32>>();
+    let truncated = bits(yarn_table(case, Some(true)));
+    assert_eq!(bits(yarn_table(case, None)), truncated);
+    assert_eq!(bits(yarn_table_before_truncate(case)), truncated);
+    let fractional = bits(yarn_table(case, Some(false)));
+    assert_ne!(fractional, truncated);
+}

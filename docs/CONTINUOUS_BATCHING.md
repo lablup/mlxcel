@@ -57,8 +57,8 @@ roofline, while per-request decode rate falls proportionally. The defaults:
   forward per tick: families with a native decode path include Llama 3,
   Llama 4, Qwen 3, Gemma 3, Gemma 3n text/VLM, Gemma 4 text/VLM/Unified,
   Helium, Qwen3-MoE, Ministral 3, ExaOne 4, Mellum, Laguna, Step 3.5,
-  Step 3.7 VLM text decode, AFMoE (Trinity), Kolibri-1, DeepSeek V4,
-  IQuestLoopCoder, Inkling text/VLM, and Inkling 2 text/VLM. The latter six model-owned families batch projections and
+  Step 3.7 VLM text decode, AFMoE (Trinity), Kolibri-1, PLaMo 3, DeepSeek V4,
+  IQuestLoopCoder, Inkling text/VLM, and Inkling 2 text/VLM. The latter seven model-owned families batch projections and
   feed-forward operations while retaining sequence-local attention caches;
   Inkling stacks convolution tails and DeepSeek V4 updates pooling per row.
   Inkling 2 (#3377) runs one forward over every row, including Mini's three
