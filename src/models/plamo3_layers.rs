@@ -22,8 +22,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::afmoe::{validate_norm, validate_projection};
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::plamo2::{
-    FINAL_NORM_OFFSET, PRE_MIXER_NORM_OFFSET, PRE_MLP_NORM_OFFSET, offset_rms_norm,
-    post_mixer_norm_offset, post_mlp_norm_offset,
+    PRE_MIXER_NORM_OFFSET, PRE_MLP_NORM_OFFSET, offset_rms_norm, post_mixer_norm_offset,
+    post_mlp_norm_offset,
 };
 use crate::models::plamo3_config::ModelArgs;
 use crate::models::rope_utils::RopeScalingKind;
@@ -33,6 +33,7 @@ pub(crate) const QK_NORM_OFFSET: f32 = 1.0;
 
 /// The six PLaMo 3 norm offsets in `(name, offset)` form, pinned by
 /// `plamo3_tests::every_norm_offset_is_folded_into_its_weight`.
+#[cfg(test)]
 pub(crate) fn norm_offsets() -> [(&'static str, f32); 6] {
     [
         ("pre_mixer_norm", PRE_MIXER_NORM_OFFSET),
@@ -40,7 +41,7 @@ pub(crate) fn norm_offsets() -> [(&'static str, f32); 6] {
         ("pre_mlp_norm", PRE_MLP_NORM_OFFSET),
         ("post_mlp_norm", post_mlp_norm_offset()),
         ("qk_norm", QK_NORM_OFFSET),
-        ("norm", FINAL_NORM_OFFSET),
+        ("norm", crate::models::plamo2::FINAL_NORM_OFFSET),
     ]
 }
 

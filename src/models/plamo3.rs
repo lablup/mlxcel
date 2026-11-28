@@ -34,8 +34,9 @@
 //!   YaRN (`factor`, `original = initial_context_length`, `beta_fast` 32,
 //!   `beta_slow` 1, `truncate: false`, concentration `0.1 ln(factor) + 1`).
 //!   `pfnet/plamo-3-610m-fin-instruct` ships factor 256 over 4096. The table
-//!   goes through [`RopeScalingKind::resolve`], so `--rope-scaling none` drops
-//!   it (which is how the mlx-lm comparison, which ignores YaRN, is run).
+//!   goes through [`RopeScalingKind::resolve`], so the server's
+//!   `--rope-scaling none` drops it; `tests/plamo3_mlx_lm_parity.rs` installs
+//!   that override to compare against mlx-lm, which ignores YaRN.
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
