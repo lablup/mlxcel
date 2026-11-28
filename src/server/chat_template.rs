@@ -477,6 +477,9 @@ impl ChatTemplateProcessor {
         // included) as the decoder seed. The built-in template renders the
         // text parts only, which is what the shipped one does for a plain
         // string, so it replaces the checkpoint's for this family.
+        // Unlimited-OCR is overridden too: its MLX conversion ships
+        // DeepSeek-OCR's template, whose trailing space the reference never
+        // renders (see `UNLIMITED_OCR_CHAT_TEMPLATE`).
         let template = if matches!(
             family,
             Some(
