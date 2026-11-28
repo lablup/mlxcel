@@ -2976,6 +2976,11 @@ std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w);
 // CUDA weight-upload counters of `Load::eval_gpu` (#1564); false without CUDA.
 bool weight_load_transfer_stats(rust::Slice<uint64_t> out);
 
+// Hand the PTX disk cache the gid whose write access on a cache path
+// component counts as the user's own, or a negative value for none (#3503).
+// A no-op without the CUDA backend and on Windows.
+void set_ptx_cache_trusted_group(int64_t gid);
+
 std::unique_ptr<MlxArray> inplace_slice_write(
     const MlxArray& dst,
     const MlxArray& rows,

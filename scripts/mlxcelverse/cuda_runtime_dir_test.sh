@@ -67,9 +67,23 @@ ptx_cache_dir=$(awk '
   copying { print }
   copying && /^}/ { exit }
 ' "$jit_module")
-for needle in 'ptx_cache_env_from_process()' 'ptx_cache_env_refusal(' 'resolve_ptx_cache_dir('; do
+for needle in 'ptx_cache_env_from_process()' 'ptx_cache_env_refusal(' 'resolve_ptx_cache_dir(' \
+  'resolve_ptx_trusted_root(' 'open_ptx_cache_below_trusted_root(' 'cache_dir_is_trusted('; do
   if ! grep -qF "$needle" <<<"$ptx_cache_dir"; then
     printf 'ptx_cache_dir() in jit_module.cpp no longer calls %s\n' "$needle" >&2
+    exit 1
+  fi
+done
+# The POSIX rules are tested below (#3503); jit_module.cpp has to be what calls
+# them, for the root above, for the device subdirectory, and for the entries.
+for needle in 'return ptx_cache_dir_is_trusted(' \
+  'open_ptx_cache_components(' 'active_trusted_root() = {trusted, fd};' \
+  'return ptx_cache_entry_ref(pinned_cache_dirs(), path);' \
+  'guard.fd = ::openat(' 'entry.dir_fd,' 'tmp_ref.dir_fd,' 'path_ref.dir_fd,' \
+  '::unlinkat(bad_ref.dir_fd,' '::unlinkat(probe.dir_fd,' \
+  'return make_private_directories_at(entry_dir.dir_fd, entry_dir.name);'; do
+  if ! code_has "$jit_module" "$needle"; then
+    printf 'jit_module.cpp no longer has %s; the tested PTX cache trust rules are bypassed\n' "$needle" >&2
     exit 1
   fi
 done
@@ -95,4 +109,4 @@ fi
   "$repo_root/scripts/mlxcelverse/cuda_runtime_dir_test.cpp" \
   -o "$test_dir/cuda-runtime-dir-test"
 "$test_dir/cuda-runtime-dir-test"
-printf '[cuda-runtime-dir] runtime directory order, override errors, marker, preload check, include order and PTX cache path rules passed (host only; no CUDA)\n'
+printf '[cuda-runtime-dir] runtime directory order, override errors, marker, preload check, include order, PTX cache path rules and PTX cache trust rules passed (host only; no CUDA)\n'

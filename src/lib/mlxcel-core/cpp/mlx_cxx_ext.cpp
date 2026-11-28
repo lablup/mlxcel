@@ -12,6 +12,11 @@
 #include "kv_inplace_write.h"       // in-place decode KV row write (#1959).
 #ifdef MLXCEL_BRIDGE_CUDA_BACKEND
 #include "mlx/backend/cuda/load_staging.h"  // weight upload counters (#1564).
+#if !defined(_WIN32)
+// PTX cache trusted group (#3503). Not on Windows, where the header brings in
+// <windows.h> and the cache is judged by ACLs.
+#include "mlx/backend/cuda/ptx_cache_dir.h"
+#endif
 #elif defined(MLXCEL_BRIDGE_ROCM_BACKEND)
 #include "mlx/backend/rocm/load_staging.h"  // weight upload counters (#1564).
 #endif
@@ -418,6 +423,14 @@ std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w) {
         std::static_pointer_cast<mlxcel_array_desc::DescPtr::element_type>(
             std::move(locked));
     return std::make_unique<MlxArray>(std::move(out));
+}
+
+void set_ptx_cache_trusted_group(int64_t gid) {
+#if defined(MLXCEL_BRIDGE_CUDA_BACKEND) && !defined(_WIN32)
+    mlx::core::cu::set_ptx_cache_trusted_group(gid);
+#else
+    (void)gid;
+#endif
 }
 
 bool weight_load_transfer_stats(rust::Slice<uint64_t> out) {

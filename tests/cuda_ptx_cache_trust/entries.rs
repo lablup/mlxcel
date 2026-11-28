@@ -40,7 +40,11 @@ fn populate(cache: &Path) -> Option<(ChildRun, Vec<PathBuf>)> {
 /// The second run found every planted entry unusable: it compiled the
 /// kernels again, produced the first run's output, and republished each
 /// entry as a private regular file.
-fn assert_recompiled_and_republished(second: &ChildRun, first: &ChildRun, entries: &[PathBuf]) {
+pub(super) fn assert_recompiled_and_republished(
+    second: &ChildRun,
+    first: &ChildRun,
+    entries: &[PathBuf],
+) {
     second.assert_success("run over the planted entries");
     assert!(
         second.refusals().is_empty(),
