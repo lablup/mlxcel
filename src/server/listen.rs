@@ -113,9 +113,10 @@ pub(crate) async fn serve(
             #[cfg(unix)]
             {
                 let listener = bind_unix(path)?;
+                let bound = super::shutdown::socket_identity(path);
                 announce(&format!("unix://{}", path.display()));
                 let served = accept_unix(listener, app, options).await;
-                super::shutdown::remove_own_socket(path);
+                super::shutdown::remove_own_socket(path, bound);
                 served
             }
             // tokio has no Unix domain socket listener off Unix (#58).

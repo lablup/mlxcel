@@ -293,28 +293,101 @@ impl ConnectionDrain {
     }
 }
 
+/// Identity of a bound socket file; see [`socket_identity`].
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SocketIdentity {
+    dev: u64,
+    ino: u64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+#[cfg(unix)]
+impl SocketIdentity {
+    fn of(entry: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            dev: entry.dev(),
+            ino: entry.ino(),
+            ctime: entry.ctime(),
+            ctime_nsec: entry.ctime_nsec(),
+        }
+    }
+}
+
+/// The filesystem identity of the socket file at `path`: device, inode and
+/// change time. The change time guards against inode reuse, since a
+/// filesystem such as ext4 may hand a path re-created right after an unlink
+/// the inode number it just freed.
+///
+/// Captured right after the bind, so [`remove_own_socket`] can tell this
+/// server's socket from one a replacement server bound on the same path
+/// while this one was draining. `None` when the entry cannot be read.
+#[cfg(unix)]
+pub(crate) fn socket_identity(path: &std::path::Path) -> Option<SocketIdentity> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|entry| SocketIdentity::of(&entry))
+}
+
 /// Remove the socket file this server bound, after its listener is gone.
 ///
-/// Only a socket is removed: if the path was replaced by something else while
-/// the server ran (a regular file, a symlink), it is left alone. A failure is
-/// logged; the next start clears a stale socket in `bind_unix` anyway.
+/// Only this server's own socket is removed: the entry must still be a socket
+/// with the identity captured at bind time (`bound`, from
+/// [`socket_identity`]). The listener is dropped before the drain, so a
+/// replacement server started during the drain may already have replaced the
+/// stale socket at this path with its own live one (`bind_unix` clears a
+/// socket nobody listens on); that socket, a path replaced by something else
+/// (a regular file, a symlink), and a socket whose identity was never
+/// captured are all left alone. A failure is logged; the next start clears a
+/// stale socket in `bind_unix` anyway.
 #[cfg(unix)]
-pub(crate) fn remove_own_socket(path: &std::path::Path) {
+pub(crate) fn remove_own_socket(path: &std::path::Path, bound: Option<SocketIdentity>) {
     use std::os::unix::fs::FileTypeExt;
 
+    let Some(bound) = bound else {
+        tracing::warn!(
+            "{}: the socket identity was not captured at bind time; it is left as it is",
+            path.display()
+        );
+        return;
+    };
     match std::fs::symlink_metadata(path) {
-        Ok(entry) if entry.file_type().is_socket() => match std::fs::remove_file(path) {
-            Ok(()) => tracing::info!("removed Unix socket {}", path.display()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                tracing::warn!("failed to remove Unix socket {}: {error}", path.display())
+        Ok(entry) if entry.file_type().is_socket() && SocketIdentity::of(&entry) == bound => {
+            match std::fs::remove_file(path) {
+                Ok(()) => tracing::info!("removed Unix socket {}", path.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!("failed to remove Unix socket {}: {error}", path.display())
+                }
             }
-        },
+        }
+        Ok(entry) if entry.file_type().is_socket() => tracing::info!(
+            "{} now belongs to another server; it is left as it is",
+            path.display()
+        ),
         Ok(_) => tracing::warn!(
             "{} is no longer a socket; it is left as it is",
             path.display()
         ),
         Err(_) => {}
+    }
+}
+
+/// Run `work` unless a shutdown signal arrives first.
+///
+/// Returns `None` when the signal won; `work` is then dropped. For startup
+/// waits that hold no model yet (pipeline discovery, the `--pp-peer`
+/// assignment wait), where the latched signal would otherwise be ignored
+/// until the wait timed out on its own.
+pub(crate) async fn unless_shutdown<F: std::future::Future>(work: F) -> Option<F::Output> {
+    let token = install();
+    tokio::select! {
+        biased;
+        () = token.cancelled() => None,
+        output = work => Some(output),
     }
 }
 

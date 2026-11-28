@@ -82,3 +82,46 @@ async fn finished_connections_are_reaped_while_accepting() {
         drain.tasks.len()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_own_socket_is_removed_on_shutdown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("own.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+    let bound = super::socket_identity(&path);
+    drop(listener);
+    super::remove_own_socket(&path, bound);
+    assert!(!path.exists(), "the server's own socket must be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_replacement_servers_socket_is_left_in_place() {
+    // A replacement server that binds the same path during the drain replaces
+    // the old, unlistened socket with its own live one; the old server must
+    // not unlink it when its drain ends.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("shared.sock");
+    let old = std::os::unix::net::UnixListener::bind(&path).expect("bind old");
+    let old_identity = super::socket_identity(&path);
+    drop(old);
+    std::fs::remove_file(&path).expect("clear the stale socket like bind_unix");
+    let _replacement = std::os::unix::net::UnixListener::bind(&path).expect("bind replacement");
+    super::remove_own_socket(&path, old_identity);
+    assert!(
+        path.exists(),
+        "the replacement server's socket must survive"
+    );
+    std::os::unix::net::UnixStream::connect(&path).expect("the replacement still answers");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_without_a_captured_identity_is_left_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("unknown.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+    super::remove_own_socket(&path, None);
+    assert!(path.exists());
+}

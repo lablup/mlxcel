@@ -3940,7 +3940,19 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // the tensor-parallel / pipeline-parallel validators so the emitted TOML
     // passes through the existing distributed resolution path unchanged.
     ServerDistributedFlags::from(&startup).ensure_supported()?;
-    let zero_config_plan = run_zero_config_bring_up(&mut startup).await?;
+    // The bring-up waits on the network (discovery, the assignment push, a
+    // `--pp-peer` waiting up to `PEER_ASSIGNMENT_TIMEOUT` for its stage) with
+    // no model loaded, so a shutdown signal ends it at once (#3483) instead of
+    // being latched and ignored until the wait times out on its own.
+    let Some(zero_config_plan) =
+        crate::server::shutdown::unless_shutdown(run_zero_config_bring_up(&mut startup)).await
+    else {
+        tracing::info!(
+            "shutdown requested during the pipeline bring-up; exiting before any model loads"
+        );
+        return Ok(());
+    };
+    let zero_config_plan = zero_config_plan?;
     if startup.dry_run {
         if let Some(plan) = zero_config_plan.as_ref() {
             // Print the topology summary to stdout so CI gates and operators
