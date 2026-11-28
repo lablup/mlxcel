@@ -134,8 +134,10 @@ fn assert_private_chain(root: &Path, owned_like: &Path) {
                 dir.display()
             );
             assert_eq!(meta.uid(), uid, "{} is owned by the user", dir.display());
+            // The permission bits only: a directory made under a setgid
+            // parent (a volume root with `fsGroup`) inherits that bit.
             assert_eq!(
-                meta.mode() & 0o7777,
+                meta.mode() & 0o777,
                 0o700,
                 "{} must be created 0700",
                 dir.display()
