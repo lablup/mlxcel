@@ -5713,10 +5713,16 @@ mod xla_canonical_diagnostics {
         // changed the eager prefix-decode numerics, and the pin was never
         // refreshed because this test is `#[ignore]`d. 854 was re-captured on
         // main at 551039ee (MLX pin bff10220) with the mlx-vlm 0.7.8 CPU
-        // oracle agreeing on the same fixture.
+        // oracle agreeing on the same fixture. Re-captured again on GB10 at
+        // the fc344c98 MLX pin (#3134 advanced it three times since
+        // 551039ee): the eager prefix-decode now ranks 236798 first, leading
+        // 854 by a 0.3125-logit margin at a ~14-logit magnitude, while the
+        // 0.7.8 CPU oracle still ranks 854 first by 0.75 and the XLA side
+        // ranks 236798 by 0.375. A cross-build, cross-device close-ranking
+        // flip; the pin tracks the production CUDA numerics.
         assert_eq!(
             argmax(&mlx_prefix_decode),
-            854,
+            236798,
             "pinned production-CUDA prefix-decode MLX top1 drifted"
         );
         mlxcel_core::memory::clear_cache();
@@ -5860,6 +5866,12 @@ mod xla_canonical_diagnostics {
         // CPU oracle agrees there (854), while for the single-pass full
         // prefill it ranks 854 first by a 0.75-logit margin over 236798, a
         // cross-device close-ranking flip that is recorded, not gated.
+        // Re-captured again on GB10 at the fc344c98 MLX pin (#3134 advanced
+        // it three times since 551039ee), the eager prefix-decode ranks
+        // 236798 first by a 0.3125-logit margin over 854 (XLA agrees by
+        // 0.375), while the mlx-vlm 0.7.8 CPU oracle still ranks 854 first
+        // by 0.75. A cross-build, cross-device close-ranking flip, recorded
+        // next to the pin.
         assert_eq!(
             argmax(&mlx_logits),
             236798,
@@ -5867,7 +5879,7 @@ mod xla_canonical_diagnostics {
         );
         assert_eq!(
             argmax(&mlx_prefix_decode),
-            854,
+            236798,
             "pinned production-CUDA prefix-decode MLX top1 drifted"
         );
         assert_eq!(
