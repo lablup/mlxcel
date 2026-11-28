@@ -56,6 +56,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use cxx::UniquePtr;
+
+use crate::dtype;
+use crate::ffi;
+use crate::ffi::MlxArray;
+
 // ---------------------------------------------------------------------------
 // Codebook struct
 // ---------------------------------------------------------------------------
@@ -296,6 +302,42 @@ pub fn nearest_centroid_indices_with_boundaries(
         .iter()
         .map(|&v| boundaries.partition_point(|&b| b < v).min(last_idx))
         .collect()
+}
+
+/// Device counterpart of [`nearest_centroid_indices_with_boundaries`]: the
+/// index of each element of `x` is the number of `boundaries` strictly below
+/// it, as a UINT8 tensor of the shape of `x`.
+///
+/// `boundaries` is the 1-D ascending midpoint array of a [`Codebook`]
+/// (`n_centroids - 1` values, at most 255 so the count fits a byte). The rule
+/// does not depend on the codebook size, so the 3-bit and the 4-bit quantizers
+/// share it. It agrees with the host function on every input:
+///
+/// - a value equal to a boundary is not above it, so it takes the lower index,
+///   as `partition_point(|b| b < v)` does;
+/// - NaN is above nothing and maps to index 0, as on the host, where
+///   `b < NaN` is false for the first boundary;
+/// - the host's `.min(n_centroids - 1)` cap never binds, because there are
+///   only `n_centroids - 1` boundaries to count.
+///
+/// The compare broadcasts `x[..., None]` against the boundaries, so the
+/// transient is `x.size() * boundaries.len()` bools, and the whole stage is
+/// lazy: nothing is evaluated and nothing leaves the device. A zero-size `x`
+/// returns a zero-size index tensor.
+///
+/// Used by: `quant3::quantize_v_turbo3` (Turbo3Asym V quantize, #3274).
+pub(crate) fn boundary_indices_on_device(
+    x: &MlxArray,
+    boundaries: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let boundary_shape = ffi::array_shape(boundaries);
+    assert!(
+        boundary_shape.len() == 1 && (1..=255).contains(&boundary_shape[0]),
+        "boundary_indices_on_device: boundaries must be 1-D with 1..=255 values; \
+         got shape {boundary_shape:?}"
+    );
+    let above = ffi::greater(&ffi::expand_dims(x, -1), boundaries);
+    ffi::astype(&ffi::sum_axis(&above, -1, false), dtype::UINT8)
 }
 
 // ---------------------------------------------------------------------------
@@ -894,5 +936,129 @@ mod tests {
             nearest_centroid_indices_with_boundaries(&values, &cb.boundaries, cb.centroids.len());
         let naive = nearest_centroid_indices(&values, &cb.centroids);
         assert_eq!(result, naive);
+    }
+
+    // -----------------------------------------------------------------------
+    // boundary_indices_on_device (#3274)
+    // -----------------------------------------------------------------------
+
+    /// Device indices for `values` against `cb`, read back as plain bytes.
+    fn device_indices(values: &[f32], cb: &Codebook) -> Vec<u8> {
+        let x = ffi::from_slice_f32(values, &[values.len() as i32]);
+        let boundaries = ffi::from_slice_f32(&cb.boundaries, &[cb.boundaries.len() as i32]);
+        let idx = boundary_indices_on_device(&x, &boundaries);
+        assert_eq!(ffi::array_dtype(&idx), dtype::UINT8);
+        assert_eq!(ffi::array_shape(&idx), vec![values.len() as i32]);
+        ffi::eval(&idx);
+        ffi::array_to_raw_bytes(&idx)
+    }
+
+    fn host_indices(values: &[f32], cb: &Codebook) -> Vec<u8> {
+        nearest_centroid_indices_with_boundaries(values, &cb.boundaries, cb.centroids.len())
+            .into_iter()
+            .map(|i| i as u8)
+            .collect()
+    }
+
+    /// The device rule is the host rule on the inputs where the two could
+    /// part: every boundary exactly, the floats on either side of it, both
+    /// zeros, the infinities, NaN, the finite extremes and subnormals. Checked
+    /// for the 3-bit codebook (Turbo3) and the 4-bit one (the rule #3272
+    /// shares), at head dims 64, 128 and 256.
+    #[test]
+    fn device_boundary_indices_match_host_at_the_edges() {
+        for &bits in &[3_u8, 4] {
+            for &head_dim in &[64_u32, 128, 256] {
+                let cb = optimal_codebook(bits, head_dim);
+                let mut values: Vec<f32> = vec![
+                    0.0,
+                    -0.0,
+                    f32::NAN,
+                    -f32::NAN,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::MAX,
+                    f32::MIN,
+                    f32::MIN_POSITIVE,
+                    -f32::MIN_POSITIVE,
+                    f32::from_bits(1),
+                    -f32::from_bits(1),
+                ];
+                for &boundary in cb.boundaries.iter() {
+                    values.push(boundary);
+                    values.push(boundary.next_up());
+                    values.push(boundary.next_down());
+                }
+                for &centroid in cb.centroids.iter() {
+                    values.push(centroid);
+                }
+                let device = device_indices(&values, &cb);
+                let host = host_indices(&values, &cb);
+                assert_eq!(device, host, "bits {bits} head_dim {head_dim}");
+
+                // The rule itself, stated without the host function: a value on
+                // a boundary takes the lower index, one float above it the
+                // upper, NaN maps to 0 and +inf to the last centroid.
+                let n = cb.centroids.len() as u8;
+                assert_eq!(device[2], 0, "NaN");
+                assert_eq!(device[3], 0, "-NaN");
+                assert_eq!(device[4], n - 1, "+inf");
+                assert_eq!(device[5], 0, "-inf");
+                for j in 0..cb.boundaries.len() {
+                    assert_eq!(device[12 + 3 * j], j as u8, "on boundary {j}");
+                    assert_eq!(device[12 + 3 * j + 1], j as u8 + 1, "above boundary {j}");
+                    assert_eq!(device[12 + 3 * j + 2], j as u8, "below boundary {j}");
+                }
+            }
+        }
+    }
+
+    /// Dense sweep across the codebook's range and well past it.
+    #[test]
+    fn device_boundary_indices_match_host_on_a_sweep() {
+        for &bits in &[3_u8, 4] {
+            let cb = optimal_codebook(bits, 128);
+            let span = cb.centroids[cb.centroids.len() - 1] * 2.0;
+            let n = 20_001;
+            let values: Vec<f32> = (0..n)
+                .map(|i| span * (2.0 * i as f32 / (n - 1) as f32 - 1.0))
+                .collect();
+            assert_eq!(device_indices(&values, &cb), host_indices(&values, &cb));
+        }
+    }
+
+    /// The index tensor keeps the input's shape, and an input with no elements
+    /// yields an index tensor with no elements.
+    #[test]
+    fn device_boundary_indices_keep_shape_and_accept_empty_input() {
+        let cb = optimal_codebook(3, 64);
+        let boundaries = ffi::from_slice_f32(&cb.boundaries, &[cb.boundaries.len() as i32]);
+
+        let x = ffi::zeros(&[2, 3, 5, 64], dtype::FLOAT32);
+        let idx = boundary_indices_on_device(&x, &boundaries);
+        assert_eq!(ffi::array_shape(&idx), vec![2, 3, 5, 64]);
+
+        let empty = ffi::zeros(&[1, 2, 0, 64], dtype::FLOAT32);
+        let idx = boundary_indices_on_device(&empty, &boundaries);
+        assert_eq!(ffi::array_shape(&idx), vec![1, 2, 0, 64]);
+        assert_eq!(ffi::array_dtype(&idx), dtype::UINT8);
+        ffi::eval(&idx);
+        assert!(ffi::array_to_raw_bytes(&idx).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "boundaries must be 1-D with 1..=255 values")]
+    fn device_boundary_indices_reject_an_empty_boundary_array() {
+        let x = ffi::zeros(&[4], dtype::FLOAT32);
+        let boundaries = ffi::zeros(&[0], dtype::FLOAT32);
+        let _ = boundary_indices_on_device(&x, &boundaries);
+    }
+
+    #[test]
+    #[should_panic(expected = "boundaries must be 1-D with 1..=255 values")]
+    fn device_boundary_indices_reject_more_boundaries_than_a_byte_counts() {
+        let x = ffi::zeros(&[4], dtype::FLOAT32);
+        let boundaries = ffi::zeros(&[256], dtype::FLOAT32);
+        let _ = boundary_indices_on_device(&x, &boundaries);
     }
 }
