@@ -20,6 +20,10 @@
 // but only on a host with a GPU, so this is where CI runs them.
 
 using mlx::core::cu::kNoPtxCacheTrustedGroup;
+using mlx::core::cu::make_private_directories_at;
+using mlx::core::cu::open_ptx_cache_components;
+using mlx::core::cu::ptx_cache_entry_ref;
+using mlx::core::cu::PtxPinnedDir;
 using mlx::core::cu::open_ptx_cache_below_trusted_root;
 using mlx::core::cu::ptx_cache_component_refusal;
 using mlx::core::cu::ptx_cache_dir_is_trusted;
@@ -337,6 +341,95 @@ void test_ptx_planted_symlink(const fs::path& base) {
       "planted: the symlink is named");
 }
 
+// The cache directory's descriptor is kept and each device subdirectory is
+// opened from it, so what happens to the path after the first descent does
+// not decide where a later device subdirectory is.
+void test_ptx_device_dir_from_held_descriptor(const fs::path& base) {
+  const uid_t euid = ::geteuid();
+  const auto open = make_dir(base / "held-open", 0777);
+  std::string reason;
+  const int cache_fd = open_ptx_cache_below_trusted_root(
+      open, fs::path("cuda-ptx") / "scope", euid, reason);
+  check(cache_fd >= 0, "held: the cache directory opens");
+  if (cache_fd < 0) {
+    return;
+  }
+  const auto cache = open / "cuda-ptx" / "scope";
+  // Another directory of this user, shaped like the cache, takes its place.
+  const auto foreign = make_dir(open / "models", 0700);
+  make_dir(foreign / "scope", 0700);
+  make_dir(foreign / "scope" / "sm80-nvrtc12.0", 0700);
+  std::fclose(std::fopen(
+      (foreign / "scope" / "sm80-nvrtc12.0" / "planted.ptx").c_str(), "w"));
+  check(
+      ::rename((open / "cuda-ptx").c_str(), (open / "real").c_str()) == 0 &&
+          ::rename(foreign.c_str(), (open / "cuda-ptx").c_str()) == 0,
+      "held: swap the first component");
+  const int device_fd =
+      open_ptx_cache_components(cache_fd, cache, "sm80-nvrtc12.0", euid, reason);
+  check(device_fd >= 0, "held: the device subdirectory opens");
+  struct stat st;
+  check(
+      device_fd >= 0 && ::fstatat(device_fd, "planted.ptx", &st, 0) != 0 &&
+          fs::is_directory(open / "real" / "scope" / "sm80-nvrtc12.0"),
+      "held: it is the checked directory's child, not the swapped-in one");
+  check(
+      ::fcntl(cache_fd, F_GETFD) != -1,
+      "held: the starting descriptor stays open");
+  check(
+      open_ptx_cache_components(cache_fd, cache, fs::path(), euid, reason) < 0,
+      "held: no names is not a directory to open");
+  make_dir(open / "real" / "scope" / "shared", 0770);
+  check(
+      open_ptx_cache_components(cache_fd, cache, "shared", euid, reason) < 0 &&
+          reason == (cache / "shared").string() + " is group- or other-writable",
+      "held: the rule applies to names opened from a held descriptor");
+
+  // Entries of a pinned directory are reached through its descriptor.
+  const auto device = cache / "sm80-nvrtc12.0";
+  const std::vector<PtxPinnedDir> pinned = {{device.string() + "/", device_fd}};
+  const auto direct = ptx_cache_entry_ref(pinned, device / "mod.ptx");
+  check(
+      direct.dir_fd == device_fd && direct.name == "mod.ptx",
+      "ref: an entry of the pinned directory");
+  const auto nested = ptx_cache_entry_ref(pinned, device / "long" / "tail.ptx");
+  check(
+      nested.dir_fd == device_fd && nested.name == "long/tail.ptx",
+      "ref: an entry in a nested directory");
+  const auto sibling =
+      ptx_cache_entry_ref(pinned, cache / "sm80-nvrtc12.0x" / "mod.ptx");
+  check(
+      sibling.dir_fd == AT_FDCWD &&
+          sibling.name == (cache / "sm80-nvrtc12.0x" / "mod.ptx").string(),
+      "ref: a sibling whose name extends the pinned one goes by path");
+  check(
+      ptx_cache_entry_ref(pinned, device).dir_fd == AT_FDCWD,
+      "ref: the pinned directory itself goes by path");
+  check(
+      ptx_cache_entry_ref({}, device / "mod.ptx").dir_fd == AT_FDCWD,
+      "ref: nothing pinned, everything goes by path");
+
+  // Nested directories for a long module name are made below the descriptor,
+  // which is the real directory, wherever the path leads now.
+  check(
+      make_private_directories_at(device_fd, fs::path("long") / "longer") &&
+          make_private_directories_at(device_fd, fs::path("long") / "longer"),
+      "at: nested directories, and again when they exist");
+  const auto made = open / "real" / "scope" / "sm80-nvrtc12.0" / "long";
+  check(
+      mode_of(made) == 0700 && mode_of(made / "longer") == 0700 &&
+          !fs::exists(open / "cuda-ptx" / "scope" / "sm80-nvrtc12.0" / "long"),
+      "at: created 0700 in the pinned directory");
+  std::fclose(std::fopen((made / "file").c_str(), "w"));
+  check(
+      !make_private_directories_at(device_fd, fs::path("long") / "file" / "x"),
+      "at: a regular file in the way");
+  if (device_fd >= 0) {
+    ::close(device_fd);
+  }
+  ::close(cache_fd);
+}
+
 void test_ptx_cache_trust() {
   test_ptx_component_rule();
   std::error_code error;
@@ -351,6 +444,7 @@ void test_ptx_cache_trust() {
   test_ptx_trusted_root(base);
   test_ptx_descent(base);
   test_ptx_planted_symlink(base);
+  test_ptx_device_dir_from_held_descriptor(base);
   // Make everything removable again.
   for (auto it = fs::recursive_directory_iterator(base, error);
        !error && it != fs::recursive_directory_iterator();

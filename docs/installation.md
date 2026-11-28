@@ -441,9 +441,14 @@ image has no passwd entry for the uid, and neither can be fixed from inside a
 nonroot pod. Set `MLXCEL_CACHE_TRUSTED_ROOT` to the volume root (it may equal
 `MLXCEL_CACHE_DIR`): the root and what is above it are then not checked, and
 everything below it must be a real directory you own that no one else can
-write. Use it only where no other uid can write that root, or where no other
-directory of yours sits directly in it; see the variable's entry in
-[environment-variables.md](environment-variables.md) for what it gives up.
+write. Use it only where no other uid can write that root. Where that is not
+certain, put mlxcel one level down (`MLXCEL_CACHE_DIR=/cache/mlxcel` with
+`MLXCEL_CACHE_TRUSTED_ROOT=/cache`), so that no other directory of yours, the
+model store included, sits beside the cache directly in the root; see the
+variable's entry in [environment-variables.md](environment-variables.md) for
+what the opt-in gives up. The private-group rule above looks at the image's
+account files only, so do not give the pod's `fsGroup` or `runAsGroup` to a
+container that runs as another uid.
 
 `MLX_PTX_CACHE_DIR` and `MLXCEL_CACHE_DIR` must be absolute paths for this cache: a relative one would resolve against the current directory, which anyone can pick for you. The notice then reads `MLX_PTX_CACHE_DIR must be an absolute path, got "<value>"`, and nothing is created. On Windows, `\cache` and `C:cache` count as relative. `MLXCEL_CACHE_DIR` is not consulted when `MLX_PTX_CACHE_DIR` is set, and an empty value of either counts as unset.
 

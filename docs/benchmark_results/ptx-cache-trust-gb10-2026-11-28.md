@@ -5,7 +5,7 @@ Issue: [#3503](https://github.com/lablup/mlxcel/issues/3503). Question: with the
 ## Setup
 
 - Host: NVIDIA GB10 (spark-101), 20 cores, driver 580.178.04, CUDA 13.0.3, kernel 7.0.0-1019-nvidia. Not quiet: 1-minute load between 2.0 and 6.0 during the runs (other users' jobs), recorded per arm below.
-- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arm at `5a9c96f2`; control arm from `main` at `7ab71f92`.
+- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arm at `5a9c96f2`; control arm from `main` at `7ab71f92`. Review changes after `5a9c96f2` (the device subdirectory opened from a kept descriptor, the sweep through the descriptor, no Rust-side directory creation under the opt-in) were re-checked with the child tests and one cold and warm pass, not with the full table.
 - Model: `mlx-community/Qwen3-4B-4bit` (local `models/qwen3-4b-4bit`).
 - Volume roots, created as root through a container so their owner and mode match what a nonroot pod gets: `vol-0777` is `root:root` mode `0777`; `vol-fsgroup` is `root:1000` mode `2775`, where 1000 is the test user's own group. The user is uid 1000, gid 1000; `/etc/nsswitch.conf` lists `files systemd` for `passwd` and `group`, `/etc/group` has no other member of gid 1000 and no other `/etc/passwd` account has it as primary group, so the group is provably private.
 - Harness: `scripts/bench/ptx_cache_trust_ttft.py`, run under `gpu-lock run --tag issue-3503`. One run starts the server with `MLXCEL_CACHE_DIR` set to the volume root, waits for `/health`, sends one streaming chat request (`max_tokens` 16, temperature 0) and stops the server. A cold run deletes `<root>/cuda-ptx` first. Five runs per cell.
@@ -41,6 +41,7 @@ Refused arms printed `mlxcel: CUDA kernel disk cache disabled: <root> is group- 
 
 - A real Kubernetes pod. The owner and mode that `emptyDir`, local-path and NFS volume roots get (expected `0777`) were not checked on a cluster (`stat -c '%a %u:%g' /cache` on kind). The directories here were shaped by hand to match.
 - A minimal container image. `own_group_is_private()` fails closed without `/etc/nsswitch.conf` or a passwd entry for the uid, so Rule 1 is expected not to apply there and the opt-in to be required; that was not run.
+- Kubernetes' recursive `fsGroup` ownership change. With the default `fsGroupChangePolicy: Always`, the kubelet is expected to add group write to everything on a volume that supports ownership changes at each mount, which would make the directories below a trusted root and every entry group-writable and so refused or missed after a pod restart. Not verified here; if it holds, the chart needs `fsGroupChangePolicy: OnRootMismatch` or no `fsGroup` on the cache volume.
 - Any GPU other than GB10, and any model other than Qwen3-4B-4bit. The saving scales with how many kernels a model compiles.
 - A quiet host.
 

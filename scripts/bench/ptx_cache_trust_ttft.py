@@ -123,7 +123,10 @@ def first_token_seconds(port: int, model: str, timeout: float) -> float:
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:") or line.endswith("[DONE]"):
                 continue
-            delta = json.loads(line[5:])["choices"][0].get("delta", {})
+            try:
+                delta = json.loads(line[5:])["choices"][0].get("delta", {})
+            except (ValueError, LookupError) as error:
+                raise HarnessError(f"unreadable stream line {line!r}") from error
             if delta.get("content") or delta.get("reasoning_content"):
                 return time.monotonic() - start
     raise HarnessError("the stream ended without a content token")

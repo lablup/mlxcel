@@ -46,8 +46,9 @@ struct PtxCacheEnv {
 // provably private to the user (mlxcel-core's private_group.rs); the decision
 // is made there, in one place, and the walk only compares. It is a call and
 // not an environment variable so that a launcher cannot name a shared group.
-// It takes effect only before the cache directory is first resolved, and only
-// on POSIX. Defined in jit_module.cpp.
+// It is read at each walk (the cache directory, then each device
+// subdirectory), so call it before the first kernel is compiled or loaded.
+// POSIX only. Defined in jit_module.cpp.
 void set_ptx_cache_trusted_group(std::int64_t gid);
 
 // A path as UTF-8 for a diagnostic; never throws.

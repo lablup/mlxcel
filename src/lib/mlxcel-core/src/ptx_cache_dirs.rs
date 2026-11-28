@@ -46,8 +46,11 @@
 //!   overlay then does not judge the root or anything above it by owner or
 //!   mode, and requires every component below it to be a real directory owned
 //!   by the current user that neither group nor others can write. The overlay
-//!   reads the variable itself; nothing here does. The threat model is in the
-//!   header comment of the overlay's `jit_module.cpp`.
+//!   creates the missing ones itself, without following a symlink, so with
+//!   the variable set `ensure_persistent_ptx_cache` creates and repairs
+//!   nothing. The threat model, and the limit of Rule 1's proof (it reads the
+//!   account files, not a pod's `fsGroup`), are in the header comment of the
+//!   overlay's `jit_module.cpp`.
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};

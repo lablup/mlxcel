@@ -4204,11 +4204,23 @@ pub fn ensure_persistent_ptx_cache() {
     // releases is repaired: on the directories mlxcel manages, plus the root
     // when it is the default (an explicit MLXCEL_CACHE_DIR is left as the user
     // set it). On Windows the overlay checks ACLs and nothing is repaired.
+    //
+    // With MLXCEL_CACHE_TRUSTED_ROOT set (#3503) nothing is created or
+    // repaired here. The overlay then creates each missing directory below
+    // the trusted root itself, with mode 0700 and without following a
+    // symlink, and refuses rather than repairs one that is not private.
+    // Creating them here by path first would follow a symlink that someone
+    // who can write the root put at `cuda-ptx`.
+    let overlay_creates = cfg!(target_os = "linux")
+        && std::env::var_os("MLXCEL_CACHE_TRUSTED_ROOT").is_some_and(|value| !value.is_empty());
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    if builder.create(&dir).is_ok() {
+    if overlay_creates {
+        // SAFETY: as for the call below.
+        unsafe { native_env::set_native_var("MLX_PTX_CACHE_DIR", &dir) };
+    } else if builder.create(&dir).is_ok() {
         #[cfg(unix)]
         ptx_cache_dirs::tighten_persistent_ptx_dirs(
             &root,

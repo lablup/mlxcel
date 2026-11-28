@@ -76,8 +76,12 @@ for needle in 'ptx_cache_env_from_process()' 'ptx_cache_env_refusal(' 'resolve_p
 done
 # The POSIX rules are tested below (#3503); jit_module.cpp has to be what calls
 # them, for the root above, for the device subdirectory, and for the entries.
-for needle in 'return ptx_cache_dir_is_trusted(' 'trusted_root.below / key' \
-  'ref.dir_fd,' 'tmp_ref.dir_fd,' 'bad_ref.dir_fd,'; do
+for needle in 'return ptx_cache_dir_is_trusted(' \
+  'open_ptx_cache_components(' 'active_trusted_root() = {trusted, fd};' \
+  'return ptx_cache_entry_ref(pinned_cache_dirs(), path);' \
+  'guard.fd = ::openat(' 'entry.dir_fd,' 'tmp_ref.dir_fd,' 'path_ref.dir_fd,' \
+  '::unlinkat(bad_ref.dir_fd,' '::unlinkat(probe.dir_fd,' \
+  'return make_private_directories_at(entry_dir.dir_fd, entry_dir.name);'; do
   if ! code_has "$jit_module" "$needle"; then
     printf 'jit_module.cpp no longer has %s; the tested PTX cache trust rules are bypassed\n' "$needle" >&2
     exit 1

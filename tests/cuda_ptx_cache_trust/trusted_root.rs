@@ -410,7 +410,8 @@ fn unusable_trusted_root_is_ignored_and_the_walk_applies() {
     let elsewhere = tmp.path().join("elsewhere");
     make_dir(&elsewhere, 0o700);
     let missing = tmp.path().join("missing");
-    let cache_text = canonical(&cache);
+    // The notice names the cache directory as it was given.
+    let cache_text = cache.display().to_string();
 
     let cases: Vec<(&OsStr, String)> = vec![
         (
@@ -435,7 +436,7 @@ fn unusable_trusted_root_is_ignored_and_the_walk_applies() {
         // The cache directory itself is not a proper ancestor.
         (
             cache.as_os_str(),
-            format!("{cache_text} is not an ancestor of {cache_text}"),
+            format!("{} is not an ancestor of {cache_text}", canonical(&cache)),
         ),
     ];
     for (value, reason) in cases {
