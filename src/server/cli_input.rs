@@ -90,6 +90,9 @@ pub struct ServerStartupInput {
     pub timeout_was_set: bool,
     pub decode_timeout: u64,
     pub decode_timeout_was_set: bool,
+    /// `--shutdown-timeout` / `MLXCEL_SHUTDOWN_TIMEOUT` (#3483): the HTTP
+    /// drain bound after SIGTERM or SIGINT, in seconds.
+    pub shutdown_timeout: u64,
     /// b10621 `--sleep-idle-seconds` (#1440): idle seconds before the server
     /// frees the model and sleeps. `-1` (and any negative) disables, which is
     /// upstream's default and its own disabled sentinel.
@@ -1173,6 +1176,7 @@ impl ServerStartupInput {
             ctx_size: self.ctx_size,
             n_predict: self.n_predict,
             http_timeout: self.timeout,
+            shutdown_timeout: self.shutdown_timeout,
             decode_timeout: self.decode_timeout,
             sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,

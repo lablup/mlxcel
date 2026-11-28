@@ -24,6 +24,11 @@
 //! Socket options follow upstream `server_http_context::start`: `SO_REUSEADDR`
 //! is set everywhere except Windows, `SO_REUSEPORT` only with `--reuse-port`,
 //! and a `--host` ending in `.sock` binds an `AF_UNIX` socket instead.
+//!
+//! The loop stops on the shutdown token (#3483): it drops the listener, so a
+//! new connection is refused rather than answered, closes every live
+//! connection gracefully through [`ConnectionDrain`], aborts whatever is still
+//! open at the `--shutdown-timeout` deadline, and returns `Ok(())`.
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -42,10 +47,12 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use super::http_timeout::TimeoutIo;
 use super::read_budget::{BudgetBody, ReadBudget};
+use super::shutdown::ConnectionDrain;
 use super::transport::{HttpTimeouts, ListenTarget};
 
 /// Backoff applied after a transient `accept()` failure so a descriptor
@@ -57,19 +64,30 @@ pub(crate) struct ServeOptions {
     pub timeouts: HttpTimeouts,
     pub reuse_port: bool,
     pub tls: Option<Arc<RustlsServerConfig>>,
+    /// Cancelled when the process is asked to stop; ends the accept loop.
+    pub shutdown: CancellationToken,
+    /// `--shutdown-timeout`: how long live connections get to finish once
+    /// `shutdown` fires. Zero aborts them at once.
+    pub drain: Duration,
 }
 
-/// Bind `target` and serve `app` on it forever.
+/// Bind `target` and serve `app` on it until `options.shutdown` fires.
 ///
 /// `announce` is called once with the human-readable listening address after
 /// the socket is bound and before the first connection is accepted, so a
-/// `--port 0` bind can report the ephemeral port it actually got.
+/// `--port 0` bind can report the ephemeral port it actually got. A shutdown
+/// requested before the bind (a signal during model load) returns `Ok(())`
+/// without binding.
 pub(crate) async fn serve(
     target: &ListenTarget,
     app: Router,
     options: ServeOptions,
     announce: impl FnOnce(&str),
 ) -> Result<()> {
+    if options.shutdown.is_cancelled() {
+        tracing::info!("shutdown requested before the listener was bound; not serving");
+        return Ok(());
+    }
     match target {
         ListenTarget::Tcp { host, port } => {
             let listener = bind_tcp(host, *port, options.reuse_port)?;
@@ -95,8 +113,9 @@ pub(crate) async fn serve(
             #[cfg(unix)]
             {
                 let listener = bind_unix(path)?;
+                let bound = super::shutdown::socket_identity(path);
                 announce(&format!("unix://{}", path.display()));
-                accept_unix(listener, app, options.timeouts).await
+                accept_unix(listener, app, options, path, bound).await
             }
             // tokio has no Unix domain socket listener off Unix (#58).
             #[cfg(not(unix))]
@@ -178,9 +197,11 @@ fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
 
 /// Bind a Unix domain socket, clearing a stale socket first.
 ///
-/// A socket file outlives the process that bound it, and the server leaves its
-/// own behind on shutdown, so a socket nobody listens on is removed and the
-/// path bound again. Everything else is left alone, with an error instead of a
+/// A socket file outlives the process that bound it, and a server killed
+/// without a chance to clean up (SIGKILL, a crash) leaves its own behind; a
+/// graceful shutdown removes it
+/// ([`remove_own_socket`](super::shutdown::remove_own_socket)). So a socket nobody
+/// listens on is removed and the path bound again. Everything else is left alone, with an error instead of a
 /// bind: an entry that is not a socket (a regular file, a symlink), a socket
 /// that still has a listener, which would otherwise keep running with its path
 /// taken away, and a socket whose state cannot be determined.
@@ -285,66 +306,97 @@ fn probe_unix_socket(path: &Path) -> UnixSocketProbe {
 
 async fn accept_tcp(listener: TcpListener, app: Router, options: ServeOptions) -> Result<()> {
     let acceptor = options.tls.map(TlsAcceptor::from);
-    loop {
-        let stream = match listener.accept().await {
+    let mut connections = ConnectionDrain::new(CancellationToken::new());
+    let served = loop {
+        let accepted = tokio::select! {
+            biased;
+            () = options.shutdown.cancelled() => break Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        let stream = match accepted {
             Ok((stream, _peer)) => stream,
             Err(e) if is_transient_accept_error(&e) => {
                 tracing::warn!("transient accept error, retrying: {e}");
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
                 continue;
             }
-            Err(e) => return Err(e).context("TCP accept failed"),
+            Err(e) => break Err(e).context("TCP accept failed"),
         };
         let app = app.clone();
         let timeouts = options.timeouts;
         let budget = ReadBudget::new();
+        let graceful = connections.graceful();
         match acceptor.clone() {
-            Some(acceptor) => {
-                tokio::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(tls) => {
-                            drive_connection(
-                                TimeoutIo::new(tls, timeouts, budget.clone()),
-                                app,
-                                budget,
-                            )
-                            .await
-                        }
-                        Err(e) => tracing::debug!("TLS handshake failed: {e}"),
+            // The handshake runs inside the tracked task, so a handshake
+            // still in progress at shutdown counts as an in-flight connection.
+            Some(acceptor) => connections.spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls) => {
+                        drive_connection(
+                            TimeoutIo::new(tls, timeouts, budget.clone()),
+                            app,
+                            budget,
+                            graceful,
+                        )
+                        .await
                     }
-                });
-            }
-            None => {
-                tokio::spawn(drive_connection(
-                    TimeoutIo::new(stream, timeouts, budget.clone()),
-                    app,
-                    budget,
-                ));
-            }
+                    Err(e) => tracing::debug!("TLS handshake failed: {e}"),
+                }
+            }),
+            None => connections.spawn(drive_connection(
+                TimeoutIo::new(stream, timeouts, budget.clone()),
+                app,
+                budget,
+                graceful,
+            )),
         }
-    }
+    };
+    // Dropping the listener closes the port: a connection attempted from here
+    // on is refused, not queued behind the drain.
+    drop(listener);
+    connections.drain(options.drain).await;
+    served
 }
 
 #[cfg(unix)]
-async fn accept_unix(listener: UnixListener, app: Router, timeouts: HttpTimeouts) -> Result<()> {
-    loop {
-        let stream = match listener.accept().await {
+async fn accept_unix(
+    listener: UnixListener,
+    app: Router,
+    options: ServeOptions,
+    path: &Path,
+    bound: Option<super::shutdown::SocketIdentity>,
+) -> Result<()> {
+    let mut connections = ConnectionDrain::new(CancellationToken::new());
+    let served = loop {
+        let accepted = tokio::select! {
+            biased;
+            () = options.shutdown.cancelled() => break Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        let stream = match accepted {
             Ok((stream, _peer)) => stream,
             Err(e) if is_transient_accept_error(&e) => {
                 tracing::warn!("transient accept error, retrying: {e}");
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
                 continue;
             }
-            Err(e) => return Err(e).context("Unix socket accept failed"),
+            Err(e) => break Err(e).context("Unix socket accept failed"),
         };
-        let app = app.clone();
         let budget = ReadBudget::new();
-        tokio::spawn(drive_connection(
-            TimeoutIo::new(stream, timeouts, budget.clone()),
-            app,
+        connections.spawn(drive_connection(
+            TimeoutIo::new(stream, options.timeouts, budget.clone()),
+            app.clone(),
             budget,
+            connections.graceful(),
         ));
-    }
+    };
+    // Unlink before the listener closes: while it still listens, a
+    // replacement server's `bind_unix` sees the socket as live and refuses
+    // the path, so it cannot change between the identity check and the unlink.
+    super::shutdown::remove_own_socket(path, bound);
+    drop(listener);
+    connections.drain(options.drain).await;
+    served
 }
 
 /// A descriptor or buffer shortage is a load condition, not a reason to stop
@@ -381,8 +433,17 @@ fn is_descriptor_exhaustion(_e: &io::Error) -> bool {
 /// for the next request on a keep-alive connection. See
 /// [`crate::server::read_budget`] for why an ungated deadline would cut off
 /// slow generations.
-async fn drive_connection<I>(io: I, app: Router, budget: Arc<ReadBudget>)
-where
+///
+/// `graceful` firing calls hyper's `graceful_shutdown`: an idle keep-alive
+/// connection closes at once, and a request in progress (a streaming response
+/// included) finishes before the connection closes. A connection upgraded to
+/// a WebSocket has left hyper by then and is cut when the process exits.
+async fn drive_connection<I>(
+    io: I,
+    app: Router,
+    budget: Arc<ReadBudget>,
+    graceful: CancellationToken,
+) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let service =
@@ -405,10 +466,17 @@ where
         });
     // `with_upgrades`: the `/v1/realtime` WebSocket (#1376) takes the
     // connection over after its 101 response. Plain HTTP is unaffected.
-    if let Err(e) = ConnBuilder::new(TokioExecutor::new())
-        .serve_connection_with_upgrades(TokioIo::new(io), service)
-        .await
-    {
+    let builder = ConnBuilder::new(TokioExecutor::new());
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+    tokio::pin!(connection);
+    let served = tokio::select! {
+        served = connection.as_mut() => served,
+        () = graceful.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
+    if let Err(e) = served {
         // A client that disconnects mid-stream, or one that hits the
         // `--timeout` budget, lands here. Both are ordinary, so this stays at
         // debug level.
@@ -419,6 +487,10 @@ where
 #[cfg(test)]
 #[path = "listen_tests.rs"]
 mod listen_tests;
+
+#[cfg(test)]
+#[path = "listen_shutdown_tests.rs"]
+mod listen_shutdown_tests;
 
 #[cfg(all(test, unix))]
 #[path = "listen_unix_tests.rs"]

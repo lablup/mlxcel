@@ -544,6 +544,21 @@ struct ServerArgs {
     )]
     decode_timeout: u64,
 
+    /// Seconds live connections get to finish after SIGTERM or SIGINT (#3483)
+    ///
+    /// On the first signal the server stops accepting, lets in-flight
+    /// responses (streams included) complete, aborts what is still open at
+    /// this deadline, joins its model workers and exits 0. `0` aborts in-flight
+    /// connections at once. A second signal exits 1 without draining. Also
+    /// reads `MLXCEL_SHUTDOWN_TIMEOUT`.
+    #[arg(
+        long = "shutdown-timeout",
+        env = "MLXCEL_SHUTDOWN_TIMEOUT",
+        default_value_t = mlxcel::server::transport::DEFAULT_SHUTDOWN_TIMEOUT_SECS,
+        value_name = "SECONDS"
+    )]
+    shutdown_timeout: u64,
+
     /// Prefix path the server serves from, without the trailing slash
     ///
     /// `--api-prefix /llama` moves every route under `/llama`, so
@@ -2964,6 +2979,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         timeout_was_set: long_cli_flag_was_set("timeout")
             || std::env::var_os("LLAMA_ARG_TIMEOUT").is_some(),
         decode_timeout: args.decode_timeout,
+        shutdown_timeout: args.shutdown_timeout,
         sleep_idle_seconds: args.sleep_idle_seconds,
         decode_timeout_was_set: long_cli_flag_was_set("decode-timeout")
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),

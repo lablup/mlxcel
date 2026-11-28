@@ -80,6 +80,7 @@ fn sample_args() -> crate::ServeArgs {
         max_batch_prefill_tokens: None,
         timeout: 30,
         decode_timeout: 600,
+        shutdown_timeout: 30,
         api_prefix: String::new(),
         sse_ping_interval: 30,
         threads_http: -1,

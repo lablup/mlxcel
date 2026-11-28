@@ -59,6 +59,14 @@ pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 3600;
 /// operator who only renames the flag keeps the previous behavior.
 pub const DEFAULT_DECODE_TIMEOUT_SECS: u64 = 600;
 
+/// Default for `--shutdown-timeout` (`MLXCEL_SHUTDOWN_TIMEOUT`), in seconds
+/// (#3483): how long live connections get to finish after SIGTERM or SIGINT.
+///
+/// Equal to Kubernetes' default `terminationGracePeriodSeconds`, so the drain
+/// ends before the supervisor's SIGKILL. The container image and the Helm
+/// chart rely on this value.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
 /// b10621 default for `--sse-ping-interval` (`LLAMA_ARG_SSE_PING_INTERVAL`),
 /// in seconds. `-1` disables the pings.
 pub const DEFAULT_SSE_PING_INTERVAL_SECS: i64 = 30;

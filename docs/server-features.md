@@ -423,8 +423,9 @@ when migrating an existing llama-server command. TLS is enabled by supplying
 both `--ssl-cert-file` and `--ssl-key-file`. A `--host` ending in `.sock` starts
 a Unix-domain-socket listener, and `--api-prefix` nests all routes below a path.
 
-The server does not remove its socket file when it stops, so a start on the same
-path replaces a socket nobody listens on any more. It does not replace a socket
+A graceful shutdown removes the server's own socket file (only if the path is
+still a socket). A server that was killed (SIGKILL, a crash) leaves it behind, so
+a start on the same path replaces a socket nobody listens on any more. It does not replace a socket
 another server is still listening on, a socket it cannot probe (no permission to
 connect, or a socket of another type), or an entry at that path that is not a
 socket (a regular file, a symlink): the start fails and the entry is left as it
@@ -443,6 +444,46 @@ With `AIP_MODE=PREDICTION`, the server also honors the Vertex AI custom-containe
 `AIP_HTTP_PORT`, `AIP_HEALTH_ROUTE`, and `AIP_PREDICT_ROUTE` variables. See
 [`environment-variables.md`](environment-variables.md) for the complete
 environment map.
+
+## Graceful shutdown
+
+`mlxcel-server` and `mlxcel serve` stop on SIGTERM (`docker stop`, Kubernetes
+pod deletion, systemd) and on SIGINT (Ctrl-C) through the same bounded drain.
+This matters most in a container, where the server runs as PID 1 and the kernel
+would otherwise ignore both signals until the supervisor's SIGKILL.
+
+On the first signal the server logs `shutdown signal received: SIGTERM` (or
+`SIGINT`) and:
+
+1. Closes the listener, so a new connection is refused rather than answered.
+2. Closes idle keep-alive connections at once and lets every request in
+   progress finish, a streaming response included: the client still receives
+   its final `data: [DONE]` event. An in-progress TLS handshake counts as in
+   flight.
+3. Aborts the connections still open after `--shutdown-timeout` seconds
+   (`MLXCEL_SHUTDOWN_TIMEOUT`, default `30`) and logs
+   `shutdown: drain timeout after N s, aborting M connection(s)`. `0` aborts
+   them at once.
+4. Removes its Unix socket file, for a `--host` ending in `.sock`.
+5. Joins its model workers and exits.
+
+| Outcome | Exit code |
+| --- | --- |
+| All connections drained | `0` |
+| Drain hit `--shutdown-timeout` and aborted connections | `0` |
+| A second SIGTERM or SIGINT during the drain (`second shutdown signal; exiting without drain`) | `1` |
+
+A signal that arrives while the model is still loading is not lost: the server
+does not start serving once the load finishes and exits through the same worker
+join. Set the supervisor's grace period above `--shutdown-timeout` plus the
+worker join (Kubernetes `terminationGracePeriodSeconds`, `docker stop -t`), so
+the drain ends before the SIGKILL. A WebSocket on `/v1/realtime` has left the
+HTTP connection once upgraded and is cut when the process exits.
+
+In router mode (`--models-dir`, `--models-preset`) the same drain bounds the
+HTTP side; the router then unloads its child models within its own fixed
+150-second lifecycle bound. A remote pipeline stage stops on either signal as
+well.
 
 ## Deliberate non-goals
 

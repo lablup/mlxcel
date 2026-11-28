@@ -91,6 +91,7 @@ pub mod router_presets;
 pub mod router_server;
 pub mod routes;
 pub mod runtime_settings;
+pub(crate) mod shutdown;
 pub mod slot_persist;
 pub mod slots_state;
 pub mod speculative_dispatch;

@@ -56,6 +56,7 @@ fn sample_input() -> ServerStartupInput {
         timeout_was_set: false,
         decode_timeout: 600,
         decode_timeout_was_set: false,
+        shutdown_timeout: 30,
         api_prefix: String::new(),
         webui_enabled: false,
         mcp: None,

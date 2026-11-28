@@ -66,6 +66,8 @@ fn options(timeout_secs: u64) -> ServeOptions {
         timeouts: HttpTimeouts::from_secs(timeout_secs),
         reuse_port: false,
         tls: None,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        drain: Duration::from_secs(30),
     }
 }
 
@@ -224,6 +226,8 @@ async fn tls_is_refused_on_a_unix_domain_socket() {
             timeouts: HttpTimeouts::default(),
             reuse_port: false,
             tls: Some(tls),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            drain: Duration::from_secs(30),
         },
         |_| {},
     )
@@ -291,6 +295,8 @@ async fn a_tls_listener_completes_a_handshake_and_answers() {
         timeouts: HttpTimeouts::from_secs(30),
         reuse_port: false,
         tls: Some(server_config),
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        drain: Duration::from_secs(30),
     };
     tokio::spawn(async move {
         let target = ListenTarget::Tcp {

@@ -158,6 +158,9 @@ pub struct ServerStartupConfig {
     // (socket read/write budget); `decode_timeout` is the mlxcel-native
     // decode watchdog that spelling used to carry.
     pub http_timeout: u64,
+    /// `--shutdown-timeout` (#3483): seconds live connections get to finish
+    /// after SIGTERM or SIGINT before they are aborted; `0` aborts at once.
+    pub shutdown_timeout: u64,
     pub decode_timeout: u64,
     /// b10621 `--sleep-idle-seconds` (#1440); negative disables.
     pub sleep_idle_seconds: i64,
@@ -723,6 +726,7 @@ impl Default for ServerStartupConfig {
             ctx_size: 0,
             n_predict: -1,
             http_timeout: crate::server::transport::DEFAULT_HTTP_TIMEOUT_SECS,
+            shutdown_timeout: crate::server::transport::DEFAULT_SHUTDOWN_TIMEOUT_SECS,
             decode_timeout: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
             sleep_idle_seconds: -1,
             api_prefix: String::new(),
@@ -2658,6 +2662,10 @@ fn log_endpoints(startup: &ServerStartupConfig, addr: &str) {
 /// `--ssl-cert-file` / `--ssl-key-file`. The accept loop itself lives in
 /// [`crate::server::listen`] so all three transports enforce the timeout the
 /// same way.
+///
+/// Returns `Ok(())` after a SIGTERM or SIGINT (#3483), once live connections
+/// drained or `--shutdown-timeout` expired; the caller then joins its workers
+/// as on any other exit.
 pub(crate) async fn serve_http(startup: &ServerStartupConfig, app: axum::Router) -> Result<()> {
     let resolved = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
     if let Some(warning) = &resolved.legacy_socket_warning {
@@ -2676,6 +2684,8 @@ pub(crate) async fn serve_http(startup: &ServerStartupConfig, app: axum::Router)
             timeouts: crate::server::transport::HttpTimeouts::from_secs(startup.http_timeout),
             reuse_port: startup.reuse_port,
             tls,
+            shutdown: crate::server::shutdown::install(),
+            drain: std::time::Duration::from_secs(startup.shutdown_timeout),
         },
         |addr| log_endpoints(startup, addr),
     )
@@ -3425,7 +3435,7 @@ async fn serve_remote_pipeline_stage(service_config: RemoteStageServiceConfig) -
     // handshake, the model failed to load, the transport closed) must take
     // the process down with its error instead of parking here as a zombie a
     // supervisor would never restart (#2637).
-    wait_for_stage_shutdown(handle, tokio::signal::ctrl_c()).await
+    wait_for_stage_shutdown(handle, crate::server::shutdown::shutdown_signal_io()).await
 }
 
 /// Install the configured `--surgery <FILE>` YAML pipeline into the
@@ -3759,6 +3769,10 @@ pub(crate) fn log_startup_notices(startup: &ServerStartupConfig) {
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+    // Before any model loads (#3483): a SIGTERM during the load is latched,
+    // and the listener returns at once instead of the process dying on the
+    // default action or, as a container's PID 1, ignoring the signal.
+    let _ = crate::server::shutdown::install();
     log_startup_notices(&startup);
 
     // `--image-model` with no `-m` (#2825): no chat checkpoint exists, so
@@ -3926,7 +3940,19 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // the tensor-parallel / pipeline-parallel validators so the emitted TOML
     // passes through the existing distributed resolution path unchanged.
     ServerDistributedFlags::from(&startup).ensure_supported()?;
-    let zero_config_plan = run_zero_config_bring_up(&mut startup).await?;
+    // The bring-up waits on the network (discovery, the assignment push, a
+    // `--pp-peer` waiting up to `PEER_ASSIGNMENT_TIMEOUT` for its stage) with
+    // no model loaded, so a shutdown signal ends it at once (#3483) instead of
+    // being latched and ignored until the wait times out on its own.
+    let Some(zero_config_plan) =
+        crate::server::shutdown::unless_shutdown(run_zero_config_bring_up(&mut startup)).await
+    else {
+        tracing::info!(
+            "shutdown requested during the pipeline bring-up; exiting before any model loads"
+        );
+        return Ok(());
+    };
+    let zero_config_plan = zero_config_plan?;
     if startup.dry_run {
         if let Some(plan) = zero_config_plan.as_ref() {
             // Print the topology summary to stdout so CI gates and operators
