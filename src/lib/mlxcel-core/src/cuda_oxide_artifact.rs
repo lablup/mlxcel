@@ -61,7 +61,11 @@ pub const ENTRIES: [&str; 5] = [
 ];
 
 const GRID_RULE: &str = "rows";
-const BLOCK_RULE: &str = "fused_norm_threads(dim)";
+/// The block width rule the adapter launches with: the one `fused_norm.cpp`
+/// computes for the native CUDA kernel, MLX's own `rms_norm` geometry (#3510).
+/// An artifact built for the earlier `fused_norm_threads(dim)` rule sums the
+/// squares in another order at this width, so it is refused.
+const BLOCK_RULE: &str = "fused_norm_cuda_block(dim, n_reads)";
 
 /// One entry point of the module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +131,8 @@ pub enum ArtifactError {
 struct Launch {
     grid_dim_rule: String,
     block_dim_rule: String,
+    /// Elements per vector the entry was compiled for.
+    n_reads: u32,
     shared_mem_bytes: u64,
 }
 
@@ -380,6 +386,13 @@ pub fn validate(
                 schema.activation_dtype, schema.weight_dtype
             )));
         };
+        let n_reads = activation.n_reads_under(weight);
+        if manifest.launch.n_reads != n_reads {
+            return Err(bad(format!(
+                "launch rule has n_reads {} for {:?} under a {:?} weight; the adapter launches fused_norm_cuda_block(dim, {n_reads})",
+                manifest.launch.n_reads, activation, weight
+            )));
+        }
         if entries
             .iter()
             .any(|e| e.activation == activation && e.weight == weight)

@@ -22,10 +22,26 @@ _spike_env_error() {
     return 1
 }
 
-if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+# Executed rather than sourced? bash and zsh answer differently, and neither
+# spelling parses in the other shell (or in a POSIX sh), so the bash one sits
+# inside `eval`; zsh reports a sourced file as `:file` in its eval context.
+if [ -n "${BASH_VERSION:-}" ]; then
+    eval '_spike_env_src=${BASH_SOURCE[0]}'
+    [ "$_spike_env_src" != "$0" ] || _spike_env_src=
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    case "${ZSH_EVAL_CONTEXT:-}" in
+        *:file*) _spike_env_src=sourced ;;
+        *) _spike_env_src= ;;
+    esac
+else
+    echo "cuda-oxide-smoke: source this file from bash or zsh" >&2
+    return 1 2>/dev/null || exit 1
+fi
+if [ -z "$_spike_env_src" ]; then
     echo "cuda-oxide-smoke: source this file instead of executing it: . scripts/env.sh" >&2
     exit 2
 fi
+unset _spike_env_src
 
 # --- CUDA toolkit -----------------------------------------------------------
 if [ -z "${CUDA_HOME:-}" ]; then

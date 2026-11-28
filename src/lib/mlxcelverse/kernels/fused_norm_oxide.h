@@ -62,9 +62,11 @@ namespace mlxcel::turbo {
 // artifact's entries, or more than 2^32-1 elements all answer `nullopt` and
 // record the reason. The caller has already validated the shapes.
 //
-// `threads` is `fused_norm_threads(dim)` from `fused_norm.cpp`, the block
-// width the artifact was validated with (#2832), passed in so the two routes
-// cannot compute it differently.
+// `threads` is the CUDA block width `fused_norm.cpp` computed for the
+// existing port, `fused_norm_cuda_block(dim, n_reads)` with `n_reads` from
+// the pair's compute dtype (`fused_norm_cuda.h`): MLX's `rms_norm` geometry,
+// which the artifact was regenerated and validated with (#3510). It is passed
+// in so the two routes cannot compute it differently.
 std::optional<std::vector<mlx::core::array>> try_oxide_fused_add_rms_norm(
     const mlx::core::array& x,
     const mlx::core::array& residual,

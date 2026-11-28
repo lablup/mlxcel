@@ -27,8 +27,8 @@
     "compile_options": 0,
     "payload_kind": "ptx",
     "payload_name": "cuda_oxide_fused_norm.ptx",
-    "payload_bytes": 88219,
-    "payload_sha256": "b54c1c93c6e8f03e3f3d2cf37a79dd412069153c1360b6161831583c01eaf86e",
+    "payload_bytes": 79488,
+    "payload_sha256": "ed470a19c4848893a680223db9c6861363c4cb180a5c229a63307afc305357f4",
     "entries": [
       {
         "kind": 1,
@@ -63,31 +63,31 @@
       {
         "kind": 2,
         "kind_name": "device-function",
-        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowttNtB2_8Bf16ConvB13_EB2_",
+        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtttNtB2_8Bf16ConvB14_B14_EB2_",
         "has_metadata": false
       },
       {
         "kind": 2,
         "kind_name": "device-function",
-        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowttNtB2_7F16ConvB13_EB2_",
+        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtttNtB2_7F16ConvB14_B14_EB2_",
         "has_metadata": false
       },
       {
         "kind": 2,
         "kind_name": "device-function",
-        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowffNtB2_7F32ConvB13_EB2_",
+        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowfffNtB2_7F32ConvB14_B14_EB2_",
         "has_metadata": false
       },
       {
         "kind": 2,
         "kind_name": "device-function",
-        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtfNtB2_7F16ConvNtB2_7F32ConvEB2_",
+        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtffNtB2_7F16ConvNtB2_7F32ConvB1h_EB2_",
         "has_metadata": false
       },
       {
         "kind": 2,
         "kind_name": "device-function",
-        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtfNtB2_8Bf16ConvNtB2_7F32ConvEB2_",
+        "symbol": "_RINvCs317XLAoAb5j_21cuda_oxide_fused_norm22fused_add_rms_norm_rowtftNtB2_8Bf16ConvNtB2_7F32ConvB14_EB2_",
         "has_metadata": false
       },
       {
@@ -137,14 +137,14 @@
   "artifacts": {
     "ptx": {
       "path": "artifacts/fused_add_rms_norm.sm_121.ptx",
-      "sha256": "b54c1c93c6e8f03e3f3d2cf37a79dd412069153c1360b6161831583c01eaf86e",
-      "bytes": 88219,
+      "sha256": "ed470a19c4848893a680223db9c6861363c4cb180a5c229a63307afc305357f4",
+      "bytes": 79488,
       "format": "PTX"
     },
     "cubin": {
       "path": "artifacts/fused_add_rms_norm.sm_121.cubin",
-      "sha256": "677d6d6d3a210161ad649681d783c47bc41e66526d263a9d586538ab0e18825f",
-      "bytes": 77536,
+      "sha256": "390fcc2833e532ef5bffb7d8699c2f43a0fd7dc53775079b9b2c6be938a558cd",
+      "bytes": 92000,
       "format": "cubin",
       "producer": "Cuda compilation tools, release 13.0, V13.0.88"
     }
@@ -387,12 +387,14 @@
   "launch": {
     "index_space": "1d, one block per row",
     "grid_dim_rule": "rows",
-    "block_dim_rule": "fused_norm_threads(dim)",
-    "block_dim_definition": "clamp(ceil_div(ceil_div(dim, 4), 32) * 32, 32, 1024); rows wider than 4096 loop",
+    "block_dim_rule": "fused_norm_cuda_block(dim, n_reads)",
+    "block_dim_definition": "with nvec = ceil_div(dim, n_reads): 1024 if dim > n_reads * 1024 (the row loops), else 64 if dim <= n_reads * 64, else 128 if nvec % 128 == 0, else 64 if nvec % 64 == 0 and nvec <= 512, else 128; the block MLX's CUDA rms_norm launches for the compute dtype",
+    "compute_dtype": "f32",
+    "n_reads": 4,
     "shared_mem_bytes": 0,
     "static_shared_bytes_per_block": 132,
     "buffer_layout": "x, residual, normed, new_residual are row-major [rows, dim] with exactly rows*dim elements; weight has exactly dim elements",
-    "semantics": "new_residual = round_act(x + residual); normed = round_act(gain * round_act(new_residual * rsqrt(mean(new_residual^2) + eps))) with gain = weight when weight_bias == 0, else round_w(weight_bias + weight); f32 accumulation, f32 FMA on the squares, two-stage warp butterfly reduction in the reference kernel's order",
+    "semantics": "new_residual = round_act(x + residual); normed = round_act(gain * round_compute(new_residual * rsqrt(mean(new_residual^2) + eps))) with compute = promote(act, weight) under mlxcel's table (bf16 with f32 is bf16, f16 with f32 is f32) and gain = round_compute(weight) when weight_bias == 0, else round_compute(round_w(weight_bias + weight)); f32 accumulation, f32 FMA on the squares; lane t sums vectors t, t + block, ... of n_reads elements in ascending order, then the two-stage warp butterfly reduction, which is the order of MLX's CUDA rms_norm",
     "out_of_range_threads": "lanes past dim skip the element; the grid is exact, so no block returns before a barrier",
     "rejected_on_host": "rows == 0, dim == 0, x/residual length != rows*dim, weight length != dim, rows*dim > 2^32-1",
     "case_count": 26,

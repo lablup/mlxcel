@@ -1037,24 +1037,22 @@ pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = cfg!(feature = "rocm");
 /// environment per decode step would put a `getenv` on the hot path, and the
 /// switch is not meant to change mid-run.
 ///
-/// Greedy temp-0 output is not guaranteed byte-identical to the unfused path
-/// over long generation. On CUDA the residual sum is byte-identical; what
-/// differs is the fp32 summation order of the sum of squares. MLX's
-/// `rms_norm_small` at bf16 dim 2048 runs 128 threads over two 8-wide chunks
-/// each, the fused kernel 512 threads of 4, so the normalizer can differ in
-/// its last bits and an element of the rounded intermediate `bf16(x * inv)` lands
-/// one bf16 ulp away; `normed`, the output after the gain multiply, can then be
-/// up to two ulps away. A near-tie argmax can then land on the other side. That
-/// is a tie-break difference, not a regression: measured on GB10 with
-/// `llama-3.2-1b-instruct-bf16` (#3501), two of 2048 prefill rows differed,
-/// the fused kernel matched a float64 reference on one and the graph on the
-/// other, and the one argmax flip in 128 steps was a step where the graph's
-/// top two were an exact bf16 tie (margin 0, fused margin 0.125). See
-/// `docs/benchmark_results/issue-3501-fused-norm-divergence-gb10-2026-11-28/`
-/// and `examples/fused_norm_divergence_probe.rs`. The ROCm HIP port (#2063)
-/// copies its overlay's launch geometry and measured byte-identical to the
-/// ROCm graph instead: every on/off logit-trace pair in its results page
-/// matched.
+/// On CUDA and ROCm the fused kernel is byte-identical to the unfused
+/// `add` + `fast_rms_norm` pair, so greedy temp-0 output does not depend on
+/// this switch. Both ports copy the launch geometry of the backend's own
+/// `rms_norm`, which fixes the fp32 summation order of the sum of squares:
+/// the ROCm HIP port since #2063 (every on/off logit-trace pair in its results
+/// page matched), the CUDA port since #3510 (`fused_norm_cuda.h`; pinned by
+/// `fused_norm_parity_tests/cuda_byte_identity.rs` for every dtype pair and
+/// row width, and on GB10 `llama-3.2-1b-instruct-bf16` gives the same token
+/// digest with the fusion on and off). Before #3510 the CUDA kernel summed in
+/// another order and an exact logit tie could break the other way (#3501,
+/// `docs/benchmark_results/issue-3501-fused-norm-divergence-gb10-2026-11-28/`).
+///
+/// On Metal the two are not guaranteed byte-identical over long generation:
+/// that kernel sizes its threadgroup from the row and agrees with the graph
+/// within the per-dtype budget of `fused_norm_parity_tests`, so a near-tie
+/// argmax can land on the other side.
 pub fn fused_add_rmsnorm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {

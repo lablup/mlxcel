@@ -387,9 +387,10 @@ pub(crate) fn run_fused(case: &Case, arrays: &CaseArrays) -> OutBits {
 
 /// Run a case through the graph path the blocks used before the fused kernel.
 ///
-/// MLX's `rms_norm` promotes to `result_type(x, weight)`, so a 16-bit
-/// activation with an f32 weight comes back as f32; it is rounded to the
-/// activation dtype, the dtype the kernels write, as the #2832 oracle did.
+/// MLX's `rms_norm` promotes to `result_type(x, weight)`, so an f16
+/// activation with an f32 weight comes back as f32 (a bf16 one stays bf16
+/// under this tree's promotion table); it is rounded to the activation dtype,
+/// the dtype the kernels write, as the #2832 oracle did.
 pub(crate) fn run_graph(case: &Case, arrays: &CaseArrays) -> OutBits {
     let (normed, new_residual) = if case.weight_bias == 0.0 {
         let norm = RMSNorm::new(copy(&arrays.weight), case.eps);

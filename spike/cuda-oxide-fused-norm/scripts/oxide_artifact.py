@@ -22,7 +22,8 @@ What differs from the smoke tool is that one PTX module here carries five
 `.entry` symbols (one per dtype pair), so there is one hand-written schema and
 one generated manifest per entry, all pointing at the same PTX and cubin, and
 the launch rule is the row kernel's (`grid = rows`, `block =
-fused_norm_threads(dim)`) rather than an elementwise `ceil_div(n, block)`.
+fused_norm_cuda_block(dim, n_reads)`) rather than an elementwise
+`ceil_div(n, block)`.
 
 Subcommands:
   export       extract PTX from .oxart, assemble the cubin, write one manifest
@@ -62,11 +63,15 @@ from oxide_format import (  # noqa: E402
 ARTIFACT_STEM = "fused_add_rms_norm"
 OXART_NAME = "cuda_oxide_fused_norm.oxart"
 
-# Launch geometry rule of the row kernel, mirrored from `fused_norm_threads`
-# in src/main.rs and kernels/fused_norm.cpp.
+# Launch geometry rule of the row kernel, mirrored from `fused_norm_cuda_block`
+# in src/main.rs and kernels/fused_norm.cpp, which is the block MLX's CUDA
+# `rms_norm` launches (`dispatch_num_chunks` in mlx/backend/cuda/rms_norm.cu).
 SIMD_WIDTH = 32
-N_READS = 4
 MAX_THREADS = 1024
+BLOCK_RULE = "fused_norm_cuda_block(dim, n_reads)"
+# Elements per 16-byte vector of the compute dtype, promote(activation, weight).
+VECTOR_BYTES = 16
+DTYPE_BYTES = {"f32": 4, "f16": 2, "bf16": 2}
 
 ERRORS: list[str] = []
 
@@ -76,12 +81,31 @@ def fail(message: str) -> None:
     print(f"FAIL {message}", file=sys.stderr)
 
 
-def fused_norm_threads(dim: int) -> int:
-    if dim <= 0:
-        return SIMD_WIDTH
-    lanes = -(-dim // N_READS)
-    threads = -(-lanes // SIMD_WIDTH) * SIMD_WIDTH
-    return max(SIMD_WIDTH, min(MAX_THREADS, threads))
+def fused_norm_cuda_block(dim: int, n_reads: int) -> int:
+    nvec = -(-dim // n_reads)
+    if dim > n_reads * MAX_THREADS:
+        return MAX_THREADS
+    if dim <= n_reads * 64:
+        return 64
+    if nvec % 128 == 0:
+        return 128
+    if nvec % 64 == 0 and nvec <= 512:
+        return 64
+    return 128
+
+
+def compute_dtype(act: str, weight: str) -> str:
+    """`promote_types(act, weight)` under mlxcel's table: bf16 with f32 is
+    bf16, f16 with anything else is f32."""
+    if act == weight:
+        return act
+    if {act, weight} == {"bf16", "f32"}:
+        return "bf16"
+    return "f32"
+
+
+def pair_n_reads(act: str, weight: str) -> int:
+    return VECTOR_BYTES // DTYPE_BYTES[compute_dtype(act, weight)]
 
 
 def artifact_path(base: Path, relative: str) -> Path:
@@ -454,15 +478,23 @@ def check_launch(args: argparse.Namespace) -> int:
         seen.add(key)
         if launch.get("grid_dim_rule") != "rows":
             fail(f"{entry}: manifest grid_dim_rule {launch.get('grid_dim_rule')!r} is not 'rows'")
-        if launch.get("block_dim_rule") != "fused_norm_threads(dim)":
-            fail(f"{entry}: manifest block_dim_rule {launch.get('block_dim_rule')!r} is not 'fused_norm_threads(dim)'")
+        if launch.get("block_dim_rule") != BLOCK_RULE:
+            fail(f"{entry}: manifest block_dim_rule {launch.get('block_dim_rule')!r} is not {BLOCK_RULE!r}")
+        n_reads = pair_n_reads(case["act"], case["w"])
+        if launch.get("compute_dtype") != compute_dtype(case["act"], case["w"]):
+            fail(f"{entry}: manifest compute_dtype {launch.get('compute_dtype')!r} is not promote({case['act']}, {case['w']})")
+        if launch.get("n_reads") != n_reads:
+            fail(f"{entry}: manifest n_reads {launch.get('n_reads')!r} is not {n_reads} for {case['act']}/{case['w']}")
         if launch.get("shared_mem_bytes") != 0:
             fail(f"{entry}: manifest requests dynamic shared memory; the harness launches with 0")
         if case["grid"] != case["rows"]:
             fail(f"case {case['case']}: launched grid={case['grid']}, rows={case['rows']}")
-        want_block = fused_norm_threads(case["dim"])
+        want_block = fused_norm_cuda_block(case["dim"], n_reads)
         if case["block"] != want_block:
-            fail(f"case {case['case']}: launched block={case['block']}, fused_norm_threads({case['dim']})={want_block}")
+            fail(
+                f"case {case['case']}: launched block={case['block']}, "
+                f"fused_norm_cuda_block({case['dim']}, {n_reads})={want_block}"
+            )
         if case["block"] % SIMD_WIDTH or case["block"] > MAX_THREADS or case["block"] <= 0:
             fail(f"case {case['case']}: block {case['block']} is outside the kernel's contract")
         if case["elements"] != case["rows"] * case["dim"]:
@@ -493,7 +525,7 @@ def check_launch(args: argparse.Namespace) -> int:
         return 1
     print(
         f"launch valid: cases={len(cases)} entries={len(per_entry)} grid_rule=rows "
-        f"block_rule=fused_norm_threads(dim) elements={total_elements} rejected={rejects}"
+        f"block_rule={BLOCK_RULE} elements={total_elements} rejected={rejects}"
     )
     return 0
 

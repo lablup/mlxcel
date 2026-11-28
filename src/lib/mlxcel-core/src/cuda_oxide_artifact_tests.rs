@@ -234,6 +234,13 @@ fn another_abi_version_target_format_or_entry_is_refused() {
         with(4, &|m| m["launch"]["shared_mem_bytes"] = json!(4096)),
         "launch rule",
     );
+    // The rule of the artifact before #3510, which summed in another order.
+    manifest_error(
+        with(4, &|m| {
+            m["launch"]["block_dim_rule"] = json!("fused_norm_threads(dim)")
+        }),
+        "launch rule",
+    );
     manifest_error(
         with(0, &|m| m["source"]["revision"] = json!("main")),
         "compiler revision",
@@ -351,6 +358,34 @@ fn an_unsupported_dtype_or_a_duplicate_pair_is_refused() {
         s["weight_dtype"] = json!("bf16");
     });
     manifest_error(validate(&ptx, &documents), "already serves");
+}
+
+/// The block width depends on the vector width, so an entry compiled for
+/// another one is refused even when its manifest and schema agree. Entry 4 is
+/// bf16 under an f32 weight, which computes in bf16 (8 per vector) under
+/// mlxcel's promotion table, not in f32 (4).
+#[test]
+fn an_entry_compiled_for_another_vector_width_is_refused() {
+    let (ptx, documents) = committed();
+    let artifact = validate(&ptx, &documents).expect("valid");
+    for entry in &artifact.entries {
+        let sixteen = entry.activation != Lane::F32 && entry.weight != Lane::F32
+            || entry.activation == Lane::Bf16;
+        assert_eq!(
+            entry.activation.n_reads_under(entry.weight),
+            if sixteen { 8 } else { 4 },
+            "{}",
+            entry.symbol
+        );
+    }
+    assert_eq!(Lane::F32.n_reads_under(Lane::Bf16), 8);
+    assert_eq!(Lane::F32.n_reads_under(Lane::F16), 4);
+    assert_eq!(Lane::F16.n_reads_under(Lane::Bf16), 4);
+
+    let mut documents = documents;
+    edit_manifest(&mut documents, 4, |m| m["launch"]["n_reads"] = json!(4));
+    edit_schema(&mut documents, 4, |s| s["launch"]["n_reads"] = json!(4));
+    manifest_error(validate(&ptx, &documents), "n_reads 4");
 }
 
 #[test]

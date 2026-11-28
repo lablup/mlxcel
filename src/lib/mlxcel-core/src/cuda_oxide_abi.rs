@@ -43,6 +43,25 @@ impl Lane {
         }
     }
 
+    /// Elements per 16-byte vector of the compute dtype of an activation in
+    /// `self` under a weight in `weight`: 8 when that dtype is 16 bits wide,
+    /// 4 when it is f32.
+    ///
+    /// The compute dtype is MLX's `promote_types` with this tree's table
+    /// (`overlays/*/mlx/dtype.cpp`), which `fast::rms_norm` applies: equal
+    /// dtypes stay, bf16 with f32 is bf16, and f16 with either other dtype is
+    /// f32. The launch width `fused_norm_cuda_block(dim, n_reads)` depends on
+    /// it, so the manifest's `n_reads` is checked against this.
+    #[must_use]
+    pub fn n_reads_under(self, weight: Self) -> u32 {
+        let sixteen_bit = match (self, weight) {
+            (a, w) if a == w => a != Self::F32,
+            (Self::Bf16, Self::F32) | (Self::F32, Self::Bf16) => true,
+            _ => false,
+        };
+        if sixteen_bit { 8 } else { 4 }
+    }
+
     /// How the kernel sees one element: 16-bit lanes travel as bit patterns.
     fn pointee(self) -> &'static str {
         match self {

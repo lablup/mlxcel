@@ -149,6 +149,22 @@ fn random_case(
     UniquePtr<MlxArray>,
     UniquePtr<MlxArray>,
 ) {
+    random_case_with_weight(seed, rows, dim, dtype, dtype)
+}
+
+/// [`random_case`] with the norm weight in its own dtype, for the mixed pairs
+/// (a 16-bit activation under an f32 weight, and the reverse).
+fn random_case_with_weight(
+    seed: u64,
+    rows: i32,
+    dim: i32,
+    dtype: i32,
+    weight_dtype: i32,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+) {
     random_seed(seed);
     let delta_f32 = unsafe { random_normal(&[rows, dim], dtype::FLOAT32, std::ptr::null()) };
     let residual_f32 = unsafe { random_normal(&[rows, dim], dtype::FLOAT32, std::ptr::null()) };
@@ -163,7 +179,7 @@ fn random_case(
 
     let delta = astype(&delta_f32, dtype);
     let residual = astype(&residual_f32, dtype);
-    let weight = astype(&w_f32, dtype);
+    let weight = astype(&w_f32, weight_dtype);
     eval(&delta);
     eval(&residual);
     eval(&weight);
@@ -558,7 +574,7 @@ fn argmax_index(logits: &MlxArray) -> usize {
 /// and the body copies its strided sums, 32-wide folds, `1.0f / sqrtf` and
 /// rounding points (`fused_norm_hip.h`), so it is byte-identical, a much
 /// tighter pin than the tolerance tests above: a port sized from the row
-/// (`fused_norm_threads`) fails it at 4096 wide. The second half spreads the
+/// (Metal's `fused_norm_threads`) fails it at 4096 wide. The second half spreads the
 /// residual rows' scale over e^-8 to e^8, where a port that took the row
 /// length as a compile-time constant left about 1% of f32 rows a normalizer
 /// ulp off. Rows wider than one 1024-element sweep (4096) and narrower than
@@ -673,7 +689,6 @@ fn fused_add_rms_norm_keeps_the_rocm_graph_sign_of_zero() {
     }
 }
 
-// CUDA: not byte-identical to the graph, and pinned to differ only by the
-// normalizer's reduction order (#3501).
-#[path = "fused_norm_parity_tests/cuda_near_tie.rs"]
-mod cuda_near_tie;
+// CUDA: byte-identical to the graph for every dtype pair and dim (#3510).
+#[path = "fused_norm_parity_tests/cuda_byte_identity.rs"]
+mod cuda_byte_identity;

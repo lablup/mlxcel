@@ -21,8 +21,10 @@
 //! fused CUDA kernel, and the `add` + `fast_rms_norm` graph.
 //!
 //! The pass criteria are the ones #2832 froze before its oracle ran, the
-//! budgets of `fused_norm_parity_tests::tolerance_for`; bitwise identity to
-//! the existing kernel is counted and printed, not required. The route
+//! budgets of `fused_norm_parity_tests::tolerance_for`, and since #3510 two
+//! exact ones on top: the artifact is bit-identical to the existing kernel on
+//! all 130 cases, and both are bit-identical to the graph (its `normed` cast
+//! to the activation dtype) on every row without a non-finite input. The route
 //! counters are asserted around each phase, so the comparison cannot pass by
 //! the launcher quietly taking the existing kernel on the cuda-oxide pass.
 //!
@@ -164,7 +166,8 @@ fn the_2832_matrix_passes_through_the_adapter_on_the_oxide_route() {
         let (dim, lane) = (case.dim, case.act);
         let (f_rms, f_max, f_diff) =
             compare(&ours.normed, &reference.fused.normed, lane, dim, skip);
-        let (g_rms, g_max, _) = compare(&ours.normed, &reference.graph.normed, lane, dim, skip);
+        let (g_rms, g_max, g_diff) =
+            compare(&ours.normed, &reference.graph.normed, lane, dim, skip);
         let (_, _, res_f_diff) = compare(
             &ours.new_residual,
             &reference.fused.new_residual,
@@ -197,10 +200,14 @@ fn the_2832_matrix_passes_through_the_adapter_on_the_oxide_route() {
             && g_max < max_tol
             && res_f_diff == 0
             && res_g_diff <= residual_budget
-            && nonfinite_ok;
+            && nonfinite_ok
+            // #3510: the kernel takes MLX's rms_norm geometry, so finite rows
+            // equal the graph bit for bit, not only within the budget.
+            && g_diff == 0
+            && res_g_diff == 0;
         if !pass {
             failures.push(format!(
-                "{}: fused rms {f_rms:.3e} max {f_max:.3e}, graph rms {g_rms:.3e} max {g_max:.3e} (tol {rms_tol:.1e}/{max_tol:.1e}), residual differs from fused in {res_f_diff}, from graph in {res_g_diff} (budget {residual_budget}), non-finite rows agree: {nonfinite_ok}",
+                "{}: fused rms {f_rms:.3e} max {f_max:.3e}, graph rms {g_rms:.3e} max {g_max:.3e} (tol {rms_tol:.1e}/{max_tol:.1e}), normed differs from graph in {g_diff} elements (must be 0), residual differs from fused in {res_f_diff}, from graph in {res_g_diff} (budget {residual_budget}, must be 0), non-finite rows agree: {nonfinite_ok}",
                 case.name
             ));
         }
@@ -227,6 +234,10 @@ fn the_2832_matrix_passes_through_the_adapter_on_the_oxide_route() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert_eq!(elements, EXPECTED_ELEMENTS);
+    assert_eq!(
+        bitwise_fused, EXPECTED_CASES,
+        "the artifact must stay bit-identical to the fused CUDA kernel on every case"
+    );
     assert_eq!(nonfinite_cases, 5, "one NaN / +Inf case per dtype pair");
     assert_eq!(
         (
@@ -237,4 +248,82 @@ fn the_2832_matrix_passes_through_the_adapter_on_the_oxide_route() {
         (EXPECTED_CASES as u64, EXPECTED_CASES as u64, 0),
         "every case must run on the cuda-oxide route, none on the existing kernel"
     );
+}
+
+/// Widths on the two branches of MLX's `rms_norm` dispatch that the #2832
+/// matrix does not reach, so the artifact is launched with every block rule
+/// `fused_norm_cuda_block` has: 64 threads over several chunks (a vector
+/// count that is a multiple of 64 but not of 128: 1536, 2560 and 3584 for the
+/// 8-wide entries, 768, 1280 and 1792 for the 4-wide ones) and, for the
+/// 8-wide entries, the looped 1024-thread block (8193, 12288), which the
+/// matrix reaches only at 4 per vector. The matrix stays the #2832 one; this
+/// adds launches, not cases to it.
+#[test]
+fn the_dispatch_branches_outside_the_matrix_match_on_the_oxide_route() {
+    use crate::cuda_oxide_fused_norm_fixtures::DTYPE_PAIRS;
+    const DIMS: [usize; 8] = [768, 1280, 1536, 1792, 2560, 3584, 8193, 12288];
+    let Some(_route) = RouteGuard::on_target_device() else {
+        return;
+    };
+    let cases: Vec<Case> = DTYPE_PAIRS
+        .iter()
+        .flat_map(|&(act, w)| {
+            DIMS.iter()
+                .map(move |&dim| Case::new(act, w, 5, dim, 1e-6, 0.0, false))
+        })
+        .collect();
+    let run = |route: &str| -> Vec<(OutBits, OutBits)> {
+        cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                let arrays = case_arrays(case, &inputs(case, 1000 + index));
+                let step = oxide::route_counters();
+                let fused = run_fused(case, &arrays);
+                let moved = delta(step);
+                let want = if route == "oxide" {
+                    (1, 1, 0)
+                } else {
+                    (0, 0, 1)
+                };
+                assert_eq!(
+                    (moved.oxide_routes, moved.launches, moved.native_routes),
+                    want,
+                    "{}: the {route} pass took another route",
+                    case.name
+                );
+                (fused, run_graph(case, &arrays))
+            })
+            .collect()
+    };
+    let native = run("native");
+    oxide::install_embedded().expect("the embedded artifact validates and targets this device");
+    let ours = run("oxide");
+
+    let mut failures = Vec::new();
+    for (case, ((fused, graph), (oxide_out, _))) in cases.iter().zip(native.iter().zip(&ours)) {
+        for (name, got, want) in [
+            ("normed vs fused", &oxide_out.normed, &fused.normed),
+            ("normed vs graph", &oxide_out.normed, &graph.normed),
+            (
+                "new_residual vs fused",
+                &oxide_out.new_residual,
+                &fused.new_residual,
+            ),
+            (
+                "new_residual vs graph",
+                &oxide_out.new_residual,
+                &graph.new_residual,
+            ),
+        ] {
+            let differing = got.iter().zip(want.iter()).filter(|(a, b)| a != b).count();
+            if differing != 0 {
+                failures.push(format!(
+                    "{}: {name}: {differing} elements differ",
+                    case.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
