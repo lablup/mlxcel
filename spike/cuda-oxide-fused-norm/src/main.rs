@@ -70,7 +70,7 @@ const VECTOR_BYTES: u32 = 16;
 /// Threads per row for a row of `dim` elements read as `n_reads`-wide
 /// vectors: the block MLX's CUDA `rms_norm` launches for that width, so each
 /// lane sums the same elements in the same order as the graph path. This is
-/// `fused_norm_cuda_block` in `kernels/fused_norm.cpp`, which mirrors
+/// `fused_norm_cuda_block` in `kernels/fused_norm_cuda.h`, which mirrors
 /// `dispatch_num_chunks` and the `eval_gpu` threshold of
 /// `mlx/backend/cuda/rms_norm.cu`: rows wider than `n_reads * 1024` take the
 /// looped 1024-thread kernel, narrower ones 64 or 128 threads.
@@ -831,7 +831,11 @@ struct Model {
 
 /// The same rounding points as the kernel, with the sum of squares and the
 /// reciprocal square root in f64 and a sequential summation order, so it is a
-/// check on the semantics rather than a copy of the device arithmetic.
+/// check on the semantics rather than a copy of the device arithmetic. It is a
+/// tolerance model, not an order model: it does not mirror the kernel's
+/// summation order, and the f64 sum stays within the frozen tolerances of any
+/// fp32 order. Order identity is checked by the byte-identity test against the
+/// graph path, not here.
 fn host_model(case: &Case, inp: &Inputs) -> Model {
     let dim = case.dim;
     let mut normed = vec![0.0f32; case.elements()];

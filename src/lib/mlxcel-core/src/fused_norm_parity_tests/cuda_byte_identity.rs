@@ -19,7 +19,7 @@
 //! per dim and dtype, so the fp32 sum of squares was reduced in another order
 //! and a `normed` element could land one or two bf16 ulps away (#3501). The
 //! kernel now takes MLX's geometry (`fused_norm_cuda_block` in
-//! `kernels/fused_norm.cpp`), and this module pins the result: both outputs
+//! `kernels/fused_norm_cuda.h`), and this module pins the result: both outputs
 //! equal `graph_add_rms_norm` byte for byte.
 //!
 //! The dims reach every branch of MLX's dispatch (`dispatch_num_chunks` and
