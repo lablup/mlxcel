@@ -471,3 +471,250 @@ fn snapshot_partial_match_declines_under_require_whole_entry() {
         .expect("without the gate the same partial match must adopt");
     assert_eq!(adopted.1, 20, "adopted at the 20-token common prefix");
 }
+
+// ── a warm-up keeps the boundary snapshot it extends (issue #3467) ──────────
+
+/// History length of [`turn`]; the prompt adds a four-token generation prompt.
+pub(super) const TURN_BOUNDARY: usize = 36;
+/// Tokens a [`enqueue_turn`] request decodes.
+pub(super) const TURN_MAX_TOKENS: usize = 3;
+
+/// The chat turn the warm-up tests replay: 36 history tokens and a
+/// four-token generation prompt.
+pub(super) fn turn() -> Vec<i32> {
+    prompt(TURN_BOUNDARY + 4)
+}
+
+/// A chat turn of `tokens` whose history boundary is `tokens[..boundary]`, as
+/// the server builds it. The fixture samples EOS straight away, so the turn
+/// ignores EOS and decodes [`TURN_MAX_TOKENS`] greedy tokens.
+pub(super) fn enqueue_turn(
+    sched: &mut BatchScheduler,
+    tokens: &[i32],
+    boundary: usize,
+) -> mpsc::Receiver<GenerateEvent> {
+    let mut ctx = cache_ctx();
+    ctx.history_prefix_tokens = Some(tokens[..boundary].to_vec());
+    let mut opts = options();
+    opts.prompt_cache_ctx = Some(ctx);
+    opts.max_tokens = TURN_MAX_TOKENS;
+    opts.ignore_eos = true;
+    let (tx, rx) = mpsc::channel();
+    sched.enqueue_request(
+        "prompt".to_string(),
+        Some(tokens.to_vec()),
+        opts,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        tx,
+        Arc::new(AtomicBool::new(false)),
+        true,
+    );
+    rx
+}
+
+/// Drive the scheduler until `rx` reports the turn done. Unlike
+/// [`run_to_completion`] this keeps stepping through multi-token decode and
+/// runs the completion pass that donates a decode-finished sequence.
+pub(super) fn finish_turn(
+    sched: &mut BatchScheduler,
+    rx: &mpsc::Receiver<GenerateEvent>,
+) -> crate::server::model_provider::GenerationResult {
+    for _ in 0..64 {
+        match rx.try_recv() {
+            Ok(GenerateEvent::Done(result)) => return result,
+            Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
+            Ok(_) | Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => panic!("response channel closed"),
+        }
+        match sched.decide_action() {
+            BatchSchedulerAction::Prefill(id) => sched.execute_prefill(id),
+            BatchSchedulerAction::Decode(ids) => sched.execute_decode_step(&ids),
+            BatchSchedulerAction::Idle => {}
+            other => panic!("unexpected scheduler action {other:?}"),
+        }
+        sched.finalize_completed();
+    }
+    panic!("the turn did not finish");
+}
+
+/// The queued request's sequence and how many prompt tokens it adopted.
+pub(super) fn queued(sched: &BatchScheduler) -> (SequenceId, usize) {
+    let seq = sched.prefill_queue.peek().expect("the request is queued");
+    (seq.seq_id, seq.prefill_start_offset)
+}
+
+/// Queue a warm-up for `target` in the turn's cache bucket, run it, and
+/// require that it restored a base snapshot and stored its target.
+pub(super) fn run_warmup(sched: &mut BatchScheduler, target: &[i32]) {
+    let run = sched
+        .batch_observability
+        .snapshot()
+        .prompt_cache_warmups_run;
+    sched.enqueue_prompt_cache_warmup(target.to_vec(), cache_ctx());
+    sched.run_next_prompt_cache_warmup();
+    assert_eq!(
+        sched
+            .batch_observability
+            .snapshot()
+            .prompt_cache_warmups_run,
+        run + 1,
+        "the warm-up restored a base snapshot and stored its target"
+    );
+}
+
+/// Forward `tokens` for `seq_id` as one unpadded piece and return the
+/// logits at its last position.
+fn piece_logits(sched: &mut BatchScheduler, seq_id: SequenceId, tokens: &[i32]) -> Vec<u8> {
+    let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+    let outcome = sched
+        .engine
+        .prefill(&PrefillStep {
+            seq_id,
+            input: &input,
+            embeddings: None,
+            mask: None,
+            last_pos: tokens.len() - 1,
+            trim_excess: 0,
+            eval: true,
+        })
+        .expect("the piece forwards");
+    outcome.eval.expect("the logits evaluate");
+    mlxcel_core::array_to_raw_bytes(&outcome.logits)
+}
+
+/// The logits of `tokens[boundary..]` after a cold prefill of
+/// `tokens[..boundary]`, on a scheduler of its own: the partition a cold
+/// request forwards (history, then the rest). Call it before building the
+/// scheduler under test, which installs its own default stream.
+pub(super) fn cold_suffix_logits(model: Gemma3Wrapper, tokens: &[i32], boundary: usize) -> Vec<u8> {
+    let mut sched = scheduler_with_model(model, test_store());
+    let seq_id = sched
+        .allocate_sequence_state()
+        .expect("a sequence for the cold run");
+    let _ = piece_logits(&mut sched, seq_id, &tokens[..boundary]);
+    let logits = piece_logits(&mut sched, seq_id, &tokens[boundary..]);
+    sched.release_sequence_caches(seq_id);
+    logits
+}
+
+/// The same logits from the state the scheduler restored into the queued
+/// request `queued`, copied to a probe sequence so the request itself is
+/// left untouched.
+pub(super) fn restored_suffix_logits(
+    sched: &mut BatchScheduler,
+    queued: SequenceId,
+    tokens: &[i32],
+    boundary: usize,
+) -> Vec<u8> {
+    use crate::server::prompt_cache::state_snapshot;
+    let state = state_snapshot::snapshot_sequence_state(
+        sched.engine.model(),
+        sched.engine.pool(),
+        queued,
+        boundary,
+    )
+    .expect("the adopted sequence holds the restored prefix");
+    let probe = sched
+        .allocate_sequence_state()
+        .expect("a probe sequence for the restored state");
+    let (model, pool) = sched.engine.parts_mut();
+    state_snapshot::restore_sequence_state(model, pool, probe, &state)
+        .expect("the probe takes the restored state");
+    let logits = piece_logits(sched, probe, &tokens[boundary..]);
+    sched.release_sequence_caches(probe);
+    logits
+}
+
+/// Builds a warm-up target (the next turn's history prefix) from a turn's
+/// prompt, its history boundary, and its reply.
+pub(super) type WarmTarget = fn(&[i32], usize, &[i32]) -> Vec<i32>;
+
+/// A turn, its background warm-up, then the identical turn again (a retry or
+/// regenerate): the retry must restore the turn's history-boundary snapshot.
+/// The warm-up stores the next turn's history prefix as a `Boundary` entry,
+/// and before #3467 that insert superseded the boundary snapshot it had
+/// restored from, the only stored vector that is a prefix of the retried
+/// prompt.
+///
+/// Returns the store, the scheduler, and the reply.
+pub(super) fn retry_after_warmup_restores_the_boundary(
+    model: fn() -> Gemma3Wrapper,
+    warm_target: WarmTarget,
+) -> (Arc<PromptCacheStore>, BatchScheduler, Vec<i32>) {
+    let tokens = turn();
+    let cold_logits = cold_suffix_logits(model(), &tokens, TURN_BOUNDARY);
+    let store = test_store();
+    let mut sched = scheduler_with_model(model(), store.clone());
+
+    let rx = enqueue_turn(&mut sched, &tokens, TURN_BOUNDARY);
+    assert_eq!(queued(&sched).1, 0, "a cold store restores nothing");
+    let cold = finish_turn(&mut sched, &rx).generated_token_ids;
+    assert_eq!(cold.len(), TURN_MAX_TOKENS);
+    assert!(
+        store.stats().snapshot_entries >= 1,
+        "the turn stores its history-boundary snapshot"
+    );
+
+    let target = warm_target(&tokens, TURN_BOUNDARY, &cold);
+    assert!(
+        target.len() > TURN_BOUNDARY && target[..TURN_BOUNDARY] == tokens[..TURN_BOUNDARY],
+        "the warm-up target extends the history boundary"
+    );
+    assert!(
+        !tokens.starts_with(&target),
+        "the warm-up target is not itself a prefix of the retried prompt"
+    );
+    run_warmup(&mut sched, &target);
+    assert_eq!(
+        store.stats().snapshot_hits,
+        0,
+        "a warm-up lookup is not a request hit"
+    );
+
+    let rx = enqueue_turn(&mut sched, &tokens, TURN_BOUNDARY);
+    let (seq_id, start) = queued(&sched);
+    assert_eq!(
+        (store.stats().snapshot_hits, start),
+        (1, TURN_BOUNDARY),
+        "the retried turn restores its history-boundary snapshot; only the generation prompt is prefilled"
+    );
+    assert_eq!(
+        restored_suffix_logits(&mut sched, seq_id, &tokens, TURN_BOUNDARY),
+        cold_logits,
+        "the restored state gives the cold split prefill's logits bit for bit"
+    );
+    assert_eq!(
+        finish_turn(&mut sched, &rx).generated_token_ids,
+        cold,
+        "and the same greedy tokens"
+    );
+    (store, sched, cold)
+}
+
+/// The warm-up target of the issue's sequence: the history boundary, then the
+/// reply's token ids.
+pub(super) fn history_then_reply(tokens: &[i32], boundary: usize, reply: &[i32]) -> Vec<i32> {
+    let mut target = tokens[..boundary].to_vec();
+    target.extend_from_slice(reply);
+    target
+}
+
+/// The issue's sequence on the plain fixture. Its one global-attention layer
+/// accepts a truncating restore (#1145), so before the fix the retry here
+/// still adopted 36 tokens: the warmed entry cut back to its common prefix
+/// with the prompt, which is the history boundary. What the fix changes on
+/// this fixture is that the boundary snapshot itself is still stored, hence
+/// the entry count. A model that cannot truncate prefilled from cold instead
+/// (`scheduler_warmup_boundary_tests`, and the Raon variant of this test).
+#[test]
+fn a_retried_turn_restores_the_boundary_snapshot_its_warmup_extended() {
+    let (store, _sched, _) =
+        retry_after_warmup_restores_the_boundary(tiny_gemma3, history_then_reply);
+    assert_eq!(
+        store.stats().snapshot_entries,
+        2,
+        "the boundary snapshot and the warmed next-turn prefix"
+    );
+}
