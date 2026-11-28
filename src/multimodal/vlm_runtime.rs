@@ -2560,11 +2560,17 @@ where
         VlmRuntimeRef::DeepSeekOcr(model) => {
             let pre = model.processor.preprocess(images);
 
+            // The rendered prompt is re-tokenized here, as the reference's
+            // `infer()` builds it: stripped, `<image>\n` ahead of the
+            // instruction, BOS first. The checkpoint's template ends every
+            // message with a space the reference never feeds.
             let preparation =
-                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                crate::multimodal::deepseekocr_prompt::prepare_deepseekocr_prompt_tokens(
                     prompt_tokens,
+                    prompt,
                     &pre.placeholder_counts,
                     model.image_token_id,
+                    &mut encode,
                 )
                 .map(|stats| VlmPreparationSummary::DeepSeekOcr {
                     image_blocks: stats.image_blocks,
@@ -2585,11 +2591,15 @@ where
         VlmRuntimeRef::DeepSeekOcr2(model) => {
             let pre = model.processor.preprocess(images);
 
+            // Same prompt as DeepSeek-OCR: `modeling_deepseekocr2.py` builds
+            // it with the same code.
             let preparation =
-                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                crate::multimodal::deepseekocr_prompt::prepare_deepseekocr_prompt_tokens(
                     prompt_tokens,
+                    prompt,
                     &pre.placeholder_counts,
                     model.image_token_id,
+                    &mut encode,
                 )
                 .map(|stats| VlmPreparationSummary::DeepSeekOcr2 {
                     image_blocks: stats.image_blocks,
