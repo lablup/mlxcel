@@ -2018,6 +2018,13 @@ mod ffi {
         /// untouched, on a build without the CUDA backend.
         fn weight_load_transfer_stats(out: &mut [u64]) -> bool;
 
+        /// Hand the CUDA overlay's PTX disk cache the gid whose write access
+        /// on a cache path component counts as the user's own, or a negative
+        /// value for none, which is also the state when this is never called
+        /// (#3503). Read when the cache directory is first resolved. A no-op
+        /// on a build without the CUDA backend and on Windows.
+        fn set_ptx_cache_trusted_group(gid: i64);
+
         /// `dst` with `rows` written at `start`, sharing `dst`'s buffer
         /// instead of copying it (#1959). Sound only when no reader of `dst`
         /// needs the written region's old contents and the caller owns the
@@ -4164,6 +4171,20 @@ pub fn ensure_persistent_ptx_cache() {
     if !cfg!(feature = "cuda") {
         return;
     }
+    // Rule 1 of #3503: tell the overlay which group's write access on a cache
+    // path component is the user's own. That is the effective gid, and only
+    // when private_group proves no other account is in it; otherwise nothing
+    // is handed over and the overlay refuses every group-writable component,
+    // as it does when this function is never called. Done before the
+    // MLX_PTX_CACHE_DIR check below so an explicit directory gets the rule too.
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: getegid has no preconditions and cannot fail.
+        let egid = unsafe { libc::getegid() };
+        let trusted =
+            ptx_cache_dirs::ptx_cache_trusted_gid(private_group::own_group_is_private(), egid);
+        ffi::set_ptx_cache_trusted_group(trusted.map_or(-1, i64::from));
+    }
     // An empty value counts as unset, as in the overlay (#2797).
     if std::env::var_os("MLX_PTX_CACHE_DIR").is_some_and(|value| !value.is_empty()) {
         return;
@@ -4183,11 +4204,23 @@ pub fn ensure_persistent_ptx_cache() {
     // releases is repaired: on the directories mlxcel manages, plus the root
     // when it is the default (an explicit MLXCEL_CACHE_DIR is left as the user
     // set it). On Windows the overlay checks ACLs and nothing is repaired.
+    //
+    // With MLXCEL_CACHE_TRUSTED_ROOT set (#3503) nothing is created or
+    // repaired here. The overlay then creates each missing directory below
+    // the trusted root itself, with mode 0700 and without following a
+    // symlink, and refuses rather than repairs one that is not private.
+    // Creating them here by path first would follow a symlink that someone
+    // who can write the root put at `cuda-ptx`.
+    let overlay_creates = cfg!(target_os = "linux")
+        && std::env::var_os("MLXCEL_CACHE_TRUSTED_ROOT").is_some_and(|value| !value.is_empty());
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    if builder.create(&dir).is_ok() {
+    if overlay_creates {
+        // SAFETY: as for the call below.
+        unsafe { native_env::set_native_var("MLX_PTX_CACHE_DIR", &dir) };
+    } else if builder.create(&dir).is_ok() {
         #[cfg(unix)]
         ptx_cache_dirs::tighten_persistent_ptx_dirs(
             &root,

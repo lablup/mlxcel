@@ -136,7 +136,7 @@ impl TemplateRejection {
     /// instead of being rejected.
     const MAX_MESSAGE_CHARS: usize = 512;
 
-    fn new(message: &str) -> Self {
+    pub(super) fn new(message: &str) -> Self {
         Self {
             message: truncate_chars(message, Self::MAX_MESSAGE_CHARS),
         }
@@ -266,6 +266,8 @@ pub struct ChatTemplateProcessor {
     /// [`Self::generation_prompt_suffix`], and set only when the template does
     /// not render image parts itself.
     numbered_image_tags: Option<NumberedImageTags>,
+    /// DeepSeek-VL2 formats each message with its checkpoint processor.
+    pub(crate) deepseek_vl2: Option<super::deepseek_vl2_chat::Renderer>,
     /// A native, code-rendered chat format that replaces the Jinja template
     /// entirely (#1338).
     ///
@@ -411,6 +413,13 @@ impl std::error::Error for ChatTemplateCompileError {}
 impl ChatTemplateProcessor {
     /// Create a new processor by loading template from tokenizer_config.json or chat_template.jinja
     pub fn from_model_path(model_path: &Path) -> Result<Option<Self>> {
+        let family = crate::models::get_model_type(model_path).ok();
+        if family == Some(crate::models::ModelType::DeepSeekVL2) {
+            let renderer = super::deepseek_vl2_chat::Renderer::from_dir(model_path)?;
+            let mut processor = Self::with_template(renderer.name().to_owned());
+            processor.deepseek_vl2 = Some(renderer);
+            return Ok(Some(processor));
+        }
         let config_path = model_path.join("tokenizer_config.json");
         let config: Option<serde_json::Value> = if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)
@@ -468,7 +477,16 @@ impl ChatTemplateProcessor {
         // included) as the decoder seed. The built-in template renders the
         // text parts only, which is what the shipped one does for a plain
         // string, so it replaces the checkpoint's for this family.
-        let template = if builtin_template_overrides_checkpoint(model_path) {
+        // Unlimited-OCR is overridden too: its MLX conversion ships
+        // DeepSeek-OCR's template, whose trailing space the reference never
+        // renders (see `UNLIMITED_OCR_CHAT_TEMPLATE`).
+        let template = if matches!(
+            family,
+            Some(
+                crate::models::ModelType::NemotronParseVLM
+                    | crate::models::ModelType::UnlimitedOcrVLM
+            )
+        ) {
             None
         } else {
             template
@@ -479,7 +497,7 @@ impl ChatTemplateProcessor {
         // can never shadow what a checkpoint actually ships.
         let template = match template {
             Some(template) => template,
-            None => match builtin_chat_template(model_path) {
+            None => match builtin_chat_template(family) {
                 Some(builtin) => builtin.to_string(),
                 None => return Ok(None),
             },
@@ -509,6 +527,7 @@ impl ChatTemplateProcessor {
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
             numbered_image_tags: None,
+            deepseek_vl2: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -538,6 +557,7 @@ impl ChatTemplateProcessor {
             default_enable_thinking: false,
             generation_prompt_suffix: None,
             numbered_image_tags: None,
+            deepseek_vl2: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
             reasoning_effort_steering: None,
@@ -996,7 +1016,9 @@ impl ChatTemplateProcessor {
     /// checks for `type == 'image'`, as Gemma3 VLM templates do.  Templates
     /// without this pattern expect `content` to be a plain string.
     pub fn supports_image_content(&self) -> bool {
-        self.template.contains("'image'") || self.template.contains("\"image\"")
+        self.deepseek_vl2.is_some()
+            || self.template.contains("'image'")
+            || self.template.contains("\"image\"")
     }
 
     /// Check if the template handles multimodal content with video items.
@@ -1121,6 +1143,9 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
+        if let Some(renderer) = &self.deepseek_vl2 {
+            return Ok(renderer.turns(messages, add_generation_prompt)?.concat());
+        }
         // Convert serde_json::Value to minijinja::Value
         let messages_val = minijinja::Value::from(minijinja::value::Serde(messages));
 
@@ -1222,6 +1247,11 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
+        if let Some(renderer) = &self.deepseek_vl2 {
+            return Ok(renderer
+                .turns(&serde_json::to_value(messages)?, add_generation_prompt)?
+                .concat());
+        }
         // Same `tools` rule as `apply_raw_inner`: the key is absent when the
         // request carries no tools, and an explicit empty list counts as no
         // tools (issue #1597). See that function for why undefined rather than
@@ -2312,20 +2342,8 @@ const MINICPM_CHATML_TEMPLATE: &str = concat!(
 /// the normalized path (mixed casing, tolerated JSON) silently fall back to
 /// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
 /// every request at the task-marker parse.
-/// Families whose built-in template replaces any template the checkpoint
-/// ships (see the Nemotron-Parse note in the loader above). Unlimited-OCR is
-/// here because its MLX conversion ships DeepSeek-OCR's template, whose
-/// trailing space the reference never renders (see
-/// [`UNLIMITED_OCR_CHAT_TEMPLATE`]).
-fn builtin_template_overrides_checkpoint(model_path: &Path) -> bool {
-    matches!(
-        crate::models::get_model_type(model_path),
-        Ok(crate::models::ModelType::NemotronParseVLM | crate::models::ModelType::UnlimitedOcrVLM)
-    )
-}
-
-fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
-    match crate::models::get_model_type(model_path).ok()? {
+fn builtin_chat_template(family: Option<crate::models::ModelType>) -> Option<&'static str> {
+    match family? {
         crate::models::ModelType::JinaVLM => Some(JINA_VLM_CHAT_TEMPLATE),
         crate::models::ModelType::Florence2VLM => Some(FLORENCE2_CHAT_TEMPLATE),
         // Same text-verbatim contract: the rendered text is the task prompt
@@ -2407,6 +2425,10 @@ impl std::fmt::Debug for ChatTemplateProcessor {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_vl2_chat_tests.rs"]
+mod deepseek_vl2_chat_tests;
 
 #[cfg(test)]
 mod tests {

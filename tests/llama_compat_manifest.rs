@@ -219,6 +219,17 @@ fn manifest_option_claims_hold_on_both_server_binaries() {
                         surface.label, arg["env"], claim["env"]
                     );
                 }
+                // A clap binding for the same variable would parse it before
+                // the runtime bridge runs. (`--draft` still binds a different,
+                // canonical variable through clap, which is fine.)
+                if claim["env_binding"] == "runtime" {
+                    assert_ne!(
+                        arg["env"], claim["env"],
+                        "{id}: the manifest records a runtime env binding, but {} \
+                         still binds {:?} through clap",
+                        surface.label, claim["env"]
+                    );
+                }
                 if let Some(defaults) = claim["defaults"].as_array() {
                     assert_eq!(
                         arg["defaults"].as_array().expect("defaults array"),

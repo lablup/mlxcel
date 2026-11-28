@@ -127,6 +127,18 @@ fn media_rejection_response(
     )
 }
 
+/// Whether a generation failure is the client's to fix rather than a server
+/// fault. The shared classifier decides, so this surface cannot drift from the
+/// OpenAI one. Today that is the prompt over the context window (400 there,
+/// #1472 and #2894), which Anthropic's API also answers with 400
+/// `invalid_request_error`; a 500 `api_error` has its SDKs retry a request
+/// that can never fit.
+fn is_client_generation_error(err: &anyhow::Error) -> bool {
+    super::generation_error_response(err)
+        .status
+        .is_client_error()
+}
+
 fn generation_error_to_response(err: anyhow::Error) -> Response {
     if err
         .downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
@@ -150,6 +162,8 @@ fn generation_error_to_response(err: anyhow::Error) -> Response {
             "api_error",
         )
         .into_response()
+    } else if is_client_generation_error(&err) {
+        AnthropicErrorResponse::bad_request(err.to_string()).into_response()
     } else {
         AnthropicErrorResponse::api_error(format!("Generation failed: {err}")).into_response()
     }
@@ -834,6 +848,8 @@ async fn stream_messages(
                     error: AnthropicStreamError {
                         error_type: if queue_full {
                             "overloaded_error".to_string()
+                        } else if is_client_generation_error(&err) {
+                            "invalid_request_error".to_string()
                         } else {
                             "api_error".to_string()
                         },

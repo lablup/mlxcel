@@ -20,7 +20,7 @@
       "state": "supported",
       "issue": 1440,
       "test": "src/server/routes/metrics_llama_tests.rs",
-      "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. GET /metrics is now always mounted and answers b10621's own 501 diagnostic when the flag is off, and the exported body opens with the llamacpp: metric families (#1440); mlxcel's additional mlxcel_ families and --metrics-port secondary listener are additive surfaces b10621 does not have.",
+      "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. GET /metrics is now always mounted and answers b10621's own 501 diagnostic when the flag is off, and the exported body opens with the llamacpp: metric families (#1440); mlxcel's additional mlxcel_ families and --metrics-port secondary listener are additive surfaces b10621 does not have. LLAMA_ARG_ENDPOINT_METRICS is honored at runtime (env_fallback_value_less_server_flags, src/server/cli_input.rs) rather than as a clap env attribute, so it fires only on b10621's truthy set on/enabled/true/1 and ignores every other value instead of failing startup.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -28,7 +28,8 @@
           "--metrics"
         ],
         "env": "LLAMA_ARG_ENDPOINT_METRICS",
-        "env_binding": "clap",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs",
         "defaults": [
           "false"
         ]
@@ -52,7 +53,7 @@
       "state": "supported",
       "issue": 1440,
       "test": "src/server/routes/props_tests.rs",
-      "notes": "Since #1440 the flag has b10621's exact semantics: GET /props is always mounted and --props gates POST /props, which acknowledges {\"success\": true} without reading the body, exactly upstream's (empty) handler. The earlier drift (flag gated GET, no POST existed) is resolved.",
+      "notes": "Since #1440 the flag has b10621's exact semantics: GET /props is always mounted and --props gates POST /props, which acknowledges {\"success\": true} without reading the body, exactly upstream's (empty) handler. The earlier drift (flag gated GET, no POST existed) is resolved. LLAMA_ARG_ENDPOINT_PROPS is honored at runtime (env_fallback_value_less_server_flags, src/server/cli_input.rs) rather than as a clap env attribute, so it fires only on b10621's truthy set on/enabled/true/1 and ignores every other value instead of failing startup.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -60,7 +61,8 @@
           "--props"
         ],
         "env": "LLAMA_ARG_ENDPOINT_PROPS",
-        "env_binding": "clap",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs",
         "defaults": [
           "false"
         ]

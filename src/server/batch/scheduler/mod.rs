@@ -1166,6 +1166,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 mod scheduler_model_owned_cache_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_warmup_boundary_tests.rs"]
+mod scheduler_warmup_boundary_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_model_owned_slot_tests.rs"]
 mod scheduler_model_owned_slot_tests;
 

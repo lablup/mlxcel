@@ -23,10 +23,34 @@
 //! [`ensure_persistent_ptx_cache`](crate::ensure_persistent_ptx_cache) repairs
 //! the directories it owns: `cuda-ptx`, `cuda-ptx/<scope>`, and the cache root
 //! only when it is the default `~/.cache/mlxcel` (an explicit
-//! `MLXCEL_CACHE_DIR` is the user's choice). Nothing above the root is touched,
-//! so a group-writable `~/.cache` is still refused. Only group write is
-//! cleared: a umask leaves that bit, while an other-writable directory may
-//! already hold someone else's modules and stays refused (#2797).
+//! `MLXCEL_CACHE_DIR` is the user's choice). Nothing above the root is touched.
+//! Only group write is cleared: a umask leaves that bit, while an
+//! other-writable directory may already hold someone else's modules and stays
+//! refused (#2797).
+//!
+//! Two rules let the overlay accept a directory it would otherwise refuse,
+//! such as a container volume root the process cannot chmod (#3503):
+//!
+//! - **Rule 1, no opt-in.** A component that its group can write, and others
+//!   cannot, passes when that group is the gid
+//!   [`ptx_cache_trusted_gid`] hands over through the bridge: the effective
+//!   gid, and only when `private_group` proves from `/etc/nsswitch.conf`,
+//!   `/etc/group` and `/etc/passwd` that no other account is in it. This
+//!   covers a group-writable `~/.cache` under user private groups and a volume
+//!   root with `fsGroup` equal to the pod's own group. The proof fails closed
+//!   without `/etc/nsswitch.conf` or without a passwd entry for the uid
+//!   (arbitrary-uid platforms), and the gid is passed by a call, not an
+//!   environment variable, so a launcher cannot name a shared group.
+//! - **Rule 2, opt-in.** `MLXCEL_CACHE_TRUSTED_ROOT=<absolute dir>` names an
+//!   ancestor of the PTX directory (it may be `MLXCEL_CACHE_DIR` itself). The
+//!   overlay then does not judge the root or anything above it by owner or
+//!   mode, and requires every component below it to be a real directory owned
+//!   by the current user that neither group nor others can write. The overlay
+//!   creates the missing ones itself, without following a symlink, so with
+//!   the variable set `ensure_persistent_ptx_cache` creates and repairs
+//!   nothing. The threat model, and the limit of Rule 1's proof (it reads the
+//!   account files, not a pod's `fsGroup`), are in the header comment of the
+//!   overlay's `jit_module.cpp`.
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -42,6 +66,17 @@ const GROUP_WRITE: u32 = 0o020;
 pub(crate) fn persistent_ptx_cache_dir(root: &Path, scope: &str) -> Option<PathBuf> {
     root.is_absolute()
         .then(|| root.join("cuda-ptx").join(scope))
+}
+
+/// The gid whose write access on a cache path component the overlay may treat
+/// as the user's own (Rule 1 of #3503): the effective gid `egid`, and only
+/// when `own_group_is_private` says that group has no other member
+/// ([`own_group_is_private`](crate::private_group::own_group_is_private)).
+/// `None` hands nothing over, and the overlay refuses every group-writable
+/// component.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn ptx_cache_trusted_gid(own_group_is_private: bool, egid: u32) -> Option<u32> {
+    own_group_is_private.then_some(egid)
 }
 
 /// Clear the group-write bit of `path`, keeping every other bit, when it is a
@@ -126,6 +161,16 @@ mod path_tests {
             persistent_ptx_cache_dir(&absolute, "abc"),
             Some(absolute.join("cuda-ptx").join("abc"))
         );
+    }
+
+    /// The effective gid is handed to the overlay only when the group is
+    /// provably private (#3503).
+    #[test]
+    fn the_trusted_gid_is_the_egid_only_when_the_group_is_private() {
+        for gid in [0, 1000, u32::MAX] {
+            assert_eq!(ptx_cache_trusted_gid(false, gid), None);
+            assert_eq!(ptx_cache_trusted_gid(true, gid), Some(gid));
+        }
     }
 }
 

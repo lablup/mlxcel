@@ -759,6 +759,9 @@ pub(crate) fn attach_native_chat_renderer_for_model(
     {
         chat_template.attach_reasoning_effort_steering_from(dir);
     }
+    if let Some(renderer) = &mut chat_template.deepseek_vl2 {
+        renderer.tokenizer = Some(Arc::clone(&tokenizer));
+    }
     if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
         tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
         let renderer = match model_dir

@@ -128,8 +128,9 @@ pub(crate) struct PreparedChatRequest {
     /// Token ids a native (non-Jinja) chat renderer produced for this prompt
     /// (#1338).
     ///
-    /// `Some` only for Kimi K3, whose XTML renderer emits control-token ids
-    /// directly; `prompt` then holds the equivalent text for diagnostics, the
+    /// Kimi K3 emits control-token ids natively. DeepSeek-VL2 encodes each
+    /// question and answer separately. Both supply the resulting tokens
+    /// directly; `prompt` holds the equivalent text for diagnostics, the
     /// prompt-cache key and the primed-thinking check, but is never the thing
     /// that gets tokenized. `None` for every template-rendered request, which
     /// keeps the existing tokenize-the-string path exactly as it was.
@@ -1068,7 +1069,20 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     let render_system_root_prefix =
         render_history_prefix && super::prompt_cache::system_root_min_prompt_tokens().is_some();
 
-    let (prompt, history_render, root_render) = if has_tool_fields(request)
+    let mut native_tokens = None;
+    let (prompt, history_render, root_render) = if let Some(renderer) = &processor.deepseek_vl2 {
+        let mut messages = build_raw_json_messages_with_thinking(request, preserve_thinking, None);
+        if prefill.is_some()
+            && let Some(turns) = messages.as_array_mut()
+        {
+            turns.pop();
+        }
+        let turns = renderer.turns(&messages, true)?;
+        if let Some(tokenizer) = &renderer.tokenizer {
+            native_tokens = Some(super::deepseek_vl2_chat::encode_turns(tokenizer, &turns)?);
+        }
+        (turns.concat(), None, None)
+    } else if has_tool_fields(request)
         || has_reasoning_fields(request)
         || media_parts_need_raw_render
     {
@@ -1251,6 +1265,19 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
             let continued =
                 super::assistant_prefill::append_to_prompt(&prompt, prefill, primed.as_deref())
                     .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+            if let Some(ids) = &mut native_tokens
+                && let Some(tokenizer) = processor
+                    .deepseek_vl2
+                    .as_ref()
+                    .and_then(|r| r.tokenizer.as_ref())
+            {
+                ids.extend(
+                    tokenizer
+                        .encode(&continued[prompt.len()..], false)?
+                        .into_iter()
+                        .map(|id| id as i32),
+                );
+            }
             let echoed = (!prefill.is_reasoning).then(|| prefill.text.clone());
             (continued, echoed)
         }
@@ -1258,7 +1285,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
 
     Ok(PreparedChatRequest {
         prompt,
-        prompt_token_ids: None,
+        prompt_token_ids: native_tokens,
         model_reasoning_effort,
         assistant_prefill,
         history_prompt,
