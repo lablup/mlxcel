@@ -1866,6 +1866,33 @@ pub fn env_fallback_endpoint_slots(
     }
 }
 
+/// Environment variable b10621 binds to the value-less `--metrics` flag.
+pub const LLAMA_ARG_ENDPOINT_METRICS: &str = "LLAMA_ARG_ENDPOINT_METRICS";
+/// Environment variable b10621 binds to the value-less `--props` flag.
+pub const LLAMA_ARG_ENDPOINT_PROPS: &str = "LLAMA_ARG_ENDPOINT_PROPS";
+/// Environment variable b10621 binds to the value-less `--reuse-port` flag.
+pub const LLAMA_ARG_REUSE_PORT: &str = "LLAMA_ARG_REUSE_PORT";
+
+/// Apply `LLAMA_ARG_ENDPOINT_METRICS`, `LLAMA_ARG_ENDPOINT_PROPS` and
+/// `LLAMA_ARG_REUSE_PORT` to the already-parsed `--metrics`, `--props` and
+/// `--reuse-port` flags.
+///
+/// Not clap `env = ...` bindings: b10621 turns a value-less option on from the
+/// environment only for `on`, `enabled`, `true` or `1` and ignores any other
+/// value, while clap's `bool` parser accepts only `true` / `false` and stops
+/// startup on the rest (so `LLAMA_ARG_ENDPOINT_METRICS=1` failed). The
+/// environment can only turn a flag on, like the command line.
+pub fn env_fallback_value_less_server_flags(
+    metrics: &mut bool,
+    props: &mut bool,
+    reuse_port: &mut bool,
+) {
+    use crate::cli::ggml_compat_args::env_flag;
+    *metrics |= env_flag(LLAMA_ARG_ENDPOINT_METRICS);
+    *props |= env_flag(LLAMA_ARG_ENDPOINT_PROPS);
+    *reuse_port |= env_flag(LLAMA_ARG_REUSE_PORT);
+}
+
 /// Apply `MLXCEL_ENABLE_SETTINGS_ENDPOINT` after clap parsing so deployments
 /// may use the common `1` / `0` spellings as well as `true` / `false`.
 pub fn env_fallback_settings_endpoint(
