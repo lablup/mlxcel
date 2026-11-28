@@ -51,8 +51,9 @@ fn is_socket(path: &Path) -> bool {
 
 #[tokio::test]
 async fn unix_bind_replaces_the_socket_an_earlier_run_left_behind() {
-    // The server does not remove its socket on shutdown, so the next start on
-    // the same path has to.
+    // A server that is killed (SIGKILL, a crash) cannot remove its socket, so
+    // the next start on the same path has to. A graceful shutdown removes it
+    // (`listen_shutdown_tests`).
     let directory = directory();
     let path = directory.path().join("server.sock");
     drop(bind_unix(&path).unwrap());
