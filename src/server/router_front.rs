@@ -1001,11 +1001,14 @@ async fn route_chat(
     // prompt string only, and re-tokenizing the XTML text on the far side
     // would re-recognize control-token spellings that came out of message
     // bodies, so the request is refused instead of served with a prompt whose
-    // structure the caller could influence.
+    // structure the caller could influence. DeepSeek-VL2 also lands here: it
+    // encodes each turn separately, and the joined string would re-tokenize
+    // differently at the turn boundaries.
     if prepared.prompt_token_ids.is_some() {
         anyhow::bail!(
-            "the disaggregated router does not support the Kimi K3 native chat format: its \
-             pre-rendered prompt token ids cannot be carried to a remote worker"
+            "the disaggregated router does not support native chat formats (Kimi K3, \
+             DeepSeek-VL2): their pre-rendered prompt token ids cannot be carried to a remote \
+             worker"
         );
     }
 

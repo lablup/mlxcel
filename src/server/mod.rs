@@ -35,6 +35,7 @@ pub mod conversation_store;
 mod cors;
 pub mod decision_model;
 pub mod decision_worker;
+mod deepseek_vl2_chat;
 pub(crate) mod diffusion_worker;
 pub(crate) mod dry_breakers;
 pub mod embedding_model;
