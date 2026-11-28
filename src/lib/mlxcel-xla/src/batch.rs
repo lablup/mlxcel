@@ -1911,6 +1911,29 @@ impl XlaPreparedPrefillLogits {
         check(&prepared)?;
         self.engine.prefill_prepared_slot_logits(0, &prepared)
     }
+
+    /// Teacher-forced ragged decode over the slots this engine prefilled:
+    /// advance every row with the given token at the given position and return
+    /// the full per-row logits, row 0 first. Rows that never prefilled read a
+    /// zero cache, which is the diagnostic convention (see the Gemma3n
+    /// prefix-decode probe).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the runtime failure.
+    pub fn decode_ragged_logits(
+        &mut self,
+        tokens: &[i32],
+        pos: &[i32],
+        cache_len: &[i32],
+    ) -> Result<Vec<f32>, String> {
+        self.engine.decode_ragged_logits_with_modes(
+            &vec![0; self.engine.b_max()],
+            tokens,
+            pos,
+            cache_len,
+        )
+    }
 }
 
 // The IREE engine cannot be exercised in the crate's own tests (the runtime link
