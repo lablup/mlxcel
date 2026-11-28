@@ -316,6 +316,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // `c_q` / `c_k` / `c_v` key names have no shard rules, so the planner
         // rejects this string. It keeps the dispatch table total.
         ModelType::NanoChat => "nanochat",
+        // Talkie is not tensor-parallel enabled: its `attn_query` / `mlp_gate`
+        // key names and scalar gains have no shard rules, so the planner
+        // rejects this string. It keeps the dispatch table total.
+        ModelType::Talkie => "talkie",
         // GPT-BigCode shares GPT-2's fused `c_attn` key names, and its
         // multi-query KV block cannot be split across ranks anyway, but this
         // string is not rejected here: `generate_shard_plan`'s architecture

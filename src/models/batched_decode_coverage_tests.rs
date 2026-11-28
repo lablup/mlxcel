@@ -139,6 +139,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "StableLMModel@src/models/stablelm.rs",
     "StarCoder2Model@src/models/starcoder2.rs",
     "Step3p5Model@src/models/step3p5.rs",
+    "TalkieModel@src/models/talkie.rs",
     "TeleChat3Model@src/models/telechat3.rs",
     "TensorParallelErnie45Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelGemma3Model@src/distributed/tensor_parallel/llama_runtime.rs",

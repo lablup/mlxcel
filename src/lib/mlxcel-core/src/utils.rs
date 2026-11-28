@@ -2014,7 +2014,7 @@ fn get_pipeline_mode() -> PipelineMode {
 /// * `total_layers` - Total number of transformer layers in the model.
 ///
 /// Used by: Llama3, Qwen3, Gemma, Gemma2, Gemma3, Gemma4, Apertus, SeedOss,
-/// Arcee, Nanochat and the pipeline stage executor
+/// Arcee, Nanochat, Talkie and the pipeline stage executor
 /// (`distributed/pipeline/stage_executor/common.rs`).
 #[inline]
 pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {

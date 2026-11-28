@@ -52,6 +52,8 @@ fn norm(x: &MlxArray, eps: f32) -> UniquePtr<MlxArray> {
 
 /// Mirrored RoPE frequency table: `-(base ** (arange(half) / half))`.
 ///
+/// Used by: NanoChat, Talkie
+///
 /// `fast_rope_with_freqs` divides the position by each entry, so negating the
 /// table negates the rotation angle. Computed in f64 and stored as f32.
 pub(crate) fn mirrored_rope_freqs(head_dim: usize, base: f32) -> UniquePtr<MlxArray> {

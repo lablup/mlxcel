@@ -153,6 +153,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(minimax::ModelArgs),
         case!(minimax_m3::ModelArgs),
         case!(nanochat::ModelArgs),
+        case!(talkie::ModelArgs),
         case!(nemotron::ModelArgs),
         case!(nemotron_nas::NemotronNASConfig),
         case!(seed_oss::ModelArgs),

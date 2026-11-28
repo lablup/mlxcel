@@ -5071,7 +5071,7 @@ pub fn compiled_swiglu_mlp_fp16(
 /// differing layouts, or a ModelOpt per-tensor `global_scale` the kernel has
 /// no argument for), so callers can preserve their existing fallback path.
 ///
-/// Used by: SmolLM3, StableLM, Exaone4 and Jamba
+/// Used by: SmolLM3, StableLM, Exaone4, Jamba and Talkie
 pub fn compiled_swiglu_mlp(
     x: &MlxArray,
     gate_proj: &UnifiedLinear,

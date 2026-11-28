@@ -2380,6 +2380,35 @@ fn nanochat_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+#[test]
+fn talkie_model_type_is_detected() {
+    // Talkie declares `TalkieForCausalLM` with a Llama-like config, so
+    // detection must key off `model_type` alone.
+    let model_dir = temp_path("talkie_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "talkie",
+            "architectures": ["TalkieForCausalLM"],
+            "hidden_size": 5120,
+            "head_dim": 128,
+            "num_attention_heads": 40,
+            "num_hidden_layers": 40,
+            "intermediate_size": 13696,
+            "vocab_size": 65540,
+            "rope_theta": 1000000.0,
+            "eos_token_id": [65535, 65536]
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Talkie);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 /// Write `config` to a fresh model dir and detect it.
 fn detect_config(name: &str, config: serde_json::Value) -> ModelType {
     let model_dir = temp_path(name);

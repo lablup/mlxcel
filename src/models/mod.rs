@@ -352,6 +352,7 @@ mod speculative_exactness_survey_tests;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
+pub mod talkie;
 pub mod telechat3;
 #[cfg(test)]
 pub(crate) mod vl_embedding_test_images;
@@ -544,6 +545,7 @@ pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;
 pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
+pub use talkie::TalkieModel;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
 pub use xing4_0::Xing40Model;
@@ -761,6 +763,7 @@ pub enum ModelType {
     GptBigCode, // GPT-BigCode (StarCoder / SantaCoder: GPT-2 block with multi-query attention)
     GptNeoX,    // GPT-NeoX (EleutherAI Pythia: interleaved per-head QKV, partial RoPE)
     NanoChat,   // nanochat (weightless RMSNorm, relu^2 MLP, mirrored RoPE, softcapped logits)
+    Talkie,     // talkie-lm Talkie (weightless RMSNorm, negated RoPE, scalar gains, embedding skip)
 
     // Code models
     StarCoder2,
@@ -1032,6 +1035,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::GptBigCode,
     ModelType::GptNeoX,
     ModelType::NanoChat,
+    ModelType::Talkie,
     // Code models
     ModelType::StarCoder2,
     ModelType::Mellum,
@@ -1431,6 +1435,10 @@ impl ModelType {
                 "nanochat (weightless RMSNorm, relu^2 MLP, softcapped logits)",
                 "Specialized",
             ),
+            ModelType::Talkie => (
+                "Talkie (weightless RMSNorm, negated RoPE, scalar gains)",
+                "Specialized",
+            ),
             ModelType::GptBigCode => (
                 "GPT-BigCode (StarCoder / SantaCoder, multi-query attention)",
                 "Specialized",
@@ -1732,6 +1740,7 @@ mod metadata_tests {
             GptBigCode,
             GptNeoX,
             NanoChat,
+            Talkie,
             StarCoder2,
             Mellum,
             Laguna,
