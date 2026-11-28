@@ -2560,11 +2560,17 @@ where
         VlmRuntimeRef::DeepSeekOcr(model) => {
             let pre = model.processor.preprocess(images);
 
+            // The rendered prompt is re-tokenized here, as the reference's
+            // `infer()` builds it: stripped, `<image>\n` ahead of the
+            // instruction, BOS first. The checkpoint's template ends every
+            // message with a space the reference never feeds.
             let preparation =
-                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                crate::multimodal::deepseekocr_prompt::prepare_deepseekocr_prompt_tokens(
                     prompt_tokens,
+                    prompt,
                     &pre.placeholder_counts,
                     model.image_token_id,
+                    &mut encode,
                 )
                 .map(|stats| VlmPreparationSummary::DeepSeekOcr {
                     image_blocks: stats.image_blocks,
@@ -2585,11 +2591,15 @@ where
         VlmRuntimeRef::DeepSeekOcr2(model) => {
             let pre = model.processor.preprocess(images);
 
+            // Same prompt as DeepSeek-OCR: `modeling_deepseekocr2.py` builds
+            // it with the same code.
             let preparation =
-                crate::multimodal::deepseekocr_prompt::insert_deepseekocr_image_tokens(
+                crate::multimodal::deepseekocr_prompt::prepare_deepseekocr_prompt_tokens(
                     prompt_tokens,
+                    prompt,
                     &pre.placeholder_counts,
                     model.image_token_id,
+                    &mut encode,
                 )
                 .map(|stats| VlmPreparationSummary::DeepSeekOcr2 {
                     image_blocks: stats.image_blocks,
@@ -2635,16 +2645,16 @@ where
         VlmRuntimeRef::DeepSeekVL2(model) => {
             let pre = model.processor.preprocess(images);
 
-            let preparation =
-                crate::multimodal::deepseek_vl2_prompt::insert_deepseek_vl2_image_tokens(
-                    prompt_tokens,
-                    &pre.placeholder_counts,
-                    model.image_token_id,
-                )
-                .map(|stats| VlmPreparationSummary::DeepSeekVL2 {
-                    image_blocks: stats.image_blocks,
-                    total_image_tokens: stats.total_image_tokens,
-                });
+            let stats = crate::multimodal::deepseek_vl2_prompt::insert_deepseek_vl2_image_tokens(
+                prompt_tokens,
+                &pre.placeholder_counts,
+                model.image_token_id,
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid DeepSeek-VL2 image placeholder count"))?;
+            let preparation = Some(VlmPreparationSummary::DeepSeekVL2 {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
 
             let _ = active_caches;
             let _ = image_cache_keys;

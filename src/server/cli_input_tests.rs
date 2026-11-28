@@ -3357,3 +3357,38 @@ fn mla_latent_quant_reaches_the_startup_config_and_decides_an_mla_model() {
         assert!(!sizing.fp16_last_layer);
     });
 }
+
+#[test]
+fn value_less_server_flag_envs_follow_b10621s_truthy_set() {
+    let _env_guard = env_lock();
+    // b10621 turns the flag on for exactly these four spellings and ignores
+    // every other value without an error (`TRUE` and `yes` included).
+    for (value, expected) in [
+        ("1", true),
+        ("on", true),
+        ("enabled", true),
+        ("true", true),
+        ("0", false),
+        ("false", false),
+        ("", false),
+        ("yes", false),
+        ("TRUE", false),
+    ] {
+        let _metrics = EnvGuard::set(super::LLAMA_ARG_ENDPOINT_METRICS, value);
+        let _props = EnvGuard::set(super::LLAMA_ARG_ENDPOINT_PROPS, value);
+        let _reuse_port = EnvGuard::set(super::LLAMA_ARG_REUSE_PORT, value);
+        let mut flags = (false, false, false);
+        super::env_fallback_value_less_server_flags(&mut flags.0, &mut flags.1, &mut flags.2);
+        assert_eq!(flags, (expected, expected, expected), "value {value:?}");
+    }
+    // Each variable drives only its own flag.
+    let _metrics = EnvGuard::set(super::LLAMA_ARG_ENDPOINT_METRICS, "1");
+    let mut flags = (false, false, false);
+    super::env_fallback_value_less_server_flags(&mut flags.0, &mut flags.1, &mut flags.2);
+    assert_eq!(flags, (true, false, false));
+    // The environment can only turn a flag on, never off a command-line one.
+    let _metrics = EnvGuard::set(super::LLAMA_ARG_ENDPOINT_METRICS, "0");
+    let mut flags = (true, true, true);
+    super::env_fallback_value_less_server_flags(&mut flags.0, &mut flags.1, &mut flags.2);
+    assert_eq!(flags, (true, true, true));
+}

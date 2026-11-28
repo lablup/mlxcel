@@ -665,13 +665,21 @@ impl BatchScheduler {
     /// log and trace lines, and it scopes the store's session-chain supersede
     /// rule so the two producers do not delete each other's entries.
     ///
-    /// Used by: `donate_finished_sequence_cache`,
-    /// `insert_history_boundary_snapshot`
     /// `encoded_span` is the total sequence length the model was told about when
     /// this state was produced, which is what selects a position-dependent RoPE
     /// table. It is the whole prompt for a history-boundary snapshot even though
     /// `tokens` holds only its prefix, and prompt plus generated for a
     /// completion snapshot (#1358).
+    ///
+    /// `preserve` is the stored snapshot this state was restored from, when
+    /// the insert must not supersede the conversation's entry at that restore
+    /// point (issue #3467, `PromptCacheStore::insert_snapshot_preserving`).
+    /// Only the warm-up passes one; a request's own inserts pass `None`.
+    ///
+    /// Used by: `donate_finished_sequence_cache`,
+    /// `insert_prompt_end_snapshot`, `insert_history_boundary_snapshot`,
+    /// `insert_system_root_snapshot`, `insert_checkpoint_snapshot`,
+    /// `run_next_prompt_cache_warmup`
     pub(super) fn insert_model_state_snapshot(
         &mut self,
         seq_id: SequenceId,
@@ -679,6 +687,7 @@ impl BatchScheduler {
         tokens: Vec<i32>,
         origin: SnapshotOrigin,
         encoded_span: usize,
+        preserve: Option<&Arc<ModelSnapshotEntry>>,
     ) {
         let store = match self.prompt_cache.as_ref() {
             Some(s) => s.clone(),
@@ -687,6 +696,24 @@ impl BatchScheduler {
         if tokens.len() < store.min_prefix_tokens() {
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::PrefixTooShort,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
+            return;
+        }
+        // A KV mode no snapshot can carry is recorded as that, before the
+        // capture is attempted: the capture would fail on its first such
+        // layer and read as `EmptySet`, "nothing to store" (issue #3250).
+        if let Some(mode) = self.snapshot_unsupported_kv_mode() {
+            tracing::debug!(
+                seq_id = %seq_id,
+                token_len = tokens.len(),
+                origin = ?origin,
+                kv_cache_mode = %mode,
+                "prompt-cache snapshot skipped: the model's KV cache mode cannot be stored in a snapshot"
+            );
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::KvModeNotSnapshotable,
                 Some(seq_id.as_u64()),
                 tokens.len(),
             );
@@ -775,7 +802,7 @@ impl BatchScheduler {
         let key_tokens = entry.tokens.clone();
         let key =
             Self::compose_prompt_cache_key(ctx, &key_tokens, self.rope_regime_for(encoded_span));
-        match store.insert_snapshot(&key, entry) {
+        match store.insert_snapshot_preserving(&key, entry, preserve) {
             Ok(()) => {
                 // One INFO line per process with the per-entry size and the
                 // budget it counts against, so a snapshot-only family's
@@ -1042,10 +1069,13 @@ impl BatchScheduler {
         self.sync_sequence_storage(seq_id);
 
         // Stored as a Boundary snapshot because that is exactly what it is: the
-        // next turn's history prefix. It therefore supersedes this turn's
-        // boundary entry through the same per-producer chain, keeping the
-        // conversation at one boundary snapshot while making that one cover the
-        // previous reply as well.
+        // next turn's history prefix. It does not supersede this turn's own
+        // boundary entry, though (issue #3467): a retry or regenerate of this
+        // turn sends the same prompt again, and that entry is the only stored
+        // vector that is a prefix of it (this one and the completion vector
+        // both run past the history boundary). So between a warm-up and the
+        // next turn the conversation holds both boundary entries; the next
+        // turn restores this one and its own boundary insert supersedes both.
         let warmed_len = tokens.len();
         // The restored rows keep their producers; the delta is this
         // sequence's own (issue #3047).
@@ -1056,6 +1086,7 @@ impl BatchScheduler {
             tokens,
             SnapshotOrigin::Boundary,
             warmed_len,
+            Some(&entry),
         );
         self.release_sequence_caches(seq_id);
         mlxcel_core::clear_memory_cache();
@@ -1151,6 +1182,7 @@ impl BatchScheduler {
             boundary_tokens,
             SnapshotOrigin::Boundary,
             encoded_span,
+            None,
         );
     }
 
@@ -1184,6 +1216,7 @@ impl BatchScheduler {
             root_tokens,
             SnapshotOrigin::SystemRoot,
             encoded_span,
+            None,
         );
     }
 
@@ -1227,6 +1260,7 @@ impl BatchScheduler {
             tokens,
             SnapshotOrigin::Checkpoint,
             encoded_span,
+            None,
         );
     }
 
@@ -1437,6 +1471,7 @@ impl BatchScheduler {
                 tokens,
                 SnapshotOrigin::Completion,
                 encoded_span,
+                None,
             );
             return;
         }

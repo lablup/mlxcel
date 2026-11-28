@@ -31,13 +31,35 @@ use super::connectors::deepseek_vl2::DownsampleMlpGelu;
 use super::encoders::deepseek_vl2::DeepSeekVl2VisionEncoder;
 use super::merge::{InputEmbeddings, merge_llava};
 use super::processors::deepseek_vl2::{DeepSeekVl2Preprocessed, DeepSeekVl2Processor};
+use crate::models::deepseek::DeepSeekModel;
 use crate::models::deepseek_v2::DeepSeekV2Model;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+pub enum TextDecoder {
+    Mha(DeepSeekModel),
+    Mla(DeepSeekV2Model),
+}
+
+impl TextDecoder {
+    fn language_model(&self) -> &dyn LanguageModel {
+        match self {
+            Self::Mha(model) => model,
+            Self::Mla(model) => model,
+        }
+    }
+
+    fn embed_tokens_forward(&self, ids: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Mha(model) => model.embed_tokens_forward(ids),
+            Self::Mla(model) => model.embed_tokens_forward(ids),
+        }
+    }
+}
+
 pub struct DeepSeekVl2VlModel {
-    pub text_model: DeepSeekV2Model,
+    pub text_model: TextDecoder,
     pub encoder: DeepSeekVl2VisionEncoder,
     pub projector: DownsampleMlpGelu,
     pub image_newline: UniquePtr<MlxArray>,  // (n_embed,)
@@ -127,7 +149,7 @@ impl DeepSeekVl2VlModel {
 
 impl LanguageModel for DeepSeekVl2VlModel {
     fn batched_decode_kind(&self) -> mlxcel_core::generate::BatchedDecodeKind {
-        self.text_model.batched_decode_kind()
+        self.text_model.language_model().batched_decode_kind()
     }
 
     fn forward(
@@ -136,7 +158,9 @@ impl LanguageModel for DeepSeekVl2VlModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.text_model.forward(input_ids, caches, mask)
+        self.text_model
+            .language_model()
+            .forward(input_ids, caches, mask)
     }
 
     fn forward_batched(
@@ -146,6 +170,7 @@ impl LanguageModel for DeepSeekVl2VlModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.text_model
+            .language_model()
             .forward_batched(input_ids, batch_caches, mask)
     }
 
@@ -157,8 +182,14 @@ impl LanguageModel for DeepSeekVl2VlModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         match input_embeddings {
-            Some(embeds) => self.text_model.forward_from_embeds(embeds, caches, mask),
-            None => self.text_model.forward(input_ids, caches, mask),
+            Some(embeds) => match &self.text_model {
+                TextDecoder::Mha(model) => model.forward_from_embeds(embeds, caches, mask),
+                TextDecoder::Mla(model) => model.forward_from_embeds(embeds, caches, mask),
+            },
+            None => self
+                .text_model
+                .language_model()
+                .forward(input_ids, caches, mask),
         }
     }
 
@@ -171,21 +202,22 @@ impl LanguageModel for DeepSeekVl2VlModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> Option<UniquePtr<MlxArray>> {
-        Some(self.text_model.last_row_logits_impl(
-            input_ids,
-            input_embeddings,
-            caches,
-            mask,
-            last_pos,
-        ))
+        Some(match &self.text_model {
+            TextDecoder::Mha(model) => {
+                model.last_row_logits_impl(input_ids, input_embeddings, caches, mask, last_pos)
+            }
+            TextDecoder::Mla(model) => {
+                model.last_row_logits_impl(input_ids, input_embeddings, caches, mask, last_pos)
+            }
+        })
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        self.text_model.make_caches()
+        self.text_model.language_model().make_caches()
     }
 
     fn num_layers(&self) -> usize {
-        self.text_model.num_layers()
+        self.text_model.language_model().num_layers()
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
@@ -272,7 +304,7 @@ mod tests {
             .expect("tiny projector loads");
 
         DeepSeekVl2VlModel {
-            text_model,
+            text_model: TextDecoder::Mla(text_model),
             encoder,
             projector,
             image_newline: mlxcel_core::zeros(&[4], mlxcel_core::dtype::FLOAT32),
@@ -300,7 +332,10 @@ mod tests {
         let want = {
             let mut rows: Vec<&mut [KVCache]> =
                 want_storage.iter_mut().map(Vec::as_mut_slice).collect();
-            model.text_model.forward_batched(&input, &mut rows, None)
+            model
+                .text_model
+                .language_model()
+                .forward_batched(&input, &mut rows, None)
         };
         mlxcel_core::eval(&got);
         mlxcel_core::eval(&want);

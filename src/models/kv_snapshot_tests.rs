@@ -203,7 +203,7 @@ fn rotating_round_trip_survives_an_over_window_prefill() {
     // and pinning `idx` to that length rather than to `max_size`. The state is
     // temporary (the next single-token step re-slices from the back) but a
     // snapshot taken in between has to survive it: this is the state that made
-    // `restore_fp16_snapshot_state` refuse the whole donation (#1335).
+    // `restore_snapshot_state` refuse the whole donation (#1335).
     let mut source = RotatingKVCache::new(8);
     let _ = source.update_and_fetch(keys_at(0, 20), values_at(0, 20));
     let state = source.snapshot_state();
@@ -403,38 +403,64 @@ fn assert_mode_refused(err: &str, mode: &str) {
     );
 }
 
-/// The mode is checked before the keys/values layout, so a populated turbo
-/// cache is refused for its mode whatever its sidecars leave in `keys` and
-/// `values` (issue #2422). `Turbo4Asym` holds keys without values, which the
-/// pairing check used to report as "has only one of keys/values". Symmetric
-/// `Turbo4` holds both sides packed, which the emptiness check used to skip
-/// as an empty layer, returning `Ok` with the layer missing from the snapshot.
+/// The mode is read before the keys/values layout, so a populated turbo cache
+/// is handled by its mode whatever its sidecars leave in `keys` and `values`
+/// (issue #2422). `Turbo4Asym` holds keys without values, which the pairing
+/// check used to report as "has only one of keys/values". Symmetric `Turbo4`
+/// holds both sides packed, which the emptiness check used to skip as an empty
+/// layer, returning `Ok` with the layer missing from the snapshot.
+///
+/// Since issue #3250 those two modes are stored, sidecars and all, on a full
+/// cache and on a ring alike. `Turbo4Delegated` and `Turbo3Asym` are still
+/// refused by name. The round trips themselves are pinned in
+/// `kv_snapshot_quantized_tests.rs`.
 #[test]
-fn populated_turbo_caches_are_refused_by_mode() {
+fn populated_turbo_caches_are_handled_by_mode() {
     let mut asym = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
     let _ = asym.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
     let mut snapshot = ModelStateSnapshot::new("test", 8);
-    let err = snapshot_standard(&asym, &mut snapshot, "layer0", TEST_NAMES)
-        .expect_err("a Turbo4Asym cache must not be snapshotted");
-    assert_mode_refused(&err, "Turbo4Asym");
-    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+    snapshot_standard(&asym, &mut snapshot, "layer0", TEST_NAMES)
+        .expect("a Turbo4Asym cache is snapshotted with its packed V");
+    assert!(snapshot.tensor("layer0.standard.keys").is_some());
+    assert!(
+        snapshot.tensor("layer0.standard.values").is_none(),
+        "Turbo4Asym holds no FP16 values"
+    );
+    assert!(snapshot.tensor("layer0.standard.v_packed").is_some());
 
     let mut rotating = RotatingKVCache::new_with_mode(64, KVCacheMode::Turbo4Asym);
     let _ = rotating.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
     let mut snapshot = ModelStateSnapshot::new("test", 8);
-    let err = snapshot_rotating(&rotating, &mut snapshot, "layer0", TEST_NAMES)
-        .expect_err("a Turbo4Asym rotating cache must not be snapshotted");
-    assert_mode_refused(&err, "Turbo4Asym");
-    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+    snapshot_rotating(&rotating, &mut snapshot, "layer0", TEST_NAMES)
+        .expect("a Turbo4Asym ring is snapshotted with its packed V");
+    assert!(snapshot.tensor("layer0.rotating.v_packed").is_some());
+    assert!(snapshot.tensor("layer0.rotating.values").is_none());
 
     let mut symmetric = KVCache::new_with_mode(KVCacheMode::Turbo4);
     let _ = symmetric.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
     assert_eq!(symmetric.offset, 8);
     let mut snapshot = ModelStateSnapshot::new("test", 8);
-    let err = snapshot_standard(&symmetric, &mut snapshot, "layer0", TEST_NAMES)
-        .expect_err("a populated symmetric Turbo4 cache must not be skipped as empty");
-    assert_mode_refused(&err, "Turbo4");
-    assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+    snapshot_standard(&symmetric, &mut snapshot, "layer0", TEST_NAMES)
+        .expect("a populated symmetric Turbo4 cache is stored, not skipped as empty");
+    assert!(
+        snapshot.tensor("layer0.standard.keys").is_none(),
+        "symmetric Turbo4 holds no FP16 keys"
+    );
+    assert!(snapshot.tensor("layer0.standard.k_packed").is_some());
+    assert!(snapshot.tensor("layer0.standard.v_packed").is_some());
+
+    for (mode, name) in [
+        (KVCacheMode::Turbo4Delegated, "Turbo4Delegated"),
+        (KVCacheMode::Turbo3Asym, "Turbo3Asym"),
+    ] {
+        let mut cache = KVCache::new_with_mode(mode);
+        let _ = cache.update_and_fetch(turbo_kv(8, 0.0), turbo_kv(8, 1.0));
+        let mut snapshot = ModelStateSnapshot::new("test", 8);
+        let err = snapshot_standard(&cache, &mut snapshot, "layer0", TEST_NAMES)
+            .expect_err("this mode is not carried by a snapshot");
+        assert_mode_refused(&err, name);
+        assert!(snapshot.is_empty(), "a refused snapshot stores nothing");
+    }
 }
 
 /// An empty quantized cache, which is what a KV-shared layer holds, still
@@ -465,10 +491,16 @@ fn empty_turbo_caches_are_skipped_not_refused() {
     assert!(snapshot.is_empty());
 }
 
+/// A quantized mode is stored only as the layout that mode writes, and a
+/// snapshot lands only in a cache of its own mode.
 #[test]
-fn non_fp16_mode_is_rejected() {
-    // Populate the buffers directly rather than through `update_and_fetch`:
-    // this test is about the mode gate, not about the Int8 quantizer.
+fn a_mode_that_disagrees_with_its_buffers_or_its_target_is_rejected() {
+    // Plain rows and no scales under an `Int8` label: populated directly
+    // rather than through `update_and_fetch`, because this is about the gate
+    // and not about the Int8 quantizer. A real Int8 cache holds int8 rows and
+    // per-token scales, and round-trips (`kv_snapshot_quantized_tests.rs`).
+    // An absorbed MLA latent under `Int8` is the cache that really looks like
+    // this one: its mode says Int8 and its buffers are not per-head int8.
     let mut int8 = KVCache::new_with_mode(KVCacheMode::Int8);
     int8.keys = Some(keys_at(0, 4));
     int8.values = Some(values_at(0, 4));
@@ -476,9 +508,9 @@ fn non_fp16_mode_is_rejected() {
 
     let mut snapshot = ModelStateSnapshot::new("test", 4);
     let err = snapshot_standard(&int8, &mut snapshot, "layer0", TEST_NAMES)
-        .expect_err("Int8 cache must not be snapshotted");
+        .expect_err("an Int8 cache without the Int8 layout must not be snapshotted");
     assert!(
-        err.contains("is not supported by model-state snapshots"),
+        err.contains("Test snapshot layer0: standard cache") && err.contains("Int8"),
         "unexpected error: {err}"
     );
     assert!(snapshot.is_empty(), "a refused snapshot stores nothing");

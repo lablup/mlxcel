@@ -911,6 +911,42 @@ impl PromptCacheStore {
         key: &PromptCacheKey<'_>,
         entry: ModelSnapshotEntry,
     ) -> Result<(), InsertError> {
+        self.insert_snapshot_preserving(key, entry, None)
+    }
+
+    /// [`Self::insert_snapshot`] for an entry computed by restoring the
+    /// stored snapshot `preserve` and extending it (issue #3467).
+    ///
+    /// The session-chain supersede then leaves one shorter entry of the new
+    /// entry's chain in place: the longest one whose token vector is a prefix
+    /// of `preserve`'s, which is `preserve` itself when it belongs to that
+    /// chain. Every other shorter entry is superseded as usual, and so is the
+    /// kept one by the next longer insert that passes `None`.
+    ///
+    /// A background warm-up restores a conversation's longest snapshot and
+    /// stores the next turn's history prefix as a `Boundary` entry. Without
+    /// the exemption that insert removed the turn's own history-boundary
+    /// snapshot, the only entry a retry of the same turn can restore, so the
+    /// retry prefilled from cold. The kept entry is chosen by token prefix and
+    /// not by identity because the warm-up's restore source can be the
+    /// turn's `Completion` entry, which is in another chain (a chat turn
+    /// stores one with `MLXCEL_PROMPT_CACHE_DECODED_TAIL` on, and it is the
+    /// longest stored prefix of the warm-up target when the history render
+    /// extends the sampled reply): the boundary snapshot to keep is then the
+    /// one that entry extends.
+    ///
+    /// `None` is [`Self::insert_snapshot`]. A `preserve` whose tokens cover no
+    /// stored entry of the chain exempts nothing, and neither does any
+    /// `preserve` on an insert that supersedes nothing in the first place (a
+    /// session-less key, a `Checkpoint` entry).
+    ///
+    /// Used by: `BatchScheduler::insert_model_state_snapshot`
+    pub fn insert_snapshot_preserving(
+        &self,
+        key: &PromptCacheKey<'_>,
+        entry: ModelSnapshotEntry,
+        preserve: Option<&Arc<ModelSnapshotEntry>>,
+    ) -> Result<(), InsertError> {
         let digest = key.digest();
         let entry_bytes = entry.size_bytes;
         let bucket = BucketKey::from_key(key);
@@ -1025,12 +1061,11 @@ impl PromptCacheStore {
         {
             let new_tokens = entry.tokens.as_slice();
             let new_origin = entry.origin;
-            let superseded: Vec<PromptCacheKeyDigest> = guard
+            let mut superseded: Vec<PromptCacheKeyDigest> = guard
                 .snapshots
                 .iter()
-                .filter(|(digest, slot)| {
-                    Some(**digest) != kept_restore_source
-                        && slot.sessionless == sessionless
+                .filter(|(_, slot)| {
+                    slot.sessionless == sessionless
                         && slot.bucket.session_key.as_deref() == Some(session_key)
                         && slot.entry.origin == new_origin
                         && slot.entry.tokens.len() < new_tokens.len()
@@ -1038,6 +1073,30 @@ impl PromptCacheStore {
                 })
                 .map(|(digest, _)| *digest)
                 .collect();
+            // An insert that extends a restored snapshot keeps the newest
+            // entry of its chain that the restore point covers (issue #3467):
+            // see `insert_snapshot_preserving`. It is picked among all of the
+            // chain's shorter entries, the kept restore source included, so
+            // the two exemptions name the same entry when they can and do not
+            // keep one each. Only those entries are compared, once each, so
+            // this adds one prefix test per chain member and nothing to an
+            // insert that passes `None`.
+            let kept_restored = preserve.and_then(|restored| {
+                superseded
+                    .iter()
+                    .filter_map(|digest| {
+                        let stored = guard.snapshots.get(digest)?.entry.tokens.as_slice();
+                        restored
+                            .tokens
+                            .starts_with(stored)
+                            .then_some((stored.len(), *digest))
+                    })
+                    .max_by_key(|(len, _)| *len)
+                    .map(|(_, digest)| digest)
+            });
+            superseded.retain(|digest| {
+                Some(*digest) != kept_restore_source && Some(*digest) != kept_restored
+            });
             for superseded_digest in &superseded {
                 guard.remove_snapshot_unswept(superseded_digest);
             }

@@ -88,8 +88,8 @@ pub(crate) fn text_config(config: &Value) -> &Value {
 /// The decoder section the KV cache rules and the KV sizing read.
 ///
 /// [`text_config`] for a VLM that nests its decoder there. DeepSeek-VL2 nests
-/// it under `language_config` without a `model_type` instead, so it gets the
-/// section its loader builds the `deepseek_v2` decoder from
+/// it under `language_config` instead, so it gets the MHA or MLA section
+/// its loader builds the decoder from
 /// (`loading::deepseek_vl2_language_config`). Every other config is its own
 /// decoder.
 ///
@@ -115,7 +115,7 @@ pub(crate) fn kv_decoder_config(config: &Value) -> Cow<'_, Value> {
 /// top-level `model_type` when the decoder section names none. Not lowercased.
 ///
 /// This is the family the decoder's own KV cache decisions belong to: on
-/// DeepSeek-VL2 it is `deepseek_v2`, the model whose `MlaLatentCache::supports`
+/// the MLA variants of DeepSeek-VL2 it is `deepseek_v2`, whose `MlaLatentCache::supports`
 /// picks the latent or the decompressed layout at runtime.
 ///
 /// Used by: `cli::turbo_args` (mode resolution), `execution::kv_arch` and

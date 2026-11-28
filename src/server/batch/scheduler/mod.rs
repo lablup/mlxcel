@@ -1166,6 +1166,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 mod scheduler_model_owned_cache_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_warmup_boundary_tests.rs"]
+mod scheduler_warmup_boundary_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_model_owned_slot_tests.rs"]
 mod scheduler_model_owned_slot_tests;
 
@@ -1208,6 +1212,10 @@ mod scheduler_qwen35_slice_guard_tests;
 #[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_quantized_snapshot_tests.rs"]
+mod scheduler_quantized_snapshot_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_state_checkpoint_tests.rs"]

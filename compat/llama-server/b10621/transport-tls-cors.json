@@ -249,7 +249,7 @@
       "state": "supported",
       "issue": 1432,
       "test": "src/server/listen_tests.rs",
-      "notes": "Sets SO_REUSEPORT on the listening socket in addition to the unconditional SO_REUSEADDR, matching the upstream set_socket_options callback. On a platform without SO_REUSEPORT the flag warns and is ignored rather than failing startup, which is also what upstream does.",
+      "notes": "Sets SO_REUSEPORT on the listening socket in addition to the unconditional SO_REUSEADDR, matching the upstream set_socket_options callback. On a platform without SO_REUSEPORT the flag warns and is ignored rather than failing startup, which is also what upstream does. LLAMA_ARG_REUSE_PORT is honored at runtime (env_fallback_value_less_server_flags, src/server/cli_input.rs) rather than as a clap env attribute, so it fires only on b10621's truthy set on/enabled/true/1 and ignores every other value instead of failing startup.",
       "divergence": [],
       "rationale": null,
       "mlxcel": {
@@ -257,7 +257,8 @@
           "--reuse-port"
         ],
         "env": "LLAMA_ARG_REUSE_PORT",
-        "env_binding": "clap"
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
       }
     },
     {

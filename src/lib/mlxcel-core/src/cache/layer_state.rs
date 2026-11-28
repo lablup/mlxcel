@@ -80,7 +80,8 @@ impl LayerStateKind {
     /// the Turbo block size falls back to FP16, because
     /// [`RotatingKVCache::new_with_mode`] panics for it. Every other mode
     /// passes through unchanged: the rotating cache already stores FP16 for
-    /// them, and rewriting the mode would change `can_truncate_to`.
+    /// them and keeps the label it was given. Snapshots and `can_truncate_to`
+    /// read the stored mode, not that label (issue #3250).
     pub const fn build_mode(self, mode: KVCacheMode) -> KVCacheMode {
         match self {
             Self::Sliding { window }

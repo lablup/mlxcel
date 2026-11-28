@@ -2976,6 +2976,16 @@ std::unique_ptr<MlxArray> array_weak_upgrade(const MlxWeakArray& w);
 // CUDA weight-upload counters of `Load::eval_gpu` (#1564); false without CUDA.
 bool weight_load_transfer_stats(rust::Slice<uint64_t> out);
 
+// CUDA graphs launched so far and the default device's two per-graph budgets
+// (lablup/mlxcel#3387); false without CUDA.
+bool cuda_graph_commit_stats(rust::Slice<uint64_t> out);
+
+// What the CUDA encoder counts toward the byte budget for a `data_size`
+// element input of which a kernel reads `rows_read` of `rows` leading rows
+// (lablup/mlxcel#3387); `data_size` without CUDA.
+uint64_t cuda_graph_counted_input_elements(
+    uint64_t data_size, uint64_t rows_read, uint64_t rows);
+
 // Hand the PTX disk cache the gid whose write access on a cache path
 // component counts as the user's own, or a negative value for none (#3503).
 // A no-op without the CUDA backend and on Windows.

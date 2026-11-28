@@ -60,6 +60,8 @@ mod apc_integration_tests;
 mod prefix_matcher_tests;
 #[cfg(test)]
 mod snapshot_divergence_tests;
+#[cfg(test)]
+mod snapshot_preserve_tests;
 
 pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{

@@ -50,10 +50,12 @@ fn reference_ring_survives_prefill_chunking_rollback_compaction_and_snapshots() 
         let state = cache.snapshot_state();
         let mut restored = RotatingKVCache::new(8);
         restored
-            .restore_fp16_snapshot_state(
+            .restore_snapshot_state(
                 state,
-                cache.keys.as_ref().map(|k| ffi::array_handle_clone(k)),
-                cache.values.as_ref().map(|v| ffi::array_handle_clone(v)),
+                RotatingKVCacheSnapshotBuffers::fp16(
+                    cache.keys.as_ref().map(|k| ffi::array_handle_clone(k)),
+                    cache.values.as_ref().map(|v| ffi::array_handle_clone(v)),
+                ),
             )
             .unwrap();
         assert_eq!(
@@ -105,10 +107,12 @@ fn malformed_ring_snapshots_are_rejected_without_mutating_cache() {
         let mut target = RotatingKVCache::new(8);
         assert!(
             target
-                .restore_fp16_snapshot_state(
+                .restore_snapshot_state(
                     state,
-                    Some(ffi::zeros(&k_shape, dtype::FLOAT32)),
-                    Some(ffi::zeros(&v_shape, v_dtype))
+                    RotatingKVCacheSnapshotBuffers::fp16(
+                        Some(ffi::zeros(&k_shape, dtype::FLOAT32)),
+                        Some(ffi::zeros(&v_shape, v_dtype)),
+                    ),
                 )
                 .is_err()
         );
@@ -120,7 +124,10 @@ fn malformed_ring_snapshots_are_rejected_without_mutating_cache() {
     assert_eq!(state.speculative_ring_origin, Some((1, 1)));
     let mut restored = RotatingKVCache::new(8);
     restored
-        .restore_fp16_snapshot_state(state, source.keys.take(), source.values.take())
+        .restore_snapshot_state(
+            state,
+            RotatingKVCacheSnapshotBuffers::fp16(source.keys.take(), source.values.take()),
+        )
         .unwrap();
     assert_eq!(restored.speculative_ring_cursor(), Some(1));
 }

@@ -2018,6 +2018,20 @@ mod ffi {
         /// untouched, on a build without the CUDA backend.
         fn weight_load_transfer_stats(out: &mut [u64]) -> bool;
 
+        /// Fill `out` with the CUDA graphs this process has launched so far,
+        /// then the op budget and the byte budget (in MLX's unit, input
+        /// elements `>> 20`) that cut a graph on the default GPU device
+        /// (lablup/mlxcel#3387). Returns false, leaving `out` untouched, on a
+        /// build without the CUDA backend or with no CUDA device.
+        fn cuda_graph_commit_stats(out: &mut [u64]) -> bool;
+
+        /// What the CUDA encoder counts toward a graph's byte budget for an
+        /// input of `data_size` elements of which a kernel reads `rows_read`
+        /// of its `rows` leading rows (lablup/mlxcel#3387): the encoder's own
+        /// function, bridged so its boundaries can be tested without a GPU
+        /// launch. Returns `data_size` on a build without the CUDA backend.
+        fn cuda_graph_counted_input_elements(data_size: u64, rows_read: u64, rows: u64) -> u64;
+
         /// Hand the CUDA overlay's PTX disk cache the gid whose write access
         /// on a cache path component counts as the user's own, or a negative
         /// value for none, which is also the state when this is never called
@@ -4998,6 +5012,15 @@ mod fused_moe_parity_tests;
 #[cfg(test)]
 #[path = "fused_moe_relu2_parity_tests.rs"]
 mod fused_moe_relu2_parity_tests;
+
+// Which fused decode-MoE launches cut the CUDA graph they are encoded into
+// (issue #3387): the byte-budget charge for a partly read input at its
+// boundaries, and the encoder's graph count around launches over the budget.
+// CUDA-only: the counter lives in the CUDA `device.cpp` overlay. The launch
+// tests skip on a device whose byte budget the test stacks do not exceed.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "cuda_graph_commit_tests.rs"]
+mod cuda_graph_commit_tests;
 
 // Statistical-correctness, determinism, and routing tests for the Gumbel-max
 // sampling kernel (#900). The kernel replaces `random::categorical` with a

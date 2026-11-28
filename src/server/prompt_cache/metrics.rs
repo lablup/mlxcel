@@ -120,12 +120,23 @@ pub enum PromptCacheRejectReason {
     /// silent, so a host short of memory showed only `prompt_cache_inserts`
     /// stuck at zero.
     MemoryReserve,
+    /// The model donates snapshots (`supports_snapshot_reuse()`), but one of
+    /// its layers stores a KV mode a model-state snapshot cannot carry:
+    /// `Turbo4Delegated` (a hot and a cold V) or `Turbo3Asym` (3-bit packing)
+    /// on a full-attention layer (issue #3250). No prefix of this model is
+    /// ever stored under that mode, so every request prefills cold. Before
+    /// this reason existed the decline was recorded as `EmptySet`, which reads
+    /// as "nothing to capture" rather than "this KV mode cannot be captured".
+    ///
+    /// Recorded once per donation attempt, before the snapshot is taken. The
+    /// server also warns once at startup, naming the mode.
+    KvModeNotSnapshotable,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -138,6 +149,7 @@ impl PromptCacheRejectReason {
         Self::ModelOwnedState,
         Self::RopeRegimeMismatch,
         Self::MemoryReserve,
+        Self::KvModeNotSnapshotable,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -156,6 +168,7 @@ impl PromptCacheRejectReason {
             Self::ModelOwnedState => "model_owned_state",
             Self::RopeRegimeMismatch => "rope_regime_mismatch",
             Self::MemoryReserve => "memory_reserve",
+            Self::KvModeNotSnapshotable => "kv_mode_not_snapshotable",
         }
     }
 }
@@ -217,6 +230,7 @@ pub struct PromptCacheRejectCounters {
     model_owned_state: AtomicU64,
     rope_regime_mismatch: AtomicU64,
     memory_reserve: AtomicU64,
+    kv_mode_not_snapshotable: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -239,6 +253,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::ModelOwnedState => &self.model_owned_state,
             PromptCacheRejectReason::RopeRegimeMismatch => &self.rope_regime_mismatch,
             PromptCacheRejectReason::MemoryReserve => &self.memory_reserve,
+            PromptCacheRejectReason::KvModeNotSnapshotable => &self.kv_mode_not_snapshotable,
         }
     }
 
