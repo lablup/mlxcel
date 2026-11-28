@@ -5,6 +5,7 @@
 #include "mlx_cxx_internal.h"
 #include "sparse_v_sdpa.h"          // fused Sparse-V SDPA kernel.
 #include "turbo4_delegated_sdpa.h"  // fused Turbo4Delegated SDPA kernel.
+#include "turbo_packed_attention.h"
 #include "paged_attention.h"        // fused paged-attention decode kernel (#123).
 #include "paged_attention_v2.h"     // paged decode v2 + merge kernels (#898).
 #include "fused_norm.h"             // fused residual-add + RMSNorm kernel (#905).
@@ -200,6 +201,18 @@ std::unique_ptr<Turbo4DelegatedSteelOutputs> turbo4_delegated_steel_sdpa(
 }
 
 // Fused paged-attention decode kernel launcher (epic #116 Phase 6, #123).
+std::unique_ptr<MlxArray> turbo_packed_attention(
+    const MlxArray& q, const MlxArray& k, const MlxArray& kn,
+    const MlxArray& vp, const MlxArray& vr, const MlxArray& hot,
+    const MlxArray& cb, float scale, bool packed_k) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::turbo_packed_attention(
+        q.inner, k.inner, kn.inner, vp.inner, vr.inner, hot.inner, cb.inner, scale, packed_k));
+}
+
+bool turbo_packed_attention_available() {
+    return mlxcel::turbo::turbo_packed_attention_available();
+}
+
 // Implementation in `src/lib/mlxcelverse/kernels/paged_attention.cpp`; forwarded here
 // so the new symbol shows up in the cxx-bridge ABI. Reads scattered KV blocks
 // out of the global pool via the block table with no separate gather copy.

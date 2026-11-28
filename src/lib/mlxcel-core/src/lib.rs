@@ -1909,6 +1909,19 @@ mod ffi {
         /// [`paged_attention_kernels_available`].
         fn paged_attention_decode_available() -> bool;
 
+        fn turbo_packed_attention_available() -> bool;
+        fn turbo_packed_attention(
+            q: &MlxArray,
+            k: &MlxArray,
+            kn: &MlxArray,
+            vp: &MlxArray,
+            vr: &MlxArray,
+            hot: &MlxArray,
+            cb: &MlxArray,
+            scale: f32,
+            packed_k: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// True when the resolved GPU backend has ports of both v2 kernels,
         /// the partial kernel ([`paged_attention_decode_v2_partial`]) and the
         /// merge kernel, which the flat, cascade and sparse v2 launches use

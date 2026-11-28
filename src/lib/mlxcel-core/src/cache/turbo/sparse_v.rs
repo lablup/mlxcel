@@ -1466,6 +1466,105 @@ pub fn attention_turbo4_delegated_steel(
     Some(ffi::astype(&combined, dtype::FLOAT16))
 }
 
+/// Used by: packed_decode, after the cache update. Kept independent of the
+/// cached environment and hardware so every fallback can be tested.
+fn use_packed_decode(
+    enabled: bool,
+    has_port: bool,
+    mode: crate::cache::KVCacheMode,
+    masked: bool,
+    shape: &[i32],
+) -> bool {
+    use crate::cache::KVCacheMode::{Turbo4, Turbo4Asym, Turbo4Delegated};
+    enabled
+        && has_port
+        && matches!(mode, Turbo4 | Turbo4Asym | Turbo4Delegated)
+        && !masked
+        && matches!(shape, [b, h, 1, 64 | 128 | 256] if *b > 0 && *h > 0 && i64::from(*b)*i64::from(*h) <= 65535)
+}
+
+/// Used by: KVCache's symmetric, asymmetric and delegated Turbo4 decode
+/// routes. Before the first delegated fold, the existing FP16 path is exact.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn packed_decode(
+    mode: crate::cache::KVCacheMode,
+    q: &MlxArray,
+    k: &MlxArray,
+    kn: Option<&MlxArray>,
+    vp: Option<&MlxArray>,
+    vr: Option<&MlxArray>,
+    hot: Option<&MlxArray>,
+    params: &TurboQuantParams,
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> Option<UniquePtr<MlxArray>> {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| parse_env_default_on("MLXCEL_TURBO_PACKED_ATTENTION"));
+    let shape = ffi::array_shape(q);
+    if !use_packed_decode(
+        enabled,
+        ffi::default_device_is_gpu() && ffi::turbo_packed_attention_available(),
+        mode,
+        mask.is_some(),
+        &shape,
+    ) || params.head_dim != shape[3] as u32
+    {
+        return None;
+    }
+    let (vp, vr) = (vp?, vr?);
+    let rotated_q = kn.map(|_| {
+        ffi::astype(
+            &super::quant::turbo4_k_rotate(q, params),
+            ffi::array_dtype(q),
+        )
+    });
+    let rotated_hot =
+        hot.map(|v| ffi::astype(&super::quant::turbo4_v_rotate(v, params), dtype::FLOAT16));
+    let cb = ffi::from_slice_f32(&params.codebook.centroids, &[16]);
+    let result = ffi::turbo_packed_attention(
+        rotated_q.as_deref().unwrap_or(q),
+        k,
+        kn.unwrap_or(vr),
+        vp,
+        vr,
+        rotated_hot.as_deref().unwrap_or(q),
+        &cb,
+        scale,
+        kn.is_some(),
+    )
+    .expect("Turbo packed attention launch");
+    #[cfg(test)]
+    PACKED_DECODE_CALLS.with(|n| n.set(n.get() + 1));
+    Some(super::quant::turbo4_v_inverse_rotate(&result, params))
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PACKED_DECODE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[test]
+fn turbo_packed_decode_route_declines_unsupported_inputs() {
+    use crate::cache::KVCacheMode::{Fp16, Turbo4, Turbo4Asym, Turbo4Delegated};
+    let shape = [2, 8, 1, 128];
+    for mode in [Turbo4, Turbo4Asym, Turbo4Delegated] {
+        assert!(use_packed_decode(true, true, mode, false, &shape));
+        assert!(!use_packed_decode(false, true, mode, false, &shape));
+        assert!(!use_packed_decode(true, false, mode, false, &shape));
+        assert!(!use_packed_decode(true, true, mode, true, &shape));
+        for other in [
+            [0, 8, 1, 128],
+            [1, 0, 1, 64],
+            [1, 8, 2, 128],
+            [1, 8, 1, 96],
+            [65536, 1, 1, 64],
+        ] {
+            assert!(!use_packed_decode(true, true, mode, false, &other));
+        }
+    }
+    assert!(!use_packed_decode(true, true, Fp16, false, &shape));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

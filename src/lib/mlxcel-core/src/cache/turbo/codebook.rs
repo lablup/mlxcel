@@ -325,7 +325,7 @@ pub fn nearest_centroid_indices_with_boundaries(
 /// lazy: nothing is evaluated and nothing leaves the device. A zero-size `x`
 /// returns a zero-size index tensor.
 ///
-/// Used by: `quant3::quantize_v_turbo3` (Turbo3Asym V quantize, #3274).
+/// Used by: `quant3::quantize_v_turbo3` and `quant::pack_rotated_turbo4`.
 pub(crate) fn boundary_indices_on_device(
     x: &MlxArray,
     boundaries: &MlxArray,

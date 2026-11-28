@@ -3881,3 +3881,109 @@ fn symmetric_turbo4_accepts_matching_head_dims() {
     assert_eq!(ffi::array_shape(&out_v)[3], 64);
     assert_eq!(cache.seq_len(), 4);
 }
+
+#[test]
+fn attend_stores_host_turbo4_rows_after_prefill_and_decode() {
+    use super::turbo::quant::host_reference;
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4Asym);
+    let d = 64;
+    for (i, t) in [8, 1, 1].into_iter().enumerate() {
+        let q = synth_kv_tensor(1, 4, t, d, 7 + i as u32);
+        let k = synth_kv_tensor(1, 2, t, d, 17 + i as u32);
+        let v = synth_kv_tensor(1, 2, t, d, 27 + i as u32);
+        let stored_input = ffi::astype(&v, dtype::FLOAT16);
+        let start = cache.seq_len();
+        let output = cache.attend(
+            &ffi::astype(&q, dtype::FLOAT16),
+            k,
+            v,
+            1.0 / (d as f32).sqrt(),
+            None,
+        );
+        ffi::eval(&output);
+        let params = cache.turbo_params().unwrap();
+        let (packed, norms, _) =
+            host_reference::quantize(&stored_input, params, &params.signs1, &params.signs2);
+        for (actual, expected, width) in
+            [(&cache.v_packed, packed, d / 2), (&cache.v_norms, norms, 1)]
+        {
+            let visible = ffi::slice(
+                actual.as_ref().unwrap(),
+                &[0, 0, start, 0],
+                &[1, 2, start + t, width],
+            );
+            let bytes = |a: &ffi::MlxArray| {
+                let arr = ffi::contiguous(a, false);
+                ffi::eval(&arr);
+                ffi::array_to_raw_bytes(&arr)
+            };
+            assert_eq!(bytes(&visible), bytes(&expected), "cache step {i}");
+        }
+    }
+}
+
+#[test]
+fn turbo_packed_attend_matches_dequant_sdpa_for_64_decode_steps() {
+    use super::turbo::sparse_v::PACKED_DECODE_CALLS;
+    if !ffi::default_device_is_gpu() || !ffi::turbo_packed_attention_available() {
+        return;
+    }
+    for (mode, d) in [
+        (KVCacheMode::Turbo4Asym, 64),
+        (KVCacheMode::Turbo4, 128),
+        (KVCacheMode::Turbo4Delegated, 256),
+    ] {
+        let mut cache = KVCache::new_with_mode(mode);
+        let mut reference = KVCache::new_with_mode(mode);
+        let scale = 0.75 / (d as f32).sqrt();
+        let mut max_rms = 0.0_f32;
+        let calls = PACKED_DECODE_CALLS.with(|n| n.get());
+        for step in 0_u32..=64 {
+            let t = if step == 0 { 11 } else { 1 };
+            let tensor = |heads, salt: u32| {
+                ffi::astype(
+                    &synth_kv_tensor(2, heads, t, d, salt + step),
+                    dtype::FLOAT16,
+                )
+            };
+            let (q, k, v) = (tensor(4, 71), tensor(2, 711), tensor(2, 7111));
+            // An additive zero mask is numerically neutral and forces the
+            // reference cache through the original dequant-first SDPA route.
+            let neutral = (step != 0)
+                .then(|| ffi::zeros(&[1, 1, 1, reference.seq_len() + t], dtype::FLOAT16));
+            let expected =
+                reference.attend(&q, ffi::copy(&k), ffi::copy(&v), scale, neutral.as_deref());
+            let out = cache.attend(&q, k, v, scale, None);
+            let err = rms_error(&flatten_fp32(&expected), &flatten_fp32(&out)).unwrap();
+            assert!(err < 5e-3, "{mode:?} D={d} step {step}: RMS {err}");
+            max_rms = max_rms.max(err);
+        }
+        assert_eq!(PACKED_DECODE_CALLS.with(|n| n.get()) - calls, 64);
+        eprintln!("{mode:?} D={d}: 64 packed decode steps, max RMS {max_rms:.6e}");
+    }
+}
+
+#[test]
+fn turbo_packed_empty_visible_window_and_delegated_first_row() {
+    if !ffi::default_device_is_gpu() || !ffi::turbo_packed_attention_available() {
+        return;
+    }
+    let q = ffi::zeros(&[2, 4, 1, 64], dtype::FLOAT16);
+    let k = ffi::zeros(&[2, 2, 0, 64], dtype::FLOAT16);
+    let side = ffi::zeros(&[2, 2, 0, 1], dtype::FLOAT16);
+    let vp = ffi::zeros(&[2, 2, 0, 32], dtype::UINT8);
+    let cb = ffi::zeros(&[16], dtype::FLOAT32);
+    let out = ffi::turbo_packed_attention(&q, &k, &side, &vp, &side, &k, &cb, 0.5, false).unwrap();
+    assert_eq!(ffi::array_shape(&out), [2, 4, 1, 64]);
+    assert!(flatten_fp32(&out).iter().all(|x| *x == 0.0));
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4Delegated);
+    let v = ffi::full_f32(&[2, 2, 1, 64], 0.25, dtype::FLOAT16);
+    let calls = super::turbo::sparse_v::PACKED_DECODE_CALLS.with(|n| n.get());
+    let out = cache.attend(&q, ffi::copy(&v), v, 0.5, None);
+    assert_eq!(cache.cold_offset, 0);
+    assert_eq!(
+        super::turbo::sparse_v::PACKED_DECODE_CALLS.with(|n| n.get()),
+        calls
+    );
+    assert!(flatten_fp32(&out).iter().all(|x| *x == 0.25));
+}

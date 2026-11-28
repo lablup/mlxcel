@@ -124,3 +124,22 @@ Models: `qwen3-30b-a3b-4bit` (standard attention, cache-bound) and `qwen3.5-35b-
 - `src/lib/mlxcel-core/src/cache/turbo/sparse_v.rs`, the threshold and dispatch.
 - `benchmarks/turbo_kv/`, the 2026-06-19 four-model sweep.
 - [ADR 0001](0001-paged-attention-gather-vs-fused-kernel.md), the parallel gather-vs-fused-kernel decision for paged attention.
+
+## GB10 CUDA addendum (2026-11-28)
+
+For unmasked single-token decode, GB10 cleared both gates in #3272. On
+Llama 3.1 8B at 16,384 tokens, the standalone dequant time divided by the
+full reference attention time was 86.74% for Turbo4Asym, 110.43% for Turbo4,
+and 98.01% for Turbo4Delegated. These are independently synchronized graph
+timings. The full graph can fuse operations that the isolated measurement
+materializes. Multiplying dequant time by the 28 Turbo layers cleared the
+5% decode-step threshold in each mode.
+
+The packed CUDA prototype reduced full-call latency by 53.68% / 44.75%
+(asymmetric), 73.34% / 76.82% (symmetric), and 35.88% / 49.12% (delegated)
+at 16K / 32K. It computes dense softmax over all visible positions, reading
+cold centroids into registers. The graph route remains available through
+`MLXCEL_TURBO_PACKED_ATTENTION=0`. The stock Llama resolver selects asymmetric
+Turbo4 for a symmetric request, so the symmetric decode-step measurement
+uses DirectEngine explicitly. Apple Silicon was unavailable for this run.
+See the [GB10 measurement record](../benchmark_results/turbo-kv-dequant-share-gb10-2026-11-28.md).

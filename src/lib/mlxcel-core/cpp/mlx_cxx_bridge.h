@@ -2803,6 +2803,12 @@ std::unique_ptr<MlxArray> steel_outputs_take_cold(Turbo4DelegatedSteelOutputs& o
 std::unique_ptr<MlxArray> steel_outputs_take_hot(Turbo4DelegatedSteelOutputs& o);
 
 // Fused paged-attention decode kernel launcher (epic #116 Phase 6, #123).
+std::unique_ptr<MlxArray> turbo_packed_attention(
+    const MlxArray& q, const MlxArray& k, const MlxArray& kn,
+    const MlxArray& vp, const MlxArray& vr, const MlxArray& hot,
+    const MlxArray& cb, float scale, bool packed_k);
+bool turbo_packed_attention_available();
+
 // Wraps `mlxcel::turbo::paged_attention_decode`. Reads scattered KV blocks out
 // of the global pool via the block table with no separate gather copy. `q` is
 // `[B, Hq, 1, D]` f32; `k_pool` / `v_pool` are `[num_blocks, block_size, Hkv,

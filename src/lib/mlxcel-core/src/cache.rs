@@ -3931,6 +3931,20 @@ impl KVCache {
         // per-token inverse WHT), run native SDPA against the FP16 K, and
         // inverse-rotate only the small output. Exact (`rotate(SDPA(q,k,v)) ==
         // SDPA(q,k,rotate(v))`) and far faster than a full V dequant.
+        if let Some(out) = turbo::sparse_v::packed_decode(
+            self.mode,
+            q,
+            &k_slice,
+            None,
+            Some(&vp_slice),
+            Some(&vr_slice),
+            None,
+            params,
+            scale,
+            mask,
+        ) {
+            return out;
+        }
         turbo::sparse_v::attention_turbo4_asym_dequant_sdpa(
             q, &k_slice, &vp_slice, &vr_slice, params, scale, mask,
         )
@@ -4002,6 +4016,20 @@ impl KVCache {
             &[vr_shape[0], vr_shape[1], self.offset, 1],
         );
 
+        if let Some(out) = turbo::sparse_v::packed_decode(
+            self.mode,
+            q,
+            &kp_slice,
+            Some(&kn_slice),
+            Some(&vp_slice),
+            Some(&vr_slice),
+            None,
+            params,
+            scale,
+            mask,
+        ) {
+            return out;
+        }
         turbo::sparse_v::attention_turbo4_dequant_sdpa(
             q, &kp_slice, &kn_slice, &vp_slice, &vr_slice, params, scale, mask,
         )
@@ -4192,6 +4220,22 @@ impl KVCache {
         // WHT over every cold token on each graph fallback. It is the default
         // compressed path; set `MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA=0` to
         // compare against the custom steel/cold-only order below.
+        if turbo::sparse_v::turbo4_delegated_dequant_sdpa_enabled()
+            && let Some(out) = turbo::sparse_v::packed_decode(
+                self.mode,
+                q,
+                &k_slice,
+                None,
+                v_packed_ref,
+                v_rescale_ref,
+                hot_v_ref,
+                params,
+                scale,
+                mask,
+            )
+        {
+            return out;
+        }
         if turbo::sparse_v::turbo4_delegated_dequant_sdpa_enabled()
             && let Some(out) = turbo::sparse_v::attention_turbo4_delegated_dequant_sdpa(
                 q,

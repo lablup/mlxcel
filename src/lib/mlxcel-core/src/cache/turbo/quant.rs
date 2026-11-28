@@ -79,7 +79,7 @@ use std::sync::Arc;
 
 use cxx::UniquePtr;
 
-use super::codebook::{Codebook, nearest_centroid_indices_with_boundaries, optimal_codebook};
+use super::codebook::{Codebook, boundary_indices_on_device, optimal_codebook};
 use crate::dtype;
 use crate::ffi;
 use crate::ffi::MlxArray;
@@ -231,7 +231,7 @@ pub fn generate_signs(len: usize, seed: u32) -> Arc<[f32]> {
 }
 
 // ---------------------------------------------------------------------------
-// Quantize / dequantize — graph + readback hybrid
+// Quantize / dequantize
 // ---------------------------------------------------------------------------
 
 /// Quantize a 4-D `[B, H, T, D]` tensor into the packed Turbo4 representation
@@ -289,11 +289,8 @@ fn quantize_into_packed(
     // and neither `[profile.release]` nor `[profile.test-fast]` enables
     // debug assertions, so a `debug_assert!` here guards nothing that ships or
     // that the test gate runs. The checks are O(1) against a per-quantize-call
-    // cost dominated by a WHT and a host readback.
+    // cost dominated by a WHT and the device boundary lookup.
     assert_eq!(shape.len(), 4, "input must be 4-D [B, H, T, D]");
-    let _b = shape[0];
-    let _h = shape[1];
-    let t = shape[2];
     let d = shape[3];
     assert_eq!(
         d as u32, params.head_dim,
@@ -333,123 +330,70 @@ fn quantize_into_packed(
     // 2. Apply random rotation: D2 · H · D1 · x.
     let signs1_arr = ffi::from_slice_f32(signs1, &[1, 1, 1, d]);
     let signs2_arr = ffi::from_slice_f32(signs2, &[1, 1, 1, d]);
-    let v_d1 = ffi::multiply(&v_normalized, &signs1_arr);
-    let v_h = wht(&v_d1);
-    let v_rot = ffi::multiply(&v_h, &signs2_arr);
+    let v_rot = rotate_turbo4_f32(&v_normalized, &signs1_arr, &signs2_arr);
 
-    // 3. Per-coordinate nearest-centroid lookup. We materialize the rotated
-    //    coordinates back to host memory once per quantize call. This is the
-    //    same readback pattern the TurboQuant+ MLX port uses; for B2 the
-    //    correctness story dominates and a fully-fused on-GPU implementation
-    //    is the natural follow-up (likely B7's delegated KVCache or B11+).
-    //
-    //    TODO(follow-up): replace this readback with an on-device
-    //    nearest-centroid lookup (broadcast-compare against the 15 boundaries
-    //    and reduce). The dequantize path was migrated to on-device unpacking
-    // because it dominates decode latency (`O(visible_tokens)`
-    //    per layer per step). The quantize path is `O(new_tokens)` per layer
-    //    per step — typically 1 token at decode — so the readback cost here
-    //    is dwarfed by dequantize and was deferred to keep scoped.
-    ffi::eval(&v_rot);
-    let coord_count = (shape[0] * shape[1] * t * d) as usize;
-    let v_rot_bytes = ffi::array_to_raw_bytes(&v_rot);
-    debug_assert_eq!(
-        v_rot_bytes.len(),
-        coord_count * 4,
-        "fp32 byte count mismatch"
-    );
-    let mut coords = Vec::with_capacity(coord_count);
-    for chunk in v_rot_bytes.chunks_exact(4) {
-        coords.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    let cb = &params.codebook;
+    assert_eq!(cb.centroids.len(), 16, "Turbo4 requires 16 centroids");
+    assert_eq!(cb.boundaries.len(), 15, "Turbo4 requires 15 boundaries");
+    let centroids = ffi::from_slice_f32(&cb.centroids, &[16]);
+    let boundaries = ffi::from_slice_f32(&cb.boundaries, &[15]);
+    let (packed, rescale) = pack_rotated_turbo4(&v_rot, &norm_full, &centroids, &boundaries);
+    (packed, ffi::astype(&norm_full, dtype::FLOAT16), rescale)
+}
+
+/// Rotate FP32 rows with device-resident signs. MLX rejects an empty WHT;
+/// rotating zero rows preserves their shape and dtype.
+///
+/// Used by: quantize_into_packed and TurboLatentCodec::rotate.
+pub(crate) fn rotate_turbo4_f32(
+    x: &MlxArray,
+    signs1: &MlxArray,
+    signs2: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    if ffi::array_size(x) == 0 {
+        return ffi::copy(x);
     }
+    ffi::multiply(&wht(&ffi::multiply(x, signs1)), signs2)
+}
 
-    let n_centroids = params.codebook.centroids.len();
-    let indices =
-        nearest_centroid_indices_with_boundaries(&coords, &params.codebook.boundaries, n_centroids);
-
-    // 4. Pack two consecutive 4-bit indices into one byte.
-    //    Layout: byte[i] low nibble = indices[2*i], high nibble = indices[2*i+1].
-    assert!(d % 2 == 0, "head_dim must be even for nibble-packing");
-    let coords_per_token = d as usize;
-    let bytes_per_token = coords_per_token / 2;
-    let total_tokens = (shape[0] * shape[1] * t) as usize;
-    let mut packed = vec![0u8; total_tokens * bytes_per_token];
-    for tok in 0..total_tokens {
-        let idx_off = tok * coords_per_token;
-        let pack_off = tok * bytes_per_token;
-        for j in 0..bytes_per_token {
-            let lo = (indices[idx_off + 2 * j] & 0x0F) as u8;
-            let hi = (indices[idx_off + 2 * j + 1] & 0x0F) as u8;
-            packed[pack_off + j] = lo | (hi << 4);
-        }
-    }
-
-    let v_packed = ffi::from_bytes(
-        &packed,
-        &[shape[0], shape[1], t, bytes_per_token as i32],
-        dtype::UINT8,
+/// Encode rotated unit vectors as two Lloyd-Max indices per byte and one
+/// fp16 norm correction per row. All outputs stay in the lazy device graph.
+///
+/// Used by: `quantize_into_packed` and `TurboLatentCodec::quantize`.
+pub(crate) fn pack_rotated_turbo4(
+    unit: &MlxArray,
+    norm: &MlxArray,
+    centroids: &MlxArray,
+    boundaries: &MlxArray,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let [b, h, t, d]: [i32; 4] = ffi::array_shape(unit)
+        .try_into()
+        .expect("expected [B, H, T, D]");
+    assert!(
+        d > 0 && d % 2 == 0,
+        "head_dim must be even for nibble-packing"
     );
-
-    // 5. Norms stored in fp16 for the cache. The full-precision norm
-    //    (not safe_norm) is what the dequantize path consumes.
-    let v_norms = ffi::astype(&norm_full, dtype::FLOAT16);
-
-    // 6. Precompute the per-token rescale factor `norm[t] / max(|y_hat|, eps)`
-    //    consumed by the fused Sparse-V kernel. The previous
-    //    kernel implementation derived this on-GPU per token via a
-    //    `log2(Dim) + 2`-barrier threadgroup tree reduction, which dominated
-    //    decode latency on M5 Max at 4 K context for `turbo4-asym` (the kernel was 2.0× slower than the graph fallback's A/B). Because
-    //    `|y_hat|` is a pure function of the packed indices and the codebook
-    //    — both fixed at quantize time — we can compute it once here on the
-    //    host and store the resulting fp16 scalar alongside `v_norms`.
-    //
-    //    Algorithm (per token t):
-    //      sum_sq = Σ_d codebook[indices[t, d]]²
-    //      y_hat_norm = sqrt(sum_sq)
-    //      y_hat_safe = max(y_hat_norm, 1e-10)        (matches kernel guard)
-    //      rescale[t] = norm_full[t] / y_hat_safe
-    //
-    //    The 1e-10 guard mirrors the kernel-side `1e-10f` in
-    //    `sparse_v_sdpa.cpp` and the graph dequant's `eps` in
-    //    `dequantize_from_packed`, so kernel and graph paths see numerically
-    //    identical rescale values.
-    //
-    //    Since `norm_full` is still pending GPU evaluation at this point, we
-    //    materialize it back to host bytes alongside the rotated coordinates
-    //    we already read above. fp32 keeps the divide well-conditioned for
-    //    very small / very large magnitudes; the final cast to fp16 matches
-    //    the storage dtype.
-    ffi::eval(&norm_full);
-    let norm_bytes = ffi::array_to_raw_bytes(&norm_full);
-    debug_assert_eq!(
-        norm_bytes.len(),
-        total_tokens * 4,
-        "fp32 norm byte count mismatch"
-    );
-    let centroids = params.codebook.centroids.as_ref();
-    let mut rescale = vec![0.0_f32; total_tokens];
-    for (tok, slot) in rescale.iter_mut().enumerate() {
-        let idx_off = tok * coords_per_token;
-        let mut sum_sq = 0.0_f32;
-        for d_i in 0..coords_per_token {
-            let c = centroids[indices[idx_off + d_i]];
-            sum_sq += c * c;
-        }
-        let y_hat_norm = sum_sq.sqrt();
-        let y_hat_safe = y_hat_norm.max(1e-10);
-        let norm_off = tok * 4;
-        let n_t = f32::from_le_bytes([
-            norm_bytes[norm_off],
-            norm_bytes[norm_off + 1],
-            norm_bytes[norm_off + 2],
-            norm_bytes[norm_off + 3],
-        ]);
-        *slot = n_t / y_hat_safe;
+    if b == 0 || h == 0 || t == 0 {
+        return (
+            ffi::zeros(&[b, h, t, d / 2], dtype::UINT8),
+            ffi::zeros(&[b, h, t, 1], dtype::FLOAT16),
+        );
     }
-    let v_rescale_f32 = ffi::from_slice_f32(&rescale, &[shape[0], shape[1], t, 1]);
-    let v_rescale = ffi::astype(&v_rescale_f32, dtype::FLOAT16);
-
-    (v_packed, v_norms, v_rescale)
+    let idx = boundary_indices_on_device(unit, boundaries);
+    let pairs = ffi::reshape(&idx, &[b, h, t, d / 2, 2]);
+    let half = |i: i32| {
+        ffi::reshape(
+            &ffi::slice(&pairs, &[0, 0, 0, 0, i], &[b, h, t, d / 2, i + 1]),
+            &[b, h, t, d / 2],
+        )
+    };
+    let four = ffi::full_f32(&[1], 4.0, dtype::UINT8);
+    let packed = ffi::bitwise_or(&half(0), &ffi::left_shift(&half(1), &four));
+    let y = ffi::take(centroids, &idx, 0);
+    let y_norm = ffi::sqrt(&ffi::sum_axis(&ffi::multiply(&y, &y), -1, true));
+    let eps = ffi::full_f32(&[1], 1e-10, dtype::FLOAT32);
+    let rescale = ffi::divide(norm, &ffi::maximum(&y_norm, &eps));
+    (packed, ffi::astype(&rescale, dtype::FLOAT16))
 }
 
 /// Quantize a V tensor of shape `[B, H, T, D]` (D == `params.head_dim`) into
@@ -812,6 +756,12 @@ pub fn round_up_to_block(token_count: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) mod host_reference;
+
+#[cfg(test)]
+mod device_tests;
 
 #[cfg(test)]
 mod tests {
