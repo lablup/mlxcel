@@ -238,8 +238,12 @@ impl ConnectionDrain {
     }
 
     /// The token a connection watches for the graceful close.
+    ///
+    /// A child token, so each connection's pending wait registers on its own
+    /// lock instead of one mutex every connection shares on every IO wake;
+    /// cancelling the parent still reaches every child.
     pub(crate) fn graceful(&self) -> CancellationToken {
-        self.graceful.clone()
+        self.graceful.child_token()
     }
 
     /// Run one connection as a tracked task, reaping finished ones first so a
@@ -332,16 +336,15 @@ pub(crate) fn socket_identity(path: &std::path::Path) -> Option<SocketIdentity> 
         .map(|entry| SocketIdentity::of(&entry))
 }
 
-/// Remove the socket file this server bound, after its listener is gone.
+/// Remove the socket file this server bound, once it stops accepting.
 ///
-/// Only this server's own socket is removed: the entry must still be a socket
-/// with the identity captured at bind time (`bound`, from
-/// [`socket_identity`]). The listener is dropped before the drain, so a
-/// replacement server started during the drain may already have replaced the
-/// stale socket at this path with its own live one (`bind_unix` clears a
-/// socket nobody listens on); that socket, a path replaced by something else
-/// (a regular file, a symlink), and a socket whose identity was never
-/// captured are all left alone. A failure is logged; the next start clears a
+/// Called while the listener is still open, so a replacement server's
+/// `bind_unix` sees the socket as live and cannot take the path between the
+/// check and the unlink. Only this server's own socket is removed: the entry
+/// must still be a socket with the identity captured at bind time (`bound`,
+/// from [`socket_identity`]). Another server's socket at this path, a path
+/// replaced by something else (a regular file, a symlink), and a socket whose
+/// identity was never captured are all left alone. A failure is logged; the next start clears a
 /// stale socket in `bind_unix` anyway.
 #[cfg(unix)]
 pub(crate) fn remove_own_socket(path: &std::path::Path, bound: Option<SocketIdentity>) {

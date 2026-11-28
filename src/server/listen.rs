@@ -115,9 +115,7 @@ pub(crate) async fn serve(
                 let listener = bind_unix(path)?;
                 let bound = super::shutdown::socket_identity(path);
                 announce(&format!("unix://{}", path.display()));
-                let served = accept_unix(listener, app, options).await;
-                super::shutdown::remove_own_socket(path, bound);
-                served
+                accept_unix(listener, app, options, path, bound).await
             }
             // tokio has no Unix domain socket listener off Unix (#58).
             #[cfg(not(unix))]
@@ -361,7 +359,13 @@ async fn accept_tcp(listener: TcpListener, app: Router, options: ServeOptions) -
 }
 
 #[cfg(unix)]
-async fn accept_unix(listener: UnixListener, app: Router, options: ServeOptions) -> Result<()> {
+async fn accept_unix(
+    listener: UnixListener,
+    app: Router,
+    options: ServeOptions,
+    path: &Path,
+    bound: Option<super::shutdown::SocketIdentity>,
+) -> Result<()> {
     let mut connections = ConnectionDrain::new(CancellationToken::new());
     let served = loop {
         let accepted = tokio::select! {
@@ -386,6 +390,10 @@ async fn accept_unix(listener: UnixListener, app: Router, options: ServeOptions)
             connections.graceful(),
         ));
     };
+    // Unlink before the listener closes: while it still listens, a
+    // replacement server's `bind_unix` sees the socket as live and refuses
+    // the path, so it cannot change between the identity check and the unlink.
+    super::shutdown::remove_own_socket(path, bound);
     drop(listener);
     connections.drain(options.drain).await;
     served
