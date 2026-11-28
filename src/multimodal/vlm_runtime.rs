@@ -2635,16 +2635,16 @@ where
         VlmRuntimeRef::DeepSeekVL2(model) => {
             let pre = model.processor.preprocess(images);
 
-            let preparation =
-                crate::multimodal::deepseek_vl2_prompt::insert_deepseek_vl2_image_tokens(
-                    prompt_tokens,
-                    &pre.placeholder_counts,
-                    model.image_token_id,
-                )
-                .map(|stats| VlmPreparationSummary::DeepSeekVL2 {
-                    image_blocks: stats.image_blocks,
-                    total_image_tokens: stats.total_image_tokens,
-                });
+            let stats = crate::multimodal::deepseek_vl2_prompt::insert_deepseek_vl2_image_tokens(
+                prompt_tokens,
+                &pre.placeholder_counts,
+                model.image_token_id,
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid DeepSeek-VL2 image placeholder count"))?;
+            let preparation = Some(VlmPreparationSummary::DeepSeekVL2 {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
 
             let _ = active_caches;
             let _ = image_cache_keys;
