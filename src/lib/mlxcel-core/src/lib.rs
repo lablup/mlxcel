@@ -5031,6 +5031,10 @@ pub mod cuda_oxide_artifact;
 #[cfg(mlxcel_cuda_oxide_fused_norm)]
 pub mod cuda_oxide_fused_norm;
 
+// Route marker of the fused residual-add RMSNorm kernel that any build can
+// read (#2834): `None` without the adapter above, its counters with it.
+pub mod fused_norm_route;
+
 // Manifest, schema and digest validation of the cuda-oxide artifact. No GPU.
 #[cfg(all(test, mlxcel_cuda_oxide_fused_norm))]
 #[path = "cuda_oxide_artifact_tests.rs"]

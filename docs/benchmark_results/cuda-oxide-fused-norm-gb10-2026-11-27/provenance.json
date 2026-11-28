@@ -1,0 +1,49 @@
+{
+  "issue": 2834,
+  "host": "spark-101",
+  "kernel": "7.0.0-1019-nvidia",
+  "machine": "aarch64",
+  "gpu": "NVIDIA GB10, 580.178.04",
+  "gpu_clocks_sm_mhz": "2418 MHz, 3003 MHz",
+  "cpu_governor": "performance",
+  "cuda_toolkit": [
+    "Cuda compilation tools, release 13.0, V13.0.88",
+    "Build cuda_13.0.r13.0/compiler.36424714_0"
+  ],
+  "nsys": "NVIDIA Nsight Systems version 2025.3.2.474-253236389321v0",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cxx": [
+    "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+  ],
+  "mlxcel_commit": "b45ce7acdbc5e1c089dc66f5f3a23194bb94abd1",
+  "mlxcel_dirty_files": [],
+  "mlx_pin": "fc344c986c4169d99f76b5d95ae6b4a58a359a63",
+  "build": {
+    "profile": "release",
+    "features": "cuda",
+    "env": {
+      "MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM": "1",
+      "MLXCEL_CUDA_ARCHITECTURES": "121"
+    },
+    "binaries_sha256": {
+      "oxide_fused_norm_bench": "24f0d2d8d4e28599c8d7a119bc98fb608aa27254adc05cac60eac09af6130059",
+      "oxide_fused_norm_checkpoint_bench": "bca95b8d77e539c3d07620e754901e4fea5a6530404901852a18d798e9ce3e62"
+    },
+    "binaries_sha256_recorded_after_capture": {
+      "logit_trace": "83112b6460351fc23824001e5e2db210ac4b8f675082d0b50ee17e2f732a1172",
+      "note": "logit_trace was not hashed at capture. Recomputed on 2026-11-27 from target/release/examples/logit_trace, whose mtime (11:50 KST, before every stage) is unchanged since the M2 run and which no later build touched; oxide_fused_norm_bench in the capture entry above is the build from before the M9 rebuild at 70fa4f9a"
+    }
+  },
+  "artifact": {
+    "ptx_sha256": "b54c1c93c6e8f03e3f3d2cf37a79dd412069153c1360b6161831583c01eaf86e",
+    "cubin_sha256": "677d6d6d3a210161ad649681d783c47bc41e66526d263a9d586538ab0e18825f"
+  },
+  "checkpoint": {
+    "path": "/home/inureyes/Development/mlxcel/models/llama-3.2-1b-instruct-bf16",
+    "config_sha256": "8d40f9098d80a1510565233591a58ccf4dadba6a94934c1a514bf95201621efa",
+    "model_safetensors_sha256": "f5dc593b89368a9a44a8fc3b2dacd7a3d65e43acb4ffbd98a1a40fac9c2bd6da",
+    "tokenizer_sha256": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4"
+  },
+  "gpu_lock": "/usr/local/bin/gpu-lock",
+  "ci_job_running_at_capture": false
+}
