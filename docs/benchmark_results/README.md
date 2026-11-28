@@ -33,6 +33,7 @@ These remain standalone because their reports leave a substantive measurement ga
 - [ROCm flash prefill](sdpa-flash-prefill-gfx1151-2026-10-13.md): kernel timings exist, but model-level before/after was not measured.
 - [Fused tanh-GELU f32 on CUDA](fused-gelu-tanh-f32-cuda-gb10-2026-11-11.md): the `xla-iree` StableHLO twin re-check was not run on the measuring host, and the new tests were not run on Metal.
 - [cuda-oxide fused residual-add + RMSNorm on GB10](../mlxcelverse/cuda-oxide-benchmark-evidence.md) ([raw rows and commands](cuda-oxide-fused-norm-gb10-2026-11-27/)): same kernel time as the existing fused kernel, no end-to-end effect, recommendation stop (#2834). Hardware counters, a CPU profile of the host path and an idle host were not available; one end-to-end cell could not resolve the 2 % threshold.
+- [Fused add+RMSNorm greedy divergence on Llama 3.2 1B, GB10](issue-3501-fused-norm-divergence-gb10-2026-11-28/README.md): the graph and fused paths differ by the fp32 summation order of the sum of squares (a near-tie, not a defect); the fused kernel is not byte-identical to MLX's CUDA `rms_norm` (#3501). One model, one prompt, one host; the two-ulp output bound exceeds the issue's one-ulp budget.
 
 ## Release decision archives
 

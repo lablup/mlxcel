@@ -1042,8 +1042,9 @@ pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = cfg!(feature = "rocm");
 /// differs is the fp32 summation order of the sum of squares. MLX's
 /// `rms_norm_small` at bf16 dim 2048 runs 128 threads over two 8-wide chunks
 /// each, the fused kernel 512 threads of 4, so the normalizer can differ in
-/// its last bits and an element of `normed` lands one bf16 ulp away (two after
-/// the gain multiply). A near-tie argmax can then land on the other side. That
+/// its last bits and an element of the rounded intermediate `bf16(x * inv)` lands
+/// one bf16 ulp away; `normed`, the output after the gain multiply, can then be
+/// up to two ulps away. A near-tie argmax can then land on the other side. That
 /// is a tie-break difference, not a regression: measured on GB10 with
 /// `llama-3.2-1b-instruct-bf16` (#3501), two of 2048 prefill rows differed,
 /// the fused kernel matched a float64 reference on one and the graph on the

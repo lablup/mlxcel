@@ -162,7 +162,8 @@ constexpr const char* FUSED_ADD_RMS_NORM_SOURCE = R"(
 // Llama 3.2 1B end to end runs on it. It is not byte-identical to MLX's CUDA
 // `rms_norm` (#3501): `new_residual` matches exactly, but MLX reduces the sum
 // of squares with its own launch geometry (at bf16 dim 2048,
-// `rms_norm_small<bf16, 128, 2, true, 8>`), while this kernel runs
+// `rms_norm_small` with a 128-thread block and 8-wide chunks; the `ALIGNED`
+// argument selects only the load function, not the summation order), while this kernel runs
 // `fused_norm_threads(dim)` lanes of 4 elements, so the fp32 normalizer can
 // differ in its last bits and a `normed` element lands one or two bf16 ulps
 // away. `cuda_near_tie.rs` in the parity tests pins exactly that. Matching
