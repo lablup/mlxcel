@@ -729,6 +729,10 @@ jobs:
         run: python3 scripts/ci/check_windows_reserved_paths.py
       - name: Check the guard still fails on reserved names and passes on look-alikes
         run: bash scripts/ci/check_windows_reserved_paths_test.sh
+      - name: Check technical reports sit in their minor-version folders
+        run: python3 scripts/ci/check_technical_reports_layout.py
+      - name: Check the report layout guard still fails on misplaced reports
+        run: python3 scripts/ci/check_technical_reports_layout.py --self-test
 
   cuda-arch-lists:
     name: CUDA architecture lists
