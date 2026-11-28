@@ -30,13 +30,14 @@ mod validation_shapes;
 use mlxcel_core::inkling_layer::{InklingDecoderLayer, InklingLayerSpec};
 use mlxcel_core::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr};
+use mlxcel_core::{MlxArray, UniquePtr, row_invariant};
 use serde::Deserialize;
 use std::path::Path;
 
 use self::mlp::InklingMlp;
 use self::runtime::InklingLayerCache;
 use super::model_owned::ModelOwnedSequenceState;
+use super::speculative_exactness_diag as diag;
 use crate::audio::inkling_tower::{InklingAudioConfig, InklingAudioTower};
 use crate::vision::merge::InputEmbeddings;
 
@@ -335,6 +336,24 @@ pub struct InklingModel {
     audio_tower: Option<InklingAudioTower>,
     eos_token_ids: Vec<i32>,
     sequence_state: ModelOwnedSequenceState<InklingLayerCache>,
+    /// Dense products go through the row-invariant kernel, so a verify
+    /// block's rows equal decode steps (issue #3409). Fixed at load.
+    row_kernel: bool,
+}
+
+/// `MLXCEL_INKLING_ROW_INVARIANT`: `0`, `false`, `no` or `off` keeps MLX
+/// `matmul` for Inkling's dense products (the A/B arm of the decode
+/// comparison); anything else, or unset, takes the row-invariant kernel.
+fn row_invariant_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("MLXCEL_INKLING_ROW_INVARIANT").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+    })
 }
 
 impl InklingModel {
@@ -396,6 +415,47 @@ impl InklingModel {
             audio_tower,
             eos_token_ids,
             sequence_state: ModelOwnedSequenceState::new(state),
+            row_kernel: row_invariant_enabled(),
+        })
+    }
+
+    /// The row-invariant scope of one forward over `shape = [batch, length,
+    /// ..]`. A forward entered from a verify round
+    /// ([`Self::verify_block_scope`]) stays a verify block here when it is
+    /// one sequence of 2 to 16 positions; every other forward is a decode
+    /// step or a prefill.
+    fn row_invariant_scope(&self, shape: &[i32]) -> row_invariant::Scope {
+        let verify_block = self.row_kernel
+            && row_invariant::in_verify_block()
+            && shape.len() >= 2
+            && shape[0] == 1
+            && (2..=row_invariant::MAX_ROWS).contains(&shape[1]);
+        row_invariant::Scope::enter(row_invariant::Mode {
+            kernel: self.row_kernel,
+            verify_block,
+        })
+    }
+
+    /// Turn the row-invariant products on or off, so a test can show what
+    /// the probe sees without them.
+    #[cfg(test)]
+    pub(crate) fn set_row_invariant_for_test(&mut self, on: bool) {
+        self.row_kernel = on;
+    }
+
+    /// Whether the row-invariant products are on (`MLXCEL_INKLING_ROW_INVARIANT`).
+    pub(crate) fn row_kernel_enabled(&self) -> bool {
+        self.row_kernel
+    }
+
+    /// Marks the forwards run while the guard lives as verify blocks.
+    ///
+    /// Used by: the MTP verify forward, the exactness probe's block arm and
+    /// the token-only verify forward (`forward_with_sequence_id`).
+    fn verify_block_scope(&self) -> row_invariant::Scope {
+        row_invariant::Scope::enter(row_invariant::Mode {
+            kernel: self.row_kernel,
+            verify_block: self.row_kernel,
         })
     }
 
@@ -510,9 +570,18 @@ impl InklingModel {
         embeddings: &MlxArray,
         caches: &mut [InklingLayerCache],
     ) -> UniquePtr<MlxArray> {
+        let _rows = self.row_invariant_scope(&mlxcel_core::array_shape(embeddings));
         let mut h = mlxcel_core::copy(embeddings);
-        for (layer, cache) in self.layers.iter().zip(caches) {
+        for (index, (layer, cache)) in self.layers.iter().zip(caches).enumerate() {
             h = layer.forward(&h, cache);
+            if diag::capturing() {
+                let kind = if self.config.text_config.layer_is_sliding(index) {
+                    "sliding"
+                } else {
+                    "global"
+                };
+                diag::capture(index, kind, "layer output", &h);
+            }
         }
         h
     }
@@ -527,11 +596,13 @@ impl InklingModel {
     }
 
     fn project_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        let _rows = self.row_invariant_scope(&mlxcel_core::array_shape(h));
         let h = mlxcel_core::divide_scalar(h, self.config.text_config.logits_mup_width_multiplier);
-        let logits = self
-            .lm_head
-            .as_ref()
-            .map_or_else(|| self.embed_tokens.as_linear(&h), |head| head.forward(&h));
+        let logits = self.lm_head.as_ref().map_or_else(
+            || self.embed_tokens.as_linear(&h),
+            |head| row_invariant::linear(head, &h),
+        );
+        diag::capture(self.layers.len(), "final", "logits", &logits);
         let limit = self
             .config
             .text_config
@@ -630,6 +701,7 @@ impl InklingModel {
         input: &MlxArray,
         caches: &mut [Vec<InklingLayerCache>],
     ) -> UniquePtr<MlxArray> {
+        let _rows = self.row_invariant_scope(&mlxcel_core::array_shape(input));
         let mut hidden = self.embed_tokens.forward(input);
         if let Some(norm) = &self.embed_norm {
             hidden = norm.forward(&hidden);
@@ -660,9 +732,11 @@ fn weight(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String
 }
 
 #[cfg(test)]
+mod prompt_lookup_tests;
+#[cfg(test)]
 #[path = "inkling_tests.rs"]
 mod tests;
 #[cfg(test)]
-mod tiny_tests;
+pub(crate) mod tiny_tests;
 #[cfg(test)]
 pub(crate) use tiny_tests::{tiny_audio_model, tiny_model};

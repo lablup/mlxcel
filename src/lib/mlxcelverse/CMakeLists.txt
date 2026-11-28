@@ -34,9 +34,14 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
-  # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187) and the
-  # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. Refresh
-  # wholesale on a bump and re-apply only those documented local changes.
+  # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187), its
+  # diagnostic `force` value (affine qmv_wide below generation 15), and the
+  # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. The switch
+  # also gates upstream's `use_qmv_mma`, which since ml-explore/mlx#4787 takes
+  # affine 3- to 16-row products on generation 15 and later; without that, the
+  # speculative exactness gate's retry could no longer restore byte-equality
+  # between a verify block and the single-token chain. Refresh wholesale on a
+  # bump and re-apply only those documented local changes.
   # Upstream #4594 supplies the Xcode 27 cooperative-tensor workaround;
   # no gated_delta_update_nax.h overlay is needed at this pin.
   # Upstream #4514 also supplies nonthrowing CUDA handle teardown, so the
@@ -53,8 +58,18 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # matmul.cpp keeps few-row dense products on GEMV on GPU generations 13 and
   # 14 (#2587). Refresh: take the new upstream file and re-apply the marked
   # helper and the branch before the steel GEMM route.
+  # kernels/fp_quantized.h, kernels/fp_quantized_nax.h and kernels/quantized.h
+  # bound the quantized block loader's `load_safe` reads by the tile's non-row
+  # extent: without it a partial K tile dequantized the next output row's bytes
+  # and group scale and, for the last row, read past the planes; a stale NaN
+  # scale byte there reached a valid output column as `0 * NaN` (issue #2852).
+  # Refresh: take the new upstream files and re-apply the three marked
+  # `load_safe` bodies.
   set(_metal_patch_files
       "mlx/backend/metal/device.cpp"
+      "mlx/backend/metal/kernels/fp_quantized.h"
+      "mlx/backend/metal/kernels/fp_quantized_nax.h"
+      "mlx/backend/metal/kernels/quantized.h"
       "mlx/backend/metal/kernels/quantized.metal"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/matmul.cpp"
@@ -117,14 +132,15 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # because every build compiles MLX's CPU backend and every one of them can
   # run a quantized matmul on the CPU stream (MLXCEL_DEVICE=cpu, or the CPU
   # stream a GPU build still has). quantized.cpp carries one delta, issue
-  # #2248: the scalar `_qmm`, `_qmm_t`, `fp_qmm` and `fp_qmm_t` loops, which
-  # every build without Accelerate's SIMD header runs (all of Linux, x86
-  # macOS), accumulate in float instead of the activation type, and read the
-  # activation row and the output accumulator from local buffers. Upstream
-  # accumulates bf16 in bf16 as of pin 81ba1c6a. Same refresh rule as the
-  # Metal files: take the new upstream file and re-apply the four bodies
-  # marked `mlxcel:`. The NripeshN/mlx fork does not change this file, so the
-  # ROCm overlay below never replaces it.
+  # #2248: the scalar `fp_qmm` and `fp_qmm_t` loops, which every build without
+  # Accelerate's SIMD header runs (all of Linux, x86 macOS), accumulate in
+  # float instead of the activation type, and read the activation row and the
+  # output accumulator from local buffers. Upstream accumulates in float for
+  # the affine `_qmm` / `_qmm_t` loops as of ml-explore/mlx#4803, so those two
+  # are upstream verbatim at this pin and the overlay keeps only the fp bodies.
+  # Same refresh rule as the Metal files: take the new upstream file and
+  # re-apply the two bodies marked `mlxcel:`. The NripeshN/mlx fork does not
+  # change this file, so the ROCm overlay below never replaces it.
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu/mlx/backend/cpu")
     file(GLOB_RECURSE _cpu_patch_files
          RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu"
@@ -137,6 +153,23 @@ function(mlx_apply_source_overlays mlx_source_dir)
     endforeach()
     message(STATUS "Applied CPU backend patches (${_cpu_patch_files})")
   endif()
+
+  # Core patches, applied on every build before the backend blocks below.
+  # mlx/device.cpp makes the default device per thread (upstream already keeps
+  # default streams per thread), so a thread that pins the CPU no longer moves
+  # every other thread's ops there; `mlxcel_set_process_default_device` sets
+  # the default for threads that never set their own. The ROCm overlay
+  # replaces this file with a copy carrying the same block, so a ROCm build
+  # still gets it. Refresh: take the new upstream file and re-apply the block
+  # marked `mlxcel:`.
+  set(_core_patch_files "mlx/device.cpp")
+  foreach(_patch_file ${_core_patch_files})
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/overlays/core/${_patch_file}"
+      "${mlx_source_dir}/${_patch_file}"
+      COPYONLY)
+  endforeach()
+  message(STATUS "Applied core patches (${_core_patch_files})")
 
   # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops,
   # and device.cpp (captured child graphs as barriers inside a CUDA graph,
@@ -156,13 +189,55 @@ function(mlx_apply_source_overlays mlx_source_dir)
     message(STATUS "Applied CUDA backend patches (${_cuda_patch_files})")
   endif()
 
-  # CUDA-only patches: bf16 type promotion and norm computation changes.
+  # CUDA-only patches: bf16 type promotion, norm computation, and random
+  # distribution precision changes (issue #2958).
   # These change dtype promotion rules (bf16+fp32→bf16) to avoid copy_v kernel
   # overhead on CUDA, but break Metal precision for bf16 vision weights
-  # (e.g., SigLIP position embeddings). Apply ONLY for CUDA builds.
+  # (e.g., SigLIP position embeddings). Apply ONLY for CUDA builds, and restore
+  # any retired or inactive top-level mlx/*.cpp overlay in a reused _deps/mlx-src
+  # checkout on non-ROCm builds.
+  set(_cuda_only_patches "")
+  set(_cuda_mlx_patch_relpaths "")
   if(MLX_BUILD_CUDA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx")
-    file(GLOB _cuda_only_patches
+    file(GLOB _cuda_only_patches CONFIGURE_DEPENDS
          "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/*.cpp")
+    foreach(_patch_file ${_cuda_only_patches})
+      get_filename_component(_fname "${_patch_file}" NAME)
+      list(APPEND _cuda_mlx_patch_relpaths "mlx/${_fname}")
+    endforeach()
+  endif()
+  if(NOT MLX_BUILD_ROCM AND GIT_FOUND AND EXISTS "${mlx_source_dir}/.git")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+              diff --name-only -- mlx
+      RESULT_VARIABLE _cuda_mlx_diff_result
+      OUTPUT_VARIABLE _cuda_mlx_modified_files
+      ERROR_VARIABLE _cuda_mlx_diff_error
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_cuda_mlx_diff_result EQUAL 0)
+      string(REPLACE "\n" ";" _cuda_mlx_modified_files "${_cuda_mlx_modified_files}")
+      foreach(_modified_file ${_cuda_mlx_modified_files})
+        if(_modified_file MATCHES "^mlx/[^/]+\\.cpp$"
+           AND NOT _modified_file IN_LIST _cuda_mlx_patch_relpaths
+           AND NOT _modified_file IN_LIST _core_patch_files)
+          execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${mlx_source_dir}"
+                    checkout -- "${_modified_file}"
+            RESULT_VARIABLE _cuda_mlx_restore_result
+            ERROR_VARIABLE _cuda_mlx_restore_error)
+          if(_cuda_mlx_restore_result EQUAL 0)
+            message(STATUS
+              "Restored upstream ${_modified_file} (no longer overlaid)")
+          else()
+            message(FATAL_ERROR
+              "Cannot restore upstream ${_modified_file} in "
+              "${mlx_source_dir}: ${_cuda_mlx_restore_error}")
+          endif()
+        endif()
+      endforeach()
+    endif()
+  endif()
+  if(MLX_BUILD_CUDA AND _cuda_only_patches)
     foreach(_patch_file ${_cuda_only_patches})
       get_filename_component(_fname "${_patch_file}" NAME)
       configure_file(
@@ -170,7 +245,7 @@ function(mlx_apply_source_overlays mlx_source_dir)
         "${mlx_source_dir}/mlx/${_fname}"
         COPYONLY)
     endforeach()
-    message(STATUS "Applied CUDA-only dtype/precision patches")
+    message(STATUS "Applied CUDA-only dtype/precision patches (${_cuda_mlx_patch_relpaths})")
   endif()
 
   # ROCm overlay, the ROCm part of mlxcelverse (issue #1802): the AMD GPU
@@ -262,7 +337,7 @@ else()
     #     `)` as ending the declaration, so one there would hide the tag
     #     instead of being read past.
     # Both parsers fail loudly rather than guess when the shape does not hold.
-    GIT_TAG 7ca40033132dae444d45f7fc3daae57e24c13f6c)
+    GIT_TAG fc344c986c4169d99f76b5d95ae6b4a58a359a63)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

@@ -70,3 +70,29 @@ fn finish_reason_is_length_only_when_the_budget_ran_out_without_eos() {
     // A cancelled run stops early without EOS and reports "stop".
     assert_eq!(nemotron_parse_finish_reason(false, 5, 256), "stop");
 }
+
+/// The encoder pass and the decode run in one model-owned call, so the
+/// result reports whole wall time with no decode window (issue #2938), and
+/// the `/metrics` decode-rate histogram skips it rather than recording a
+/// wall-time rate.
+#[test]
+fn result_reports_wall_time_without_a_decode_window() {
+    let result = nemotron_parse_generation_result("page".to_string(), 1300, 40, true, 256, 900);
+    assert_eq!(result.completion_tokens, 40);
+    assert_eq!(result.generation_time_ms, 900);
+    assert_eq!(result.prompt_eval_ms, 0);
+    assert_eq!(result.generation_only_ms, 900);
+    assert_eq!(result.decode_window_tokens, None);
+    assert_eq!(result.finish_reason, "stop");
+
+    let obs = crate::server::batch::observability::BatchObservability::new();
+    obs.record_request_completion(
+        result.prompt_tokens,
+        result.cached_tokens,
+        result.prompt_eval_ms,
+        result.generation_only_ms,
+        result.completion_tokens,
+        result.decode_window_tokens,
+    );
+    assert_eq!(obs.decode_tok_s_snapshot().count, 0);
+}

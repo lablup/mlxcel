@@ -74,7 +74,7 @@ fn kda_p() -> usize {
 
 /// Layer `i` is KDA for `i` in {0, 2} (1-based `kda_layers = [1, 3]`), MLA
 /// for {1, 3}; layer 0 is dense, 1..3 are MoE.
-fn tiny_text_config() -> KimiK3TextConfig {
+pub(super) fn tiny_text_config() -> KimiK3TextConfig {
     KimiK3TextConfig {
         model_type: "kimi_linear".to_string(),
         vocab_size: VOCAB,
@@ -146,7 +146,7 @@ fn arr(data: &[f32], shape: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(data, shape)
 }
 
-fn noise_arr(shape: &[i32], seed: u32, scale: f32) -> UniquePtr<MlxArray> {
+pub(super) fn noise_arr(shape: &[i32], seed: u32, scale: f32) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
     arr(&scaled_noise(n as usize, seed, scale), shape)
 }
@@ -285,8 +285,9 @@ fn raw_kda_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
     );
 }
 
-/// One MLA attention block under `prefix` (raw: `kv_b_proj`, not yet decomposed).
-fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
+/// One MLA attention block under `prefix` (raw: `kv_b_proj`, not yet
+/// decomposed), with latent width `kv_lora`.
+fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32, kv_lora: usize) {
     let d = HIDDEN as i32;
     let h = MLA_HEADS as i32;
     let qhd = (QK_NOPE + QK_ROPE) as i32;
@@ -304,16 +305,16 @@ fn raw_mla_weights(weights: &mut WeightMap, prefix: &str, seed: u32) {
     );
     weights.insert(
         format!("{prefix}.kv_a_proj_with_mqa.weight"),
-        noise_arr(&[(KV_LORA + QK_ROPE) as i32, d], seed + 3, 0.5),
+        noise_arr(&[(kv_lora + QK_ROPE) as i32, d], seed + 3, 0.5),
     );
     weights.insert(
         format!("{prefix}.kv_a_layernorm.weight"),
-        arr(&ones_plus_noise(KV_LORA, seed + 4), &[KV_LORA as i32]),
+        arr(&ones_plus_noise(kv_lora, seed + 4), &[kv_lora as i32]),
     );
     weights.insert(
         format!("{prefix}.kv_b_proj.weight"),
         noise_arr(
-            &[h * (QK_NOPE + V_HEAD) as i32, KV_LORA as i32],
+            &[h * (QK_NOPE + V_HEAD) as i32, kv_lora as i32],
             seed + 5,
             0.5,
         ),
@@ -472,7 +473,12 @@ fn raw_checkpoint(config: &KimiK3TextConfig, layout: RawLayout) -> WeightMap {
         if config.is_linear_layer(l) {
             raw_kda_weights(&mut w, &format!("{prefix}.self_attn"), seed + 10);
         } else {
-            raw_mla_weights(&mut w, &format!("{prefix}.self_attn"), seed + 10);
+            raw_mla_weights(
+                &mut w,
+                &format!("{prefix}.self_attn"),
+                seed + 10,
+                config.kv_lora_rank,
+            );
         }
         if config.is_moe_layer(l) {
             raw_moe_weights(
@@ -512,7 +518,7 @@ fn raw_checkpoint(config: &KimiK3TextConfig, layout: RawLayout) -> WeightMap {
 }
 
 /// Sanitized weights of the tiny checkpoint.
-fn sanitized(config: &KimiK3TextConfig) -> WeightMap {
+pub(super) fn sanitized(config: &KimiK3TextConfig) -> WeightMap {
     let raw = raw_checkpoint(
         config,
         RawLayout {
@@ -817,6 +823,47 @@ fn mla_q_lora_and_output_gate() {
         &expected[4 * HIDDEN..],
         1e-4,
         "absorbed MLA decode vs unabsorbed",
+    );
+    assert_eq!(cache.offset, 5);
+}
+
+/// Without a mask array the multi-token MLA step takes the rope-folded
+/// causal-mode path (#3099) and still matches the unabsorbed reference that
+/// adds the causal mask to its scores by hand, for a cold three-token prefill
+/// and a warm two-token chunk on the absorbed side.
+#[test]
+fn mla_causal_mode_prefill_and_chunk_match_the_reference() {
+    let config = tiny_text_config();
+    let weights = sanitized(&config);
+    let prefix = "model.layers.1.self_attn";
+    let attn =
+        KimiK3MLAAttention::from_weights(&weights, &config, prefix).expect("MLA layer loads");
+    let raw = stripped_raw(&config);
+
+    let x = noise_arr(&[1, 5, HIDDEN as i32], 37, 2.0);
+    let expected = read(&mla_reference(&raw, prefix, &x));
+
+    let mut cache = KVCache::new();
+    let prefill = mlxcel_core::slice(&x, &[0, 0, 0], &[1, 3, HIDDEN as i32]);
+    let out = attn.forward(&prefill, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[..3 * HIDDEN],
+        1e-4,
+        "causal-mode MLA prefill vs unabsorbed",
+    );
+
+    assert!(
+        mlxcel_core::mla::use_absorbed_mla(2, 5, KV_LORA, QK_NOPE, V_HEAD),
+        "the warm chunk must select the absorbed path"
+    );
+    let chunk = mlxcel_core::slice(&x, &[0, 3, 0], &[1, 5, HIDDEN as i32]);
+    let out = attn.forward(&chunk, None, &mut cache);
+    assert_close(
+        &out,
+        &expected[3 * HIDDEN..],
+        1e-4,
+        "causal-mode absorbed MLA chunk vs unabsorbed",
     );
     assert_eq!(cache.offset, 5);
 }
@@ -1855,4 +1902,39 @@ fn kimi_k3_sequence_state_isolates_prepared_sequences() {
             .with_existing_sequence_state(SequenceId::from_raw(1), |_| {})
             .is_err()
     );
+}
+
+crate::models::last_row_logits_harness::last_row_case!(kimi_k3_last_row_logits, || {
+    let config = tiny_text_config();
+    KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+});
+
+/// The VLM wrapper's embeddings prefill goes through
+/// `forward_rows_for_sequence`: its sampled row equals the row of the full
+/// embeddings forward (#3070).
+#[test]
+fn kimi_k3_last_row_from_embeddings_matches_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let config = tiny_text_config();
+        KimiK3Model::from_weights(&sanitized(&config), &config).expect("tiny model loads")
+    };
+    let ids = mlxcel_core::from_slice_i32(&[3, 1, 4, 1, 5, 9, 2], &[1, 7]);
+
+    let reference = make();
+    let embeds = reference.embed_tokens.forward(&ids);
+    let full = reference.forward_for_sequence_with_embeddings(&ids, Some(&embeds), None);
+    for pos in [2usize, 6] {
+        let model = make();
+        let row = model.forward_rows_for_sequence(&ids, Some(&embeds), None, Some(pos));
+        assert_eq!(
+            mlxcel_core::array_shape(&row),
+            vec![1, 1, VOCAB as i32],
+            "last-row logits must be [1, 1, vocab]"
+        );
+        let expected = mlxcel_core::generate::logits_at_position(&full, pos);
+        let close = mlxcel_core::allclose(&row, &expected, 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(mlxcel_core::item_bool(&close), "row {pos} differs");
+    }
 }

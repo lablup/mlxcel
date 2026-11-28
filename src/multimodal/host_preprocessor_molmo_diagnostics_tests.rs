@@ -494,3 +494,17 @@ impl Drop for DiagnosticHeartbeat {
 fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
     run_pinned_molmo_eager_mlx_iree_boundaries();
 }
+
+/// Pins the digest helpers to a single SHA-256 of the little-endian bytes. A
+/// second hash over the finished digest (#3365) changes every value here.
+#[test]
+fn digest_helpers_hash_the_little_endian_bytes_once() {
+    assert_eq!(
+        digest_f32(&[1.0, -2.5, 0.0, 3.25]),
+        "685b7ddd99d5c6487e584654c8e84ceb0d9b47eea2d0eaa7cd4c1aed901ca064"
+    );
+    assert_eq!(
+        digest_i32(&[1, -2, 0, 70000]),
+        "2cbde6e664ac91c29259458d27b61bf4b60b34d4655fd99dcfe71ab23e9dfb1a"
+    );
+}

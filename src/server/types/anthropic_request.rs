@@ -218,6 +218,15 @@ pub enum AnthropicContentBlock {
         #[serde(default)]
         thinking: Option<String>,
     },
+    /// An audio block. Anthropic's Messages API has no audio block, so this is
+    /// not a supported input on any family: the translator drops it exactly as
+    /// it drops [`Self::Unknown`]. It is its own variant only so the route can
+    /// tell a checkpoint that is known to have no audio encoder (Inkling 2)
+    /// that audio was sent, and refuse instead of answering as if it had not
+    /// been (issue #3376). The aliases are the OpenAI part names a client
+    /// porting a request would reuse.
+    #[serde(rename = "audio", alias = "input_audio", alias = "audio_url")]
+    Audio,
     /// Any other block type — tolerated and ignored.
     #[serde(other)]
     Unknown,
@@ -440,6 +449,21 @@ mod tests {
                 assert!(matches!(b[0], AnthropicContentBlock::Unknown));
             }
             _ => panic!("expected blocks"),
+        }
+    }
+
+    #[test]
+    fn audio_blocks_parse_as_audio_not_unknown() {
+        // Issue #3376: the route has to see that audio was sent.
+        for ty in ["audio", "input_audio", "audio_url"] {
+            let body = format!(r#"{{"role":"user","content":[{{"type":"{ty}","source":{{}}}}]}}"#);
+            let msg: AnthropicMessage = serde_json::from_str(&body).unwrap();
+            match msg.content {
+                AnthropicMessageContent::Blocks(b) => {
+                    assert!(matches!(b[0], AnthropicContentBlock::Audio), "{ty}");
+                }
+                _ => panic!("expected blocks"),
+            }
         }
     }
 

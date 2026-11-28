@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Portions of this file are derived from mlx-vlm
+// (https://github.com/Blaizzy/mlx-vlm), Copyright 2025 Prince Canuma,
+// licensed under the MIT License. See the top-level NOTICE.
+
 //! Qwen-VL prompt token insertion rules.
 //!
 //! Qwen2/2.5/3/3.5-VL families reserve image-token blocks based on the image
@@ -32,6 +36,11 @@ pub struct QwenVlmPromptInfo<'a> {
     pub vision_start_token_id: i32,
     pub image_token_id: i32,
     pub video_token_id: i32,
+    /// Render each temporal patch group of a video as its own timestamped
+    /// `<t seconds>` + start/end block (#2402). True only for the Qwen3-VL
+    /// family, whose reference processor does this; Qwen2-VL and Qwen2.5-VL
+    /// keep one flat, timeless block per video.
+    pub video_timestamps: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +159,30 @@ pub trait QwenVlRuntime {
         self.input_embeddings(input_ids, pixel_values, grid_thw)
     }
 
+    /// Variant of [`input_embeddings_with_cache`] that also receives each
+    /// video's `second_per_grid` (`temporal_patch_size / sampled fps`, in
+    /// seconds), one entry per video grid in prompt order, or an empty slice
+    /// when the request has no timed video.
+    ///
+    /// Only Qwen2.5-VL places video tokens by real time (Blaizzy/mlx-vlm#2760),
+    /// so only it overrides this. The default ignores the timing and keeps the
+    /// family's existing positions: Qwen2-VL, Cohere Compass, Qwen4-exp-VL and
+    /// MiMo-V2-VL use unit temporal spacing upstream, and the Qwen3-VL family
+    /// carries time in its `<t seconds>` text markers (#2402).
+    ///
+    /// [`input_embeddings_with_cache`]: QwenVlRuntime::input_embeddings_with_cache
+    fn input_embeddings_with_video_timing(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        _video_second_per_grid: &[f32],
+        cache_key: Option<&CacheKey>,
+        caches: Option<&ModelVisionCaches>,
+    ) -> anyhow::Result<vision::merge::InputEmbeddings> {
+        Ok(self.input_embeddings_with_cache(input_ids, pixel_values, grid_thw, cache_key, caches))
+    }
+
     /// Bind the MRoPE state computed during embedding preparation to a
     /// specific `SequenceId` so the per-row delta cannot leak into other
     /// requests' decode steps (mlx-vlm PR #1095).
@@ -214,6 +247,7 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
         impl QwenVlRuntime for $ty {
             fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
                 QwenVlmPromptInfo {
+                    video_timestamps: false,
                     processor: &self.processor,
                     spatial_merge_size: self.spatial_merge_size,
                     vision_start_token_id: self.vision_start_token_id,
@@ -274,6 +308,7 @@ impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen2VLModel, text_only);
 impl QwenVlRuntime for vision::Qwen3VLMoeModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: true,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -329,6 +364,7 @@ impl_qwen_vl_runtime_loop_dispatch!(vision::GlmOcrModel);
 impl QwenVlRuntime for vision::Qwen25VLModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: false,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -367,6 +403,25 @@ impl QwenVlRuntime for vision::Qwen25VLModel {
         )
     }
 
+    fn input_embeddings_with_video_timing(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        video_second_per_grid: &[f32],
+        cache_key: Option<&CacheKey>,
+        caches: Option<&ModelVisionCaches>,
+    ) -> anyhow::Result<vision::merge::InputEmbeddings> {
+        self.get_input_embeddings_with_video_timing(
+            input_ids,
+            pixel_values,
+            grid_thw,
+            video_second_per_grid,
+            cache_key,
+            caches.map(|c| &c.single),
+        )
+    }
+
     fn bind_mrope_state_to_sequence(&self, seq_id: SequenceId) {
         self.text_model.bind_mrope_state_to_sequence(seq_id);
     }
@@ -390,6 +445,7 @@ impl QwenVlRuntime for vision::Qwen25VLModel {
 impl QwenVlRuntime for vision::Qwen3VLModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: true,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -460,6 +516,7 @@ impl QwenVlRuntime for vision::Qwen3VLModel {
 impl QwenVlRuntime for vision::CohereCompassModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: false,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -524,6 +581,7 @@ impl QwenVlRuntime for vision::CohereCompassModel {
 impl QwenVlRuntime for vision::Qwen4ExpVLModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: false,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -566,6 +624,7 @@ impl QwenVlRuntime for vision::Qwen4ExpVLModel {
 impl QwenVlRuntime for vision::Qwen35VLModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
         QwenVlmPromptInfo {
+            video_timestamps: true,
             processor: &self.processor,
             spatial_merge_size: self.spatial_merge_size,
             vision_start_token_id: self.vision_start_token_id,
@@ -886,6 +945,351 @@ pub fn insert_qwen_vl_media_tokens(
     Ok(Some(inserted_qwen_stats(media, &per_media_counts)))
 }
 
+/// Timestamp (seconds) of each temporal group of a sampled video.
+///
+/// Port of the reference `_video_group_timestamps`: the sampled frame
+/// indices are padded to a multiple of `temporal_patch_size` by repeating the
+/// last index (exactly how the processor pads the frames it encodes), a
+/// frame's time is `index / source_fps`, and a group's time is the mean of its
+/// first and last frame time. Using the indices that were actually sampled
+/// keeps the markers right when the sampler resampled the clip at a rate other
+/// than the one requested.
+///
+/// Used by: Qwen3VLModel, Qwen3VLMoeModel, Qwen35VLModel (dense and MoE).
+pub fn qwen_video_group_timestamps(
+    frame_indices: &[usize],
+    source_fps: f64,
+    temporal_patch_size: usize,
+    grid_t: usize,
+) -> anyhow::Result<Vec<f64>> {
+    if !(source_fps.is_finite() && source_fps > 0.0) {
+        anyhow::bail!(
+            "Qwen-VL video timestamps need a positive finite source frame rate, got {source_fps}"
+        );
+    }
+    if temporal_patch_size == 0 {
+        anyhow::bail!("Qwen-VL temporal_patch_size must be positive");
+    }
+    if frame_indices.is_empty() {
+        anyhow::bail!("Qwen-VL video timestamps need at least one sampled frame");
+    }
+    let groups = frame_indices.len().div_ceil(temporal_patch_size);
+    if groups != grid_t {
+        anyhow::bail!(
+            "Qwen-VL video has {} sampled frame(s), which require {groups} temporal group(s), \
+             not {grid_t}",
+            frame_indices.len()
+        );
+    }
+    if frame_indices.windows(2).any(|pair| pair[0] > pair[1]) {
+        anyhow::bail!("Qwen-VL sampled frame indices must be in source order");
+    }
+    // A short final chunk repeats its last frame implicitly. Avoid multiplying
+    // untrusted dimensions or allocating a padded copy of the frame indices.
+    frame_indices
+        .chunks(temporal_patch_size)
+        .map(|group| {
+            let first = group[0] as f64 / source_fps;
+            let last = group[group.len() - 1] as f64 / source_fps;
+            // Halve before adding so finite endpoints cannot overflow the sum.
+            let seconds = first * 0.5 + last * 0.5;
+            if !seconds.is_finite() {
+                anyhow::bail!("Qwen-VL video timestamp exceeds finite seconds");
+            }
+            Ok(seconds)
+        })
+        .collect()
+}
+
+/// Seconds of source video one temporal grid spans:
+/// `temporal_patch_size / sampled_fps`, the Qwen2.5-VL reference processor's
+/// `second_per_grid_ts` entry for a clip (Blaizzy/mlx-vlm#2760).
+///
+/// `sampled_fps` is the rate of the frames that were encoded
+/// ([`crate::multimodal::video::SampledVideo::sampled_fps`]). The quotient is
+/// taken in f64 and narrowed to f32, as the reference's Python float division
+/// becomes a float32 array.
+///
+/// Used by: the Qwen-VL video path of the server and CLI
+/// (`server::model_worker`), consumed by Qwen2.5-VL; `examples/logit_trace`'s
+/// video arm.
+pub fn qwen_video_second_per_grid(
+    sampled_fps: f64,
+    temporal_patch_size: usize,
+) -> anyhow::Result<f32> {
+    if !(sampled_fps.is_finite() && sampled_fps > 0.0) {
+        anyhow::bail!(
+            "Qwen-VL video timing needs a positive finite sampled frame rate, got {sampled_fps}"
+        );
+    }
+    if temporal_patch_size == 0 {
+        anyhow::bail!("Qwen-VL temporal_patch_size must be positive");
+    }
+    let second_per_grid = (temporal_patch_size as f64 / sampled_fps) as f32;
+    if !(second_per_grid.is_finite() && second_per_grid > 0.0) {
+        anyhow::bail!(
+            "Qwen-VL video second_per_grid must be positive and finite, got {second_per_grid} \
+             (temporal_patch_size={temporal_patch_size}, sampled fps={sampled_fps})"
+        );
+    }
+    Ok(second_per_grid)
+}
+
+/// Text of the marker placed before one temporal group, e.g. `<1.5 seconds>`.
+pub fn qwen_video_timestamp_text(seconds: f64) -> String {
+    format!("<{seconds:.1} seconds>")
+}
+
+/// Render one media item for the timestamped (Qwen3-VL) layout.
+///
+/// Images stay one framed run. A video becomes one framed run per temporal
+/// group, each preceded by that group's timestamp text tokens:
+/// `<ts> <start> <video>* <end>` repeated `grid_t` times.
+fn render_timestamped_media(
+    item: &QwenVisualGrid,
+    count: i32,
+    group_prefixes: Option<&[Vec<i32>]>,
+    vision_start_token_id: i32,
+    image_token_id: i32,
+    video_token_id: i32,
+) -> Vec<i32> {
+    let vision_end_token_id = vision_start_token_id + 1;
+    match (item.kind, group_prefixes) {
+        (QwenVisualKind::Video, Some(prefixes)) => {
+            let group_len = (count as usize) / prefixes.len().max(1);
+            let mut out = Vec::with_capacity(
+                count as usize + prefixes.iter().map(|p| p.len() + 2).sum::<usize>(),
+            );
+            for prefix in prefixes {
+                out.extend_from_slice(prefix);
+                out.push(vision_start_token_id);
+                out.extend(std::iter::repeat_n(video_token_id, group_len));
+                out.push(vision_end_token_id);
+            }
+            out
+        }
+        (kind, _) => {
+            let token_id = match kind {
+                QwenVisualKind::Image => image_token_id,
+                QwenVisualKind::Video => video_token_id,
+            };
+            let mut out = Vec::with_capacity(count as usize + 2);
+            out.push(vision_start_token_id);
+            out.extend(std::iter::repeat_n(token_id, count as usize));
+            out.push(vision_end_token_id);
+            out
+        }
+    }
+}
+
+/// [`insert_qwen_vl_media_tokens`] for families that render per-group video
+/// timestamps (the Qwen3-VL family).
+///
+/// `video_group_prefixes[v][g]` holds the timestamp text tokens (for example
+/// `<1.5 seconds>`) placed before temporal group `g` of the `v`-th video in
+/// `media` order, so each entry must have exactly `grid_t` groups. A video
+/// then occupies `grid_t` framed runs of `(h / m) * (w / m)` video tokens
+/// instead of one flat run, matching the reference processor.
+///
+/// The same three prompt states are accepted as in the flat layout:
+///
+/// - no visual placeholders: insert rendered media after BOS;
+/// - one placeholder per item: replace each placeholder (and, for a video,
+///   its surrounding vision start/end pair) with the rendered item;
+/// - already-expanded runs: validate and leave untouched. A video may be one
+///   flat run (`grid_t` groups of features in one run) or `grid_t` per-group
+///   runs.
+pub fn insert_qwen_vl_media_tokens_timestamped(
+    prompt_tokens: &mut Vec<i32>,
+    media: &[QwenVisualGrid],
+    spatial_merge_size: usize,
+    vision_start_token_id: i32,
+    image_token_id: i32,
+    video_token_id: i32,
+    video_group_prefixes: &[Vec<Vec<i32>>],
+) -> anyhow::Result<Option<InsertedQwenVlmTokens>> {
+    if prompt_tokens.is_empty() || media.is_empty() || spatial_merge_size == 0 {
+        return Ok(None);
+    }
+
+    let per_media_counts = qwen_media_token_counts(media, spatial_merge_size)?;
+    let video_items: Vec<&QwenVisualGrid> = media
+        .iter()
+        .filter(|item| item.kind == QwenVisualKind::Video)
+        .collect();
+    if video_group_prefixes.len() != video_items.len() {
+        anyhow::bail!(
+            "Qwen-VL timestamp prefixes cover {} video(s), but request provided {}",
+            video_group_prefixes.len(),
+            video_items.len()
+        );
+    }
+    for (item, prefixes) in video_items.iter().zip(video_group_prefixes) {
+        if prefixes.len() != item.grid_thw.0 as usize {
+            anyhow::bail!(
+                "Qwen-VL video grid has {} temporal group(s), but {} timestamp(s) were provided",
+                item.grid_thw.0,
+                prefixes.len()
+            );
+        }
+    }
+
+    let render_all = || -> Vec<Vec<i32>> {
+        let mut video_idx = 0usize;
+        let mut rendered = Vec::with_capacity(media.len());
+        for (idx, item) in media.iter().enumerate() {
+            let prefixes = if item.kind == QwenVisualKind::Video {
+                let p = &video_group_prefixes[video_idx];
+                video_idx += 1;
+                Some(p.as_slice())
+            } else {
+                None
+            };
+            rendered.push(render_timestamped_media(
+                item,
+                per_media_counts[idx].1,
+                prefixes,
+                vision_start_token_id,
+                image_token_id,
+                video_token_id,
+            ));
+        }
+        rendered
+    };
+    let stats = inserted_qwen_stats(media, &per_media_counts);
+
+    let placeholder_runs = qwen_visual_token_runs(prompt_tokens, image_token_id, video_token_id);
+    if placeholder_runs.is_empty() {
+        let rendered = render_all();
+        let bos = prompt_tokens[0];
+        let rest = prompt_tokens[1..].to_vec();
+        *prompt_tokens = vec![bos];
+        prompt_tokens.extend(rendered.into_iter().flatten());
+        prompt_tokens.extend(rest);
+        return Ok(Some(stats));
+    }
+
+    for pair in placeholder_runs.windows(2) {
+        if pair[0].end == pair[1].start {
+            anyhow::bail!(
+                "Qwen-VL prompt has adjacent {:?}/{:?} visual token runs with no framing token \
+                 between them; refusing to pass ambiguous spans to MRoPE position assignment",
+                pair[0].kind,
+                pair[1].kind
+            );
+        }
+    }
+
+    // One single-token placeholder per media item: expand in place.
+    if placeholder_runs.len() == media.len()
+        && placeholder_runs.iter().all(|run| run.len == 1)
+        && placeholder_runs
+            .iter()
+            .zip(media)
+            .all(|(run, item)| run.kind == item.kind)
+    {
+        let rendered = render_all();
+        let mut expanded =
+            Vec::with_capacity(prompt_tokens.len() + rendered.iter().map(Vec::len).sum::<usize>());
+        let mut cursor = 0usize;
+        for ((run, rendered_item), &(_, count)) in placeholder_runs
+            .iter()
+            .zip(&rendered)
+            .zip(&per_media_counts)
+        {
+            if run.kind == QwenVisualKind::Image {
+                // The prompt already frames the image placeholder.
+                expanded.extend_from_slice(&prompt_tokens[cursor..run.start]);
+                expanded.extend(std::iter::repeat_n(image_token_id, count as usize));
+                cursor = run.end;
+                continue;
+            }
+            // A video is rendered with its own per-group framing, so fold an
+            // existing framing pair into it rather than framing twice.
+            let mut start = run.start;
+            let mut end = run.end;
+            if start > cursor
+                && end < prompt_tokens.len()
+                && prompt_tokens[start - 1] == vision_start_token_id
+                && prompt_tokens[end] == vision_start_token_id + 1
+            {
+                start -= 1;
+                end += 1;
+            }
+            expanded.extend_from_slice(&prompt_tokens[cursor..start]);
+            expanded.extend_from_slice(rendered_item);
+            cursor = end;
+        }
+        expanded.extend_from_slice(&prompt_tokens[cursor..]);
+        *prompt_tokens = expanded;
+        return Ok(Some(stats));
+    }
+
+    // Already expanded: walk the runs in media order and validate each shape.
+    let mut run_idx = 0usize;
+    for (media_idx, item) in media.iter().enumerate() {
+        let (kind, count) = per_media_counts[media_idx];
+        let Some(first) = placeholder_runs.get(run_idx) else {
+            anyhow::bail!(
+                "Qwen-VL prompt/media mismatch: prompt has {} visual block(s), but media item {} \
+                 has no matching block",
+                placeholder_runs.len(),
+                media_idx
+            );
+        };
+        if first.kind != kind {
+            anyhow::bail!(
+                "Qwen-VL prompt/media order mismatch: prompt block {} is {:?}, but decoded media \
+                 item {} is {:?}",
+                run_idx,
+                first.kind,
+                media_idx,
+                kind
+            );
+        }
+        let groups = item.grid_thw.0 as usize;
+        let group_len = count / item.grid_thw.0;
+        if first.len as i32 == count {
+            run_idx += 1;
+        } else if kind == QwenVisualKind::Video && groups > 1 && first.len as i32 == group_len {
+            for group in 0..groups {
+                let ok = placeholder_runs.get(run_idx + group).is_some_and(|run| {
+                    run.kind == QwenVisualKind::Video && run.len as i32 == group_len
+                });
+                if !ok {
+                    anyhow::bail!(
+                        "Qwen-VL prompt/media cardinality mismatch: video {} expects {} per-group \
+                         run(s) of {} token(s), but group {} is missing or malformed",
+                        media_idx,
+                        groups,
+                        group_len,
+                        group
+                    );
+                }
+            }
+            run_idx += groups;
+        } else {
+            anyhow::bail!(
+                "Qwen-VL prompt/media cardinality mismatch: {:?} block {} has {} placeholder \
+                 token(s), expected either 1 template token or {} expanded feature token(s)",
+                kind,
+                run_idx,
+                first.len,
+                count
+            );
+        }
+    }
+    if run_idx != placeholder_runs.len() {
+        anyhow::bail!(
+            "Qwen-VL prompt/media mismatch: prompt has {} visual block(s), but request provided \
+             media for {}",
+            placeholder_runs.len(),
+            run_idx
+        );
+    }
+    Ok(Some(stats))
+}
+
 pub fn insert_qwen_vl_image_tokens(
     prompt_tokens: &mut Vec<i32>,
     grid_thw: &[(i32, i32, i32)],
@@ -1080,6 +1484,12 @@ fn inserted_qwen_stats(
 /// `grid_t * (grid_h / spatial_merge_size) * (grid_w / spatial_merge_size)`
 /// tokens. Videos keep `grid_t` as the temporal axis; only the H/W axes are
 /// divided by spatial merge.
+///
+/// Temporal indices sit one position apart. This is
+/// [`compute_qwen_vl_mrope_position_ids_with_video_timing`] with no intervals.
+///
+/// Used by: Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE, Qwen3.5-VL, Cohere Compass,
+/// Qwen4-exp-VL. Qwen2.5-VL calls the timing variant directly.
 pub(crate) fn compute_qwen_vl_mrope_position_ids(
     input_ids: &MlxArray,
     grid_thw: &[(i32, i32, i32)],
@@ -1087,6 +1497,41 @@ pub(crate) fn compute_qwen_vl_mrope_position_ids(
     image_token_id: i32,
     video_token_id: i32,
 ) -> UniquePtr<MlxArray> {
+    compute_qwen_vl_mrope_position_ids_with_video_timing(
+        input_ids,
+        grid_thw,
+        spatial_merge_size,
+        image_token_id,
+        video_token_id,
+        &[],
+    )
+    .expect("Qwen-VL visual placeholders must be cardinality-validated before MRoPE")
+}
+
+/// [`compute_qwen_vl_mrope_position_ids`] with the temporal axis of each video
+/// spaced by real time (Blaizzy/mlx-vlm#2760).
+///
+/// `video_time_intervals` holds one interval per video grid in prompt order,
+/// `tokens_per_second * second_per_grid_ts[v]`: temporal index `t` of that
+/// video sits `trunc(t * interval)` positions after the start of its run.
+/// Images ignore it. An empty slice keeps unit spacing for every video, which
+/// is what every caller other than Qwen2.5-VL passes.
+///
+/// A non-empty slice must name every video grid; a length mismatch, a
+/// non-finite or non-positive interval, or an interval for a timestamped
+/// (per-group) video is an error rather than a fallback to unit spacing.
+///
+/// Used by: Qwen2.5-VL (`Qwen25VLModel::compute_rope_index`), and through
+/// [`compute_qwen_vl_mrope_position_ids`] by Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE,
+/// Qwen3.5-VL, Cohere Compass and Qwen4-exp-VL.
+pub(crate) fn compute_qwen_vl_mrope_position_ids_with_video_timing(
+    input_ids: &MlxArray,
+    grid_thw: &[(i32, i32, i32)],
+    spatial_merge_size: usize,
+    image_token_id: i32,
+    video_token_id: i32,
+    video_time_intervals: &[f32],
+) -> anyhow::Result<UniquePtr<MlxArray>> {
     mlxcel_core::eval(input_ids);
     let ids_shape = mlxcel_core::array_shape(input_ids);
     let seq_len = ids_shape[1] as usize;
@@ -1104,27 +1549,54 @@ pub(crate) fn compute_qwen_vl_mrope_position_ids(
         spatial_merge_size,
         image_token_id,
         video_token_id,
-    )
-    .expect("Qwen-VL visual placeholders must be cardinality-validated before MRoPE");
+        video_time_intervals,
+    )?;
 
-    qwen_vl_mrope_positions_to_array(pos_ids)
+    Ok(qwen_vl_mrope_positions_to_array(pos_ids))
 }
 
+/// Temporal groups of a timestamped video still to be positioned.
+///
+/// Qwen3-VL renders a video as one framed run per temporal group, so a single
+/// `(t, h, w)` grid row covers `t` consecutive runs of `(h/m) * (w/m)` tokens.
+#[derive(Debug, Clone, Copy)]
+struct VideoGroups {
+    h: i32,
+    w: i32,
+    remaining: i32,
+}
+
+// Used by: Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3-VL-MoE, Qwen3.5-VL, Cohere
+// Compass, Qwen4-exp-VL (all through the two `compute_qwen_vl_mrope_position_ids*`
+// wrappers above). Only Qwen2.5-VL passes `video_time_intervals`; with an empty
+// slice the positions are the unit-spaced ones the other six depend on.
 fn qwen_vl_mrope_positions_from_tokens(
     tokens: &[i32],
     grid_thw: &[(i32, i32, i32)],
     spatial_merge_size: usize,
     image_token_id: i32,
     video_token_id: i32,
+    video_time_intervals: &[f32],
 ) -> anyhow::Result<[Vec<i32>; 3]> {
     let merge = i32::try_from(spatial_merge_size)
         .map_err(|_| anyhow::anyhow!("Qwen-VL spatial_merge_size is too large"))?;
     if merge <= 0 {
         anyhow::bail!("Qwen-VL spatial_merge_size must be positive");
     }
+    if let Some(interval) = video_time_intervals
+        .iter()
+        .find(|interval| !interval.is_finite() || **interval <= 0.0)
+    {
+        anyhow::bail!(
+            "Qwen-VL MRoPE video time interval must be finite and positive, got {interval}"
+        );
+    }
 
     let mut pos_ids = [Vec::new(), Vec::new(), Vec::new()];
     let mut visual_idx = 0usize;
+    let mut video_idx = 0usize;
+    let mut run_idx = 0usize;
+    let mut video_groups: Option<VideoGroups> = None;
     let mut st = 0usize;
     let mut current_pos = 0i32;
     let mut i = 0usize;
@@ -1164,21 +1636,79 @@ fn qwen_vl_mrope_positions_from_tokens(
             current_pos += text_len as i32;
         }
 
-        let Some(&(t, h, w)) = grid_thw.get(visual_idx) else {
-            anyhow::bail!(
-                "Qwen-VL MRoPE saw more visual token runs than visual grids: run {}",
-                visual_idx
-            );
+        let observed_len = i - vision_start;
+        // Time interval of this run's video, when the caller timed the videos.
+        let mut time_interval: Option<f32> = None;
+        let (t, h, w) = if let Some(group) = video_groups.take() {
+            // Continuation of a timestamped video: this run is one temporal
+            // group of the grid consumed earlier.
+            if kind != QwenVisualKind::Video {
+                anyhow::bail!(
+                    "Qwen-VL MRoPE saw an {:?} run between the temporal groups of a video",
+                    kind
+                );
+            }
+            if group.remaining > 1 {
+                video_groups = Some(VideoGroups {
+                    remaining: group.remaining - 1,
+                    ..group
+                });
+            }
+            (1, group.h, group.w)
+        } else {
+            let Some(&(t, h, w)) = grid_thw.get(visual_idx) else {
+                anyhow::bail!(
+                    "Qwen-VL MRoPE saw more visual token runs than visual grids: run {}",
+                    visual_idx
+                );
+            };
+            if t <= 0 || h <= 0 || w <= 0 {
+                anyhow::bail!("Qwen-VL MRoPE grid must be positive, got ({t}, {h}, {w})");
+            }
+            if h % merge != 0 || w % merge != 0 {
+                anyhow::bail!(
+                    "Qwen-VL MRoPE grid ({t}, {h}, {w}) is not divisible by \
+                     spatial_merge_size={}",
+                    spatial_merge_size
+                );
+            }
+            visual_idx += 1;
+            if kind == QwenVisualKind::Video {
+                if !video_time_intervals.is_empty() {
+                    let Some(&interval) = video_time_intervals.get(video_idx) else {
+                        anyhow::bail!(
+                            "Qwen-VL MRoPE got {} video time interval(s), but the prompt has \
+                             more video grids than that",
+                            video_time_intervals.len()
+                        );
+                    };
+                    time_interval = Some(interval);
+                }
+                video_idx += 1;
+            }
+            // A video whose run holds exactly one temporal group of tokens
+            // is a timestamped video: `t` runs follow, one per group, each
+            // positioned as its own `(1, h, w)` grid. A flat run never has
+            // this length for `t > 1`, so this only reinterprets what would
+            // otherwise be a cardinality error.
+            let group_len = usize::try_from((h / merge).saturating_mul(w / merge)).unwrap_or(0);
+            if kind == QwenVisualKind::Video && t > 1 && observed_len == group_len {
+                if time_interval.is_some() {
+                    anyhow::bail!(
+                        "Qwen-VL MRoPE video time intervals do not apply to a timestamped \
+                         (per-group) video"
+                    );
+                }
+                video_groups = Some(VideoGroups {
+                    h,
+                    w,
+                    remaining: t - 1,
+                });
+                (1, h, w)
+            } else {
+                (t, h, w)
+            }
         };
-        if t <= 0 || h <= 0 || w <= 0 {
-            anyhow::bail!("Qwen-VL MRoPE grid must be positive, got ({t}, {h}, {w})");
-        }
-        if h % merge != 0 || w % merge != 0 {
-            anyhow::bail!(
-                "Qwen-VL MRoPE grid ({t}, {h}, {w}) is not divisible by spatial_merge_size={}",
-                spatial_merge_size
-            );
-        }
 
         let llm_t = t;
         let llm_h = h / merge;
@@ -1192,28 +1722,47 @@ fn qwen_vl_mrope_positions_from_tokens(
                     "Qwen-VL MRoPE grid ({t}, {h}, {w}) expands past platform token capacity"
                 )
             })?;
-        let observed_len = i - vision_start;
         if observed_len != expected_len {
             anyhow::bail!(
                 "Qwen-VL MRoPE {:?} run {} has {} token(s), expected {} from grid ({t}, {h}, {w})",
                 kind,
-                visual_idx,
+                run_idx,
                 observed_len,
                 expected_len
             );
         }
 
+        // A timed video spaces its temporal indices by real time: an f32
+        // product truncated to an integer per index, as the reference's
+        // `(arange(t) * interval).astype(int32)` does, so a fractional
+        // interval never accumulates into the next span. Interval 1.0 and the
+        // untimed case are both `ti`.
+        let temporal_pos = |ti: i32| match time_interval {
+            Some(interval) => ((ti as f32) * interval) as i32,
+            None => ti,
+        };
+        // The next span starts one past the largest position on any axis.
+        let span = temporal_pos(llm_t - 1)
+            .checked_add(1)
+            .map(|t_span| t_span.max(llm_h).max(llm_w))
+            .and_then(|span| current_pos.checked_add(span).map(|_| span))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Qwen-VL MRoPE positions for grid ({t}, {h}, {w}) exceed the i32 range"
+                )
+            })?;
         for ti in 0..llm_t {
+            let t_pos = current_pos + temporal_pos(ti);
             for hi in 0..llm_h {
                 for wi in 0..llm_w {
-                    pos_ids[0].push(current_pos + ti);
+                    pos_ids[0].push(t_pos);
                     pos_ids[1].push(current_pos + hi);
                     pos_ids[2].push(current_pos + wi);
                 }
             }
         }
-        current_pos += llm_t.max(llm_h).max(llm_w);
-        visual_idx += 1;
+        current_pos += span;
+        run_idx += 1;
         st = i;
     }
 
@@ -1225,11 +1774,25 @@ fn qwen_vl_mrope_positions_from_tokens(
             pos_ids[2].push(p);
         }
     }
+    if let Some(group) = video_groups {
+        anyhow::bail!(
+            "Qwen-VL MRoPE video ended with {} temporal group run(s) still missing",
+            group.remaining
+        );
+    }
     if visual_idx != grid_thw.len() {
         anyhow::bail!(
-            "Qwen-VL MRoPE saw {} visual token run(s), but {} visual grid(s) were provided",
+            "Qwen-VL MRoPE saw {} visual grid(s) worth of token runs, but {} visual grid(s) \
+             were provided",
             visual_idx,
             grid_thw.len()
+        );
+    }
+    if !video_time_intervals.is_empty() && video_time_intervals.len() != video_idx {
+        anyhow::bail!(
+            "Qwen-VL MRoPE got {} video time interval(s) for {} video grid(s)",
+            video_time_intervals.len(),
+            video_idx
         );
     }
     debug_assert_eq!(pos_ids[0].len(), tokens.len());

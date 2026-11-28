@@ -23,13 +23,12 @@ use std::fs::File;
 use std::io::Read;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use memmap2::Mmap;
 use safetensors::{Dtype, SafeTensors};
 use sha2::{Digest, Sha256};
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -39,6 +38,12 @@ use crate::emitter::{
     phi4_audio_diagnostic_specs, phi4_audio_weight_specs,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, compiler_version_output, observe_float_tensor, production_artifact_contract,
+};
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, phi4_audio_operators,
+};
 use crate::weights::{bf16_to_f32, f16_to_f32};
 
 /// Immutable upstream checkpoint revision qualified by #874.
@@ -114,23 +119,8 @@ fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
     flags: &[S],
     graph: &str,
 ) -> Result<String, String> {
-    let version = Command::new(compiler)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("run {} --version: {error}", compiler.display()))?;
-    if !version.status.success() {
-        return Err(format!(
-            "{} --version failed: {}",
-            compiler.display(),
-            String::from_utf8_lossy(&version.stderr)
-        ));
-    }
-    generation_identity_from_version(
-        compiler,
-        flags,
-        graph,
-        String::from_utf8_lossy(&version.stdout).trim(),
-    )
+    let version = compiler_version_output(compiler)?;
+    generation_identity_from_version(compiler, flags, graph, version.as_str())
 }
 
 fn generation_identity_from_version<S: AsRef<str> + std::fmt::Debug>(
@@ -207,10 +197,11 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
     names
         .iter()
         .map(|name| {
-            map.get(name)
+            let file = map
+                .get(name)
                 .and_then(serde_json::Value::as_str)
-                .map(|file| model_dir.join(file))
-                .ok_or_else(|| format!("{} has no entry for `{name}`", index.display()))
+                .ok_or_else(|| format!("{} has no entry for `{name}`", index.display()))?;
+            crate::iree::index_shard_path(model_dir, &index, file)
         })
         .collect()
 }
@@ -246,6 +237,7 @@ fn decode_i32_scalar(bytes: &[u8]) -> Result<i32, String> {
 fn load_audio_weights(
     model_dir: &Path,
     config: &Phi4AudioConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<Vec<AuxiliaryWeight>, String> {
     let specs = phi4_audio_weight_specs(config);
     let names = specs
@@ -282,6 +274,7 @@ fn load_audio_weights(
                     spec.shape
                 ));
             }
+            observe_float_tensor(observer, tensor.dtype())?;
             let values = match tensor.dtype() {
                 Dtype::BF16 => bf16_to_f32(tensor.data()),
                 Dtype::F16 => f16_to_f32(tensor.data()),
@@ -344,9 +337,7 @@ fn load_audio_module(
 ) -> Result<IreeAuxiliaryModule, String> {
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
     let vmfb = cached_vmfb_path(
         &compiler,
         graph,
@@ -355,13 +346,23 @@ fn load_audio_module(
         artifact_name,
         frame_bucket,
     );
-    let weights = load_audio_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let mut observer = CheckpointSourceObserver::default();
+    let weights = load_audio_weights(model_dir, config, &mut observer)?;
+    let operators = phi4_audio_operators();
+    let contract = production_artifact_contract(
         entry_name,
         config_identity(config, frame_bucket, precision),
         generation_identity(&compiler, &flags, graph)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "phi4mm-audio",
+            operators: &operators,
+            precision,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(
             &compiler,
             graph,
@@ -719,7 +720,10 @@ impl Phi4AudioDiagnosticRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aux_manifest::{auxiliary_manifest_path, verify_auxiliary_manifest};
+    use crate::aux_manifest::{
+        AuxiliaryArtifactContract, auxiliary_manifest_path, ensure_qualified_auxiliary_artifact,
+        verify_auxiliary_manifest,
+    };
 
     fn published_config() -> Phi4AudioConfig {
         Phi4AudioConfig {

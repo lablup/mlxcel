@@ -133,10 +133,10 @@ fn bounded_detection_rejects_dflash_without_reading_weights() {
 #[test]
 fn shared_detection_errors_do_not_leak_absolute_catalog_paths() {
     let root = temp_dir("sanitized-detection-error");
-    let path = write_model(&root, "unsupported-embedding", "arcee");
+    let path = write_model(&root, "unsupported-embedding", "unported_dense_fixture");
     std::fs::write(
         path.join("config.json"),
-        r#"{"model_type":"arcee","architectures":["BertModel"]}"#,
+        r#"{"model_type":"unported_dense_fixture","architectures":["BertModel"]}"#,
     )
     .expect("config");
 
@@ -145,7 +145,10 @@ fn shared_detection_errors_do_not_leak_absolute_catalog_paths() {
         path,
         RouterModelSource::ModelsDir,
     ));
-    assert_eq!(entry.metadata.model_type.as_deref(), Some("arcee"));
+    assert_eq!(
+        entry.metadata.model_type.as_deref(),
+        Some("unported_dense_fixture")
+    );
     let reason = entry
         .metadata
         .unknown_reasons

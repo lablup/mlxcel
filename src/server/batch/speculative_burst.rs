@@ -91,6 +91,12 @@
 //!   one warning), B = 1 only, and gated on the block-versus-chain
 //!   exactness probe (`Lfm2Model::dflash_exactness_allows`) like the MTP
 //!   arms. The per-target plumbing lives in [`super::dflash_target`].
+//! - **DSpark / Inkling 2** (issue #3374): text-only requests on
+//!   [`crate::LoadedModel::Inkling2VLM`], paired with the DSpark drafter
+//!   bundled in the checkpoint's own `mtp.safetensors` (`--model-draft` is the
+//!   target directory). Greedy only, B = 1 only, gated on the exactness probe
+//!   (`Inkling2Model::dflash_exactness_allows`); image requests keep classic
+//!   decode through the multimodal gate.
 //! - **DFlash / Muse Glimmer** (issue #1343): text-only requests on
 //!   [`crate::LoadedModel::MuseGlimmerVLM`], paired with the Muse Glimmer
 //!   assistant drafter (`muse_glimmer_assistant`) through the same
@@ -524,12 +530,12 @@ pub(crate) fn mtp_prefill_suffix_start(
 ///   round-cost model that predicts them.
 /// - Batch-capable targets (the 31B + bf16 assistant): **on from Apple GPU
 ///   generation 15** ([`AppleSiliconGen::wide_quantized_projections`], which
-///   is M3, M4 and M5), classic decode below it.
+///   is M3 and every later enumerated generation), classic decode below it.
 ///
 /// The batch-capable half keyed on `has_neural_accelerator` (M5 only) until
 /// #1217 measured M3 Ultra on this pairing for the first time and found 1.95x
 /// to 2.65x on a host the old predicate declined. The rows are in
-/// `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
+/// `docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`.
 ///
 /// The discriminator is the `use_qmv_wide` split documented in
 /// `crate::models::speculative_exactness`, not the Neural Accelerator: from
@@ -583,7 +589,7 @@ pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
 /// profitability. Issue #1983 restores 31B QAT/non-QAT singleton exactness by
 /// matching classic attention geometry; that correction has a measured cost,
 /// so the pre-probe #1217 speedups are not promises for the corrected path.
-/// See docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md.
+/// See docs/benchmark_results/versions/v0.8.0.md#gemma4-31b-mtp-exactness-2026-09-26.
 /// Used by: Gemma 4 and Qwen 3.5 MTP policy fallback.
 ///
 /// `wide_quantized_projections` is the host's Apple GPU generation reduced to
@@ -747,7 +753,17 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             vlm.text_model.mtp_exactness_allows(block_size)
         }
-        LoadedModel::Inkling(_) | LoadedModel::InklingVLM(_) => true,
+        // Qwen3.8-Flash-Next (`qwen4_exp`, #2880) paired with the native
+        // `qwen4_exp_mtp` head: Metal plus the measured block-vs-chain probe.
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm.text_model.mtp_exactness_allows(block_size),
+        // Inkling (issue #1549): admitted unconditionally before, which on
+        // Apple GPU generation 15+ served temperature-0 streams that differed
+        // from classic decode at narrow verify widths. Same measured gate as
+        // the arms above. On an M3 Ultra the probe still declines with
+        // `qmv_wide` off (the `T = 1` convolution and attention kernels
+        // differ too), so only `MLXCEL_MTP_ALLOW_INEXACT=1` engages it there.
+        LoadedModel::Inkling(m) => m.mtp_exactness_allows(block_size),
+        LoadedModel::InklingVLM(vlm) => vlm.text.mtp_exactness_allows(block_size),
         // GLM-4.7-Flash (`glm4_moe_lite`, issue #1326) paired with the
         // `glm4_moe_lite_mtp` drafter `mlxcel split-mtp` produces. Plain MLA
         // over `KVCache`, no Metal-only kernel prerequisite: the whole
@@ -775,6 +791,7 @@ pub(crate) fn mtp_target_family_supported(model: &LoadedModel) -> bool {
             | LoadedModel::Qwen35Moe(_)
             | LoadedModel::Qwen35VLM(_)
             | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Qwen4ExpVLM(_)
             | LoadedModel::Inkling(_)
             | LoadedModel::InklingVLM(_)
             | LoadedModel::Glm4MoeLite(_)
@@ -1103,6 +1120,10 @@ pub(crate) enum BurstOutcome {
 /// without cloning.
 pub(crate) struct BurstContext<'a> {
     pub(crate) model: &'a LoadedModel,
+    /// The B=1 sequence's scheduler-owned layer state (issue #3254), which a
+    /// speculative target of a scheduler-owned family runs over. `None` for
+    /// every other family and for batched bursts.
+    pub(crate) layer_state: Option<&'a mut [mlxcel_core::cache::LayerState]>,
     pub(crate) tokenizer: &'a crate::tokenizer::MlxcelTokenizer,
     pub(crate) drafter_slot: &'a mut WorkerDrafterSlot,
     pub(crate) dispatch: &'a crate::server::SpeculativeDispatch,
@@ -1113,15 +1134,15 @@ pub(crate) struct BurstContext<'a> {
     /// the DFlash and batched burst arms.
     pub(crate) profile_probe_rounds: usize,
     pub(crate) prefill_chunk_size: usize,
-    /// Classic history-boundary prefill split for the B=1 sequence (issue
-    /// #2160); `None` for batched bursts and requests without one.
-    pub(crate) prefill_boundary: Option<usize>,
+    /// Classic snapshot-boundary prefill splits for the B=1 sequence (issue
+    /// #2160, #2885); empty for batched bursts and requests without one.
+    pub(crate) prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits,
     /// The scheduler's context bound (#1472), applied by the burst stream's
     /// finish step exactly as classic decode applies it (#2168).
     pub(crate) context_bound: ContextBound,
     /// The same split for each row of a batched window, in window order
     /// (issue #2190); empty for B=1 bursts.
-    pub(crate) prefill_boundaries: Vec<Option<usize>>,
+    pub(crate) prefill_boundaries: Vec<mlxcel_core::prefill_plan::PrefillSplits>,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1133,6 +1154,7 @@ impl<'a> BurstContext<'a> {
     fn reborrow(&mut self) -> BurstContext<'_> {
         BurstContext {
             model: self.model,
+            layer_state: self.layer_state.as_deref_mut(),
             tokenizer: self.tokenizer,
             drafter_slot: &mut *self.drafter_slot,
             dispatch: self.dispatch,
@@ -1174,7 +1196,7 @@ impl<'a> BurstContext<'a> {
 /// does NOT need a manual bind here — and adding one would
 /// double-bind. See `run_dflash_burst` below.
 fn run_mtp_burst(
-    ctx: BurstContext<'_>,
+    mut ctx: BurstContext<'_>,
     seq: &mut SequenceInfo,
     block_size: u32,
 ) -> Result<BurstSuccess, BurstOutcome> {
@@ -1217,6 +1239,18 @@ fn run_mtp_burst(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        // Qwen3.8-Flash-Next (#2880) pairs with the native `qwen4_exp_mtp`
+        // head; the wrapper exposes the text backbone's embed_tokens and
+        // lm_head. Metal-only for the same kind of reason as Qwen 3.5.
+        LoadedModel::Qwen4ExpVLM(_) if !mlxcel_core::metal_is_available() => {
+            tracing::warn!(
+                "MTP speculative dispatch declined: Qwen4-Exp MTP requires the Metal \
+                 backend (its temperature-0 exactness rests on the Metal precise \
+                 gated-delta kernel); falling back to classic decode"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         // GLM-4.7-Flash (#1326): the drafter borrows nothing; bind only
@@ -1225,9 +1259,9 @@ fn run_mtp_burst(
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), Inkling \
-                 (text or VLM), or GLM-4.7-Flash (glm4_moe_lite); \
-                 falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), \
+                 Qwen3.8-Flash-Next (qwen4_exp), Inkling (text or VLM), or \
+                 GLM-4.7-Flash (glm4_moe_lite); falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1416,9 +1450,18 @@ fn run_mtp_burst(
         // (Qwen attention caches are plain growing KVCaches), so no
         // block-size-derived constructor parameter.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
+            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::for_sequence(
                 qwen,
-                Some(seq.seq_id),
+                seq.seq_id,
+                Some(layer_state),
             )
             .with_prefill_start_offset(prefill_start_offset);
             drive_mtp_generator(
@@ -1435,11 +1478,44 @@ fn run_mtp_burst(
             )
         }
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-            let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
-                vlm,
+            // Qwen 3.5 state is the pool's (issue #3254). Without it the burst
+            // fails here instead of running on the shared fallback slot.
+            let Some(layer_state) = ctx.layer_state.take() else {
+                return Err(BurstOutcome::Error(format!(
+                    "MTP burst: sequence {} holds no scheduler-owned layer state",
+                    seq.seq_id
+                )));
+            };
+            let adapter =
+                crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::for_sequence(
+                    vlm,
+                    seq.seq_id,
+                    Some(layer_state),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        // Qwen3.8-Flash-Next (#2880): the adapter routes through the text
+        // backbone's per-sequence slot; its caches are plain growing
+        // KVCaches, so no block-size-derived constructor parameter.
+        LoadedModel::Qwen4ExpVLM(vlm) => {
+            let adapter = crate::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                &vlm.text_model,
                 Some(seq.seq_id),
             )
-            .with_prefill_start_offset(prefill_start_offset);
+            .with_prefill_start_offset(prefill_start_offset)
+            .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1680,6 +1756,8 @@ pub(crate) fn dflash_target_exactness_allows(
         LoadedModel::Lfm2VL(m) => m.exactness_allows(bs),
         LoadedModel::MuseGlimmerVLM(m) => m.exactness_allows(bs),
         LoadedModel::Laguna(m) => m.exactness_allows(bs),
+        LoadedModel::Inkling2VLM(m) => m.exactness_allows(bs),
+        LoadedModel::Raon1Mini(m) => m.exactness_allows(bs),
         _ => return None,
     })
 }
@@ -1711,6 +1789,12 @@ pub(crate) fn dflash_target_supports_batched(model: &LoadedModel) -> Option<bool
         LoadedModel::Laguna(_) => {
             <crate::models::LagunaWrapper as DFlashTargetModel>::supports_batched()
         }
+        LoadedModel::Inkling2VLM(_) => {
+            <crate::vision::Inkling2VlModel as DFlashTargetModel>::supports_batched()
+        }
+        LoadedModel::Raon1Mini(_) => {
+            <crate::models::Raon1MiniModel as DFlashTargetModel>::supports_batched()
+        }
         _ => return None,
     })
 }
@@ -1735,6 +1819,10 @@ pub(crate) fn dflash_burst_would_engage(
         && dflash_target_exactness_allows(model, block_size as usize) == Some(true)
         && !(drafter_slot.drafter_ref().is_some_and(|d| d.greedy_only())
             && !sampler_is_greedy(&seq.sampling))
+        && !(drafter_slot
+            .drafter_ref()
+            .is_some_and(|d| d.supports_sampled_verify())
+            && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling))
 }
 
 /// DFlash B=1 burst: a Qwen 3.5 text target (or VLM wrapper serving a
@@ -1812,7 +1900,8 @@ fn run_dflash_burst(
             "DFlash speculative dispatch declined: target is {:?}, expected Qwen 3.5 \
              text or VLM-wrapped text-only (DFlash drafter), LFM2 / LFM2.5 text or \
              LFM2-VL text-only (DSpark drafter), Muse Glimmer text-only (Muse Glimmer \
-             assistant drafter), or Laguna (Laguna DFlash drafter); falling back to \
+             assistant drafter), Laguna (Laguna DFlash drafter), Inkling 2 (its bundled \
+             DSpark drafter), or Raon-1 mini (DFlash2 drafter); falling back to \
              classic decode",
             model_variant_label(ctx.model),
         );
@@ -1861,6 +1950,23 @@ fn run_dflash_burst(
             seq.seq_id,
             seq.sampling.temperature,
             seq.sampling.top_k,
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+    // A drafter that samples its verify rows (Raon DFlash2, issue #3436)
+    // cannot carry a feedback sampler's state (Mirostat, adaptive-p) across
+    // them.
+    if ctx
+        .drafter_slot
+        .drafter_ref()
+        .is_some_and(|d| d.supports_sampled_verify())
+        && !mlxcel_core::drafter::dflash::sampled_verify::sampled_verify_serves(&seq.sampling)
+    {
+        tracing::warn!(
+            "DFlash speculative dispatch declined for seq {}: the request samples with a \
+             feedback sampler (Mirostat or adaptive-p), whose state the sampled verify rows \
+             cannot carry; serving it with classic decode",
+            seq.seq_id,
         );
         return Err(BurstOutcome::DeclineToClassic);
     }
@@ -1914,6 +2020,8 @@ fn run_dflash_burst(
                 ctx.drafter_slot,
                 cancel,
                 &logprobs_config,
+                (ctx.prefill_chunk_size, ctx.prefill_boundary),
+                Some(seq.seq_id),
             )?
         };
     }
@@ -1929,6 +2037,8 @@ fn run_dflash_burst(
         LoadedModel::Lfm2VL(m) => drive!(m),
         LoadedModel::MuseGlimmerVLM(m) => drive!(m),
         LoadedModel::Laguna(m) => drive!(m),
+        LoadedModel::Inkling2VLM(m) => drive!(m),
+        LoadedModel::Raon1Mini(m) => drive!(m),
         _ => {
             // Unreachable per the variant gate above. Defensive arm
             // rather than `unreachable!()` so a future LoadedModel
@@ -3063,14 +3173,17 @@ pub fn model_variant_label(model: &LoadedModel) -> &'static str {
         LoadedModel::Qwen35VLM(_) => "Qwen35VLM",
         LoadedModel::Qwen35Moe(_) => "Qwen35Moe",
         LoadedModel::Qwen35MoeVLM(_) => "Qwen35MoeVLM",
+        LoadedModel::Qwen4ExpVLM(_) => "Qwen4ExpVLM",
         LoadedModel::Inkling(_) => "Inkling",
         LoadedModel::InklingVLM(_) => "InklingVLM",
         LoadedModel::Lfm2(_) => "Lfm2",
         LoadedModel::Lfm2Moe(_) => "Lfm2Moe",
         LoadedModel::Lfm2VL(_) => "Lfm2VL",
         LoadedModel::Laguna(_) => "Laguna",
+        LoadedModel::Inkling2VLM(_) => "Inkling2VLM",
         LoadedModel::Glm4MoeLite(_) => "Glm4MoeLite",
         LoadedModel::MuseGlimmerVLM(_) => "MuseGlimmerVLM",
+        LoadedModel::Raon1Mini(_) => "Raon1Mini",
         _ => "other",
     }
 }
@@ -3110,7 +3223,7 @@ mod tests {
     /// M3 is the row this issue moved, and it moved on measurement: the
     /// 31B + bf16 assistant pairing runs 1.95x to 2.65x on an M3 Ultra that
     /// the previous `has_neural_accelerator` predicate declined
-    /// (`docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`).
+    /// (`docs/benchmark_results/versions/v0.6.0.md#mtp-b1-gate-m3ultra-2026-08-20`).
     #[test]
     fn mtp_b1_default_batch_capable_follows_gpu_generation() {
         use mlxcel_core::hardware::AppleSiliconGen;

@@ -1,0 +1,5 @@
+model,shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,ppl_reference,ppl_candidate,mla_paths_candidate
+deepseek-v2-lite-chat-4bit-mlx,decode1k,decompressed (MLXCEL_MLA_ABSORBED=0),default (absorbed fused),512,4,209,0,14.6514,14.6903,decompressed=216 absorbed_fused=13824
+deepseek-v2-lite-chat-4bit-mlx,decode4k,decompressed (MLXCEL_MLA_ABSORBED=0),default (absorbed fused),256,0,106,0,12.9935,12.9915,decompressed=108 absorbed_fused=6912
+kimi-vl-a3b-thinking-4bit,decode1k,composed (MLXCEL_MLA_FUSED_DECODE=0),fused (default),512,2,192,0,18.0403,17.9517,decompressed=216 absorbed_fused=13824
+kimi-vl-a3b-thinking-4bit,decode4k,composed (MLXCEL_MLA_FUSED_DECODE=0),fused (default),256,2,50,0,35.4533,35.5602,decompressed=108 absorbed_fused=6912

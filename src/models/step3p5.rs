@@ -23,15 +23,18 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{
     KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
 };
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -416,6 +419,15 @@ pub struct Step3p5Attention {
 }
 
 impl Step3p5Attention {
+    /// Head counts and head dim for the prefill mask choice (#3072).
+    fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -450,8 +462,18 @@ impl Step3p5Attention {
         // Update KV cache
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention. A mask-less multi-token forward is a
+        // single-row prefill whose model left the mask to MLX's causal mode
+        // or native window route (#3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -1219,7 +1241,21 @@ impl Step3p5Model {
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
         caches: &mut [Cache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
         _mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // The step3p7 VLM wrapper supplies pre-merged `(batch, seq, hidden)`
         // embeddings on prefill; text-only decode falls back to the token
@@ -1232,27 +1268,33 @@ impl Step3p5Model {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1] as i32;
 
-        // Create masks for prefill
-        let full_mask = if seq_len > 1 {
-            self.full_idx.map(|idx| {
-                let offset = caches[idx].as_interface().offset();
-                create_causal_mask(seq_len, offset)
-            })
-        } else {
-            None
-        };
+        // Create masks for prefill. Each is `None` for a decode row and where
+        // a single row can take MLX's causal mode or native window route
+        // instead and MLX fuses it (#3072). Full and sliding layers carry
+        // their own head counts.
+        let dtype = mlxcel_core::array_dtype(&h);
+        let batch = shape[0];
+        let full_mask = self.full_idx.and_then(|idx| {
+            let offset = caches[idx].as_interface().offset();
+            let attention = self.layers[idx].self_attn.prefill_attention();
+            prefill_causal_mask(seq_len, offset, batch, attention, dtype)
+        });
 
-        let swa_mask = if seq_len > 1 {
-            self.swa_idx.map(|idx| {
-                // Full-width windowed mask for a fresh single-pass prefill that
-                // exceeds the window (RotatingKVCache keeps all prefill keys),
-                // clamped mask otherwise. See issue #408.
-                let offset = caches[idx].as_interface().offset();
-                create_sliding_window_prefill_mask(seq_len, offset, self.config.sliding_window)
-            })
-        } else {
-            None
-        };
+        let swa_mask = self.swa_idx.and_then(|idx| {
+            // Full-width windowed mask for a fresh single-pass prefill that
+            // exceeds the window (RotatingKVCache keeps all prefill keys),
+            // clamped mask otherwise. See issue #408.
+            let offset = caches[idx].as_interface().offset();
+            prefill_sliding_window_mask(
+                seq_len,
+                offset,
+                self.config.sliding_window,
+                batch,
+                self.layers[idx].self_attn.prefill_attention(),
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
+        });
 
         // Pass through layers
         for (i, layer) in self.layers.iter().enumerate() {
@@ -1263,6 +1305,8 @@ impl Step3p5Model {
             };
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
+
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm and lm_head
         let h = self.norm.forward(&h);
@@ -1478,7 +1522,7 @@ impl LanguageModel for Step3p5Model {
         self.kv_cache_layer_modes.storage_modes(|layer_idx| {
             (layer_idx < self.config.num_hidden_layers && self.config.is_sliding(layer_idx))
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 
@@ -1596,6 +1640,32 @@ impl LanguageModel for Step3p5Model {
             || self.fresh_caches(),
             |caches| self.forward_with_caches(input_ids, input_embeddings, caches, mask),
         )
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The token and embeddings forwards share one body and one
+        // per-sequence state lookup; `None` embeddings embed `input_ids`.
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.forward_rows_with_caches(
+                    input_ids,
+                    input_embeddings,
+                    caches,
+                    mask,
+                    Some(last_pos),
+                )
+            },
+        ))
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

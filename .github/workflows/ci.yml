@@ -156,6 +156,12 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
+              # The cuda-oxide smoke spike package carries an empty [workspace]
+              # table and is not a member of the mlxcel workspace. It gates
+              # itself with its own pinned toolchain and check-lint.sh, so a
+              # change confined to it cannot move a cargo-fmt, cargo-deny or
+              # clippy verdict for mlxcel.
+              - '!spike/cuda-oxide-smoke/**'
             # The dependency graph alone: the manifests, the lockfile and the
             # policy file. `cargo-deny` reads nothing else, so a source-only PR
             # cannot change its verdict and does not need the job.
@@ -163,6 +169,7 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - '!spike/cuda-oxide-smoke/**'
             mlx_pin:
               - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
@@ -221,6 +228,9 @@ jobs:
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              # The cuda-oxide smoke package is not a workspace member, so its
+              # manifest cannot change what the ROCm build compiles or links.
+              - '!spike/cuda-oxide-smoke/**'
             # The Windows build glue and its tests: the build scripts and
             # build_support modules that lay out the Windows CUDA and ROCm
             # builds, the overlay sources that choose the runtime and include
@@ -260,6 +270,7 @@ jobs:
               - 'src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/jit_module.cpp'
               - 'scripts/mlxcelverse/cuda_ptx_cache_win_test*'
               - 'scripts/mlxcelverse/rocm_hsaco_cache_test*'
+              - '.github/workflows/ci.yml'
             # What can break the CPU-only link of `mlxcel-core`: the Rust
             # sources and manifests, plus the bridge C++ that `rust` above does
             # not match. The bug that motivated the `cpu-link` job lived in
@@ -278,6 +289,9 @@ jobs:
               - 'src/lib/mlxcelverse/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'src/lib/mlxcel-core/build_support/**'
+              # The cuda-oxide smoke spike package is outside the mlxcel
+              # workspace, so it cannot break the CPU-only link of mlxcel-core.
+              - '!spike/cuda-oxide-smoke/**'
             # The inputs the overlay host tests read: the overlay sources, the
             # scripts that inspect them, the pin-extraction script the record
             # check resolves the MLX commit from, and the two build scripts
@@ -557,6 +571,34 @@ jobs:
       - name: Check the dtype-key checker rejects a shrunk or moved scope
         run: bash scripts/ci/check_kernel_dtype_keys_test.sh
 
+  used-by:
+    name: used-by annotations
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `kernel-dtype-keys`: it needs no toolchain and runs in seconds, and it has
+    # to fire on both halves of a break. A model PR that adds a call to a shared
+    # helper breaks it, and so does a comment-only edit to an annotation, so the
+    # only path filter that would not miss one of them is every Rust file.
+    # The `Used by:` annotations on the top-level `pub fn`s of
+    # mlxcel-core's utils.rs and layers.rs record which models call a shared
+    # helper, and a wrong one reads as an answer: issue #1110 was filed against
+    # a `create_causal_mask` roster naming six families that had stopped
+    # calling it. The check resolves the real callers through `use`
+    # declarations and requires each annotation to account for every caller
+    # file by name or through the regenerating grep it carries (issue #1141). The second step is the
+    # checker's own negative coverage on a synthetic workspace, the pre-#1121
+    # roster included.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the Used by annotations account for every caller
+        run: python3 scripts/ci/check_used_by.py
+      - name: Check the used-by checker rejects a stale or absent annotation
+        run: bash scripts/ci/check_used_by_test.sh
+
   env-var-docs:
     name: env var docs
     # Deliberately not behind the `changes` filter, like `crate-versions` and
@@ -612,6 +654,29 @@ jobs:
       - name: Check the port-dispatch checker rejects an unvalidated wave64 port
         run: bash scripts/ci/check_kernel_port_dispatch_test.sh
 
+  ab-harness:
+    name: ab harness cleanup
+    # Not behind the `changes` filter, like its neighbours: no toolchain, about
+    # ten seconds, and a silent defect. `scripts/xla/ab_decode_pair.sh` builds
+    # each git-ref arm in a temporary worktree of about 2 GB. The arms were
+    # resolved in a command substitution, so the worktree registration was
+    # appended inside a subshell, the EXIT trap looped over nothing, and every
+    # run leaked both worktrees until /tmp (a tmpfs on the measurement host)
+    # filled and the next run died with `No space left on device` (#3108). The
+    # same harness read its measured rounds back from fixed /tmp files without
+    # noticing a lost one, so a ten-round run could report `n=3`. The test
+    # drives the real script with a `cargo` stub and asserts that every exit
+    # path removes its worktrees and that a missing round is refused.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the A/B harness removes its worktrees and rejects lost rounds
+        run: bash scripts/ci/ab_decode_pair_worktree_test.sh
+
   binary-assets:
     name: binary assets
     # Deliberately not behind the `changes` filter, for the same reason as
@@ -638,6 +703,10 @@ jobs:
         run: python3 scripts/ci/check_benchmark_raw_logs.py
       - name: Check the guard still fails on raw logs and stale entries
         run: bash scripts/ci/check_benchmark_raw_logs_test.sh
+      - name: Check benchmark CSV producers agree on one schema
+        run: python3 scripts/ci/check_benchmark_csv_schema.py
+      - name: Check the schema guard still fails on drift
+        run: bash scripts/ci/check_benchmark_csv_schema_test.sh
 
   windows-reserved-paths:
     name: Windows reserved paths
@@ -660,6 +729,10 @@ jobs:
         run: python3 scripts/ci/check_windows_reserved_paths.py
       - name: Check the guard still fails on reserved names and passes on look-alikes
         run: bash scripts/ci/check_windows_reserved_paths_test.sh
+      - name: Check technical reports sit in their minor-version folders
+        run: python3 scripts/ci/check_technical_reports_layout.py
+      - name: Check the report layout guard still fails on misplaced reports
+        run: python3 scripts/ci/check_technical_reports_layout.py --self-test
 
   cuda-arch-lists:
     name: CUDA architecture lists
@@ -804,7 +877,7 @@ jobs:
         with:
           node-version: '26.5.1'
       - name: Install pnpm
-        run: npm install --global pnpm@12.16.1
+        run: npm install --global pnpm@12.23.0
       - name: Install WebUI dependencies
         run: pnpm --dir webui install --frozen-lockfile
       - name: Typecheck WebUI
@@ -964,7 +1037,7 @@ jobs:
         with:
           node-version: '26.5.1'
       - name: Install pnpm for real-router browser harness
-        run: npm install --global pnpm@12.16.1
+        run: npm install --global pnpm@12.23.0
       - name: Install WebUI dependencies for real-router browser harness
         run: pnpm --dir webui install --frozen-lockfile
       - name: Install Chromium runtime for real-router browser harness
@@ -1125,6 +1198,9 @@ jobs:
       # moved the score by more than the 2 percent budget), and then fails closed, naming each
       # process, if any GPU compute process remains. The step timeout covers both 600-second lock
       # waits and the 600-second quiet wait on top of the 45 minutes the gate itself was given.
+      # The precheck also refuses, as an infrastructure failure (#2940), when $RUNNER_TEMP has less
+      # than 5 GB free, and a verifier failure whose log shows ENOSPC/EDQUOT/EIO is reported as
+      # `activity gate infrastructure failure` instead of a performance verification failure.
       - name: Run Activity performance gate with the hidden acceptance deferred
         timeout-minutes: 75
         env:
@@ -1143,6 +1219,7 @@ jobs:
             --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
             --run-root "$RUNNER_TEMP" \
             --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --min-free-gb 5 \
             --quiet-timeout 600
           full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
           summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
@@ -1609,7 +1686,7 @@ jobs:
   # no sm_70 implementation. Catching those needs nvcc pointed at sm_70, not a
   # Volta card, and no GPU runner is involved here. The runtime half stays
   # uncovered, and the decision to leave it uncovered is recorded in
-  # `docs/benchmark_results/volta-sm70-baseline-2026-08-31.md` (issue #1538)
+  # `docs/benchmark_results/versions/v0.7.0.md#volta-sm70-baseline-2026-08-31` (issue #1538)
   # together with what a GPU-backed Volta job would and would not add: there is
   # no Volta runner, no release artifact targets sm_70, and #1537 already turns
   # an architecture mismatch into a named startup error instead of an opaque
@@ -2203,15 +2280,20 @@ jobs:
               "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
+          # Compile with the Clang that ships with this Visual Studio, not the
+          # image's standalone LLVM on PATH: each MSVC STL release requires a
+          # minimum Clang (STL1000), and the standalone LLVM lags behind it
+          # (LLVM 20.1.8 against MSVC 14.52, which requires Clang 22).
+          $cxx = Join-Path $vs 'VC\Tools\Llvm\x64\bin\clang++.exe'
+          if (-not (Test-Path $cxx)) { throw "no Visual Studio Clang at $cxx (component VC.Llvm.Clang)" }
+          "CXX=$($cxx -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: CUDA PTX cache host test
         shell: bash
-        env:
-          CXX: clang++
-        run: bash scripts/mlxcelverse/cuda_ptx_cache_win_test.sh
+        run: |
+          "$CXX" --version | head -n 1
+          bash scripts/mlxcelverse/cuda_ptx_cache_win_test.sh
       - name: ROCm kernel cache host test
         shell: bash
-        env:
-          CXX: clang++
         run: bash scripts/mlxcelverse/rocm_hsaco_cache_test.sh
 
   # ============================================================================

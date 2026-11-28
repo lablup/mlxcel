@@ -238,6 +238,62 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
         );
     }
 
+    fn supports_per_row_accepts(&self) -> bool {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::supports_per_row_accepts(
+            &self.text_model,
+        )
+    }
+
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::row_layout_supported(
+            &self.text_model,
+            caches,
+        )
+    }
+
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        <crate::models::Qwen35Model as mlxcel_core::drafter::dflash::SpeculativeTarget>::batch_cache_offset(
+            caches,
+        )
+    }
+
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.text_model.forward_speculative_rows(
+            verify_input,
+            caches,
+            capture_layer_ids,
+            row_valid_ends,
+        )
+    }
+
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = self.text_model.rollback_speculative_cache_rows(
+            caches,
+            &verify_out.gdn_states,
+            accepted,
+            Some(row_valid_ends_pre),
+            block_size,
+        );
+    }
+
     fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
         debug_assert!(
             !verify_out.hidden_states.is_empty(),
@@ -320,6 +376,63 @@ impl LanguageModel for Qwen35VLModel {
         )
     }
 
+    // The prefill's last-logits entry points go to the text model, which
+    // projects only the sampled row through the LM head (#3045); the trait
+    // default would materialize the full-sequence logits behind this wrapper.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits(
+            &self.text_model,
+            input_ids,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits_with_sequence_id(
+            &self.text_model,
+            input_ids,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        mlxcel_core::generate::LanguageModel::forward_last_logits_with_embeddings_and_sequence_id(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        )
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         mlxcel_core::generate::LanguageModel::release_sequence_state_by_id(
             &self.text_model,
@@ -377,6 +490,29 @@ impl LanguageModel for Qwen35VLModel {
 
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         mlxcel_core::generate::LanguageModel::sequence_state_layout(&self.text_model)
+    }
+
+    // The text model's state is scheduler-owned (issue #3254), so the
+    // wrapper forwards the whole surface: the table, the state builder, the
+    // snapshot vocabulary and the forward.
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        mlxcel_core::generate::LanguageModel::layer_state_kinds(&self.text_model)
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        mlxcel_core::generate::LanguageModel::make_layer_state(&self.text_model)
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        mlxcel_core::generate::LanguageModel::layer_state_snapshot_spec(&self.text_model)
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        mlxcel_core::generate::LanguageModel::forward_layer_state(&self.text_model, request, rows)
     }
 
     fn sync_sequence_storage(
@@ -456,6 +592,30 @@ impl LanguageModel for Qwen35VLModel {
             &self.text_model,
             seq_id,
             snapshot,
+        )
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::state_checkpoint_from_snapshot(
+            &self.text_model,
+            snapshot,
+        )
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state_from_checkpoint(
+            &self.text_model,
+            seq_id,
+            checkpoint,
+            donor,
         )
     }
 

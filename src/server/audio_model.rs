@@ -78,8 +78,29 @@ pub struct AudioTranscribeInput {
     pub translate: bool,
 }
 
+/// One decoded window of a speech-to-text request.
+///
+/// One segment is produced per consecutive 30 s Whisper window, so `start` and
+/// `end` are window boundaries rather than sentence timestamps. Word- and
+/// timestamp-token level segmenting stays out of scope (see the follow-up note
+/// in `src/models/whisper/mod.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptSegment {
+    /// Zero-based index of the window within the request.
+    pub id: usize,
+    /// Window start offset in mel frames (100 per second), matching the
+    /// OpenAI `verbose_json` `seek` field.
+    pub seek: usize,
+    /// Window start in seconds from the beginning of the source audio.
+    pub start: f32,
+    /// Window end in seconds, clamped to the source audio duration.
+    pub end: f32,
+    /// Text decoded from this window.
+    pub text: String,
+}
+
 /// Result of a speech-to-text request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AudioTranscribeOutput {
     /// Recognized text.
     pub text: String,
@@ -87,6 +108,9 @@ pub struct AudioTranscribeOutput {
     pub language: Option<String>,
     /// Source audio duration in seconds, surfaced in verbose responses.
     pub duration_seconds: Option<f32>,
+    /// Per-window segments in source order; empty when the engine reports no
+    /// window boundaries.
+    pub segments: Vec<TranscriptSegment>,
 }
 
 /// Decoded request for the text-to-speech direction.

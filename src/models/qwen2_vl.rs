@@ -91,6 +91,20 @@ fn default_bits() -> i32 {
 }
 
 impl Qwen2VLConfig {
+    /// Give the config the layout of a ModelOpt NVFP4 export's repacked
+    /// linears: 4-bit codes in the 16-element blocks the transcode keeps.
+    ///
+    /// Such an export has no MLX `quantization` block, and without one
+    /// [`Self::group_size`] and [`Self::bits`] are 0, which the quantized
+    /// loaders refuse. A config that already has the block is left alone.
+    ///
+    /// Used by: `load_qwen2_5_vl` (`src/loading/vlm_qwen.rs`)
+    pub(crate) fn declare_modelopt_nvfp4_layout(&mut self) {
+        self.quantization.get_or_insert(QuantConfig {
+            group_size: crate::models::sanitize::NVFP4_SOURCE_GROUP_SIZE as i32,
+            bits: 4,
+        });
+    }
     fn num_kv_heads(&self) -> usize {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)
     }
@@ -448,6 +462,11 @@ impl Attention {
                     0,
                 )
             }
+        } else if l > 1 {
+            // A mask-less multi-token forward is a single-row prefill whose
+            // causality MLX's causal mode supplies (`prefill_causal_mask`,
+            // #3051).
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
         } else {
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -672,6 +691,16 @@ pub struct Qwen2VLModel {
 }
 
 impl Qwen2VLModel {
+    /// Head counts and head dim for [`mlxcel_core::utils::prefill_causal_mask`]
+    /// (#3051).
+    fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self._config.num_attention_heads,
+            self._config.num_kv_heads(),
+            self._config.head_dim(),
+        )
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &Qwen2VLConfig) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
@@ -791,6 +820,28 @@ impl Qwen2VLModel {
         self.lm_head.forward(&h)
     }
 
+    /// [`Self::forward_for_sequence`] projecting only position `last_pos`
+    /// through the LM head: `[B, 1, vocab]`, the row a prefill samples
+    /// (#3070). The MRoPE entry for `seq_id` is resolved exactly as in the
+    /// full forward, and the final norm acts per position, so the row equals
+    /// the full forward's.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` of `Qwen2VLModel` and of the
+    /// Qwen2-VL / Qwen2.5-VL wrappers.
+    pub(crate) fn last_logits_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden(input_ids, input_embeddings, caches, mask, seq_id);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
     /// Everything [`Self::forward_for_sequence`] does except the head:
     /// returns the `[B, L, hidden_size]` states after the final norm.
     ///
@@ -883,12 +934,22 @@ impl Qwen2VLModel {
         // byte-identical to the untrimmed path. `cache_offset` stays monotonic
         // above because position_ids/RoPE need absolute positions. See issue
         // #421 (mirrors #419/#420).
+        // A single-row prefill takes MLX's causal mode instead of the array
+        // (`prefill_causal_mask`, #3051); the attention layer routes a
+        // mask-less multi-token forward through `causal_attention`, whose
+        // bottom-right alignment matches the `live_len` offset below.
         let auto_mask;
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            auto_mask = mlxcel_core::utils::prefill_causal_mask(
+                seq_len,
+                caches[0].live_len(),
+                batch,
+                self.prefill_attention(),
+                mlxcel_core::array_dtype(&h),
+            );
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be
@@ -1160,6 +1221,25 @@ impl mlxcel_core::generate::LanguageModel for Qwen2VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.last_logits_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn forward_batched_with_ids(

@@ -15,6 +15,7 @@
 use super::{GraniteVisionVLModel, Phi3VLModel, Phi4SigLipVLModel};
 use crate::LanguageModel;
 use crate::models::embedding_test_support::mlx_test_guard;
+use crate::models::last_row_logits_harness::last_row_case;
 use crate::vision::config::VisionConfig;
 use crate::vision::connectors::mlp::MLPProjector;
 use crate::vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
@@ -134,13 +135,11 @@ fn assert_runtime_delegation<M: LanguageModel>(model: &M) {
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(model);
 }
 
-#[test]
-fn phi3_vl_delegates_native_batched_decode_to_text_tower() {
-    let _guard = mlx_test_guard();
+fn tiny_phi3_vl() -> Phi3VLModel {
     let mut projector_weights = WeightMap::new();
     insert_linear(&mut projector_weights, "img_projection.0", 32, 16, 17);
     insert_linear(&mut projector_weights, "img_projection.2", 32, 32, 19);
-    let model = Phi3VLModel {
+    Phi3VLModel {
         text_model: crate::models::phi3::tests::tiny_longrope_model(),
         vision_encoder: tiny_siglip_vision("vision_tower.vision_model"),
         glb_gn: filled(&[1, 1, 16], 23),
@@ -161,17 +160,29 @@ fn phi3_vl_delegates_native_batched_decode_to_text_tower() {
         .expect("second Phi3-V projector builds"),
         processor: crate::vision::processors::phi3_v::Phi3VProcessor::new(1),
         image_dim_out: 4,
-    };
-    assert_runtime_delegation(&model);
+    }
 }
 
 #[test]
-fn phi4_siglip_vl_delegates_native_batched_decode_to_text_tower() {
+fn phi3_vl_delegates_native_batched_decode_to_text_tower() {
     let _guard = mlx_test_guard();
+    assert_runtime_delegation(&tiny_phi3_vl());
+}
+
+// The wrappers hand the prefill to the text tower's last-row projection on
+// both the text and the merged-embeddings path (#3070).
+last_row_case!(phi3_vl_last_row_logits, tiny_phi3_vl, embeddings);
+last_row_case!(
+    phi4_siglip_vl_last_row_logits,
+    tiny_phi4_siglip_vl,
+    embeddings
+);
+
+fn tiny_phi4_siglip_vl() -> Phi4SigLipVLModel {
     let mut projector_weights = WeightMap::new();
     insert_linear(&mut projector_weights, "mm_projector_linear1", 32, 4, 31);
     insert_linear(&mut projector_weights, "mm_projector_linear2", 32, 32, 37);
-    let model = Phi4SigLipVLModel {
+    Phi4SigLipVLModel {
         text_model: crate::models::phi3::tests::tiny_longrope_model(),
         vision_tower: tiny_phi4_siglip_vision("vision_tower"),
         mm_projector_linear1: mlxcel_core::layers::UnifiedLinear::from_weights(
@@ -191,14 +202,17 @@ fn phi4_siglip_vl_delegates_native_batched_decode_to_text_tower() {
         processor: crate::vision::processors::phi4_siglip::Phi4SigLipProcessor::new(1, 1, 4),
         select_layer: -1,
         eos_token_ids: vec![2],
-    };
-    assert_runtime_delegation(&model);
+    }
 }
 
 #[test]
-fn granite_vision_delegates_native_batched_decode_to_text_tower() {
+fn phi4_siglip_vl_delegates_native_batched_decode_to_text_tower() {
     let _guard = mlx_test_guard();
-    let model = GraniteVisionVLModel {
+    assert_runtime_delegation(&tiny_phi4_siglip_vl());
+}
+
+fn tiny_granite_vision() -> GraniteVisionVLModel {
+    GraniteVisionVLModel {
         text_model: crate::models::popular_dense_batched_decode_tests::tiny_granite_model(),
         vision_tower: tiny_siglip_vision("vision_tower.vision_model"),
         projector: tiny_projector("multi_modal_projector", 4, 8),
@@ -209,6 +223,19 @@ fn granite_vision_delegates_native_batched_decode_to_text_tower() {
         feature_side: 2,
         base_tokens: 4,
         eos_token_id: 2,
-    };
-    assert_runtime_delegation(&model);
+    }
 }
+
+#[test]
+fn granite_vision_delegates_native_batched_decode_to_text_tower() {
+    let _guard = mlx_test_guard();
+    assert_runtime_delegation(&tiny_granite_vision());
+}
+
+// The wrapper's text and embeddings prefills both reach Granite's last-row
+// projection, `logits_scaling` included (#3070).
+crate::models::last_row_logits_harness::last_row_case!(
+    granite_vision_last_row_logits,
+    tiny_granite_vision,
+    embeddings
+);

@@ -55,15 +55,19 @@ pub(crate) fn qwen35_text_config(config: &serde_json::Value) -> Result<serde_jso
         text_config_obj.insert("quantization".to_string(), config["quantization"].clone());
     }
 
-    // A vendor fine-grained FP8 release declares `quantization_config` and no
-    // `quantization`; the weights are converted to MLX-native mxfp8 at load,
-    // so the config has to say so before the model constructor reads it.
+    // An FP8 release declares `quantization_config` and no `quantization`; the
+    // weights are converted to MLX-native mxfp8 at load, so the config has to
+    // say so before the model constructor reads it.
     if let Some(detected) =
-        models::qwen_fp8_block_quantization(config).map_err(|error| anyhow::anyhow!("{error}"))?
+        models::fp8_checkpoint_quantization(config).map_err(|error| anyhow::anyhow!("{error}"))?
     {
-        models::merge_fp8_block_quantization(&mut text_config, detected)
+        models::merge_fp8_quantization(&mut text_config, detected)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    // Neither does an NVFP4 export from ModelOpt or compressed-tensors, whose
+    // repacked linears keep 16-element blocks.
+    models::merge_modelopt_nvfp4_quantization(&mut text_config, config, None)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     Ok(text_config)
 }
@@ -83,7 +87,9 @@ enum SpecialWeightLoaderKind {
     KimiK3,
     Inkling,
     Longcat,
+    LongcatSparse,
     Rwkv7,
+    Z1t,
 }
 
 fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoaderKind> {
@@ -107,7 +113,9 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => {
             Some(SpecialWeightLoaderKind::Longcat)
         }
+        ModelType::LongcatFlashSparse => Some(SpecialWeightLoaderKind::LongcatSparse),
         ModelType::Rwkv7 => Some(SpecialWeightLoaderKind::Rwkv7),
+        ModelType::Z1t => Some(SpecialWeightLoaderKind::Z1t),
         _ => None,
     }
 }
@@ -130,14 +138,12 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map_err(|err| anyhow::anyhow!("Failed to parse config: {}", err))?;
             args.validate_supported()?;
             let owned = copy_weight_map(weights);
-            let owned = match models::qwen_fp8_block_quantization(&value)
-                .map_err(|error| anyhow::anyhow!("{error}"))?
-            {
-                Some(detected) => models::requantize_block_fp8_weights(owned, detected.block_rows)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?,
-                None => owned,
-            };
-            let owned = models::qwen3_5::sanitize_moe_weights(owned, &args);
+            let fp8 = models::fp8_checkpoint_quantization(&value)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let owned = models::requantize_fp8_weights(owned, fp8)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let owned = models::qwen3_5::sanitize_moe_weights(owned, &args)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             let model = models::Qwen35Model::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             if model_type == ModelType::Qwen35Moe {
@@ -152,7 +158,7 @@ pub(crate) fn try_load_special_model_from_weights(
             let language_model = models::gemma3n::Gemma3nLanguageModel::from_weights(
                 weights,
                 &config,
-                "language_model.model",
+                models::gemma3n::text_only_language_model_prefix(weights),
             )
             .map_err(|err| anyhow::anyhow!("{}", err))?;
             LoadedModel::Gemma3n(models::Gemma3nModel {
@@ -254,7 +260,8 @@ pub(crate) fn try_load_special_model_from_weights(
                 .map(|name| models::nemotron_h::BlockType::from_str(name))
                 .collect();
             let owned = copy_weight_map(weights);
-            let owned = models::NemotronHModel::sanitize_weights(owned, &args);
+            let owned = models::NemotronHModel::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
             let model = models::NemotronHModel::from_weights(args, owned, block_types)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             LoadedModel::NemotronH(model)
@@ -307,12 +314,29 @@ pub(crate) fn try_load_special_model_from_weights(
                 LoadedModel::LongcatFlash(model)
             }
         }
+        SpecialWeightLoaderKind::LongcatSparse => {
+            let args: models::longcat_flash_sparse::LongcatFlashSparseConfig =
+                super::parse_model_config(config_str)?;
+            let owned = copy_weight_map(weights);
+            let owned = models::longcat_flash_sparse::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            let model = models::LongcatFlashSparseModel::from_weights(&owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            LoadedModel::LongcatFlashSparse(model)
+        }
         SpecialWeightLoaderKind::Rwkv7 => {
             let args: models::rwkv7::Rwkv7Config = super::parse_model_config(config_str)?;
             let mut model = models::Rwkv7::from_weights(weights, args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             model.set_eos_token_ids(super::read_eos_token_ids(model_path));
             LoadedModel::Rwkv7(model)
+        }
+        SpecialWeightLoaderKind::Z1t => {
+            let args: models::z1t::Z1tConfig = super::parse_model_config(config_str)?;
+            let mut model = models::Z1t::from_weights(weights, args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
+            model.set_eos_token_ids(super::read_eos_token_ids(model_path));
+            LoadedModel::Z1t(model)
         }
     }))
 }

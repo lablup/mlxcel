@@ -41,8 +41,14 @@ src/
   that picks the dense or paged kernel from the storage behind the cache
   ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)), plus the
   `KvAttention` trait, `RotatingKVCache::attend`, `ChunkedKVCache::attend` and
-  `cache::attend_batched_rows` that the model-owned families (Gemma 3, Llama 4)
-  attend through ([ADR 0009](adr/0009-engine-step-api.md)).
+  `cache::attend_batched_rows` that the model-owned families (Llama 4) and the
+  scheduler-owned ones (Gemma 3) attend through
+  ([ADR 0009](adr/0009-engine-step-api.md)).
+- `src/lib/mlxcel-core/src/cache/layer_state.rs`: `LayerStateKind`,
+  `LayerState` and `RecurrentState`, the per-layer sequence state the pool
+  owns for a scheduler-owned family and hands to
+  `LanguageModel::forward_layer_state`
+  ([ADR 0010](adr/0010-scheduler-owned-sequence-state.md)).
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
@@ -204,15 +210,18 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
   `MLXCEL_PAGED_ATTENTION_V2=1`), and Gumbel-max sampling.
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
-- ROCm (experimental, `--features rocm`) runs the vendored ROCm backend from
-  `src/lib/mlxcelverse/overlays/rocm/`. The build passes the HIP `gfx` targets
-  through `MLX_ROCM_ARCHITECTURES` (default: the targets `rocminfo` reports),
-  links the backend's kernel archive and the ROCm libraries, and embeds
-  `$ROCM_PATH/lib` as an rpath. The fused launchers above choose CUDA whenever
+- ROCm (supported since 0.8, `--features rocm`) runs the vendored ROCm backend from
+  `src/lib/mlxcelverse/overlays/rocm/` on Linux and on Windows x86_64 MSVC. On
+  Linux the build passes the HIP `gfx` targets through `MLX_ROCM_ARCHITECTURES`
+  (default: the targets `rocminfo` reports), links the backend's kernel archive
+  and the ROCm libraries, and embeds `$ROCM_PATH/lib` as an rpath. The Windows
+  build links the SDK import libraries and delay-loads the ROCm DLLs from one
+  relocatable runtime directory. The fused launchers above choose CUDA whenever
   Metal is unavailable, so on ROCm they take their MLX graph fallbacks where one
   exists; routing them by backend kind is lablup/mlxcel#1803. See
-  [Linux with AMD ROCm](installation.md#linux-with-amd-rocm-experimental) for
-  status and known gaps.
+  [Linux with AMD ROCm](installation.md#linux-with-amd-rocm) and
+  [Windows with AMD ROCm](installation.md#windows-with-amd-rocm) for status and
+  known gaps.
 
 ## Distributed and multi-device
 

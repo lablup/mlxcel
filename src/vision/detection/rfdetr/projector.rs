@@ -43,8 +43,22 @@ impl Projector {
                 .map(|index| Bottleneck::from_weights(weights, &format!("{prefix}.m.{index}")))
                 .collect::<Result<_, _>>()?,
             second: ConvNorm::from_weights(weights, &format!("{prefix}.cv2"), 256, 1)?,
-            norm: load_norm(weights, "projector.stages.0.1", 1.0e-5)?,
+            norm: load_norm(weights, "projector.stages.0.1", 1.0e-6)?,
         })
+    }
+
+    /// Every LayerNorm eps in forward order: `cv1`, the bottleneck `cv1` /
+    /// `cv2` pairs, `cv2`, then the final norm.
+    #[cfg(test)]
+    pub(super) fn norm_eps(&self) -> Vec<f32> {
+        let mut eps = vec![self.first.norm_eps()];
+        for bottleneck in &self.bottlenecks {
+            eps.push(bottleneck.first.norm_eps());
+            eps.push(bottleneck.second.norm_eps());
+        }
+        eps.push(self.second.norm_eps());
+        eps.push(self.norm.eps);
+        eps
     }
 
     pub fn forward(&self, features: &[UniquePtr<MlxArray>]) -> Result<UniquePtr<MlxArray>, String> {

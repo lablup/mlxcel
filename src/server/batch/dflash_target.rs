@@ -118,6 +118,27 @@ impl DFlashVerifyOutput for crate::models::laguna_speculative::LagunaVerifyOutpu
     }
 }
 
+impl DFlashVerifyOutput for crate::models::inkling2::speculative::Inkling2VerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        self.logits
+            .as_ref()
+            .expect("Inkling 2 verify output must carry logits")
+    }
+
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
+impl DFlashVerifyOutput for crate::models::raon1_mini::speculative::Raon1MiniVerifyOutput {
+    fn logits(&self) -> &MlxArray {
+        &self.logits
+    }
+    fn hidden_states(&self) -> &[UniquePtr<MlxArray>] {
+        &self.hidden_states
+    }
+}
+
 impl DFlashVerifyOutput for crate::models::muse_glimmer::VerifyOutput {
     fn logits(&self) -> &MlxArray {
         self.logits
@@ -147,12 +168,20 @@ pub(crate) enum DFlashDrafterFamily {
     MuseAssistant,
     /// The Poolside Laguna DFlash drafter (issue #1351).
     Laguna,
+    /// The DSpark drafter bundled with an Inkling 2 checkpoint (issue #3374).
+    Inkling2DSpark,
+    /// The Raon-1 mini DFlash2 drafter (issue #3436).
+    RaonDFlash2,
 }
 
 impl DFlashDrafterFamily {
     /// Which family a loaded drafter is, read off its two self-reports.
     fn of(drafter: &dyn Drafter) -> Self {
-        if drafter.is_dspark() {
+        if drafter.is_inkling2_dspark() {
+            Self::Inkling2DSpark
+        } else if drafter.is_raon_dflash2() {
+            Self::RaonDFlash2
+        } else if drafter.is_dspark() {
             Self::DSpark
         } else if drafter.is_muse_assistant() {
             Self::MuseAssistant
@@ -189,6 +218,18 @@ pub(crate) trait DFlashTargetModel:
     /// prompt-cache prefix declines to classic decode on this path.
     fn make_dflash_caches(&self) -> Vec<Self::Cache>;
 
+    /// [`Self::make_dflash_caches`] for the burst of `seq_id`, for a target
+    /// whose forward depends on per-sequence state the scheduler set at
+    /// admission (Raon-1 mini's reasoning-effort alpha, issue #3436). The
+    /// default ignores the id.
+    fn make_dflash_caches_for(
+        &self,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+    ) -> Vec<Self::Cache> {
+        let _ = seq_id;
+        self.make_dflash_caches()
+    }
+
     /// Which prompt rows the first draft sees. Qwen 3.5 keeps the last
     /// position; DSpark wants every row.
     ///
@@ -200,10 +241,35 @@ pub(crate) trait DFlashTargetModel:
         FirstHiddenRows::LastPromptPosition
     }
 
+    /// The burst's prompt prefill. `chunk` and `boundary` are the scheduler's
+    /// classic partition of this prompt (`--prefill-chunk-size` and the
+    /// prompt-cache snapshot splits), which a target whose drafter-on text
+    /// must equal classic decode past one chunk mirrors (Inkling 2, issue
+    /// #3410). The default prefills through
+    /// `SpeculativeTarget::prefill_forward_with_capture_layers` unchanged.
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let _ = (chunk, boundary);
+        self.prefill_forward_with_capture_layers(prompt, caches, capture_layer_ids)
+    }
+
     /// Hook for a target whose caches need arming for a multi-row verify
     /// (for example a rotating buffer sized to the block). No-op by
     /// default; runs on the fresh caches before the prefill.
     fn enable_speculative_buffers(&self, _caches: &mut [Self::Cache], _block_size: usize) {}
+
+    /// Hook for a target that can capture only the newest `rows` prompt rows
+    /// at prefill, for a drafter that keeps a bounded context window
+    /// (`Drafter::context_window`, issue #3436). Runs on the fresh caches
+    /// before the prefill; the burst then tells the drafter how many rows
+    /// were left out. No-op by default (every row is captured).
+    fn limit_prefill_capture(&self, _caches: &mut [Self::Cache], _rows: usize) {}
 
     /// Whether a `block_size`-row verify block is byte-identical to the
     /// single-token decode chain on this host, and the burst may therefore
@@ -371,6 +437,97 @@ impl DFlashTargetModel for crate::models::LagunaWrapper {
     }
 }
 
+/// Raon-1 mini (issue #3436), driven by its DFlash2 drafter: every prompt row
+/// seeds the drafter context, the burst caches carry the sequence's
+/// reasoning-effort alpha, the width is gated by the exactness probe, and the
+/// burst is B = 1 only.
+impl DFlashTargetModel for crate::models::Raon1MiniModel {
+    fn make_dflash_caches(
+        &self,
+    ) -> Vec<crate::models::raon1_mini::speculative::Raon1MiniSpecCache> {
+        self.make_speculative_caches(None)
+    }
+    fn make_dflash_caches_for(
+        &self,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+    ) -> Vec<crate::models::raon1_mini::speculative::Raon1MiniSpecCache> {
+        self.make_speculative_caches(seq_id)
+    }
+    fn limit_prefill_capture(
+        &self,
+        caches: &mut [crate::models::raon1_mini::speculative::Raon1MiniSpecCache],
+        rows: usize,
+    ) {
+        crate::models::Raon1MiniModel::limit_prefill_capture(self, caches, rows);
+    }
+    /// The classic partition of the prompt: Raon-1 mini's prefill splits at
+    /// the prompt-cache snapshot boundaries (issue #3458), and drafted text
+    /// must equal the text of that split prefill.
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [crate::models::raon1_mini::speculative::Raon1MiniSpecCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        self.prefill_speculative_planned(prompt, caches, capture_layer_ids, chunk, boundary)
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.dflash_exactness_allows(block_size)
+    }
+    fn required_drafter_family() -> Option<DFlashDrafterFamily> {
+        Some(DFlashDrafterFamily::RaonDFlash2)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
+/// Inkling 2 (issue #3374), driven by the DSpark drafter bundled in its own
+/// checkpoint: every prompt row seeds the drafter context, the block width is
+/// gated by the exactness probe, and the burst is B = 1 only.
+impl DFlashTargetModel for crate::vision::Inkling2VlModel {
+    fn make_dflash_caches(&self) -> Vec<mlxcel_core::inkling_layer::InklingLayerCache> {
+        self.text.make_speculative_caches()
+    }
+    fn first_hidden_rows() -> FirstHiddenRows {
+        FirstHiddenRows::EveryPromptRow
+    }
+    fn prefill_burst(
+        &self,
+        prompt: &MlxArray,
+        caches: &mut [mlxcel_core::inkling_layer::InklingLayerCache],
+        capture_layer_ids: &[usize],
+        chunk: usize,
+        boundary: mlxcel_core::prefill_plan::PrefillSplits,
+    ) -> Self::VerifyOut {
+        let suppressed = crate::models::inkling2::speculative::suppression_map(
+            &LanguageModel::output_suppressed_token_ids(self),
+        );
+        self.text.prefill_speculative_planned(
+            prompt,
+            caches,
+            capture_layer_ids,
+            &suppressed,
+            chunk,
+            boundary,
+        )
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.text.dflash_exactness_allows(block_size)
+    }
+    fn required_drafter_family() -> Option<DFlashDrafterFamily> {
+        Some(DFlashDrafterFamily::Inkling2DSpark)
+    }
+    fn supports_batched() -> bool {
+        false
+    }
+}
+
 impl DFlashTargetModel for crate::vision::MuseGlimmerVlmModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::muse_glimmer::MuseCache> {
         self.text.make_speculative_caches()
@@ -449,6 +606,8 @@ fn required_family_pairing_error(
         DFlashDrafterFamily::DSpark => "an LFM2 DSpark drafter",
         DFlashDrafterFamily::MuseAssistant => "the Muse Glimmer assistant drafter",
         DFlashDrafterFamily::Laguna => "a Laguna DFlash drafter",
+        DFlashDrafterFamily::Inkling2DSpark => "the DSpark drafter bundled with Inkling 2",
+        DFlashDrafterFamily::RaonDFlash2 => "the Raon-1 mini DFlash2 drafter",
     };
     Some(match required {
         DFlashDrafterFamily::DSpark => format!(
@@ -478,6 +637,19 @@ fn required_family_pairing_error(
              residual streams it was trained on, at a width this target does not produce, \
              and its mask token id indexes a different vocabulary. Point --model-draft at a \
              Laguna DFlash drafter, or drop it to serve this model with classic decode."
+        ),
+        DFlashDrafterFamily::Inkling2DSpark => format!(
+            "the target is an Inkling 2 checkpoint and the drafter passed to --model-draft is \
+             {got}, not its bundled DSpark drafter. An Inkling 2 target drafts with the \
+             mtp.safetensors shipped in its own checkpoint: pass the same directory to \
+             --model-draft, or drop it to serve this model with classic decode."
+        ),
+        DFlashDrafterFamily::RaonDFlash2 => format!(
+            "the target is a Raon-1 mini checkpoint and the drafter passed to --model-draft is \
+             {got}, not KRAFTON/Raon-1-mini-dflash2. A Raon-1 mini target drafts with that \
+             speculator only: another drafter's fc projection reads residual streams of a width \
+             this target does not produce. Point --model-draft at Raon-1-mini-dflash2, or drop \
+             it to serve this model with classic decode."
         ),
         DFlashDrafterFamily::Dflash => format!(
             "the target admits only the Qwen 3.5 DFlash drafter and the drafter passed to \
@@ -522,6 +694,22 @@ fn first_hidden_for(
     }
 }
 
+/// Prompt rows before the first row of `first_hidden`: nonzero only under
+/// the every-row policy when the target captured just the newest rows of
+/// the prompt ([`DFlashTargetModel::limit_prefill_capture`], issue #3436).
+fn first_context_start(rows: FirstHiddenRows, prompt_len: usize, first_hidden: &MlxArray) -> usize {
+    match rows {
+        FirstHiddenRows::EveryPromptRow => {
+            let shape = mlxcel_core::array_shape(first_hidden);
+            let captured = shape
+                .get(shape.len().saturating_sub(2))
+                .map_or(0, |&n| usize::try_from(n).unwrap_or(0));
+            prompt_len.saturating_sub(captured)
+        }
+        FirstHiddenRows::LastPromptPosition => 0,
+    }
+}
+
 /// DFlash B = 1 burst on any [`DFlashTargetModel`]: prefill through the
 /// target's speculative verify hook, first-bonus and first-hidden
 /// extraction, then `DFlashGenerator::run`.
@@ -554,6 +742,8 @@ pub(crate) fn run_dflash_on_target<T>(
     drafter_slot: &mut WorkerDrafterSlot,
     cancel: &AtomicBool,
     logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    prefill_partition: (usize, mlxcel_core::prefill_plan::PrefillSplits),
+    seq_id: Option<mlxcel_core::cache::SequenceId>,
 ) -> Result<DFlashTargetRun, BurstOutcome>
 where
     T: DFlashTargetModel,
@@ -604,8 +794,11 @@ where
         )));
     }
 
-    let mut caches: Vec<T::Cache> = target.make_dflash_caches();
+    let mut caches: Vec<T::Cache> = target.make_dflash_caches_for(seq_id);
     target.enable_speculative_buffers(&mut caches, block_size as usize);
+    if let Some(window) = owned_drafter.context_window() {
+        target.limit_prefill_capture(&mut caches, window);
+    }
 
     // Prefill through the speculative verify hook, capturing the layers the
     // drafter checkpoint asks for (`target_layer_ids`).
@@ -616,8 +809,14 @@ where
         .unwrap_or_else(|| target.capture_layer_ids().to_vec());
     let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let prefill_verify_start = Instant::now();
-    let verify_out =
-        target.prefill_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+    let (chunk, boundary) = prefill_partition;
+    let verify_out = target.prefill_burst(
+        &prompt_arr,
+        &mut caches,
+        &capture_layer_ids,
+        chunk,
+        boundary,
+    );
     let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
 
     // First bonus from the last-position logits, under the request's
@@ -628,10 +827,14 @@ where
     let logits = verify_out.logits();
     let logits_shape = mlxcel_core::array_shape(logits);
     let vocab = logits_shape[2];
+    // The last logits row: every prompt row's for most targets, the last
+    // row only for a target whose plain prefill computes just that one
+    // (Raon-1 mini, issue #3436).
+    let last_row = logits_shape[1] - 1;
     let last_logits = mlxcel_core::slice(
         logits,
-        &[0, last_pos, 0],
-        &[logits_shape[0], last_pos + 1, vocab],
+        &[0, last_row, 0],
+        &[logits_shape[0], last_row + 1, vocab],
     );
     let (first_bonus_arr, first_bonus_adjusted_logits) =
         mlxcel_core::sampling::sample_token_optimized(&last_logits, sampling, token_history);
@@ -659,6 +862,8 @@ where
         concat_captured_hidden(hidden_states),
         last_pos,
     );
+    let first_context_start =
+        first_context_start(T::first_hidden_rows(), prompt_tokens.len(), &first_hidden);
     let first_hidden_ms = first_hidden_start.elapsed().as_secs_f64() * 1000.0;
 
     // Release the prefill's rollback snapshots before the round loop starts.
@@ -676,6 +881,9 @@ where
         block_size,
         mlxcel_core::drafter::dflash::round_loop::DEFAULT_MASK_TOKEN_ID,
     );
+    // A sampled verify row reads the history classic decode would (#3436).
+    generator.set_token_history(token_history.to_vec());
+    generator.set_first_context_start(first_context_start);
     let result = generator.run(
         target,
         target as &dyn LanguageModel,
@@ -712,6 +920,7 @@ where
                 zero_accept_rounds = diagnostics.zero_accept_rounds,
                 partial_accept_rounds = diagnostics.partial_accept_rounds,
                 full_accept_rounds = diagnostics.full_accept_rounds,
+                classic_steps = diagnostics.classic_steps,
                 prefill_verify_ms,
                 first_bonus_ms,
                 first_hidden_ms,
@@ -908,7 +1117,8 @@ where
                 clamped_rounds = output.clamped_rounds,
                 accept_lens = ?output.accept_lens,
                 committed_accept_lens = ?output.committed_accept_lens,
-                "DFlash batched burst accept lengths (walk vs committed after the uniform-accept clamp)"
+                "DFlash batched burst accept lengths (walk vs committed under the active accept policy; \
+                 clamped_rounds is non-zero only on the uniform-clamp arm)"
             );
             let mut rows: BatchedBurstTokens = Vec::with_capacity(batch_size);
             for (r, row_tokens) in output.tokens.into_iter().enumerate() {
@@ -976,6 +1186,27 @@ mod tests {
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&last),
             vec![18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
+        );
+    }
+
+    /// The drafter skips exactly the prompt rows a limited prefill did not
+    /// capture, and nothing under the last-position policy (issue #3436).
+    #[test]
+    fn first_context_start_counts_the_uncaptured_prompt_rows() {
+        let _runtime = crate::initialize_runtime();
+        let tail = mlxcel_core::zeros(&[1, 3, 6], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(
+            first_context_start(FirstHiddenRows::EveryPromptRow, 10, &tail),
+            7
+        );
+        assert_eq!(
+            first_context_start(FirstHiddenRows::EveryPromptRow, 3, &tail),
+            0
+        );
+        let last = mlxcel_core::zeros(&[1, 1, 6], mlxcel_core::dtype::FLOAT32);
+        assert_eq!(
+            first_context_start(FirstHiddenRows::LastPromptPosition, 10, &last),
+            0
         );
     }
 

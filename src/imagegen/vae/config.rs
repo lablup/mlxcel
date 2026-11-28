@@ -38,6 +38,12 @@ pub struct Flux2VaeConfig {
     pub out_channels: i32,
     pub latent_channels: i32,
     pub block_out_channels: Vec<i32>,
+    /// Diffusers `decoder_block_out_channels`: the decoder may be narrower than
+    /// the encoder (MOSS-Image ships the distilled small decoder, 96/192/384/384,
+    /// over a 128/256/512/512 encoder). Absent means the decoder mirrors the
+    /// encoder.
+    #[serde(default)]
+    pub decoder_block_out_channels: Option<Vec<i32>>,
     pub layers_per_block: i32,
     pub norm_num_groups: i32,
     pub mid_block_add_attention: bool,
@@ -55,6 +61,7 @@ impl Default for Flux2VaeConfig {
             out_channels: 3,
             latent_channels: 32,
             block_out_channels: vec![128, 256, 512, 512],
+            decoder_block_out_channels: None,
             layers_per_block: 2,
             norm_num_groups: 32,
             mid_block_add_attention: true,
@@ -90,6 +97,16 @@ impl Flux2VaeConfig {
     /// Check the fields the loader depends on.
     pub fn validate(&self) -> Result<()> {
         check_block_channels(&self.block_out_channels, self.norm_num_groups)?;
+        if let Some(decoder) = &self.decoder_block_out_channels {
+            check_block_channels(decoder, self.norm_num_groups)?;
+            if decoder.len() != self.block_out_channels.len() {
+                bail!(
+                    "FLUX.2 VAE decoder has {} blocks but the encoder has {}",
+                    decoder.len(),
+                    self.block_out_channels.len()
+                );
+            }
+        }
         if self.latent_channels < 1 || self.in_channels < 1 || self.out_channels < 1 {
             bail!("FLUX.2 VAE channel counts must be positive");
         }
@@ -100,6 +117,15 @@ impl Flux2VaeConfig {
             bail!("FLUX.2 VAE scaling_factor must be finite and non-zero");
         }
         Ok(())
+    }
+
+    /// The decoder's channel widths: `decoder_block_out_channels` when the
+    /// checkpoint narrows the decoder, the encoder's widths otherwise.
+    #[must_use]
+    pub fn decoder_channels(&self) -> &[i32] {
+        self.decoder_block_out_channels
+            .as_deref()
+            .unwrap_or(&self.block_out_channels)
     }
 
     /// Spatial downscale between pixels and the unpatchified latent grid.

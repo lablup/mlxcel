@@ -157,6 +157,9 @@ impl BatchScheduler {
             thinking_token_ids: None,
             prompt_cache: None,
             prompt_cache_seq_ctx: std::collections::HashMap::new(),
+            prompt_cache_prompt_end_stored: std::collections::HashSet::new(),
+            snapshot_growth_gate: super::prompt_cache::default_snapshot_growth_gate(),
+            prompt_cache_adopted_lineage: std::collections::HashMap::new(),
             prompt_cache_warmups: std::collections::VecDeque::new(),
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
@@ -424,8 +427,12 @@ impl BatchScheduler {
     ) -> (ContextRetentionPolicy, bool) {
         if self.max_kv_size.is_none()
             || !policy.context_shift
-            || self.engine.model().sequence_state_layout().backend
-                != SequenceStateBackend::ModelOwned
+            || !self
+                .engine
+                .model()
+                .sequence_state_layout()
+                .backend
+                .keeps_state_outside_kv_slice()
         {
             return (policy, false);
         }
@@ -595,6 +602,26 @@ impl BatchScheduler {
                 );
             }
         }
+        // Prompt lookup on Qwen3.8-Flash-Next (#2880) rewinds the model's
+        // own state, so its verify block must be byte-identical to the chain
+        // for the same reason an MTP block must, and the same gate decides it
+        // at the widest block a round can run: on GPU generation 15+ the
+        // probe fails under `qmv_wide` and passes once the gate switches it
+        // off for the process. A decline turns prompt lookup off for this
+        // worker rather than serving rows whose temperature-0 output could
+        // differ from classic decode.
+        if let crate::server::SpeculativeDispatch::PromptLookup { config, .. } =
+            &self.speculative_dispatch
+            && let crate::LoadedModel::Qwen4ExpVLM(vlm) = self.engine.model()
+            && !vlm.text_model.mtp_exactness_allows(config.max_draft + 1)
+        {
+            tracing::warn!(
+                block_size = config.max_draft + 1,
+                "prompt lookup declined on Qwen4-Exp: the verify block is not byte-identical \
+                 to the single-token chain on this GPU; serving classic decode"
+            );
+            self.speculative_dispatch = crate::server::SpeculativeDispatch::Disabled;
+        }
         self
     }
 
@@ -638,7 +665,9 @@ impl BatchScheduler {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "unknown-drafter".to_string());
-            let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
+            let target_id = target_model_id
+                .clone()
+                .unwrap_or_else(|| "unknown-target".to_string());
             let block = *block_size as usize;
             if block >= 2
                 && !crate::server::batch::speculative_burst::mtp_capable_target(
@@ -663,6 +692,39 @@ impl BatchScheduler {
         } else {
             false
         };
+        // A DFlash dispatch (issue #3374) has no adaptive policy, but the
+        // endpoint still names the pairing, and its exactness verdict, so a
+        // consumer can tell a served DFlash pairing from "no drafter". The
+        // probe is memoized per (model, width): running it here moves it off
+        // the first request, as the MTP warm-up above does.
+        if let crate::server::SpeculativeDispatch::DFlash {
+            draft_model_path,
+            block_size,
+            ..
+        } = &self.speculative_dispatch
+        {
+            let drafter_id = draft_model_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown-drafter".to_string());
+            let target_id = target_model_id
+                .clone()
+                .unwrap_or_else(|| "unknown-target".to_string());
+            let exact = crate::server::batch::speculative_burst::dflash_target_exactness_allows(
+                self.engine.model(),
+                *block_size as usize,
+            );
+            exactness_veto = Some(if exact == Some(false) {
+                MtpPolicySnapshot::exactness_declined(
+                    target_id,
+                    drafter_id,
+                    *block_size,
+                    crate::models::speculative_exactness::decline_reason(*block_size),
+                )
+            } else {
+                MtpPolicySnapshot::dflash_dispatch(target_id, drafter_id, *block_size)
+            });
+        }
         // Publish the resolved policy state for the supported read interface
         // (issue #1257). Doing it here, rather than letting the endpoint reach
         // into `self.mtp_policy`, is what keeps `MtpPolicy` single-threaded and
@@ -860,6 +922,17 @@ impl BatchScheduler {
     ///
     /// When `None` every hot path short-circuits on the `is_some()` check
     /// before any store access so the bit-exact baseline is preserved.
+    /// Replace the host-memory gate snapshot growth goes through, so a test
+    /// can simulate a host below its memory reserve (#3146).
+    #[cfg(test)]
+    pub(crate) fn with_snapshot_growth_gate(
+        mut self,
+        gate: Arc<mlxcel_core::host_memory::AvailabilityGate>,
+    ) -> Self {
+        self.snapshot_growth_gate = gate;
+        self
+    }
+
     pub fn with_prompt_cache(mut self, store: Option<Arc<PromptCacheStore>>) -> Self {
         self.prompt_cache = store;
         self

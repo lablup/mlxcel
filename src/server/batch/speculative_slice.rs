@@ -66,7 +66,7 @@
 //! restarts that drafter's draft context from empty; acceptance under
 //! concurrent rotation for that family is correspondingly worse than a
 //! single-request measurement shows (see
-//! `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`, issue #1165).
+//! `docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`, issue #1165).
 //!
 //! ## Streaming
 //!
@@ -424,7 +424,7 @@ impl MtpSliceJob {
     /// but draft quality: a park boundary restarts that drafter's draft
     /// context from empty, so acceptance under grant rotation is worse than
     /// a single-request measurement shows (see
-    /// `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`, issue
+    /// `docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`, issue
     /// #1165, uncharacterized).
     pub(crate) fn attach_drafter(&mut self, drafter: Box<dyn Drafter>) {
         debug_assert!(

@@ -106,11 +106,15 @@ fn deepseek_v2_switch_linear_rejects_quantization_params_that_would_abort_gather
 // and one without, compared through the full block including `o_proj`.
 //
 // The flag itself cannot be toggled inside one process (`absorbed_enabled` is a
-// `OnceLock`), so the test sets the folded field directly. That is the same
-// state the loader produces when the flag is on, and it is reachable because
-// this test module is compiled inside `deepseek_v2`.
+// `OnceLock`), so the test sets the folded field directly. Both states are
+// what the loader produces (absorbed by default, decompressed under
+// `MLXCEL_MLA_ABSORBED=0` or off Metal), and they are reachable because this test module
+// is compiled inside `deepseek_v2`.
 
 use super::{KVCache, MLAAttention, ModelArgs, load_mla_attention};
+
+#[path = "deepseek_v2_latent_option_tests.rs"]
+mod latent_option;
 use mlxcel_core::mla::{MlaAbsorbedProjections, MlaGeometry};
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -254,7 +258,9 @@ fn expanded_and_absorbed_mla_batched_decode_match_ragged_rows() {
     let _runtime = crate::initialize_runtime();
     let args = mla_test_args();
     let weights = mla_test_weights(&args, 0x2560);
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    // The expanded (decompressed) arm: clear the fold the default loads (#3131).
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    baseline.absorbed = None;
     assert_ragged_batched_attention_matches_rows(&baseline);
 
     let geometry = MlaGeometry {
@@ -357,9 +363,171 @@ fn absorbed_decode_preserves_each_row_layout_in_a_mixed_storage_batch() {
     );
 }
 
+/// An int8 cache on a latent whose rank is whole affine groups stores the
+/// latent quantized (issue #3155): the cold prefill dequantizes the window it
+/// just stored, a decode step attends on the packed rows, and a batched decode
+/// step that puts such a row between two fp16-latent rows returns what each
+/// row's own forward returns.
 #[test]
-fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
+fn int8_cache_stores_a_quantized_latent_and_decodes_like_its_own_row() {
     let _runtime = crate::initialize_runtime();
+    let mut args = mla_test_args();
+    args.kv_lora_rank = 64;
+    let weights = mla_test_weights(&args, 0x3155);
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let mut attn = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    attn.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&attn.kv_b_proj, geometry).expect("fold"));
+
+    let mut state = 0x3155u64;
+    let mut hidden = |tokens: usize| {
+        mlxcel_core::from_slice_f32(
+            &xorshift(&mut state, tokens * HIDDEN, 0.25),
+            &[1, tokens as i32, HIDDEN as i32],
+        )
+    };
+    let histories = [hidden(2), hidden(5), hidden(3)];
+    let nexts = [hidden(1), hidden(1), hidden(1)];
+    let int8 = mlxcel_core::cache::KVCacheMode::Int8;
+    let new_caches = || {
+        [
+            KVCache::new(),
+            mlxcel_core::layers::KVCache::new_with_mode(int8),
+            KVCache::new(),
+        ]
+    };
+    let mut want_caches = new_caches();
+    let mut got_caches = new_caches();
+    for caches in [&mut want_caches, &mut got_caches] {
+        for (cache, history) in caches.iter_mut().zip(&histories) {
+            let out = attn.forward(history, None, cache);
+            mlxcel_core::eval(&out);
+        }
+    }
+    for caches in [&want_caches, &got_caches] {
+        assert!(!caches[0].holds_quantized_latent());
+        assert!(caches[1].holds_quantized_latent());
+        assert_eq!(caches[1].seq_len(), 5);
+    }
+
+    let want_rows: Vec<_> = want_caches
+        .iter_mut()
+        .zip(&nexts)
+        .map(|(cache, next)| attn.forward(next, None, cache))
+        .collect();
+    let want_refs: Vec<&MlxArray> = want_rows.iter().filter_map(|row| row.as_ref()).collect();
+    let want = mlxcel_core::concatenate_many(&want_refs, 0);
+    let next_refs: Vec<&MlxArray> = nexts.iter().filter_map(|row| row.as_ref()).collect();
+    let next = mlxcel_core::concatenate_many(&next_refs, 0);
+    let got = {
+        let [a, b, c] = &mut got_caches;
+        let mut caches = [a, b, c];
+        attn.forward_batched_decode(&next, &mut caches)
+    };
+    mlxcel_core::eval(&got);
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(&got, &want, 1e-3, 1e-3)),
+        "a quantized-latent row in a batch must match its own forward"
+    );
+    assert_eq!(got_caches[1].seq_len(), 6);
+
+    // The quantized row stays close to the same history on an fp16 latent:
+    // the difference is the 8-bit codec, not a different attention.
+    let mut fp16 = KVCache::new();
+    let out = attn.forward(&histories[1], None, &mut fp16);
+    mlxcel_core::eval(&out);
+    let fp16_out = attn.forward(&nexts[1], None, &mut fp16);
+    let int8_out = want_rows[1].as_ref().unwrap();
+    assert!(
+        mlxcel_core::item_bool(&mlxcel_core::allclose(int8_out, &fp16_out, 5e-2, 5e-2)),
+        "int8 latent decode drifted from the fp16 latent"
+    );
+}
+
+/// A bf16 layer over an int8 latent keeps bf16 activations on the decompressed
+/// multi-token step (#3177). The window dequantizes to FP16, and bf16 against
+/// FP16 promotes to float32 in MLX, so without the cast back the step returned
+/// float32 and carried it through `o_proj` into the residual stream.
+#[test]
+fn a_bf16_layer_keeps_bf16_over_an_int8_latent() {
+    let _runtime = crate::initialize_runtime();
+    let bf16 = mlxcel_core::dtype::BFLOAT16;
+    let mut args = mla_test_args();
+    args.kv_lora_rank = 64;
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let weights: WeightMap = mla_test_weights(&args, 0x3177)
+        .into_iter()
+        .map(|(name, value)| (name, mlxcel_core::astype(&value, bf16)))
+        .collect();
+    let mut attn = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
+    attn.absorbed =
+        Some(MlaAbsorbedProjections::from_kv_b_proj(&attn.kv_b_proj, geometry).expect("fold"));
+
+    let mut state = 0x3177u64;
+    let mut hidden = |tokens: usize| {
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &xorshift(&mut state, tokens * HIDDEN, 0.25),
+                &[1, tokens as i32, HIDDEN as i32],
+            ),
+            bf16,
+        )
+    };
+    let mut cache =
+        mlxcel_core::layers::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
+    let (prefill, counts) = mlxcel_core::mla::stats::scoped(|| {
+        let prefill = attn.forward(&hidden(5), None, &mut cache);
+        mlxcel_core::eval(&prefill);
+        prefill
+    });
+    assert!(cache.holds_quantized_latent());
+    assert!(
+        counts.get(mlxcel_core::mla::MlaDecodePath::Decompressed) >= 1,
+        "the cold prefill must take the decompressed path"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&prefill),
+        bf16,
+        "prefill output dtype"
+    );
+    // Behind the 5-token window the cost model absorbs a 2-token step, which
+    // dequantizes the window inside `MlaLatentCache::attend_preprojected`.
+    let (absorbed_step, counts) = mlxcel_core::mla::stats::scoped(|| {
+        let absorbed_step = attn.forward(&hidden(2), None, &mut cache);
+        mlxcel_core::eval(&absorbed_step);
+        absorbed_step
+    });
+    assert!(
+        counts.get(mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill) >= 1,
+        "the 2-token step must take the absorbed multi-token path"
+    );
+    assert_eq!(
+        mlxcel_core::array_dtype(&absorbed_step),
+        bf16,
+        "absorbed multi-token step output dtype"
+    );
+    let decode = attn.forward(&hidden(1), None, &mut cache);
+    assert_eq!(
+        mlxcel_core::array_dtype(&decode),
+        bf16,
+        "decode output dtype"
+    );
+}
+
+/// One dense MLA layer over a 16-token vocabulary.
+fn tiny_harness_model() -> super::DeepSeekV2Model {
     let mut args = mla_test_args();
     args.vocab_size = 16;
     args.intermediate_size = 64;
@@ -394,7 +562,13 @@ fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
             0.1,
         );
     }
-    let model = super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads");
+    super::DeepSeekV2Model::from_weights(&weights, &args).expect("tiny model loads")
+}
+
+#[test]
+fn deepseek_v2_batched_decode_harness_covers_ragged_single_and_empty() {
+    let _runtime = crate::initialize_runtime();
+    let model = tiny_harness_model();
     crate::models::batched_decode_harness::assert_batched_decode_matches_sequential(
         &model,
         &[&[1], &[2, 3], &[4, 5, 6]],
@@ -421,11 +595,17 @@ fn absorbed_mla_attention_matches_the_decompressed_block_step_for_step() {
         v_head_dim: args.v_head_dim,
     };
 
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
-    assert!(
-        baseline.absorbed.is_none(),
-        "the loader must not fold when MLXCEL_MLA_ABSORBED is unset"
+    // The loader folds exactly when the process-wide mode absorbs: by default
+    // where the fused kernel runs (issue #3131), always under an on spelling,
+    // never under an off spelling. The baseline then drops the fold, which is
+    // the state `=0` produces.
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load baseline");
+    assert_eq!(
+        baseline.absorbed.is_some(),
+        mlxcel_core::mla::absorbed_enabled(),
+        "the loader must fold exactly when mla::absorbed_enabled() holds"
     );
+    baseline.absorbed = None;
 
     let mut absorbed = load_mla_attention(&weights, &args, ATTN_PREFIX).expect("load absorbed");
     absorbed.absorbed =
@@ -475,7 +655,10 @@ fn absorbed_attention_leaves_a_much_smaller_cache_behind() {
         qk_rope_head_dim: args.qk_rope_head_dim,
         v_head_dim: args.v_head_dim,
     };
-    let baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
+    // Absorbed is the loader's default on Metal (#3131); clear the fold to get the
+    // decompressed layout `MLXCEL_MLA_ABSORBED=0` produces.
+    let mut baseline = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
+    baseline.absorbed = None;
     let mut absorbed = load_mla_attention(&weights, &args, ATTN_PREFIX).unwrap();
     absorbed.absorbed =
         Some(MlaAbsorbedProjections::from_kv_b_proj(&absorbed.kv_b_proj, geometry).unwrap());
@@ -496,5 +679,14 @@ fn absorbed_attention_leaves_a_much_smaller_cache_behind() {
         "decompressed cache {} bytes vs latent {} bytes; absorption did not take",
         base_cache.nbytes(),
         latent_cache.nbytes()
+    );
+}
+
+#[test]
+fn deepseek_v2_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        tiny_harness_model,
+        crate::models::last_row_logits_harness::TOKENS,
     );
 }

@@ -67,6 +67,82 @@ fn load_unsupported<T>() -> Result<T> {
     )
 }
 
+/// The ids an OpenXLA session stops on: the stop set the eager backend uses
+/// for the same checkpoint (#3292).
+///
+/// `mlxcel-xla` cannot see the root crate, so on its own it reads only
+/// `generation_config.json` and `config.json` (including `text_config`). Eager
+/// also resolves the tokenizer's `eos_token` through `tokenizer_config.json` or
+/// `tokenizer.json`. This merges the crate's config ids, as the declared set,
+/// with [`crate::loading::read_eos_token_ids`], the same merge the LLaVA loader
+/// applies to its `text_config` ids, so both backends stop on the same tokens.
+pub(crate) fn xla_stop_token_ids(model_path: &Path) -> Vec<i32> {
+    crate::loading::merged_eos_token_ids(mlxcel_xla::config_eos_token_ids(model_path), model_path)
+}
+
+/// Build the OpenXLA session for a resolved static capacity.
+///
+/// The engine drives generation from the session, so it loads its own weights
+/// and config from the model directory here (rather than the MLX `load_model`
+/// boundary). Under the `iree` feature this compiles the bundled prefill /
+/// decode_step graphs and uploads the weights resident; without it, the session
+/// loads but `prefill` / `decode_step` report that the `iree` feature is off.
+/// KV mode and token bias do not apply: the session owns its own KV and samples
+/// greedily on-device.
+fn build_xla_session(
+    model_path: &Path,
+    num_layers: usize,
+    context_capacity: usize,
+) -> Result<Session> {
+    let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
+        .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
+    build_xla_session_with(model_path, num_layers, context_capacity, image_preprocessor)
+}
+
+fn build_xla_session_with(
+    model_path: &Path,
+    num_layers: usize,
+    context_capacity: usize,
+    image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+) -> Result<Session> {
+    let mut session =
+        XlaInferenceSession::load_with_context_capacity(model_path, num_layers, context_capacity)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    session.set_eos_token_ids(xla_stop_token_ids(model_path));
+    Ok(Session::xla(session, image_preprocessor))
+}
+
+/// The static shape for a request needing `required_positions`, or the pinned
+/// `MLXCEL_XLA_CONTEXT_CAPACITY` when the operator set one.
+fn request_sized_capacity(model_path: &Path, required_positions: Option<usize>) -> Result<usize> {
+    let model_window = crate::read_model_context_window(model_path);
+    mlxcel_xla::resolve_context_capacity(required_positions, model_window)
+        .map_err(|error| anyhow::anyhow!(error))
+}
+
+/// Build a single-sequence OpenXLA session for a request whose images were
+/// already prepared, sized from that request's expanded prompt.
+///
+/// The CLI prepares images before it compiles a shape so the shape can follow
+/// the processed media (`PreparedImagePrefill::sequence_len`) rather than a
+/// per-family worst case (issue #3361). The preprocessor that prepared them is
+/// handed over so the session reports the same image capability and the
+/// vision weights are not loaded a second time.
+///
+/// # Errors
+///
+/// Returns an error when the request does not fit the checkpoint window or the
+/// capacity ladder, or when the session fails to load.
+pub fn create_prepared_xla_session(
+    model_path: &Path,
+    num_layers: usize,
+    required_positions: usize,
+    image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+) -> Result<Session> {
+    let context_capacity = request_sized_capacity(model_path, Some(required_positions))?;
+    build_xla_session_with(model_path, num_layers, context_capacity, image_preprocessor)
+}
+
 impl ComputeBackend for XlaBackend {
     fn name(&self) -> &'static str {
         "xla"
@@ -100,18 +176,12 @@ impl ComputeBackend for XlaBackend {
         _kv_cache_mode: KVCacheMode,
         _token_bias: TokenBiasMap,
     ) -> Result<Session> {
-        // The OpenXLA engine drives generation from the session, so it loads its
-        // own weights and config from the model directory here (rather than the
-        // MLX `load_model` boundary). Under the `iree` feature this compiles the
-        // bundled prefill / decode_step graphs and uploads the weights resident;
-        // without it, the session loads but `prefill` / `decode_step` report that
-        // the `iree` feature is off. KV mode and token bias do not apply: the
-        // session owns its own KV and samples greedily on-device.
-        let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
-            .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
         // Match the server path: reject a graph that could never admit one
         // image before generation starts, instead of after the vision tower has
-        // already run on the first image request.
+        // already run on the first image request. The request-sized path below
+        // is sized from the prompt the preprocessor already produced and
+        // admission checks it, so the guard is only needed here, where the
+        // request is unknown.
         let context_capacity =
             mlxcel_xla::context_capacity_from_env().map_err(|e| anyhow::anyhow!(e))?;
         crate::ensure_xla_image_context_capacity(
@@ -119,13 +189,28 @@ impl ComputeBackend for XlaBackend {
             context_capacity,
             std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some(),
         )?;
-        let session = XlaInferenceSession::load_with_context_capacity(
-            model_path,
-            num_layers,
-            context_capacity,
-        )
-        .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(Session::xla(session, image_preprocessor))
+        build_xla_session(model_path, num_layers, context_capacity)
+    }
+
+    fn create_session_for_request(
+        &self,
+        model_path: &Path,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+        required_positions: Option<usize>,
+    ) -> Result<Session> {
+        // The static shape has to be chosen before the graph compiles, so this
+        // is the only place that can size it for the request instead of the
+        // 256-token compatibility default (issue #2855). A pinned
+        // `MLXCEL_XLA_CONTEXT_CAPACITY` still wins inside the resolver and
+        // ignores the hint. The image guard from `create_session` is omitted on
+        // purpose: an image caller sizes from its processed media through
+        // `create_prepared_xla_session` instead (issue #3361), and admission
+        // still rejects a request that does not fit the compiled shape.
+        let context_capacity = request_sized_capacity(model_path, required_positions)?;
+        let _ = (kv_cache_mode, token_bias);
+        build_xla_session(model_path, num_layers, context_capacity)
     }
 
     fn supports_batched_serving(&self) -> bool {
@@ -133,5 +218,82 @@ impl ComputeBackend for XlaBackend {
         // (issue #449 M3 Stage 2c) once real IREE execution is compiled in. Without
         // `xla-iree` there is no engine to batch with, so it reports false.
         cfg!(feature = "xla-iree")
+    }
+}
+
+// The XLA stop set must match the eager one (#3292).
+#[cfg(test)]
+mod eos_parity_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::Path;
+
+    use super::xla_stop_token_ids;
+    use crate::loading::read_eos_token_ids;
+
+    fn as_set(ids: &[i32]) -> BTreeSet<i32> {
+        ids.iter().copied().collect()
+    }
+
+    /// generation_config, tokenizer_config (by `eos_token` name) and
+    /// config.json each declare a different id.
+    fn write_sidecars(dir: &Path, config_json: &str) {
+        fs::write(
+            dir.join("generation_config.json"),
+            r#"{"eos_token_id": 10}"#,
+        )
+        .expect("write generation config");
+        fs::write(
+            dir.join("tokenizer_config.json"),
+            r#"{"eos_token": "<|im_end|>", "added_tokens_decoder": {"11": {"content": "<|im_end|>"}}}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(dir.join("config.json"), config_json).expect("write config");
+    }
+
+    #[test]
+    fn xla_stop_set_equals_the_eager_set_across_all_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_sidecars(dir.path(), r#"{"eos_token_id": [12, 10]}"#);
+        let eager = read_eos_token_ids(dir.path());
+        assert_eq!(as_set(&eager), BTreeSet::from([10, 11, 12]));
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), as_set(&eager));
+    }
+
+    #[test]
+    fn xla_stop_set_resolves_the_tokenizer_eos_through_tokenizer_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"eos_token": "<|im_end|>"}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(
+            dir.path().join("tokenizer.json"),
+            r#"{"added_tokens": [{"id": 151645, "content": "<|im_end|>", "special": true}]}"#,
+        )
+        .expect("write tokenizer");
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"eos_token_id": 151643}"#,
+        )
+        .expect("write config");
+        let eager = read_eos_token_ids(dir.path());
+        assert_eq!(as_set(&eager), BTreeSet::from([151643, 151645]));
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), as_set(&eager));
+    }
+
+    /// A vision-language checkpoint's `text_config` ids are merged in as
+    /// declared ids, like the eager LLaVA loader's `merged_eos_token_ids`.
+    #[test]
+    fn xla_stop_set_adds_text_config_ids_to_the_eager_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_sidecars(
+            dir.path(),
+            r#"{"eos_token_id": 12, "text_config": {"eos_token_id": 13}}"#,
+        );
+        let mut expected = as_set(&read_eos_token_ids(dir.path()));
+        expected.insert(13);
+        assert_eq!(as_set(&xla_stop_token_ids(dir.path())), expected);
     }
 }

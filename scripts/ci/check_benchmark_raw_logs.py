@@ -1,28 +1,11 @@
 #!/usr/bin/env python3
-"""Keep raw run logs and raw record streams out of docs/benchmark_results/data/.
+"""Keep raw records and run captures out of the entire benchmark result tree.
 
-Rationale
----------
-``check_binary_assets.py`` deliberately ignores text, so nothing stopped server
-logs, build logs and empty stderr captures from piling up beside the benchmark
-reports: 690 such files were pruned at once. A report's tables and its CSV result
-carry its evidence; the logs and per-run record streams were noise in checkouts
-and searches.
-
-The rule
---------
-Under ``docs/benchmark_results/data/``, a tracked file fails this check when it
-is empty, is named ``server*.log``, is a build, format or lint log, or is a raw
-record stream (``*.jsonl`` / ``*.ndjson``), unless it is excused:
-
-- per-run logs and empty files a report cites by name are listed in
-  ``benchmark_raw_logs_allowlist.txt``;
-- raw record streams cannot be allowlisted. Files that predate the CSV-only rule
-  are listed in ``benchmark_raw_data_baseline.txt``, which can only shrink.
-
-Adding an entry to either file is a deliberate, reviewable act. An entry that no
-longer matches a violation also fails, so both lists can only shrink. Test logs
-have no reliable name, so they are out of scope.
+Final reports, measurement CSVs and compact correctness/provenance evidence
+belong here; JSONL/NDJSON, server/build logs, stdout/stderr captures and empty
+files do not. The historical allowlist and raw-data baseline are empty after
+the 2026-11-10 consolidation. Stale entries fail as before. Reusable harnesses
+and their inputs belong in scripts/ or tests/fixtures/, not result campaigns.
 """
 
 from __future__ import annotations
@@ -32,10 +15,11 @@ import re
 import subprocess
 import sys
 
-DATA_PREFIX = "docs/benchmark_results/data/"
+DATA_PREFIX = "docs/benchmark_results/"
 BUILD_LOG = re.compile(r"(^|[-_.])(fmt|clippy|build|lint|nextest)[-_.a-z0-9]*\.log$")
 SERVER_LOG = re.compile(r"^server[^/]*\.log$")
 RAW_RECORD = re.compile(r"\.(jsonl|ndjson)$")
+RAW_CAPTURE = re.compile(r"\.(log|out|err|stdout|stderr)$")
 RAW_RECORD_KIND = "raw record stream (commit the CSV result instead)"
 
 
@@ -53,7 +37,7 @@ def read_list(path: pathlib.Path) -> set[str]:
 
 def violation(root: pathlib.Path, rel: str) -> str | None:
     name = rel.rsplit("/", 1)[-1]
-    if RAW_RECORD.search(name) and "/harness/" not in rel:
+    if RAW_RECORD.search(name):
         return RAW_RECORD_KIND
     if SERVER_LOG.search(name):
         return "server log"
@@ -61,6 +45,8 @@ def violation(root: pathlib.Path, rel: str) -> str | None:
         return "build log"
     if (root / rel).stat().st_size == 0:
         return "empty file"
+    if RAW_CAPTURE.search(name):
+        return "raw output capture"
     return None
 
 
@@ -94,7 +80,9 @@ def main() -> int:
         rel for rel, kind in found.items() if kind == RAW_RECORD_KIND and rel in baseline
     }
 
-    failed = False
+    failed = bool(allowed or baseline)
+    if failed:
+        print("::error::legacy benchmark exception lists must stay empty; archive captures outside the result tree")
     for rel in sorted(set(found) - excused):
         failed = True
         print(f"::error file={rel}::{found[rel]} under benchmark data: {rel}")
@@ -107,9 +95,8 @@ def main() -> int:
     if failed:
         print(
             "Raw logs and raw record streams belong outside the repository. Keep "
-            "the Markdown record and its CSV result instead. List a log a report "
-            "cites by name in scripts/ci/benchmark_raw_logs_allowlist.txt, or "
-            "remove a baseline entry once its file is gone.",
+            "the Markdown record and its CSV result instead. Legacy exception "
+            "lists must stay empty after consolidation.",
             file=sys.stderr,
         )
         return 1

@@ -55,7 +55,7 @@ pub(crate) fn event_to_sse(event: UiEvent) -> Event {
 }
 
 fn request_id() -> String {
-    format!("req_{}", chrono::Utc::now().timestamp_micros())
+    format!("req_{}", crate::server::clock::unix_micros_now())
 }
 
 fn invalid_event_field(

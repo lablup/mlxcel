@@ -43,10 +43,24 @@
 //! every row; `pool` finds it by first-real-token argmax rather than assuming
 //! that, so a left-padded batch would pool correctly too.
 //!
-//! The late-interaction (ColBERT) LFM2 checkpoints share this `model_type` and
-//! architecture but ship a `1_Dense` projection and emit one vector per token.
-//! They are out of scope here and are rejected at load with a message saying
-//! so, rather than loading and silently returning a single pooled vector.
+//! Two more checkpoints share this backbone and `model_type`, and the loader
+//! tells them apart by their weights rather than by a separate `ModelType`:
+//!
+//! - LFM2.5-Encoder (`Lfm2BidirectionalForMaskedLM`) stores the backbone under
+//!   `lfm2.`, which is stripped before the shared sanitize. Its masked-LM head
+//!   is tied to `embed_tokens`, so nothing else is dropped, and it pools like
+//!   LFM2.5-Embedding (CLS unless `1_Pooling` or `--pooling` says otherwise).
+//!   It is a fine-tuning backbone: the pooled vector is not a trained sentence
+//!   embedding.
+//! - LFM2.5-ColBERT ships one token projection (`1_Dense/`, `dense.*` in the
+//!   mlx-community conversions, or `projection.*` in an mlx-vlm re-export;
+//!   see [`head`]). With it the model is
+//!   multi-vector: every token's hidden state goes through the projection and
+//!   is L2-normalized by [`project_and_normalize`], and pooling is skipped. The
+//!   upstream reference runs this head with `mask_convolutions=False`; this
+//!   port keeps the padding-zeroed conv input for it too, which agrees with the
+//!   reference on unpadded rows and keeps a padded row equal to the same row
+//!   run alone.
 //!
 //! Prompt prefixes (`query: ` / `document: `) are caller-side and documented in
 //! `docs/embeddings.md`.
@@ -54,6 +68,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde_json::Value;
@@ -62,49 +77,53 @@ use crate::embeddings::limits::config_normalize_flag;
 use crate::embeddings::loader::load_embedding_weights;
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput};
 use crate::embeddings::pooling::{PoolingMode, pool, resolve_pooling_mode};
+use crate::models::col_late_interaction::project_and_normalize;
 use crate::models::embedding_sanitize::sanitize_decoder_embedding_weights;
 use crate::models::lfm2::{Lfm2Model, ModelArgs};
 
-/// LFM2.5-Embedding: bidirectional LFM2 layers, CLS pooling.
+#[path = "lfm2_embedding_head.rs"]
+mod head;
+
+/// Wrapper prefix the `Lfm2BidirectionalForMaskedLM` export stores the
+/// backbone under.
+const MASKED_LM_PREFIX: &str = "lfm2.";
+
+/// LFM2.5-Embedding, -Encoder and -ColBERT: bidirectional LFM2 layers, then
+/// either pooling (single-vector) or a token projection (multi-vector).
 pub struct Lfm2EmbeddingModel {
     model: Lfm2Model,
+    /// The ColBERT token projection; `None` for the pooled embedders.
+    projection: Option<UnifiedLinear>,
     pooling: PoolingMode,
     normalize: bool,
     embedding_dim: usize,
 }
 
-/// Reject a late-interaction export.
+/// The key passes [`Lfm2EmbeddingModel::load`] applies before
+/// `Lfm2Model::from_weights` runs its own sanitize: strip the masked-LM
+/// export's single `lfm2.` wrapper, then the shared decoder-embedding
+/// normalization (Dense fold, head drop, `model.` prefix).
 ///
-/// The multi-vector LFM2 checkpoints ship a `1_Dense` module folder in place of
-/// (or alongside) the pooling module. `dense_folders` is what
-/// [`sanitize_decoder_embedding_weights`] folded, which catches the same layout
-/// through its tensors even when the folder is named differently.
-fn reject_late_interaction(model_dir: &Path, dense_folders: usize) -> Result<()> {
-    let folder_on_disk = std::fs::read_dir(model_dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry.file_name().to_str().is_some_and(|name| {
-                name.strip_suffix("_Dense")
-                    .is_some_and(|index| index.parse::<u32>().is_ok())
-            })
-        });
-    if dense_folders == 0 && !folder_on_disk {
-        return Ok(());
+/// Returns the number of `Dense` folders folded.
+pub(crate) fn sanitize_family_weights(weights: &mut WeightMap) -> usize {
+    let renames: Vec<(String, String)> = weights
+        .keys()
+        .filter_map(|key| {
+            key.strip_prefix(MASKED_LM_PREFIX)
+                .map(|rest| (key.clone(), rest.to_string()))
+        })
+        .collect();
+    for (from, to) in renames {
+        if let Some(tensor) = weights.remove(&from) {
+            weights.insert(to, tensor);
+        }
     }
-    bail!(
-        "{} carries a sentence-transformers Dense module. That is the LFM2 / LFM2.5 ColBERT \
-         late-interaction layout, which emits one vector per token through a projection this \
-         single-vector embedder does not apply; multi-vector LFM2 checkpoints are not supported \
-         yet",
-        model_dir.display()
-    )
+    sanitize_decoder_embedding_weights(weights)
 }
 
 impl Lfm2EmbeddingModel {
-    /// Load an LFM2.5-Embedding checkpoint from `model_dir`.
+    /// Load an LFM2.5-Embedding, -Encoder or -ColBERT checkpoint from
+    /// `model_dir`.
     ///
     /// The published export saves the inner `Lfm2BidirectionalModel`, so the
     /// backbone roots arrive bare (`embed_tokens.weight`, `layers.0.…`,
@@ -120,10 +139,19 @@ impl Lfm2EmbeddingModel {
         args.conv_causal = false;
 
         let mut weights = load_embedding_weights(model_dir, config)?;
-        let dense_folders = sanitize_decoder_embedding_weights(&mut weights);
-        reject_late_interaction(model_dir, dense_folders)?;
+        let dense_folders = sanitize_family_weights(&mut weights);
+        let prefix = head::find_projection(&weights, dense_folders)
+            .with_context(|| format!("loading {}", model_dir.display()))?;
+        head::validate_projection(model_dir, config, &weights, prefix, args.group_size())?;
 
-        let pooling = resolve_pooling_mode(model_dir, PoolingMode::Cls)?;
+        // A multi-vector head keeps every token and never pools, so the
+        // pooling resolver (and its `--pooling` override) only applies to the
+        // single-vector exports.
+        let pooling = if prefix.is_some() {
+            PoolingMode::Cls
+        } else {
+            resolve_pooling_mode(model_dir, PoolingMode::Cls)?
+        };
         Self::from_weights(weights, args, pooling, config_normalize_flag(config))
     }
 
@@ -133,17 +161,42 @@ impl Lfm2EmbeddingModel {
     /// pooling can be exercised on a synthetic checkpoint-free model.
     /// `Lfm2Model::from_weights` takes the weights by value because it applies
     /// the LFM2 rename pass in place.
+    ///
+    /// A linear under one of `head::PROJECTION_PREFIXES` (`dense.0`, `dense`,
+    /// `projection`, `model.projection`) in `weights` becomes the ColBERT
+    /// token projection and makes the model multi-vector; its tensors are
+    /// taken out before the backbone is built.
     pub(crate) fn from_weights(
-        weights: WeightMap,
+        mut weights: WeightMap,
         args: ModelArgs,
         pooling: PoolingMode,
         normalize: bool,
     ) -> Result<Self> {
-        let embedding_dim = args.hidden_size;
+        let (group_size, bits) = (args.group_size(), args.bits());
+        let mut embedding_dim = args.hidden_size;
+        let projection = match head::find_projection(&weights, 0)? {
+            Some(prefix) => {
+                let linear = UnifiedLinear::from_weights(&weights, prefix, group_size, bits)
+                    .map_err(|e| anyhow::anyhow!("LFM2 ColBERT projection `{prefix}`: {e}"))?;
+                let (out_features, in_features) = head::projection_widths(&linear, prefix)?;
+                if in_features != args.hidden_size {
+                    bail!(
+                        "LFM2 ColBERT projection `{prefix}` takes {in_features} input features \
+                         but the backbone hidden size is {}",
+                        args.hidden_size
+                    );
+                }
+                head::take_projection_keys(&mut weights, prefix);
+                embedding_dim = out_features;
+                Some(linear)
+            }
+            None => None,
+        };
         let model = Lfm2Model::from_weights(args, weights)
             .map_err(|e| anyhow::anyhow!("LFM2.5-Embedding: {e}"))?;
         Ok(Self {
             model,
+            projection,
             pooling,
             normalize,
             embedding_dim,
@@ -171,10 +224,14 @@ impl EmbeddingModel for Lfm2EmbeddingModel {
         }
 
         let hidden = self.forward_hidden(batch.input_ids, batch.attention_mask);
-        let pooled = pool(&hidden, batch.attention_mask, self.pooling);
+        let embeddings = match &self.projection {
+            // `[B, L, D]`, unit rows, padding rows zeroed.
+            Some(projection) => project_and_normalize(&hidden, projection, batch.attention_mask),
+            None => pool(&hidden, batch.attention_mask, self.pooling),
+        };
 
         Ok(EmbeddingOutput {
-            embeddings: pooled,
+            embeddings,
             last_hidden_state: None,
         })
     }
@@ -191,6 +248,10 @@ impl EmbeddingModel for Lfm2EmbeddingModel {
         self.normalize
     }
 
+    fn multi_vector(&self) -> bool {
+        self.projection.is_some()
+    }
+
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
@@ -198,4 +259,8 @@ impl EmbeddingModel for Lfm2EmbeddingModel {
 
 #[cfg(test)]
 #[path = "lfm2_embedding_tests.rs"]
-mod lfm2_embedding_tests;
+pub(crate) mod lfm2_embedding_tests;
+
+#[cfg(test)]
+#[path = "lfm2_embedding_head_tests.rs"]
+mod lfm2_embedding_head_tests;

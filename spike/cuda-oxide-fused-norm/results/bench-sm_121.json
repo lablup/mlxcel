@@ -1,0 +1,25 @@
+{
+  "results": "mlxcel.cuda-oxide-fused-norm.bench/v1",
+  "module_load_ms": 254.900,
+  "timing": "CUDA events recorded on the launch stream around the launches; cold = first launch at the shape (the very first also pays the process's first launch), warm = mean of 200 launches after 20 warm-up launches; inputs uploaded once per shape",
+  "shapes": [
+    {"act": "f32", "weight": "f32", "rows": 1, "dim": 1024, "block": 256, "grid": 1, "cold_us": 18.560, "warm_us": 4.095, "iters": 200, "effective_gbps": 6.00, "first_launch_in_process": true},
+    {"act": "f32", "weight": "f32", "rows": 1, "dim": 4096, "block": 1024, "grid": 1, "cold_us": 6.240, "warm_us": 6.143, "iters": 200, "effective_gbps": 16.00, "first_launch_in_process": false},
+    {"act": "f32", "weight": "f32", "rows": 1, "dim": 8192, "block": 1024, "grid": 1, "cold_us": 10.528, "warm_us": 8.191, "iters": 200, "effective_gbps": 24.00, "first_launch_in_process": false},
+    {"act": "f32", "weight": "f32", "rows": 5, "dim": 4096, "block": 1024, "grid": 5, "cold_us": 9.824, "warm_us": 8.191, "iters": 200, "effective_gbps": 60.01, "first_launch_in_process": false},
+    {"act": "f32", "weight": "f32", "rows": 33, "dim": 2048, "block": 512, "grid": 33, "cold_us": 7.616, "warm_us": 6.143, "iters": 200, "effective_gbps": 264.03, "first_launch_in_process": false},
+    {"act": "f32", "weight": "f32", "rows": 64, "dim": 8192, "block": 1024, "grid": 64, "cold_us": 37.184, "warm_us": 36.340, "iters": 200, "effective_gbps": 346.25, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 1, "dim": 1024, "block": 256, "grid": 1, "cold_us": 18.304, "warm_us": 4.095, "iters": 200, "effective_gbps": 3.00, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 1, "dim": 4096, "block": 1024, "grid": 1, "cold_us": 6.752, "warm_us": 6.133, "iters": 200, "effective_gbps": 8.01, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 1, "dim": 8192, "block": 1024, "grid": 1, "cold_us": 8.256, "warm_us": 6.153, "iters": 200, "effective_gbps": 15.98, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 5, "dim": 4096, "block": 1024, "grid": 5, "cold_us": 8.416, "warm_us": 6.143, "iters": 200, "effective_gbps": 40.01, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 33, "dim": 2048, "block": 512, "grid": 33, "cold_us": 7.168, "warm_us": 6.102, "iters": 200, "effective_gbps": 132.90, "first_launch_in_process": false},
+    {"act": "bf16", "weight": "bf16", "rows": 64, "dim": 8192, "block": 1024, "grid": 64, "cold_us": 25.056, "warm_us": 18.477, "iters": 200, "effective_gbps": 340.50, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 1, "dim": 1024, "block": 256, "grid": 1, "cold_us": 17.792, "warm_us": 4.095, "iters": 200, "effective_gbps": 3.00, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 1, "dim": 4096, "block": 1024, "grid": 1, "cold_us": 8.128, "warm_us": 5.242, "iters": 200, "effective_gbps": 9.38, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 1, "dim": 8192, "block": 1024, "grid": 1, "cold_us": 8.032, "warm_us": 6.153, "iters": 200, "effective_gbps": 15.98, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 5, "dim": 4096, "block": 1024, "grid": 5, "cold_us": 7.936, "warm_us": 6.143, "iters": 200, "effective_gbps": 40.01, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 33, "dim": 2048, "block": 512, "grid": 33, "cold_us": 7.200, "warm_us": 6.944, "iters": 200, "effective_gbps": 116.80, "first_launch_in_process": false},
+    {"act": "f16", "weight": "f16", "rows": 64, "dim": 8192, "block": 1024, "grid": 64, "cold_us": 20.960, "warm_us": 18.333, "iters": 200, "effective_gbps": 343.17, "first_launch_in_process": false}
+  ]
+}

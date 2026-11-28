@@ -1,6 +1,6 @@
 # granite-4.0-h-tiny `w1` against an f32 reference (lablup/mlxcel#2154)
 
-Traces and per-op numbers behind [the granite `w1` section of the 2026-09-30 correctness page](../../../docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md#the-granite-w1-perplexity-gap). They answer one question: is the +4.345% `w1` perplexity of ROCm against Metal (`../rocm_gfx1151_c5fe9a16/` against `../metal_m5_d1128266/`) a ROCm defect. `METADATA.txt` has the host, commit, binary hash, checkpoint and the meaning of every tag; `RUNS.txt` has every run; `SHA256SUMS` covers every file here.
+Traces and per-op numbers behind [the granite `w1` section of the 2026-09-30 correctness page](../../../docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30). They answer one question: is the +4.345% `w1` perplexity of ROCm against Metal (`../rocm_gfx1151_c5fe9a16/` against `../metal_m5_d1128266/`) a ROCm defect. `METADATA.txt` has the host, commit, binary hash, checkpoint and the meaning of every tag; `RUNS.txt` has every run; `SHA256SUMS` covers every file here.
 
 ## What is here
 

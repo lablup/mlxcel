@@ -219,7 +219,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::DeepSeekV2 => "deepseek_v2",
         ModelType::DeepSeekV3 => "deepseek_v3",
         ModelType::DeepSeekV32 => "deepseek_v32",
+        // Hy4 is not TP-enabled; this arm keeps the dispatch table total.
+        ModelType::HyV4 => "hy_v4",
         ModelType::DeepSeekV4 => "deepseek_v4",
+        ModelType::Xing40 => "xing4_0",
         ModelType::Dots1 => "dots1",
         ModelType::Cohere => "cohere",
         ModelType::Cohere2 => "cohere2",
@@ -255,6 +258,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // which the shard rules name. This arm only keeps the dispatch table
         // total; the refusal comes from `validate_supported_runtime`.
         ModelType::MiMoV2Flash => "mimo_v2_flash",
+        ModelType::MiMoV2VLM => "mimo_v2",
         // Bailing MoE is not shardable by the generic transformer plan: its
         // attention projection is the fused `attention.query_key_value` rather
         // than separate q/k/v, and its routed experts live under
@@ -272,11 +276,19 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // neither of which the shard rules name. This arm only keeps the
         // dispatch table total.
         ModelType::Afmoe => "afmoe",
+        // Not "llama": the TP runtime builds a SwiGLU `llama3` decoder from
+        // `config.json` and would load this gate-free squared-ReLU MLP wrong.
+        // The refusal comes from `runtime_kind_for`, which has no arm for it.
+        ModelType::Arcee => "arcee",
         // Not shardable by the generic transformer plan: the experts live
         // under `mlp.experts` and the shared branch is blended rather than
         // added, neither of which the shard rules name. This arm only keeps
         // the dispatch table total.
         ModelType::Klear => "klear",
+        // Not shardable by the generic transformer plan, for AFMoE's reasons:
+        // stacked experts under `mlp.switch_mlp` and rotating sliding caches.
+        // This arm only keeps the dispatch table total.
+        ModelType::Kolibri1 => "kolibri1",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
@@ -349,6 +361,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // config through `to_llama3_args`, which is a change to how the runtime
         // builds its config and not something deserializing a key can deliver.
         ModelType::Helium => "helium",
+        // Not "llama": the TP runtime parses `config.json` straight into
+        // `llama3::ModelArgs` and would skip `K2HorizonConfig::validate`, so a
+        // grouped-norm or MoE variant would shard and decode wrongly. The
+        // refusal comes from `runtime_kind_for`, which has no arm for it.
+        ModelType::K2Horizon => "k2_horizon",
         // TeleChat3 is not TP-enabled and this arm only keeps the dispatch table
         // total; the refusal comes from `validate_supported_runtime`, whose
         // `runtime_kind_for` match has no `ModelType::TeleChat3` arm. The
@@ -361,6 +378,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::Laguna => "laguna",
+        ModelType::Limite => "limite",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",
         ModelType::MiniCPM3 => "minicpm3",
         ModelType::StableLM => "stablelm",
@@ -379,7 +397,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Lfm2VL => "lfm2",
         // Inkling uses model-owned short-convolution state and has no TP port.
         ModelType::Inkling | ModelType::InklingVLM => "inkling",
-        ModelType::Plamo2 => "plamo2",
+        // Inkling 2 keeps per-visit model-owned state and has no TP port.
+        ModelType::Inkling2VLM => "inkling2",
+        // PLaMo 2.1 VL's text backbone is PLaMo 2; TP is refused for
+        // VLM-kind models earlier, this keeps the dispatch table total.
+        ModelType::Plamo2 | ModelType::Plamo2VLM => "plamo2",
         ModelType::GraniteMoeHybrid => "granitemoehybrid",
         ModelType::NemotronH => "nemotron_h",
         ModelType::NemotronHNanoOmniVLM => "nemotron_h_nano_omni",
@@ -395,14 +417,19 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // projections are `qkv_proj`, `kv_a_proj_with_mqa`, `embed_q` and
         // `switch_mlp`.
         ModelType::KimiK3 | ModelType::KimiK3VLM => "kimi_k3",
+        // Raon-1 mini is not TP-enabled; this arm keeps the dispatch table total.
+        ModelType::Raon1Mini => "raon1_mini",
         // Kimi-VL / Kimi-VL 2.5 use a DeepSeek-V3-style MoE text backbone.
         ModelType::KimiVL | ModelType::KimiK25 => "deepseek_v3",
         ModelType::LongcatFlash | ModelType::LongcatFlashNgram => "longcat_flash",
+        // Replicated like the other LongCat types; no tensor-parallel port.
+        ModelType::LongcatFlashSparse => "longcat_flash_sparse",
         ModelType::Step3p5 => "step3p5",
         // Step-3.7's text backbone is the Step-3.5 MoE stack; TP is refused for
         // VLM-kind models earlier, this keeps the dispatch table total.
         ModelType::Step3p7 => "step3p5",
         ModelType::RecurrentGemma => "recurrent_gemma",
+        ModelType::Z1t => "z1t",
         ModelType::LlavaVLM
         | ModelType::LlavaBunnyVLM
         | ModelType::AyaVisionVLM

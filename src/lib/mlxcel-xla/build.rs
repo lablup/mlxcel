@@ -37,33 +37,37 @@ use std::process::Command;
 #[path = "../mlxcel-core/build_support/rocm_rpath.rs"]
 mod rocm_rpath;
 
-fn cuda_nvcc() -> PathBuf {
-    if let Some(path) = env::var_os("NVCC") {
-        return PathBuf::from(path);
+// Used by: Gemma3n QMV and the opt-in dense native 4-bit GEMV.
+// A CUDA IREE runtime can still run ordinary f16 graphs without nvcc. An
+// explicitly configured compiler takes precedence, including when unavailable.
+fn cuda_nvcc() -> Result<PathBuf, String> {
+    let candidate = if let Some(path) = env::var_os("NVCC") {
+        PathBuf::from(path)
+    } else {
+        let conventional = PathBuf::from("/usr/local/cuda/bin/nvcc");
+        if conventional.is_file() {
+            conventional
+        } else {
+            PathBuf::from("nvcc")
+        }
+    };
+    match Command::new(&candidate).arg("--version").output() {
+        Ok(output) if output.status.success() => Ok(candidate),
+        Ok(output) => Err(format!(
+            "{} --version exited {}",
+            candidate.display(),
+            output.status
+        )),
+        Err(error) => Err(format!("{}: {error}", candidate.display())),
     }
-    let conventional = PathBuf::from("/usr/local/cuda/bin/nvcc");
-    if conventional.is_file() {
-        return conventional;
-    }
-    let available_on_path = Command::new("nvcc")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if available_on_path {
-        return PathBuf::from("nvcc");
-    }
-    panic!(
-        "the CUDA IREE Gemma3n QMV build requires nvcc; set NVCC, install \
-         /usr/local/cuda/bin/nvcc, or put nvcc on PATH"
-    );
 }
 
-fn compile_gemma3n_qmv_ptx() {
-    let source = PathBuf::from("csrc/gemma3n_qmv.cu");
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
-        .join("gemma3n_qmv_sm80.ptx");
-    let nvcc = cuda_nvcc();
-    let mut command = Command::new(&nvcc);
+/// Compile one CUDA kernel source to `compute_80` PTX in `OUT_DIR`.
+fn compile_cuda_ptx(nvcc: &std::path::Path, source: &str, output_name: &str, what: &str) {
+    let source = PathBuf::from(source);
+    let output =
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join(output_name);
+    let mut command = Command::new(nvcc);
     command
         .arg("-ptx")
         .arg("--std=c++17")
@@ -77,11 +81,34 @@ fn compile_gemma3n_qmv_ptx() {
         .unwrap_or_else(|error| panic!("failed to run {}: {error}", nvcc.display()));
     if !result.status.success() {
         panic!(
-            "failed to compile Gemma3n QMV PTX with {}:\n{}",
+            "failed to compile {what} PTX with {}:\n{}",
             nvcc.display(),
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+/// Build optional PTX artifacts. An absent compiler disables the artifacts,
+/// not the CUDA runtime. A compiler that exists but rejects a source is a real
+/// build failure and must not silently hide a broken kernel behind a fallback.
+fn compile_cuda_kernels() {
+    let nvcc = match cuda_nvcc() {
+        Ok(nvcc) => nvcc,
+        Err(reason) => {
+            println!(
+                "cargo:warning=CUDA IREE PTX omitted ({reason}); native 4-bit GEMV will fall back to f16; Gemma3n CUDA Q4 still requires nvcc"
+            );
+            return;
+        }
+    };
+    compile_cuda_ptx(
+        &nvcc,
+        "csrc/gemma3n_qmv.cu",
+        "gemma3n_qmv_sm80.ptx",
+        "Gemma3n QMV",
+    );
+    compile_cuda_ptx(&nvcc, "csrc/qmv4.cu", "qmv4_sm80.ptx", "native 4-bit GEMV");
+    println!("cargo:rustc-cfg=xla_iree_cuda_ptx");
 }
 
 fn add_iree_shim_sources(build: &mut cc::Build) {
@@ -89,9 +116,36 @@ fn add_iree_shim_sources(build: &mut cc::Build) {
         .file("csrc/xla_iree.c")
         .file("csrc/xla_aux.c")
         .file("csrc/xla_local_task.c");
+    // Test-only shim hooks (issue #2923) are compiled only for the crate's
+    // `test-support` feature, which the root `test-utils` feature enables.
+    if env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some() {
+        build.define("MLXCEL_XLA_TEST_SUPPORT", None);
+    }
     if env::var_os("CARGO_FEATURE_DIAGNOSTICS").is_some() {
         build.file("csrc/xla_diagnostic_flags.c");
     }
+}
+
+// Read back by `iree_identity::runtime_archive_identity`, which records the linked
+// IREE runtime in every operator numeric contract (issue #3211). Hash the
+// archive the consuming binary links so a runtime rebuild changes the identity
+// even when the deployed binary no longer sees the build tree.
+fn bake_runtime_archive_digest(archive: PathBuf) {
+    use sha2::{Digest, Sha256};
+    println!("cargo:rerun-if-changed={}", archive.display());
+    let Ok(bytes) = std::fs::read(&archive) else {
+        println!(
+            "cargo:warning=IREE runtime archive {} is unreadable; the runtime identity falls back to the dist layout at run time",
+            archive.display()
+        );
+        return;
+    };
+    let digest = Sha256::digest(&bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!("cargo:rustc-env=MLXCEL_XLA_IREE_RUNTIME_SHA256={hex}");
 }
 
 fn main() {
@@ -105,6 +159,7 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/xla_local_task.h");
     println!("cargo:rerun-if-changed=csrc/xla_diagnostic_flags.c");
     println!("cargo:rerun-if-changed=csrc/gemma3n_qmv.cu");
+    println!("cargo:rerun-if-changed=csrc/qmv4.cu");
     println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
@@ -115,6 +170,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IREE_MACOS_COMPILE");
     // cfg used by src/iree.rs to select the cuda/rocm iree-compile / device behavior.
     println!("cargo:rustc-check-cfg=cfg(xla_iree_cuda)");
+    println!("cargo:rustc-check-cfg=cfg(xla_iree_cuda_ptx)");
     println!("cargo:rustc-check-cfg=cfg(xla_iree_rocm)");
 
     // Only build the native shim under the `iree` feature.
@@ -147,7 +203,10 @@ fn main() {
             .include(&bld_inc)
             .define("XLA_GATE_CUDA", None)
             .compile("xla_iree");
-        compile_gemma3n_qmv_ptx();
+        compile_cuda_kernels();
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         println!("cargo:rustc-cfg=xla_iree_cuda");
         if let Ok(ic) = env::var("IREE_CUDA_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
@@ -176,6 +235,9 @@ fn main() {
             .include(&bld_inc)
             .define("XLA_GATE_ROCM", None)
             .compile("xla_iree");
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         println!("cargo:rustc-cfg=xla_iree_rocm");
         if let Ok(ic) = env::var("IREE_ROCM_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
@@ -209,6 +271,9 @@ fn main() {
             .include(&src_inc)
             .include(&bld_inc)
             .compile("xla_iree");
+        bake_runtime_archive_digest(
+            home.join("build/runtime/src/iree/runtime/libiree_runtime_unified.a"),
+        );
         if let Ok(ic) = env::var("IREE_MACOS_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
         }
@@ -232,6 +297,7 @@ fn main() {
     let mut build = cc::Build::new();
     add_iree_shim_sources(&mut build);
     build.include(&include).compile("xla_iree");
+    bake_runtime_archive_digest(dist.join("lib/libiree_runtime_unified.a"));
 
     // Bake the dist path so the session can find `bin/iree-compile` at runtime
     // (a runtime `IREE_DIST` env var still takes precedence). The vmfb must be

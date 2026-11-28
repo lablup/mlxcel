@@ -90,3 +90,27 @@ fn diagnostic_graph_compiles_for_cpu() {
     .unwrap();
     assert!(vmfb.metadata().unwrap().len() > 0);
 }
+
+#[test]
+fn graph_rounds_to_f16_at_every_eager_materialization() {
+    // #3390: the f32 graph without these roundings missed eager by up to 2.8
+    // in the outlier channel of the selected layers. Per layer: two
+    // LayerNorms (2 each), six quantized linears (dequantized weight, product,
+    // bias add), the attention context, two residual adds and quick_gelu (4).
+    // Before the tower: pixels, patch product, position add and pre-LN (2).
+    // After it: four pool linears with bias and three projector linears
+    // without.
+    let config = config();
+    let per_layer = 2 * 2 + 6 * 3 + 1 + 2 + 4;
+    let expected = 5 + per_layer * config.emitted_layers() + 4 * 3 + 3 * 2;
+    let production = emit_molmo_vision(&config);
+    assert_eq!(
+        crate::emitter::molmo_vision_f16::tests::f16_roundings(&production),
+        expected
+    );
+    let diagnostic = emit_molmo_vision_diagnostics(&config);
+    assert_eq!(
+        crate::emitter::molmo_vision_f16::tests::f16_roundings(&diagnostic),
+        expected
+    );
+}

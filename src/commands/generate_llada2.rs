@@ -100,7 +100,7 @@ pub(crate) fn run_llada2_generation(
         mlxcel_core::random_seed(seed);
     }
 
-    print_generation_preamble(user_prompt)?;
+    print_generation_preamble(user_prompt, !args.generation.no_chat_template)?;
 
     // Stream through the shared incremental detokenizer; raw ids are collected
     // in parallel so any held-back tail bytes can be flushed afterward.

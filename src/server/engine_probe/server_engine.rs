@@ -154,15 +154,16 @@ fn paged_kernel_launches() -> u64 {
 }
 
 impl ServerEngineRun {
-    /// Decode throughput in the `mlxcel-bench-decode` convention: generated
-    /// tokens over the post-first-token time.
+    /// Decode throughput in the `mlxcel-bench-decode` convention: the tokens
+    /// after the first one over the post-first-token time.
     #[must_use]
     pub fn decode_tok_per_sec(&self) -> f64 {
-        if self.decode_ms > 0.0 {
-            self.tokens.len() as f64 / (self.decode_ms / 1000.0)
-        } else {
-            0.0
-        }
+        // `decode_ms` starts when the first token arrives, so that token is
+        // outside the window.
+        mlxcel_core::generate::decode_tok_per_sec(
+            self.tokens.len().saturating_sub(1),
+            self.decode_ms,
+        )
     }
 }
 
@@ -271,6 +272,10 @@ impl ServerEngine {
                 mm_digest: MultimodalDigest::empty(),
                 history_prompt: None,
                 history_prefix_tokens: key.history_tokens.clone(),
+                root_prompt: None,
+                root_prefix_tokens: None,
+                snapshot_lineage: Default::default(),
+                model_reasoning_effort: None,
             });
         let options = ServerGenerateOptions {
             max_tokens: request.max_tokens,
@@ -288,6 +293,7 @@ impl ServerEngine {
             post_sampling_probs: false,
             reasoning_budget: Default::default(),
             thinking_enter_block_on_start: false,
+            thinking_primed_close: None,
             reasoning_control: None,
             prompt_cache_ctx,
             structured: None,
@@ -295,9 +301,12 @@ impl ServerEngine {
             lora_scales: None,
             grammar: None,
             image_soft_tokens: None,
+            video_num_frames: None,
+            video_min_frames: None,
             pre_rendered_prompt_tokens: Some(request.prompt_tokens.to_vec()),
             admission_notification: None,
             count_prompt_only: false,
+            model_reasoning_effort: None,
         };
         let live = self.server.config().live_settings();
         let before = self.server.observability().snapshot();
@@ -376,10 +385,13 @@ mod tests {
     }
 
     #[test]
-    fn decode_rate_is_tokens_over_post_first_token_time() {
-        assert!((run_with(50, 500.0).decode_tok_per_sec() - 100.0).abs() < 1e-9);
-        assert_eq!(run_with(50, 0.0).decode_tok_per_sec(), 0.0);
+    fn decode_rate_excludes_the_first_token_from_the_window() {
+        // 51 tokens: the first arrives at TTFT, 50 more in the 500 ms after.
+        assert!((run_with(51, 500.0).decode_tok_per_sec() - 100.0).abs() < 1e-9);
+        assert_eq!(run_with(51, 0.0).decode_tok_per_sec(), 0.0);
         assert_eq!(run_with(0, 500.0).decode_tok_per_sec(), 0.0);
+        // A single token leaves nothing inside the window.
+        assert_eq!(run_with(1, 500.0).decode_tok_per_sec(), 0.0);
     }
 
     #[test]

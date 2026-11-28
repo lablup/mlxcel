@@ -1,5 +1,7 @@
 # MLA matrix-absorbed decode: Apple M1 Ultra, 2026-08-02
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Validation run for issue #907 (epic #909).
 
 **Outcome: the memory reduction is structural and large (8.89x), and decode speed

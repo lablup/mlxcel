@@ -50,13 +50,14 @@ use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{silu, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
-use super::model_owned::ModelOwnedSequenceState;
+use super::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 
 #[path = "kimi_k3_sanitize.rs"]
 mod sanitize;
@@ -432,14 +433,24 @@ impl KimiK3LayerCache {
     }
 }
 
-fn make_layer_caches(layers: &[KimiK3DecoderLayer]) -> Vec<KimiK3LayerCache> {
+/// One cache per layer: KDA state for a linear layer, and for an MLA layer a
+/// latent-pair `KVCache` in the table's mode for that layer index (fp16 when
+/// no table was injected). The table is indexed by layer, so a KDA layer's
+/// entry is simply unused (#3162).
+fn make_layer_caches(
+    layers: &[KimiK3DecoderLayer],
+    modes: &KvCacheLayerModes,
+) -> Vec<KimiK3LayerCache> {
     layers
         .iter()
-        .map(|layer| {
+        .enumerate()
+        .map(|(idx, layer)| {
             if layer.is_linear {
                 KimiK3LayerCache::Delta(KimiK3DeltaCache::new())
             } else {
-                KimiK3LayerCache::Attn(KVCache::new())
+                KimiK3LayerCache::Attn(KVCache::new_with_mode(
+                    super::mla_batched::latent_pair_cache_mode(modes.mode_for_layer(idx)),
+                ))
             }
         })
         .collect()
@@ -821,8 +832,10 @@ impl KimiK3DeltaAttention {
             &self.conv_decode_weight,
             in_dtype,
         ));
-        let tail = mlxcel_core::slice(&padded, &[0, 1, 0], &[b, self.kernel_size, channels]);
-        (out, mlxcel_core::contiguous(&tail, false))
+        (
+            out,
+            mlxcel_core::utils::materialized_state_tail(&padded, self.kernel_size - 1),
+        )
     }
 
     /// Everything after the conv: q/k norm, gate, recurrence, output gate,
@@ -1077,11 +1090,90 @@ pub(crate) struct KimiK3MLAAttention {
     qk_rope_head_dim: i32,
     q_head_dim: i32,
     kv_lora_rank: i32,
+    /// Value width, read off the config. Only the absorption cost model needs
+    /// it; the projection shapes already carry it.
+    v_head_dim: i32,
     scale: f32,
+    /// Family key for the latent-cache helpers' warnings and their
+    /// `QUANTIZED_LATENT_FAMILIES` gate: `kimi_k3`, or the borrowing family.
+    family: &'static str,
+}
+
+/// Geometry and options of one gated q-LoRA NoPE MLA layer, for a family
+/// that borrows [`KimiK3MLAAttention`] without a [`KimiK3TextConfig`].
+///
+/// Used by: KimiK3 (through [`KimiK3MLAAttention::from_weights`]), Raon1Mini
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NopeMlaSpec {
+    pub(crate) hidden_size: usize,
+    pub(crate) num_heads: usize,
+    pub(crate) q_lora_rank: Option<usize>,
+    pub(crate) kv_lora_rank: usize,
+    pub(crate) qk_nope_head_dim: usize,
+    pub(crate) qk_rope_head_dim: usize,
+    pub(crate) v_head_dim: usize,
+    pub(crate) use_output_gate: bool,
+    /// Epsilon of `q_a_layernorm` / `kv_a_layernorm`.
+    pub(crate) latent_norm_eps: f32,
+    pub(crate) group_size: i32,
+    pub(crate) bits: i32,
+    pub(crate) family: &'static str,
 }
 
 impl KimiK3MLAAttention {
-    fn forward_batched_decode(
+    /// Each linear's input width against `spec` (issue #3457): `q_a_proj` /
+    /// `q_proj`, `kv_a_proj_with_mqa` and `g_proj` take `hidden_size`,
+    /// `q_b_proj` takes `q_lora_rank`, `o_proj` takes
+    /// `num_attention_heads * v_head_dim`. `embed_q` / `unembed_out` are
+    /// derived from `kv_b_proj` at sanitize and are not checked here.
+    ///
+    /// Used by: Raon1Mini (`raon1_mini.rs`); Kimi K3 does not call it yet
+    pub(crate) fn check_input_widths(
+        &self,
+        spec: &NopeMlaSpec,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let hidden = spec.hidden_size;
+        match &self.q_proj {
+            QueryProjection::Plain(q_proj) => {
+                q_proj.check_input_width(&format!("{prefix}.q_proj"), hidden)?;
+            }
+            QueryProjection::LoRA {
+                q_a_proj, q_b_proj, ..
+            } => {
+                q_a_proj.check_input_width(&format!("{prefix}.q_a_proj"), hidden)?;
+                let rank = spec.q_lora_rank.unwrap_or_default();
+                q_b_proj.check_input_width(&format!("{prefix}.q_b_proj"), rank)?;
+            }
+        }
+        self.kv_a_proj_with_mqa
+            .check_input_width(&format!("{prefix}.kv_a_proj_with_mqa"), hidden)?;
+        if let Some(g_proj) = &self.g_proj {
+            g_proj.check_input_width(&format!("{prefix}.g_proj"), hidden)?;
+        }
+        self.o_proj.check_input_width(
+            &format!("{prefix}.o_proj"),
+            spec.num_heads * spec.v_head_dim,
+        )
+    }
+
+    /// The layer's MLA shape, for the latent cache view.
+    fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        super::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+    }
+
+    /// One decode token per row (`x` `[B, 1, hidden]`) against each row's
+    /// own latent cache, which may differ in length.
+    ///
+    /// Used by: KimiK3 (`forward_batched_attention`), Raon1Mini (native
+    /// batched decode, `raon1_mini_lm.rs`)
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut KVCache],
@@ -1120,21 +1212,26 @@ impl KimiK3MLAAttention {
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
         let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1);
         let output = super::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &kv_latent, &k_pe, caches, self.scale, None,
+            self.family,
+            true,
+            self.geometry(),
+            &q_latent,
+            &q_pe,
+            &kv_latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output, true);
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, 1, -1]);
-        let output = match &self.g_proj {
-            Some(g_proj) => {
-                let gate = mlxcel_core::sigmoid(&g_proj.forward(x));
-                mlxcel_core::multiply(&output, &gate)
-            }
-            None => output,
-        };
-        self.o_proj.forward(&output)
+        self.project_output(x, &output, b, 1)
     }
 
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -1177,8 +1274,127 @@ impl KimiK3MLAAttention {
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]); // [B, 1, L, rope]
         let kv_latent = mlxcel_core::expand_dims(&self.kv_a_layernorm.forward(&compressed), 1); // [B, 1, L, rank]
 
-        let (cached_latent, cached_k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // An `int8` cache stores the latent as the affine group-64 triple and
+        // hands back a quantized window; the fresh chunk is quantized before
+        // this step reads it, so a prefill reads what later decode steps read
+        // (#3162). An fp16 cache is updated exactly as before.
+        let window = super::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            self.family,
+            true,
+        );
 
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        );
+
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention`: the fused kernel's quantized
+        // variant where it applies (Metal, unmasked, up to
+        // `FUSED_DECODE_QUANTIZED_MAX_KEYS` keys, #3156; records
+        // `AbsorbedFused`), the #3155 composed decode otherwise (records
+        // `AbsorbedComposed`). The additive mask is cast to the score dtype
+        // and added to the rope-score term where the dense code adds it. Every
+        // other step over a quantized window dequantizes it once and runs the
+        // fp16 code below.
+        let (cached_latent, cached_k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_lat = self.embed_q.forward(&q_nope, true);
+                let mask = mask.map(|m| cast_to(m, mlxcel_core::array_dtype(&q_pe)));
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
+                    &q_lat,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask.as_deref(),
+                );
+                let output = self.unembed_out.forward(&output, true);
+                return self.project_output(x, &output, b, l);
+            }
+            window => super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe)),
+        };
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
+        if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, through
+            // `rope_folded_attention` instead of materializing the
+            // `[B, H, L, S]` nope, rope, summed and softmax score tensors by
+            // hand. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&cached_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            let output = if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_lat = self.embed_q.forward(&q_nope, true);
+                let attn = mlxcel_core::mla::rope_folded_attention(
+                    &q_lat,
+                    &q_pe,
+                    &cached_latent,
+                    &cached_k_pe,
+                    &cached_latent,
+                    self.scale,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&attn, true) // [B, H, L, v_head]
+            } else {
+                // Materialize: expand the latent to per-head k / v.
+                let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, nope]
+                let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head]
+                mlxcel_core::mla::rope_folded_attention(
+                    &q_nope,
+                    &q_pe,
+                    &k,
+                    &cached_k_pe,
+                    &v,
+                    self.scale,
+                    folded_mask,
+                )
+            };
+            return self.project_output(x, &output, b, l);
+        }
+
+        // Single-token decode keeps the manual form: its score row is one
+        // `[B, H, 1, S]` slice.
         // pe_scores = (q_pe * scale) @ k_pe^T -> [B, H, L, S]; the mask is
         // additive (0 / -inf) and is added in the scores dtype.
         let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
@@ -1190,17 +1406,19 @@ impl KimiK3MLAAttention {
             pe_scores = mlxcel_core::add(&pe_scores, &m);
         }
 
-        let output = if l == 1 {
-            // Decode in the latent space: q_lat = embed_q(q_nope) [B, H, 1, rank].
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if absorbed {
+            // Absorbed: work in the latent space, q_lat = embed_q(q_nope).
             let q_lat = self.embed_q.forward(&q_nope, true);
             let q_lat = mlxcel_core::multiply(&q_lat, &scale_arr);
             let k_t = mlxcel_core::swap_axes(&cached_latent, -1, -2);
             let scores = mlxcel_core::add(&mlxcel_core::matmul(&q_lat, &k_t), &pe_scores);
             let probs = mlxcel_core::softmax(&scores, -1);
             let attn = mlxcel_core::matmul(&probs, &cached_latent);
-            self.unembed_out.forward(&attn, true) // [B, H, 1, v_head]
+            self.unembed_out.forward(&attn, true) // [B, H, L, v_head]
         } else {
-            // Prefill: expand the latent to per-head k / v.
+            // Materialize: expand the latent to per-head k / v.
             let k = self.embed_q.forward(&cached_latent, false); // [B, H, S, nope]
             let v = self.unembed_out.forward(&cached_latent, true); // [B, H, S, v_head]
             let q_nope_scaled = mlxcel_core::multiply(&q_nope, &scale_arr);
@@ -1209,8 +1427,19 @@ impl KimiK3MLAAttention {
             let probs = mlxcel_core::softmax(&scores, -1);
             mlxcel_core::matmul(&probs, &v) // [B, H, L, v_head]
         };
+        self.project_output(x, &output, b, l)
+    }
 
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+    /// `[B, H, L, v_head]` attention output to `[B, L, hidden]`: head merge,
+    /// the optional sigmoid output gate on `x`, and `o_proj`.
+    fn project_output(
+        &self,
+        x: &MlxArray,
+        output: &MlxArray,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         let output = match &self.g_proj {
             Some(g_proj) => {
@@ -1227,23 +1456,49 @@ impl KimiK3MLAAttention {
         config: &KimiK3TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
-        let gs = config.group_size();
-        let bits = config.bits();
+        let spec = NopeMlaSpec {
+            hidden_size: config.hidden_size,
+            num_heads: config.num_attention_heads,
+            q_lora_rank: config.q_lora_rank,
+            kv_lora_rank: config.kv_lora_rank,
+            qk_nope_head_dim: config.qk_nope_head_dim,
+            qk_rope_head_dim: config.qk_rope_head_dim,
+            v_head_dim: config.v_head_dim,
+            use_output_gate: config.mla_use_output_gate,
+            latent_norm_eps: MLA_LORA_NORM_EPS,
+            group_size: config.group_size(),
+            bits: config.bits(),
+            family: "kimi_k3",
+        };
+        Self::from_spec(weights, &spec, prefix)
+    }
+
+    /// Load one layer from explicit geometry.
+    ///
+    /// Used by: [`Self::from_weights`], Raon1Mini (`raon1_mini.rs`)
+    pub(crate) fn from_spec(
+        weights: &WeightMap,
+        spec: &NopeMlaSpec,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let gs = spec.group_size;
+        let bits = spec.bits;
+        let q_head_dim = spec.qk_nope_head_dim + spec.qk_rope_head_dim;
 
         check_axis(
             weights,
             &format!("{prefix}.kv_a_proj_with_mqa.weight"),
             0,
-            config.kv_lora_rank + config.qk_rope_head_dim,
+            spec.kv_lora_rank + spec.qk_rope_head_dim,
             "kv_lora_rank + qk_rope_head_dim",
         )?;
         check_numel(
             weights,
             &format!("{prefix}.kv_a_layernorm.weight"),
-            config.kv_lora_rank,
+            spec.kv_lora_rank,
             "kv_lora_rank",
         )?;
-        let q_out_key = if config.q_lora_rank.is_some() {
+        let q_out_key = if spec.q_lora_rank.is_some() {
             format!("{prefix}.q_b_proj.weight")
         } else {
             format!("{prefix}.q_proj.weight")
@@ -1252,10 +1507,10 @@ impl KimiK3MLAAttention {
             weights,
             &q_out_key,
             0,
-            config.num_attention_heads * config.q_head_dim(),
+            spec.num_heads * q_head_dim,
             "num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim)",
         )?;
-        if let Some(rank) = config.q_lora_rank {
+        if let Some(rank) = spec.q_lora_rank {
             check_axis(
                 weights,
                 &format!("{prefix}.q_a_proj.weight"),
@@ -1270,7 +1525,7 @@ impl KimiK3MLAAttention {
                 "q_lora_rank",
             )?;
         }
-        if config.mla_use_output_gate {
+        if spec.use_output_gate {
             // The gate multiplies the `[B, L, num_attention_heads * v_head_dim]`
             // attention output; a width that neither matches it nor broadcasts
             // against it throws inside MLX rather than returning.
@@ -1278,7 +1533,7 @@ impl KimiK3MLAAttention {
                 weights,
                 &format!("{prefix}.g_proj.weight"),
                 0,
-                config.num_attention_heads * config.v_head_dim,
+                spec.num_heads * spec.v_head_dim,
                 "num_attention_heads * v_head_dim",
             )?;
         }
@@ -1286,11 +1541,11 @@ impl KimiK3MLAAttention {
             weights,
             &format!("{prefix}.o_proj.weight"),
             0,
-            config.hidden_size,
+            spec.hidden_size,
             "hidden_size",
         )?;
 
-        let q_proj = if config.q_lora_rank.is_some() {
+        let q_proj = if spec.q_lora_rank.is_some() {
             let q_a_norm = take_weight(weights, &format!("{prefix}.q_a_layernorm.weight"))?;
             QueryProjection::LoRA {
                 q_a_proj: UnifiedLinear::from_weights(
@@ -1299,7 +1554,7 @@ impl KimiK3MLAAttention {
                     gs,
                     bits,
                 )?,
-                q_a_layernorm: RMSNorm::new(q_a_norm, MLA_LORA_NORM_EPS),
+                q_a_layernorm: RMSNorm::new(q_a_norm, spec.latent_norm_eps),
                 q_b_proj: UnifiedLinear::from_weights(
                     weights,
                     &format!("{prefix}.q_b_proj"),
@@ -1325,7 +1580,7 @@ impl KimiK3MLAAttention {
         let embed_q = MultiLinear::from_weights(weights, &format!("{prefix}.embed_q"), gs, bits)?;
         let unembed_out =
             MultiLinear::from_weights(weights, &format!("{prefix}.unembed_out"), gs, bits)?;
-        let g_proj = if config.mla_use_output_gate {
+        let g_proj = if spec.use_output_gate {
             Some(UnifiedLinear::from_weights(
                 weights,
                 &format!("{prefix}.g_proj"),
@@ -1340,17 +1595,19 @@ impl KimiK3MLAAttention {
         Ok(Self {
             q_proj,
             kv_a_proj_with_mqa,
-            kv_a_layernorm: RMSNorm::new(kv_norm_weight, MLA_LORA_NORM_EPS),
+            kv_a_layernorm: RMSNorm::new(kv_norm_weight, spec.latent_norm_eps),
             embed_q,
             unembed_out,
             g_proj,
             o_proj,
-            num_heads: config.num_attention_heads as i32,
-            qk_nope_head_dim: config.qk_nope_head_dim as i32,
-            qk_rope_head_dim: config.qk_rope_head_dim as i32,
-            q_head_dim: config.q_head_dim() as i32,
-            kv_lora_rank: config.kv_lora_rank as i32,
-            scale: (config.q_head_dim() as f32).powf(-0.5),
+            num_heads: spec.num_heads as i32,
+            qk_nope_head_dim: spec.qk_nope_head_dim as i32,
+            qk_rope_head_dim: spec.qk_rope_head_dim as i32,
+            q_head_dim: q_head_dim as i32,
+            kv_lora_rank: spec.kv_lora_rank as i32,
+            v_head_dim: spec.v_head_dim as i32,
+            scale: (q_head_dim as f32).powf(-0.5),
+            family: spec.family,
         })
     }
 }
@@ -1828,6 +2085,10 @@ pub struct KimiK3Model {
     /// layer, `[D, 1]` float32 with its epsilon.
     output_attn_res: Option<(UniquePtr<MlxArray>, f32)>,
     sequence_state: ModelOwnedSequenceState<KimiK3LayerCache>,
+    /// Resolved per-layer KV cache modes, injected by the generator or the
+    /// scheduler through [`LanguageModel::set_kv_cache_layer_modes`]. Only
+    /// the MLA layers read it (#3162).
+    kv_cache_layer_modes: KvCacheLayerModes,
     eos_token_ids: Vec<i32>,
     /// The dtype of the embedding table, which is the dtype every layer
     /// runs its activations in (see `activation_dtype`).
@@ -1857,7 +2118,7 @@ impl KimiK3Model {
         caches: &mut [KimiK3LayerCache],
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
     /// The dtype the decoder runs in: that of the embedding table.
@@ -1882,13 +2143,18 @@ impl KimiK3Model {
         } else {
             mlxcel_core::astype(inputs_embeds, self.act_dtype)
         };
-        self.forward_hidden(h, caches)
+        self.forward_hidden(h, caches, None)
     }
 
+    /// The layer stack, final norm and LM head over input embeddings `h`,
+    /// projecting every position (`row == None`) or only position `row`
+    /// (`[B, 1, vocab]`, the prefill's sampled row, #3070). The layers and
+    /// the output Attention Residual mix run over the whole input either way.
     fn forward_hidden(
         &self,
         h: UniquePtr<MlxArray>,
         caches: &mut [KimiK3LayerCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         assert_eq!(
             caches.len(),
@@ -1896,22 +2162,15 @@ impl KimiK3Model {
             "kimi_k3: cache cardinality must match layer count"
         );
 
-        let l = mlxcel_core::array_shape(&h)[1];
-
-        // Every cache advances by the same token count, so any layer's offset
-        // is the sequence position; the additive mask is [L, L + offset].
-        let attn_mask = if l > 1 {
-            let offset = caches.first().map_or(0, KimiK3LayerCache::offset);
-            Some(create_causal_mask(l, offset))
-        } else {
-            None
-        };
-
-        let (h, blocks) = self.run_layers(h, attn_mask.as_deref(), caches);
+        // No mask array: a multi-token MLA step runs MLX's causal mode inside
+        // the rope-folded attention, over the live window its cache returns,
+        // which masks the same keys as the additive `[L, L + offset]` mask (#3099).
+        let (h, blocks) = self.run_layers(h, None, caches);
         let h = match &self.output_attn_res {
             Some((w, eps)) => attn_res_mix(&blocks, &h, w, *eps),
             None => h,
         };
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         if let Some(lm_head) = &self.lm_head {
@@ -1922,7 +2181,7 @@ impl KimiK3Model {
     }
 
     pub fn make_layer_caches(&self) -> Vec<KimiK3LayerCache> {
-        make_layer_caches(&self.layers)
+        make_layer_caches(&self.layers, &self.kv_cache_layer_modes)
     }
 
     fn delta_rows_uniform(rows: &[&KimiK3DeltaCache]) -> bool {
@@ -2229,7 +2488,8 @@ impl KimiK3Model {
             None
         };
 
-        let internal_caches = make_layer_caches(&layers);
+        let kv_cache_layer_modes = KvCacheLayerModes::new();
+        let internal_caches = make_layer_caches(&layers, &kv_cache_layer_modes);
         let eos_token_ids = super::parse_optional_eos_token_ids(&config.eos_token_id);
 
         Ok(Self {
@@ -2240,6 +2500,7 @@ impl KimiK3Model {
             tie_word_embeddings: config.tie_word_embeddings,
             output_attn_res,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes,
             eos_token_ids,
             act_dtype,
         })
@@ -2272,15 +2533,37 @@ impl KimiK3Model {
         inputs_embeds: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, inputs_embeds, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence_with_embeddings`] projecting every
+    /// position (`row == None`) or only position `row` (`[B, 1, vocab]`, the
+    /// prefill's sampled row, #3070), against the same sequence state.
+    ///
+    /// Used by: [`Self::forward_for_sequence_with_embeddings`], this model's
+    /// `LanguageModel::last_row_logits` and `vision::kimi_k3_vl`'s.
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input_ids)[1];
         if seq_id.is_none() && seq_len > 1 {
             self.sequence_state
                 .replace_internal(self.make_layer_caches());
         }
 
-        let run = |internal: &mut [KimiK3LayerCache]| match inputs_embeds {
-            Some(embeds) => self.forward_with_input_embeddings(embeds, internal),
-            None => self.forward(input_ids, internal),
+        let run = |internal: &mut [KimiK3LayerCache]| {
+            let h = match inputs_embeds {
+                Some(embeds) if mlxcel_core::array_dtype(embeds) == self.act_dtype => {
+                    mlxcel_core::copy(embeds)
+                }
+                Some(embeds) => mlxcel_core::astype(embeds, self.act_dtype),
+                None => self.embed_tokens.forward(input_ids),
+            };
+            self.forward_hidden(h, internal, row)
         };
         if let Some(seq_id) = seq_id {
             self.sequence_state
@@ -2297,16 +2580,37 @@ impl LanguageModel for KimiK3Model {
         self.layers.len()
     }
 
-    /// No mode table: report the real storage so the server does not fall back to the configured
-    /// table (issue #2790). Attention layers keep an FP16 `KVCache`; linear layers none.
+    /// What each layer stores, by the builder's own rule: an MLA layer holds
+    /// its table mode (fp16 or the affine int8 latent, #3162), a KDA layer no
+    /// KV (issue #2790). Before a table is injected every MLA layer is fp16.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
-        crate::models::model_owned::table_less_storage_modes(self.layers.len(), |idx| {
-            if self.layers[idx].is_linear {
-                crate::models::model_owned::LayerKv::None
-            } else {
-                crate::models::model_owned::LayerKv::Fp16Only
-            }
-        })
+        Some(
+            (0..self.layers.len())
+                .map(|idx| {
+                    let kind = if self.layers[idx].is_linear {
+                        LayerStateKind::None
+                    } else {
+                        LayerStateKind::Full
+                    };
+                    kind.stored_mode(super::mla_batched::latent_pair_cache_mode(
+                        self.kv_cache_layer_modes.mode_for_layer(idx),
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    /// Record the resolved per-layer table and rebuild the fallback slot so
+    /// it is not left holding caches in the previous mode. Both injection
+    /// sites run before any sequence exists.
+    fn set_kv_cache_layer_modes(&self, modes: Vec<mlxcel_core::cache::KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_layer_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<mlxcel_core::cache::KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -2411,6 +2715,23 @@ impl LanguageModel for KimiK3Model {
         self.forward_for_sequence(input_ids, seq_id)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // The trait's embeddings forward is the default, which ignores them:
+        // decline so that path keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows_for_sequence(input_ids, None, seq_id, Some(last_pos)))
+    }
+
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
@@ -2463,3 +2784,7 @@ impl LanguageModel for KimiK3Model {
 #[cfg(test)]
 #[path = "kimi_k3_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kimi_k3_latent_tests.rs"]
+mod latent_tests;

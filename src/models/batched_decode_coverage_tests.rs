@@ -18,6 +18,7 @@ use std::path::Path;
 const EXPECTED_NATIVE: &[&str] = &[
     "AfmoeModel@src/models/afmoe.rs",
     "ApertusModel@src/models/apertus.rs",
+    "ArceeModel@src/models/arcee.rs",
     "BailingMoeLinearModel@src/models/bailing_moe_linear.rs",
     "BailingMoeModel@src/models/bailing_moe.rs",
     "BitNetModel@src/models/bitnet.rs",
@@ -69,6 +70,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "HunyuanVlModel@src/vision/hunyuan_vl.rs",
     "HunyuanVlTextModel@src/models/hunyuan_vl.rs",
     "IQuestLoopCoderWrapper@src/models/iquestloopcoder_model.rs",
+    "Inkling2Model@src/models/inkling2/runtime.rs",
     "InklingModel@src/models/inkling/runtime.rs",
     "InternLM2Model@src/models/internlm2.rs",
     "InternLM3Model@src/models/internlm3.rs",
@@ -77,8 +79,10 @@ const EXPECTED_NATIVE: &[&str] = &[
     "KimiK3Model@src/models/kimi_k3.rs",
     "KimiLinearModel@src/models/kimi_linear.rs",
     "KlearModel@src/models/klear.rs",
+    "Kolibri1Model@src/models/kolibri1_lm.rs",
     "LagunaWrapper@src/models/laguna.rs",
     "Lfm2Model@src/models/lfm2.rs",
+    "LimiteWrapper@src/models/limite_wrapper.rs",
     "Llama3Model@src/models/llama3.rs",
     "Llama4Wrapper@src/models/llama4.rs",
     "Mamba2Model@src/models/mamba2.rs",
@@ -127,6 +131,7 @@ const EXPECTED_NATIVE: &[&str] = &[
     "Qwen3VLModel@src/vision/qwen3_vl.rs",
     "Qwen3VLMoeModel@src/models/qwen3_vl_moe.rs",
     "Qwen3VLMoeModel@src/vision/qwen3_vl_moe.rs",
+    "Raon1MiniModel@src/models/raon1_mini_lm.rs",
     "Rwkv7@src/models/rwkv7.rs",
     "SeedOssModel@src/models/seed_oss.rs",
     "SmolLM3Model@src/models/smollm3.rs",
@@ -141,7 +146,9 @@ const EXPECTED_NATIVE: &[&str] = &[
     "TensorParallelLlamaModel@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen35Model@src/distributed/tensor_parallel/llama_runtime.rs",
     "TensorParallelQwen3Model@src/distributed/tensor_parallel/llama_runtime.rs",
+    "Xing40Model@src/models/xing4_0.rs",
     "YoutuLanguageModel@src/models/youtu_vl_lm.rs",
+    "Z1t@src/models/z1t.rs",
 ];
 
 const EXPECTED_DELEGATING: &[&str] = &[
@@ -154,6 +161,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "GotOcrVlModel@src/vision/got_ocr.rs",
     "GraniteVisionVLModel@src/vision/granite_vision.rs",
     "Idefics2Model@src/vision/idefics2.rs",
+    "Inkling2VlModel@src/vision/inkling2_vl.rs",
     "InklingVlModel@src/vision/inkling_vl.rs",
     "InternVLChatVLM@src/vision/internvl.rs",
     "JinaVlmModel@src/vision/jina_vlm.rs",
@@ -164,6 +172,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "LlmJpVlModel@src/vision/llmjp_vl.rs",
     "LocateAnythingVLM@src/vision/locateanything.rs",
     "MageVlModel@src/vision/mage_vl.rs",
+    "MimoV2VlModel@src/vision/mimo_v2_vl.rs",
     "MiniCPMOVLModel@src/vision/minicpmo_vl.rs",
     "MiniCPMV46VLModel@src/vision/minicpmv4_6_vl.rs",
     "MiniMaxM3VlModel@src/vision/minimax_m3_vl.rs",
@@ -175,6 +184,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
     "NemotronHNanoOmniVlModel@src/vision/nemotron_h_nano_omni_vl.rs",
     "Phi3VLModel@src/vision/phi3_vl.rs",
     "Phi4SigLipVLModel@src/vision/phi4_siglip_vl.rs",
+    "Plamo2VlModel@src/vision/plamo2_vl.rs",
     "Qwen35VLModel@src/vision/qwen3_5_vl.rs",
     "Qwen4ExpVLModel@src/vision/qwen4_exp_vl.rs",
     "SmolVLMModel@src/vision/smolvlm.rs",
@@ -186,6 +196,7 @@ const EXPECTED_DELEGATING: &[&str] = &[
 const EXPECTED_PER_ROW_FALLBACK: &[&str] = &[
     "BaichuanModel@src/models/baichuan.rs",
     "Granite4VisionVLModel@src/vision/granite4_vision.rs",
+    "HyV4Model@src/models/hy_v4.rs",
     "Llama4CxxModel@src/models/llama4.rs",
     "MuseGlimmerTextWrapper@src/models/muse_glimmer.rs",
     "PipelineServerModel@src/distributed/pipeline/server_runtime.rs",
@@ -541,7 +552,7 @@ fn issue_2563_vlm_families_use_grouped_native_sequence_aware_decode() {
     }
 }
 
-fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
+pub(super) fn visit_rs_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
     for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display())) {
         let path = entry.expect("directory entry").path();
         if path.is_dir() {
@@ -616,8 +627,11 @@ fn classify_impl(key: &str, block: &str) -> Result<Option<DecodeClassification>,
     if method_body(block, "supports_batching").is_some_and(literal_false) {
         return Ok(None);
     }
-    let has_batched_override =
-        block.contains("fn forward_batched(") || block.contains("fn forward_batched_with_ids(");
+    // A scheduler-owned family's batched forward is `forward_layer_state`,
+    // which takes the rows' pool state (issue #3254).
+    let has_batched_override = block.contains("fn forward_batched(")
+        || block.contains("fn forward_batched_with_ids(")
+        || block.contains("fn forward_layer_state(");
     match method_body(block, "batched_decode_kind") {
         Some(body) if body.contains("BatchedDecodeKind::Native") => {
             if has_batched_override {
@@ -659,7 +673,7 @@ fn literal_false(body: &str) -> bool {
         == "false"
 }
 
-fn matching_brace(source: &str, open: usize) -> usize {
+pub(super) fn matching_brace(source: &str, open: usize) -> usize {
     let mut depth = 0usize;
     for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
         match byte {
@@ -676,7 +690,7 @@ fn matching_brace(source: &str, open: usize) -> usize {
     panic!("unclosed impl block at byte {open}")
 }
 
-fn relative_source_path(root: &Path, path: &Path) -> String {
+pub(super) fn relative_source_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .expect("source under repository root")
         .components()

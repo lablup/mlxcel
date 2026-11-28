@@ -40,6 +40,13 @@ use std::sync::OnceLock;
 /// // Slice x[:, 5:, :] along axis 1 (5 to end)
 /// let sliced = slice_axis(&x, 1, 5, -1);
 /// ```
+///
+/// Used by: model and drafter layers that split activations or weights along
+/// an axis, including RecurrentGemma and Inkling MTP, embedding pooling,
+/// generative rerankers, and vision loaders and detectors such as RF-DETR.
+/// Find qualified references and grouped imports, excluding test modules:
+/// `grep -rln '\butils::.*\bslice_axis\b\|\bslice_axis,' src --include='*.rs'
+/// | grep -v 'tests\.rs$' | grep -v '/batched_decode_harness\.rs$'`.
 pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(x);
     let ndim = shape.len();
@@ -76,6 +83,71 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
     ffi::slice(x, &starts, &stops)
 }
 
+/// Sources at least this many rows long along the sliced axis have their
+/// state tail evaluated eagerly by [`materialized_state_tail`]. Below it the
+/// retained source is small (a decode step or a short verify block), and an
+/// extra `async_eval` per layer would only add scheduling overhead.
+pub const STATE_TAIL_EAGER_MIN_ROWS: i32 = 256;
+
+/// The last `n_keep` rows of `x` along axis 1, as a fresh buffer for a
+/// recurrent cache (a convolution state, for example).
+///
+/// A cache entry assigned as a plain lazy slice, or as `contiguous` of one,
+/// is a graph node that holds its whole source until something evaluates the
+/// cache. In a single-pass prefill nothing does until the forward ends, so a
+/// model that stores such a tail per layer keeps every layer's full-length
+/// source alive at once: 0.47 GB per linear-attention layer for Qwen 3.5 4B
+/// at 28.7K tokens, 11 GB over 24 layers. When the source is long, this
+/// schedules the tail with `async_eval` so the source is released once the
+/// layer's own consumers have run; the result is bit-identical.
+///
+/// Used by: Qwen 3.5, Qwen3-Next, Qwen4-Exp (gated-delta and PLE), Mamba,
+/// Mamba2, FalconH1, GraniteMoeHybrid, Plamo2, NemotronH, Jamba, Lfm2 (and its
+/// speculative path), KimiLinear, KimiK3 and RaonRda (short conv), RecurrentGemma,
+/// Inkling (short conv), Z1T (AFT-conv window)
+pub fn materialized_state_tail(x: &MlxArray, n_keep: i32) -> UniquePtr<MlxArray> {
+    materialized_axis_tail(x, 1, n_keep)
+}
+
+/// The last `n_keep` entries of `x` along `axis`, as a fresh buffer that does
+/// not hold `x` alive once it has been evaluated. [`materialized_state_tail`]
+/// is the axis-1 case; a KV cache keeps its time axis at 2.
+///
+/// Evaluated eagerly (with `async_eval`, errors deferred to the next
+/// `try_eval`) when `x` is at least [`STATE_TAIL_EAGER_MIN_ROWS`] long along
+/// `axis`; the result is bit-identical either way.
+///
+/// Used by: [`materialized_state_tail`], `RotatingKVCache`'s first fill in `cache/first_fill.rs`
+/// (Gemma 2/3/4, Cohere2, GPT-OSS, Ministral3 and every other family with
+/// sliding-window layers, issue #3062)
+pub fn materialized_axis_tail(x: &MlxArray, axis: usize, n_keep: i32) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(x);
+    let rows = shape[axis];
+    let mut starts = vec![0i32; shape.len()];
+    starts[axis] = rows - n_keep;
+    let tail = ffi::contiguous(&ffi::slice(x, &starts, &shape), false);
+    if rows >= STATE_TAIL_EAGER_MIN_ROWS {
+        crate::deferred_eval::async_eval_or_defer(&tail);
+    }
+    tail
+}
+
+/// Starts evaluating a recurrent state computed from a long prefill so its
+/// full-length inputs are released once the layer's consumers run (see
+/// [`materialized_state_tail`]). No-op below [`STATE_TAIL_EAGER_MIN_ROWS`] rows.
+///
+/// Used by: Mamba2, FalconH1, GraniteMoeHybrid (SSM final state), the
+/// gated-delta chunked scan (Qwen3Next, Qwen3.5, Qwen4-Exp, KimiLinear,
+/// KimiK3), BailingMoeLinear (GLA state), and the conv-state sites that keep a
+/// per-row or non-axis-1 tail: Baichuan, Inkling batched, TP Qwen3.5 rows
+/// (`tensor_parallel/llama_runtime.rs`), Z1T (AFT-conv running pool sums),
+/// and the chunked SSD scan (`ssd_scan.rs`).
+pub fn schedule_prefill_state(state: &MlxArray, rows: i32) {
+    if rows >= STATE_TAIL_EAGER_MIN_ROWS {
+        crate::deferred_eval::async_eval_or_defer(state);
+    }
+}
+
 // Attention Mask Utilities.
 /// Create a causal attention mask.
 ///
@@ -92,20 +164,29 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 ///
 /// Used by: decoders that materialize an explicit prefill mask instead of
 /// leaving `mask: None` for fused SDPA to apply causality itself. At this
-/// commit that is 49 non-test files under `src/models`, in four groups.
-/// Hybrid and mixed-layer stacks that build one mask at the full-attention
-/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
-/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma, Laguna.
-/// Sliding-window, chunked and dual-attention families that build a separate
-/// global mask per forward: Gemma3, Gemma4, Gemma3n, DiffusionGemma, Cohere2,
-/// CohereCompass, Exaone4, Olmo3, Ministral3, Mistral4, Mellum, Llama4. VLM
-/// decoders that thread a mask down from the multimodal wrapper: Qwen2VL,
-/// Qwen3VL, GLM4V, Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and
-/// custom-attention decoders that add the mask to scores by hand: DeepSeekV3,
-/// DeepSeekV3.2, MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram,
-/// BailingMoeLinear, GLM4MoeLite, Qwen3.5, KimiK3. Outside `src/models` the
-/// callers are `lib.rs`, `layers.rs`, the tensor-parallel Llama runtime, the
-/// GLM4 pipeline stage executor, and disaggregated handoff; the grep also
+/// commit that is 14 non-test files under `src/models`, in five groups.
+/// Hybrid stacks that keep their mask for now: MiniMaxM3, RecurrentGemma.
+/// Sliding-window and dual-attention families that build a separate global
+/// mask per forward: Gemma4, DiffusionGemma. MLA and custom-attention
+/// decoders that add the mask to scores by hand: DeepSeekV2, DeepSeekV3.2,
+/// Hy4 (`hy_v4_attention.rs`, which follows the V3.2 causal fallback),
+/// the GLM4MoeLite MTP drafter, and the Qwen 3.5 speculative forward.
+/// KimiLinear, GLM4MoeLite, KimiK3 and LongcatFlashNgram fold the rope half
+/// into SDPA through `mla::rope_folded_attention` and take causal mode
+/// instead (#3099). Speculative verify blocks: Lfm2 (`forward_speculative`).
+/// Files that call it only from test or diagnostic code: Gemma3 (its mask
+/// tests), Gemma3n (its `xla-diagnostics` probes) and ExaoneMoe (its cache
+/// tests); Gemma4MtpTarget only names it in a comment.
+/// The hybrid, full-attention, GLM4V-family and sliding-window decoders that
+/// can take MLX's causal mode build their prefill masks through
+/// [`prefill_causal_mask`] and [`prefill_sliding_window_mask`] instead
+/// (#3051, #3072), and so do the attention-sink decoders (GptOss, FalconOcr,
+/// MiMoV2, DeepSeekV4), whose layers, like Laguna's, run
+/// [`crate::causal_prefill_attention`] (#3098). Outside `src/models` the
+/// callers are `lib.rs`, `layers.rs`, the tensor-parallel Llama runtime
+/// (Gemma 4), disaggregated handoff
+/// (`src/distributed/disaggregated/handoff_impl.rs`) and the SAM 3 text
+/// encoder (`src/vision/dense/sam3/text_encoder.rs`); the grep also
 /// matches `cache.rs` (calls inside its `#[cfg(test)]` module) and
 /// `drafter/qwen3_5_mtp/layer.rs` (a comment mention, not a call).
 ///
@@ -119,6 +200,291 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 /// `grep -rln '\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
     additive_causal_window_mask(size, offset, None)
+}
+
+/// Whether a model's own prefill causal mask can be left to MLX's causal
+/// mode instead of being built as an array (issue #3051).
+///
+/// The full-attention layers of the hybrid and Qwen-VL families build
+/// [`create_causal_mask`]`(seq_len, offset)` for a multi-token forward. MLX's
+/// SDPA fuses causal mode on every Metal generation where it does not fuse an
+/// additive array mask (pre-M5 at head_dim 256), and the array itself is an
+/// f32 `[seq_len, offset + seq_len]` buffer (3.65 GiB at 28K tokens). The two
+/// mask the same keys when:
+///
+/// - the forward has more than one query (`seq_len > 1`; a decode row needs
+///   no mask at all);
+/// - it is one row (`batch == 1`): batched rows keep the array, which the
+///   broadcast and padded batch paths are written against;
+/// - the caller supplied no mask of its own (`has_caller_mask == false`): a
+///   left-padding, windowed or multimodal mask is never replaced;
+/// - it is not a speculative verify block (no `DecodeLookaheadAppendScope`
+///   is active), which keeps the dispatch the verify path had before;
+/// - the layer attends exactly `offset + seq_len` keys, which holds for the
+///   dense `KVCache` these layers fetch from: MLX aligns causal mode
+///   bottom-right (query `i` sees keys `0..=k_len - q_len + i`), the same
+///   keys `create_causal_mask` allows at `offset = k_len - q_len`.
+///
+/// Position ids (MRoPE) only change the rotary embedding, not which keys a
+/// query attends, so they do not affect the choice.
+///
+/// `MLXCEL_PREFILL_CAUSAL_MODE=0` keeps the array mask everywhere, which is
+/// the pre-#3051 dispatch.
+///
+/// Used by: [`prefill_causal_mask`], `prefill_sdpa.rs` and Llama4.
+pub fn prefill_uses_causal_mode(seq_len: i32, batch: i32, has_caller_mask: bool) -> bool {
+    causal_mode_applies(
+        seq_len,
+        batch,
+        has_caller_mask,
+        crate::cache::speculative_append_active(),
+        prefill_causal_mode_enabled(),
+    )
+}
+
+/// The decision behind [`prefill_uses_causal_mode`], with the thread and
+/// process state passed in so it can be tested without them. A verify block
+/// (`speculative`, inside a `DecodeLookaheadAppendScope`) keeps the array
+/// mask, so a speculative verify scores its positions with the same kernel
+/// as before #3051.
+pub(crate) fn causal_mode_applies(
+    seq_len: i32,
+    batch: i32,
+    has_caller_mask: bool,
+    speculative: bool,
+    enabled: bool,
+) -> bool {
+    seq_len > 1 && batch == 1 && !has_caller_mask && !speculative && enabled
+}
+
+/// The attention geometry of a model's full-attention layers, which the
+/// prefill mask choice needs to ask MLX whether causal mode fuses.
+/// `head_dim` is the query and key head dim and `value_dim` the value head
+/// dim, which differs from it in the MLA-style decoders that concatenate a
+/// rope part onto the queries and keys (Mistral 4, MiniCPM3); MLX keeps
+/// those off its fused full-attention kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillAttention {
+    pub q_heads: i32,
+    pub kv_heads: i32,
+    pub head_dim: i32,
+    pub value_dim: i32,
+    /// Whether the layers carry attention sinks, which MLX weighs when it
+    /// picks a kernel; such layers run [`crate::causal_prefill_attention`]
+    /// with their sinks (#3098).
+    pub sinks: bool,
+}
+
+impl PrefillAttention {
+    pub fn new(q_heads: usize, kv_heads: usize, head_dim: usize) -> Self {
+        Self {
+            q_heads: q_heads as i32,
+            kv_heads: kv_heads as i32,
+            head_dim: head_dim as i32,
+            value_dim: head_dim as i32,
+            sinks: false,
+        }
+    }
+
+    /// The same geometry for layers with attention sinks.
+    pub fn with_sinks(self) -> Self {
+        Self {
+            sinks: true,
+            ..self
+        }
+    }
+
+    /// The same geometry with a value head dim of `value_dim`.
+    pub fn with_value_dim(self, value_dim: usize) -> Self {
+        Self {
+            value_dim: value_dim as i32,
+            ..self
+        }
+    }
+
+    /// The SDPA facts of a single prefill of `q_len` queries over `k_len`
+    /// keys, all in `activation_dtype`.
+    fn shape(
+        &self,
+        batch: i32,
+        q_len: i32,
+        k_len: i32,
+        activation_dtype: i32,
+    ) -> crate::window_sdpa::WindowSdpaShape {
+        crate::window_sdpa::WindowSdpaShape {
+            value_dim: self.value_dim,
+            ..crate::window_sdpa::WindowSdpaShape::prefill(
+                batch,
+                self.q_heads,
+                self.kv_heads,
+                q_len,
+                k_len,
+                self.head_dim,
+                activation_dtype,
+            )
+        }
+    }
+}
+
+/// The causal mask a model-built prefill needs: `None` for a decode row, or
+/// when [`prefill_uses_causal_mode`] allows causal mode and MLX fuses causal
+/// SDPA at this shape, in which case the layer must route a `seq_len > 1`
+/// forward without a mask through [`crate::causal_attention`] (or, for
+/// layers with sinks, `attention.sinks`, through
+/// [`crate::causal_prefill_attention`] with them, #3098); else
+/// [`create_causal_mask`]`(seq_len, offset)`.
+///
+/// Where MLX would fall back for causal mode too (pre-M5 Metal at head_dim
+/// 256 over `q_len != k_len`, every prefill piece after the first), the array
+/// mask stays: the model builds it once per forward and every full-attention
+/// layer shares it, which peaks lower than the per-layer chunked causal
+/// fallback (+4% on qwen3.8-27b at 28K tokens with 2048-token chunks). The
+/// verdict comes from MLX itself through
+/// [`crate::prefill_sdpa::maskless_route_is_fused`], memoized per shape and
+/// asked with sinks when `attention.sinks` is set.
+/// `activation_dtype` is the hidden state's dtype.
+///
+/// Used by: Qwen 3.5 (single model and tensor-parallel runtime), Qwen3-Next
+/// (single model and pipeline stage), GraniteMoeHybrid, Qwen2-VL, Qwen3-VL,
+/// Qwen3-VL-MoE (#3051); FalconH1, Plamo2, Lfm2, BailingMoeLinear, Llama4,
+/// Mistral4, MiniCPM3, NemotronNas, GLM4V, GLM4V-MoE, HunyuanVL, PaddleOcrVL,
+/// Ernie4.5MoeVL, and the global layers of Cohere2MoE, CohereCompass, Olmo3,
+/// Ministral3, Exaone4, ExaoneMoe, Mellum, Step3P5, AFMoE and Gemma3n
+/// (#3072); GptOss, FalconOcr and the sink full layers of MiMoV2 (#3098);
+/// the NoPE global layers of Limite (#2360).
+pub fn prefill_causal_mask(
+    seq_len: i32,
+    offset: i32,
+    batch: i32,
+    attention: PrefillAttention,
+    activation_dtype: i32,
+) -> Option<UniquePtr<MlxArray>> {
+    if seq_len <= 1 {
+        return None;
+    }
+    let causal = prefill_uses_causal_mode(seq_len, batch, false) && {
+        let shape = attention.shape(batch, seq_len, offset + seq_len, activation_dtype);
+        crate::prefill_sdpa::maskless_route_is_fused(&shape, 0, attention.sinks)
+    };
+    if causal {
+        None
+    } else {
+        Some(create_causal_mask(seq_len, offset))
+    }
+}
+
+/// The causal mask a softcapped full-attention prefill hands to every layer:
+/// `create_causal_mask(seq_len, offset)` for a multi-token forward with
+/// `softcap > 0`, else `None` (#3072).
+///
+/// The softcap composite needs the scores, so MLX's causal mode cannot
+/// replace the array; [`crate::causal_attention`] builds this same mask for a
+/// mask-less softcapped call, once per layer. A model that builds it once per
+/// forward and passes it down runs the identical masked SDPA (the
+/// `materializing_sdpa_query_chunk` gate slices it per query chunk) while
+/// holding one mask instead of one per layer in flight. `offset` is the
+/// number of keys the cache holds ahead of the new rows.
+///
+/// Used by: Gemma 2.
+pub fn softcap_prefill_causal_mask(
+    seq_len: i32,
+    offset: i32,
+    softcap: f32,
+) -> Option<UniquePtr<MlxArray>> {
+    (seq_len > 1 && softcap > 0.0).then(|| create_causal_mask(seq_len, offset))
+}
+
+/// Which keys a sliding-window layer's cache returns for a multi-token
+/// append, which sizes both the prefill mask and the SDPA the layer runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlidingPrefillKeys {
+    /// A dense `KVCache`: every live key plus the new ones
+    /// ([`create_sliding_window_prefill_mask_dense`]).
+    Dense,
+    /// A `RotatingKVCache`: at most `window - 1` prior keys plus the new
+    /// ones ([`create_sliding_window_prefill_mask`],
+    /// [`crate::window_sdpa::rotating_prefill_key_len`]).
+    Rotating,
+}
+
+/// The sliding-window prefill mask a model-built prefill needs, the
+/// sliding-layer counterpart of [`prefill_causal_mask`] (#3072): `None` when
+/// the layer can take MLX's own masking, else the dense windowed band the
+/// model builds once per forward and shares across its sliding layers.
+///
+/// `prior` is the value the model already sizes its sliding mask from (the
+/// cache's live length or offset). With `keys` the cache layout, the layer
+/// attends `k_len` keys. It is `None` when [`prefill_uses_causal_mode`] allows
+/// it and:
+///
+/// - every key is inside the window (`k_len <= window`), so the band is plain
+///   bottom-right causal, and MLX fuses causal mode at this shape; or
+/// - the keys outgrow the window and [`crate::window_sdpa::plan`] picks MLX's
+///   native `window_size` entry, which masks the same `q - k < window` band
+///   (`legacy_causal_window_mask` is this function's dense band).
+///
+/// A layer handed `None` for a multi-token forward must run
+/// [`crate::maskless_prefill_attention`], or with `attention.sinks`
+/// [`crate::causal_prefill_attention`] with its sinks (#3098), which MLX
+/// then fuses with sinks the same way. Where MLX would take its graph
+/// fallback, the one shared array stays, as it does for padded, batched and
+/// speculative forwards. A non-positive `window` means no window.
+///
+/// Used by: Cohere2, Cohere2MoE, CohereCompass, Olmo3, Ministral3, Exaone4,
+/// ExaoneMoe, Mellum, Step3P5, AFMoE, Gemma3n; GptOss, MiMoV2 and an all-local
+/// DeepSeekV4 stack (#3098); Limite, whose window is `sliding_window + 1`
+/// (#2360).
+pub fn prefill_sliding_window_mask(
+    seq_len: i32,
+    prior: i32,
+    window: i32,
+    batch: i32,
+    attention: PrefillAttention,
+    activation_dtype: i32,
+    keys: SlidingPrefillKeys,
+) -> Option<UniquePtr<MlxArray>> {
+    if seq_len <= 1 {
+        return None;
+    }
+    let window = if window > 0 { window } else { i32::MAX };
+    let k_len = match keys {
+        SlidingPrefillKeys::Dense => prior.saturating_add(seq_len),
+        SlidingPrefillKeys::Rotating => {
+            crate::window_sdpa::rotating_prefill_key_len(seq_len, prior, window)
+        }
+    };
+    let maskless = prefill_uses_causal_mode(seq_len, batch, false) && {
+        let shape = attention.shape(batch, seq_len, k_len, activation_dtype);
+        crate::prefill_sdpa::maskless_route_is_fused(&shape, window, attention.sinks)
+    };
+    if maskless {
+        None
+    } else {
+        Some(match keys {
+            SlidingPrefillKeys::Dense => {
+                create_sliding_window_prefill_mask_dense(seq_len, prior, window)
+            }
+            SlidingPrefillKeys::Rotating => {
+                create_sliding_window_prefill_mask(seq_len, prior, window)
+            }
+        })
+    }
+}
+
+/// `MLXCEL_PREFILL_CAUSAL_MODE`, read once: anything but `0`, `false` or
+/// `off` (the default is on) lets [`prefill_uses_causal_mode`] pick causal mode.
+fn prefill_causal_mode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_prefill_causal_mode(std::env::var("MLXCEL_PREFILL_CAUSAL_MODE").ok().as_deref())
+    })
+}
+
+fn parse_prefill_causal_mode(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off")
+    )
 }
 
 /// Shared builder for full-width additive causal / windowed-causal masks.
@@ -194,10 +560,9 @@ fn padding_mask_shape(mask: &MlxArray, builder: &str) -> (i32, i32) {
 /// padding tokens still see every real key, so no row is fully blocked and no
 /// softmax is NaN. Broadcasts against `[B, H, L, L]` scores.
 ///
-/// Used by: the encoder-only embedding families (BERT, XLM-RoBERTa,
-/// ModernBERT, SigLIP text) and the bidirectional decoder embedders
-/// (EmbeddingGemma, Qwen3-Embedding, LFM2 / Ministral3 / Llama bidirectional,
-/// ColQwen2.5, ColIdefics3) served through `/v1/embeddings`.
+/// Used by: BERT and ModernBERT, and the embedding paths in EmbeddingGemma2,
+/// Gemma3-Embedding, LFM2, Ministral3-Embedding, Llama-Bidirec and
+/// Llama-Nemotron-VL-Embedding.
 pub fn create_bidirectional_padding_mask(mask: &MlxArray) -> UniquePtr<MlxArray> {
     let (b, l) = padding_mask_shape(mask, "create_bidirectional_padding_mask");
     let zero_i32 = ffi::from_slice_i32(&[0], &[1, 1]);
@@ -221,9 +586,10 @@ pub fn create_bidirectional_padding_mask(mask: &MlxArray) -> UniquePtr<MlxArray>
 /// finite. Padding-row outputs are garbage-but-finite and are never consumed,
 /// because those key positions stay blocked for every real query.
 ///
-/// Used by: the last-token embedding families (Qwen3-Embedding without
-/// bidirectional attention, Qwen3-VL-Embedding) and any batched causal
-/// prefill over a padded `[B, L]` input.
+/// Used by: padded prefill in Qwen3-Embedding, Qwen3-VL-Embedding, ColIdefics3,
+/// ColQwen2.5, the Qwen3 and Qwen3-VL generative rerankers
+/// (`rerank/qwen3_generative.rs`, `rerank/qwen3_vl_generative.rs`), and the
+/// SAM 3 text encoder (`sam3/text_encoder.rs`).
 pub fn create_causal_padding_mask(mask: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
     let (b, total) = padding_mask_shape(mask, "create_causal_padding_mask");
     assert!(
@@ -261,8 +627,8 @@ pub fn create_causal_padding_mask(mask: &MlxArray, offset: i32) -> UniquePtr<Mlx
 /// padding query row attends every real key inside its window, and one that
 /// has none keeps its own column so no softmax row is NaN.
 ///
-/// Used by: ModernBERT local-attention layers and the EmbeddingGemma
-/// sliding-window layers served through `/v1/embeddings`.
+/// Used by: local-attention layers in ModernBERT, EmbeddingGemma2,
+/// Gemma3-Embedding and Ministral3-Embedding.
 pub fn create_bidirectional_window_mask(mask: &MlxArray, window: i32) -> UniquePtr<MlxArray> {
     let (b, l) = padding_mask_shape(mask, "create_bidirectional_window_mask");
     assert!(
@@ -299,8 +665,16 @@ pub fn create_bidirectional_window_mask(mask: &MlxArray, window: i32) -> UniqueP
 /// `f32` in native byte order because the cast lands the data in `FLOAT32`
 /// before the raw copy.
 ///
-/// Used by: the `/v1/embeddings` engine (pooled vectors back to the HTTP
-/// layer), `mlxcel embed`, and the embedding mask / pooling tests.
+/// Used by: code that reads a finished result back to the host. That is the
+/// `/v1/embeddings` engine (pooled vectors back to the HTTP layer) and
+/// `mlxcel embed`, the reranker, the token classification models, the Flux2
+/// scheduler, tiling and transformer, the dense-vision and detection
+/// predictors under `src/vision`, the Gemma4, Qwen3-VL and NemotronParse
+/// model files, and the embedding mask / pooling tests.
+///
+/// The caller set is too large to enumerate by name without going stale, so
+/// the groups above are a summary. Regenerate the exact list with
+/// `grep -rln '\barray_to_vec_f32(' src --include='*.rs' | grep -v 'tests\.rs$'`.
 pub fn array_to_vec_f32(arr: &MlxArray) -> Vec<f32> {
     let as_f32 = if ffi::array_dtype(arr) == dtype::FLOAT32 {
         None
@@ -356,7 +730,8 @@ pub fn array_to_vec_f32(arr: &MlxArray) -> Vec<f32> {
 /// K/V at padding positions finite, instead of relying on the kernel's hard
 /// skip of additive −∞ columns to confine NaN to never-consumed slots.
 ///
-/// Used by: BatchQuantizedKVCache, BatchTurboQuantKVCache
+/// Used by: BatchQuantizedKVCache and BatchTurboQuantKVCache in
+/// `cache/batch_quant.rs`, Gemma4 and its MTP target (`gemma4_mtp_target.rs`).
 pub fn create_causal_mask_with_left_padding(
     n: i32,
     offset: i32,
@@ -657,8 +1032,68 @@ pub fn mask_stale_key_gap(
     }
 }
 
+/// Build the additive attention mask for a ragged batched verify block.
+///
+/// Row `r` has a contiguous valid key prefix `[0, per_row_valid_end[r])`, then
+/// a stale gap `[per_row_valid_end[r], offset)` left by a shorter accept, then
+/// this round's `l` new keys at the shared physical offset. The mask admits the
+/// row's history, blocks its stale gap, and applies causality inside the new
+/// block at each row's LOGICAL positions: new key `t` sits at logical position
+/// `per_row_valid_end[r] + t`, so query `j` admits new keys `t <= j`.
+///
+/// `left_padding[r]` additionally blocks the row's resident leading padding
+/// `[0, left_padding[r])` (all zero for the equal-length DFlash burst).
+/// `window` further limits every visible key to the last `window` logical
+/// positions. Returns `[B, 1, l, offset + l]` f32 with 0 (attend) and
+/// `-inf` (blocked) entries.
+///
+/// This is the mask `rollback_speculative_cache_divergent`-style compaction
+/// maintains: after each round every row's cache content is a contiguous
+/// prefix, so one `(valid_end, gap_end)` pair per row describes it exactly.
+/// Used by: Gemma 4 divergent batched MTP verify, Qwen 3.5 per-row DFlash
+/// verify in `qwen3_next.rs` (issue #2442).
+#[must_use]
+pub fn build_divergent_row_mask(
+    l: i32,
+    offset: i32,
+    per_row_valid_end: &[i32],
+    left_padding: &[i32],
+    window: Option<i32>,
+) -> UniquePtr<MlxArray> {
+    assert_eq!(
+        per_row_valid_end.len(),
+        left_padding.len(),
+        "build_divergent_row_mask: one left_padding entry per row"
+    );
+    let b = per_row_valid_end.len();
+    let k_len = offset + l;
+    let mut data = vec![f32::NEG_INFINITY; b * l as usize * k_len as usize];
+    for (r, (&ve, &lp)) in per_row_valid_end.iter().zip(left_padding).enumerate() {
+        for j in 0..l {
+            let q_pos = ve + j;
+            let row_base = (r * l as usize + j as usize) * k_len as usize;
+            for k in 0..k_len {
+                let visible = if k < lp {
+                    false
+                } else if k < ve {
+                    window.map(|w| k > q_pos - w).unwrap_or(true)
+                } else if k < offset {
+                    false
+                } else {
+                    let k_pos = ve + (k - offset);
+                    k_pos <= q_pos && window.map(|w| k_pos > q_pos - w).unwrap_or(true)
+                };
+                if visible {
+                    data[row_base + k as usize] = 0.0;
+                }
+            }
+        }
+    }
+    ffi::from_slice_f32(&data, &[b as i32, 1, l, k_len])
+}
+
 /// Create a boolean causal attention mask.
-/// Used by: same as `create_causal_mask` (experimental path)
+/// Used by: the experimental boolean-mask branch of `causal_attention` in `lib.rs`.
 ///
 /// Returns a bool mask where `true` means "allowed attention".
 pub fn create_causal_bool_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
@@ -779,7 +1214,8 @@ pub fn create_causal_mask_with_window(
 
 /// Create a sliding-window causal mask sized to the *full* key axis, without
 /// the `min(size + offset, window)` cap applied by [`create_causal_mask_with_window`].
-/// Used by: Gemma4 and Laguna directly, `lib.rs`'s shared dispatch for a
+/// Used by: Laguna DFlash (`drafter/laguna_dflash/attention.rs`),
+/// `prefill_sdpa.rs`, `lib.rs`'s shared dispatch for a
 /// softcapped single-pass prefill longer than the sliding window (#413), and
 /// `window_sdpa::legacy_causal_window_mask`, the legacy arm of the native
 /// window route that the unsoftcapped over-window prefill takes (#2621; the
@@ -850,9 +1286,9 @@ pub fn create_causal_mask_with_window_full(
 /// `size >= window` continuation chunk of their whole window (all-`-inf` rows
 /// softmax to NaN and decode as `<pad>`).
 ///
-/// Used by: GptOss, Mellum, Exaone4, ExaoneMoE, Ministral3, Step3P5, Gemma3,
-/// Gemma4, AFMoE, DeepSeekV4 and the tensor-parallel Llama runtime for
-/// sliding-window prefill mask construction. Gemma4 additionally routes
+/// Used by: GptOss, Gemma3, Gemma4, DeepSeekV4 for sliding-window prefill
+/// mask construction, and through [`prefill_sliding_window_mask`] by Mellum,
+/// Exaone4, ExaoneMoE, Ministral3, Step3P5 and AFMoE (#3072). Gemma4 additionally routes
 /// through `trim_mask_to_keys`, which now sees this mask's key axis match the
 /// cache return exactly.
 ///
@@ -903,8 +1339,9 @@ pub fn create_sliding_window_prefill_mask(
 /// keys once it has rolled over, so the clamped mask is the matching shape.
 /// See issue #413.
 ///
-/// Used by: Cohere2, Cohere2MoE, CohereCompass, Gemma3n, Olmo3 sliding-window
-/// prefill mask construction.
+/// Used by: [`prefill_sliding_window_mask`] (Cohere2, Cohere2MoE,
+/// CohereCompass, Gemma3n, Olmo3 and ExaoneMoe's dense-cache path), and the
+/// Gemma3n diagnostics that rebuild the production masks.
 pub fn create_sliding_window_prefill_mask_dense(
     size: i32,
     sliding_offset: i32,
@@ -914,7 +1351,7 @@ pub fn create_sliding_window_prefill_mask_dense(
 }
 
 /// Create a boolean causal attention mask with optional sliding window.
-/// Used by: same as `create_causal_mask_with_window` (experimental path)
+/// Used by: the windowed boolean-mask branch of `causal_attention` in `lib.rs`.
 ///
 /// Returns a bool mask where `true` means "allowed attention".
 /// Shape is `(size, min(size + offset, window))` when window is specified.
@@ -964,7 +1401,8 @@ pub fn create_causal_bool_mask_with_window(
 /// # Returns
 /// Tensor of shape [batch, n_heads, seq_len, head_dim]
 ///
-/// Used by: DeepSeekV2 and MiniCPM3 under `src/models`, plus the DeepSeek-OCR
+/// Used by: DeepSeekV2, MiniCPM3 and Hy4 (`hy_v4_attention.rs`, the rope keys
+/// of its sink prefill) under `src/models`, plus the DeepSeek-OCR
 /// Qwen2 vision encoder
 /// (`src/vision/encoders/deepseekocr_qwen2.rs`) and the Qwen3-Omni MoE speech
 /// layers (`src/audio/qwen3_omni_moe/speech_layers.rs`). Most decoders never
@@ -1007,6 +1445,11 @@ pub fn repeat_kv(x: &MlxArray, n_rep: i32) -> UniquePtr<MlxArray> {
 
 // Activation Functions.
 /// SiLU (Swish) activation: x * sigmoid(x) — compiled kernel fusion
+///
+/// Used by: decoder MLPs and gates (including DeepSeekV2, Jamba and Mamba2)
+/// and the MoGe3, Sapiens2 and DotsOCR vision paths. Look for the wrapper's
+/// module in imports and qualified calls to distinguish it from the raw SiLU:
+/// `grep -rln '\butils::.*\bsilu\b' src --include='*.rs' | grep -v 'tests\.rs$'`.
 #[inline]
 pub fn silu(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_silu(x)
@@ -1029,6 +1472,10 @@ pub fn gelu_sigmoid(x: &MlxArray) -> UniquePtr<MlxArray> {
 }
 
 /// ReLU squared activation: max(0, x)^2 — compiled kernel fusion
+///
+/// Used by: Nemotron, NemotronH, NanoChat, Arcee (dense AFM MLP), the
+/// Nemotron H Nano Omni sound projector (`projector.rs`) and vision bridge
+/// (`nemotron_h_nano_omni_vl.rs`).
 #[inline]
 pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_relu_squared(x)
@@ -1037,7 +1484,7 @@ pub fn relu_squared(x: &MlxArray) -> UniquePtr<MlxArray> {
 ///// Numerically stable softplus activation: log(1 + exp(x)).
 /// Uses logaddexp(x, 0) internally to match Python's mx.logaddexp(x, 0).
 /// This avoids float16 overflow for values >= ~11.09 (exp(x) > float16 max).
-/// Used by: this wrapper is called directly by GatedDelta, Laguna and
+/// Used by: this wrapper is called directly by GatedDelta, Laguna, RaonRda and
 /// DeepSeekV4MoE. Mamba, Mamba2, Jamba, RecurrentGemma, FalconH1,
 /// GraniteMoeHybrid, NemotronH, Plamo2, and the shared audio attention tower
 /// (`audio/attention.rs`, `audio/gemma3n/attention.rs`) instead call the raw
@@ -1057,11 +1504,11 @@ pub fn softplus(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// callers port an erf GELU; new code should name its formula through
 /// [`GeluActivation`] instead.
 ///
-/// Used by: about 80 non-test call sites across `src/models`,
-/// `src/vision/encoders`, `src/vision/connectors` and `src/audio`. The
-/// per-site upstream formula is recorded in `docs/gelu-call-sites.md`;
-/// regenerate the caller set with
-/// `grep -rn 'gelu_approx(' src --include='*.rs' | grep -v '_tests\.rs'`.
+/// Used by: GPT-NeoX (`gpt_neox.rs`) and the Youtu-VL merger
+/// (`youtu_vl_merger.rs`). Calls spelled `mlxcel_core::gelu_approx` use the
+/// crate-root FFI function. See `docs/gelu-call-sites.md` for the upstream
+/// formulas. Find the calls to this wrapper with
+/// `grep -rln '\butils::gelu_approx(' src --include='*.rs' | grep -v 'tests\.rs$'`.
 #[inline]
 pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_approx(x)
@@ -1085,7 +1532,9 @@ pub fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// Hugging Face `gelu_pytorch_tanh` as the SigLIP, Molmo2 and Qwen3-VL eager
 /// encoders compute it; those were qualified against f32 StableHLO graphs.
 ///
-/// Used by: [`GeluActivation::TanhF32`].
+/// Used by: [`gelu_tanh_f32_fused_where_bit_exact`], the
+/// [`GeluActivation::TanhF32`] dispatch, wherever the fused kernel does not
+/// return these bits (every backend but CUDA, and the CPU device).
 #[inline]
 pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::gelu_tanh_f32(x)
@@ -1100,10 +1549,80 @@ pub fn gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// FMA, so a lane can differ from [`gelu_tanh_f32`] by f32 rounding before the
 /// cast back.
 ///
-/// Used by: [`GeluActivation::TanhF32Compiled`].
+/// Used by: [`gelu_tanh_f32_compiled_where_available`] whenever
+/// [`fused_gelu_tanh_f32`] has no port for this backend, and the GELU tests.
 #[inline]
 pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     ffi::compiled_gelu_tanh_f32(x)
+}
+
+/// [`gelu_tanh_f32`] evaluated in f32 by one fused custom kernel: a Metal
+/// port (#2857) and a CUDA port (#2780) of the same body.
+///
+/// The Metal port may contract a multiply-add into an FMA, so a lane can
+/// differ from [`gelu_tanh_f32`] by f32 rounding. The CUDA port rounds every
+/// operation on its own and returns [`gelu_tanh_f32`]'s bits.
+///
+/// Used by: [`GeluActivation::TanhF32Compiled`], and
+/// [`GeluActivation::TanhF32`] on CUDA.
+///
+/// # Panics
+///
+/// Panics if the fused kernel throws on a backend where
+/// [`fused_gelu_tanh_f32_available`] reported it could run. Callers that cannot
+/// guarantee the port use [`gelu_tanh_f32_compiled_where_available`], which
+/// takes the graph-composed path elsewhere.
+#[inline]
+pub fn fused_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
+    ffi::fused_gelu_tanh_f32(x).expect("fused_gelu_tanh_f32 kernel threw on this backend")
+}
+
+/// Whether the fused launch handles an input of this dtype and element count:
+/// the kernel is written for f32, bf16 and f16, and its grid is an `i32`.
+fn fused_gelu_tanh_f32_accepts(input_dtype: i32, size: usize) -> bool {
+    matches!(
+        input_dtype,
+        crate::dtype::FLOAT32 | crate::dtype::BFLOAT16 | crate::dtype::FLOAT16
+    ) && size <= i32::MAX as usize
+}
+
+/// [`fused_gelu_tanh_f32`] where the kernel has a port for this backend and
+/// accepts the input, and [`compiled_gelu_tanh_f32`] everywhere else.
+///
+/// The two paths compute the same f32 formula, so the fallback is a rounding
+/// difference, not a different function. This is the dispatch
+/// [`GeluActivation::TanhF32Compiled`] takes: the CPU-only case has to keep
+/// working because [`GeluActivation::in_f32_compiled`] maps the plain
+/// [`Tanh`](GeluActivation::Tanh) variant here, and the SigLIP and MiniCPM-V
+/// encoders take that route regardless of device.
+#[inline]
+pub fn gelu_tanh_f32_compiled_where_available(x: &MlxArray) -> UniquePtr<MlxArray> {
+    if ffi::fused_gelu_tanh_f32_available()
+        && fused_gelu_tanh_f32_accepts(ffi::array_dtype(x), ffi::array_size(x))
+    {
+        fused_gelu_tanh_f32(x)
+    } else {
+        compiled_gelu_tanh_f32(x)
+    }
+}
+
+/// [`fused_gelu_tanh_f32`] where the kernel returns [`gelu_tanh_f32`]'s bits
+/// and accepts the input, and [`gelu_tanh_f32`] itself everywhere else.
+///
+/// This is the dispatch [`GeluActivation::TanhF32`] takes. Its call sites are
+/// pinned bit for bit to the private copies they replaced, so the kernel may
+/// stand in for the eager chain only where it rounds exactly as that chain
+/// does, which is the CUDA port (#2780). On Metal, on a backend without a
+/// port and on the CPU device this is the eager helper, unchanged.
+#[inline]
+pub fn gelu_tanh_f32_fused_where_bit_exact(x: &MlxArray) -> UniquePtr<MlxArray> {
+    if ffi::fused_gelu_tanh_f32_matches_eager_bits()
+        && fused_gelu_tanh_f32_accepts(ffi::array_dtype(x), ffi::array_size(x))
+    {
+        fused_gelu_tanh_f32(x)
+    } else {
+        gelu_tanh_f32(x)
+    }
 }
 
 /// Which GELU formula a call site computes.
@@ -1127,9 +1646,10 @@ pub fn compiled_gelu_tanh_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
 /// Nemotron VoiceChat TTS backbone and codec, the Gemma3n dead `gelu_topk`
 /// branch, and the Phi-4 SigLIP, DeepSeek-VL2, Youtu-VL, Jina-VLM, LFM2-VL,
 /// Moondream, PaddleOCR-VL, Qwen2-VL and Molmo vision MLPs (#2548); the
-/// GPT-BigCode MLP and the shared vision `hidden_act` parser (#2794). Not used
-/// by the remaining `gelu_approx` call sites, which compute erf. Regenerate
-/// with `grep -rln 'GeluActivation' src --include='*.rs'`.
+/// GPT-BigCode MLP and the shared vision `hidden_act` parser (#2794); the
+/// DeepSeek-OCR / Unlimited-OCR CLIP MLP (`quick_gelu`, #3235). Not used by the
+/// remaining `gelu_approx` call sites, which compute erf. Regenerate with
+/// `grep -rln 'GeluActivation' src --include='*.rs'`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum GeluActivation {
@@ -1140,13 +1660,22 @@ pub enum GeluActivation {
     /// `nn.gelu_approx` computes.
     Tanh,
     /// tanh approximation evaluated in f32, cast back ([`gelu_tanh_f32`]).
+    ///
+    /// The call sites folded onto this variant are pinned bit for bit to the
+    /// copies it replaced, so it is the eager helper everywhere except where
+    /// the fused custom kernel returns that helper's bits: on CUDA it is one
+    /// kernel launch ([`gelu_tanh_f32_fused_where_bit_exact`], #2780).
     TanhF32,
-    /// [`TanhF32`](Self::TanhF32) as one compiled kernel
-    /// ([`compiled_gelu_tanh_f32`]); equal to it up to f32 rounding.
+    /// [`TanhF32`](Self::TanhF32) as one kernel: the fused custom kernel
+    /// ([`fused_gelu_tanh_f32`]) where this backend has a port for it (Metal,
+    /// CUDA), the compiled chain ([`compiled_gelu_tanh_f32`]) elsewhere; equal
+    /// to [`TanhF32`](Self::TanhF32) up to f32 rounding either way, and bit
+    /// for bit on CUDA.
     ///
     /// The families switched from erf to tanh in #2423 use this so the switch
-    /// does not add prefill time. The call sites folded onto `TanhF32` stay on
-    /// the eager helper, which is pinned bit-for-bit to the copies it replaced.
+    /// does not add prefill time. On Metal the call sites folded onto
+    /// `TanhF32` stay on the eager helper, because the Metal kernel may round
+    /// a lane differently and they are pinned bit for bit.
     TanhF32Compiled,
     /// `x * sigmoid(1.702 x)` ([`gelu_sigmoid`]).
     Fast,
@@ -1195,8 +1724,8 @@ impl GeluActivation {
         match self {
             Self::Erf => gelu_approx(x),
             Self::Tanh => gelu_tanh(x),
-            Self::TanhF32 => gelu_tanh_f32(x),
-            Self::TanhF32Compiled => compiled_gelu_tanh_f32(x),
+            Self::TanhF32 => gelu_tanh_f32_fused_where_bit_exact(x),
+            Self::TanhF32Compiled => gelu_tanh_f32_compiled_where_available(x),
             Self::Fast => gelu_sigmoid(x),
         }
     }
@@ -1418,6 +1947,13 @@ pub fn concatenate(a: &MlxArray, b: &MlxArray, axis: i32) -> UniquePtr<MlxArray>
 }
 
 /// Stack arrays along a new axis.
+///
+/// Used by: model loaders stacking expert weights (including DeepSeekV3.2
+/// and SolarOpen), recurrent and gated-delta state updates, the split-MTP
+/// surgery pass and the GLiNER2.5 scorer. Find qualified references and
+/// grouped imports, including a name on its own continuation line:
+/// `grep -rln '\butils::.*\bstack_arrays\b\|^ *stack_arrays,' src --include='*.rs'
+/// | grep -v 'tests\.rs$'`.
 pub fn stack_arrays(arrays: &[UniquePtr<MlxArray>], axis: i32) -> UniquePtr<MlxArray> {
     let ptrs: Vec<*const MlxArray> = arrays
         .iter()
@@ -1478,7 +2014,8 @@ fn get_pipeline_mode() -> PipelineMode {
 /// * `total_layers` - Total number of transformer layers in the model.
 ///
 /// Used by: Llama3, Qwen3, Gemma, Gemma2, Gemma3, Gemma4, Apertus, SeedOss,
-/// and the pipeline stage executor (`distributed/pipeline/stage_executor/common.rs`)
+/// Arcee, Nanochat and the pipeline stage executor
+/// (`distributed/pipeline/stage_executor/common.rs`).
 #[inline]
 pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
     static MODE: OnceLock<PipelineMode> = OnceLock::new();
@@ -1511,176 +2048,20 @@ mod embedding_mask_tests;
 mod gelu_tests;
 
 #[cfg(test)]
+#[path = "utils_state_tail_tests.rs"]
+mod state_tail_tests;
+
+#[cfg(test)]
+#[path = "utils_prefill_causal_mode_tests.rs"]
+mod prefill_causal_mode_tests;
+
+#[cfg(test)]
+#[path = "utils_prefill_sliding_mask_tests.rs"]
+mod prefill_sliding_mask_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Guards the `create_causal_mask` caller-roster count sentence in this
-    /// file's doc comment against silent drift. See issue #1767: five files
-    /// joined the caller set across four PRs while the stated count stayed
-    /// frozen; #1141 tracks the broader `// Used by:` staleness problem this
-    /// only guards for `create_causal_mask`.
-    #[test]
-    fn create_causal_mask_roster_count_matches_repo() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let repo_utils_rs = repo_root.join("src/lib/mlxcel-core/src/utils.rs");
-        if !repo_utils_rs.exists() {
-            // Not a full workspace checkout (e.g. mlxcel-core vendored or
-            // published standalone), so there is no `src/models` sibling
-            // tree to walk.
-            return;
-        }
-        let models_dir = repo_root.join("src/models");
-        assert!(
-            models_dir.is_dir(),
-            "expected {} to exist alongside {}",
-            models_dir.display(),
-            repo_utils_rs.display()
-        );
-
-        let mut rs_files = Vec::new();
-        collect_rs_files(&models_dir, &mut rs_files);
-
-        let mut caller_files: Vec<String> = rs_files
-            .into_iter()
-            .filter(|path| {
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                !file_name.ends_with("tests.rs")
-            })
-            .filter(|path| {
-                let contents = std::fs::read_to_string(path)
-                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-                calls_create_causal_mask(&contents)
-            })
-            .map(|path| {
-                path.strip_prefix(&repo_root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        caller_files.sort();
-        let measured = caller_files.len();
-
-        let utils_src = include_str!("utils.rs");
-        let (marker_pos, stated) = find_stated_causal_mask_count(utils_src).unwrap_or_else(|| {
-            panic!(
-                "the create_causal_mask doc comment lost its count sentence: expected to find \
-                 `that is <N> non-test files under` in src/lib/mlxcel-core/src/utils.rs"
-            )
-        });
-        let count_line = line_number_at(utils_src, marker_pos);
-
-        assert_eq!(
-            stated, measured,
-            "create_causal_mask roster drift: src/lib/mlxcel-core/src/utils.rs:{count_line} \
-             states {stated} non-test caller files under src/models, but {measured} were \
-             found: {caller_files:?}. To fix, update the count sentence at \
-             src/lib/mlxcel-core/src/utils.rs:{count_line} and regenerate the roster with: \
-             grep -rln '\\bcreate_causal_mask(' src/models --include='*.rs' | grep -v 'tests\\.rs$'"
-        );
-    }
-
-    /// Recursively collects every `*.rs` file under `dir` into `out`. Uses
-    /// `DirEntry::file_type()` (an `lstat`, not a `stat`) rather than
-    /// `Path::is_dir()`/`is_file()`, so a symlinked directory or file is
-    /// neither recursed into nor collected, matching `grep -r`'s default of
-    /// not following symlinks.
-    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let entries = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", dir.display()));
-        for entry in entries {
-            let entry = entry.unwrap_or_else(|e| {
-                panic!(
-                    "failed to read a directory entry under {}: {e}",
-                    dir.display()
-                )
-            });
-            let file_type = entry
-                .file_type()
-                .unwrap_or_else(|e| panic!("failed to stat {}: {e}", entry.path().display()));
-            if file_type.is_dir() {
-                collect_rs_files(&entry.path(), out);
-            } else if file_type.is_file() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                    out.push(path);
-                }
-            }
-        }
-    }
-
-    /// True if `contents` calls `create_causal_mask(`, matched the same way
-    /// as the regeneration command's `\bcreate_causal_mask(` grep pattern: a
-    /// literal `create_causal_mask(` substring not immediately preceded by
-    /// an identifier character (ASCII alphanumeric or `_`). A plain
-    /// `contains` on the bare function name would also credit
-    /// `create_causal_mask_with_window(` and `create_causal_mask_with_left_padding(`
-    /// calls to this function; requiring the literal trailing `(` in the
-    /// needle already rules those out; the preceding-character check further
-    /// guards against a hypothetical differently-prefixed identifier ending
-    /// in the same name. A preceding `:` still counts as a valid match: 14
-    /// files under `src/models` call the qualified `utils::create_causal_mask(`
-    /// or `mlxcel_core::utils::create_causal_mask(`, and `\b` in the frozen
-    /// grep definition matches there too (`:` is not a word character), so
-    /// excluding it would measure 35 instead of the grep's 49 and disagree
-    /// with the definition this test exists to enforce.
-    fn calls_create_causal_mask(contents: &str) -> bool {
-        const NEEDLE: &str = "create_causal_mask(";
-        let bytes = contents.as_bytes();
-        let mut search_start = 0;
-        while let Some(rel_pos) = contents[search_start..].find(NEEDLE) {
-            let pos = search_start + rel_pos;
-            let preceded_by_identifier_char = pos > 0
-                && bytes
-                    .get(pos - 1)
-                    .map(|&b| b.is_ascii_alphanumeric() || b == b'_')
-                    .unwrap_or(false);
-            if !preceded_by_identifier_char {
-                return true;
-            }
-            search_start = pos + 1;
-        }
-        false
-    }
-
-    /// Locates the fixed sentence prefix `that is ` / ` non-test files
-    /// under` in the `create_causal_mask` doc comment, taking the first
-    /// match of the full pattern (digits between the two fixed strings).
-    /// Returns the byte offset of the `that is ` prefix together with the
-    /// parsed count; the offset lets the caller compute the sentence's
-    /// current line number instead of hardcoding one that would go stale if
-    /// lines are ever inserted above it.
-    fn find_stated_causal_mask_count(utils_src: &str) -> Option<(usize, usize)> {
-        const MARKER: &str = "that is ";
-        const SUFFIX: &str = " non-test files under";
-        let mut search_start = 0;
-        while let Some(rel_pos) = utils_src[search_start..].find(MARKER) {
-            let marker_start = search_start + rel_pos;
-            let marker_end = marker_start + MARKER.len();
-            let after = &utils_src[marker_end..];
-            let digits_end = after
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(after.len());
-            if digits_end > 0
-                && after[digits_end..].starts_with(SUFFIX)
-                && let Ok(count) = after[..digits_end].parse::<usize>()
-            {
-                return Some((marker_start, count));
-            }
-            search_start = marker_end;
-        }
-        None
-    }
-
-    /// 1-based line number of byte offset `pos` within `text`, counting the
-    /// newlines that precede it.
-    fn line_number_at(text: &str, pos: usize) -> usize {
-        text.as_bytes()[..pos]
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count()
-            + 1
-    }
 
     #[test]
     fn test_slice_axis_basic() {
@@ -2661,6 +3042,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- build_divergent_row_mask: ragged verify block layout (#2442) --------
+
+    /// History attends, the stale gap is −∞, and the new block is causal at
+    /// each row's own logical positions.
+    #[test]
+    fn build_divergent_row_mask_admits_history_gap_and_logical_block() {
+        // l=2, offset=4. Row 0 lags by two positions (ve=2), row 1 is current.
+        let mask = build_divergent_row_mask(2, 4, &[2, 4], &[0, 0], None);
+        assert_eq!(ffi::array_shape(&mask), vec![2, 1, 2, 6]);
+        let cell = |b: i32, q: i32, k: i32| -> f32 {
+            ffi::item_f32(&ffi::slice(&mask, &[b, 0, q, k], &[b + 1, 1, q + 1, k + 1]))
+        };
+        let attended = |b: i32, q: i32, k: i32| cell(b, q, k) == 0.0;
+        let blocked = |b: i32, q: i32, k: i32| {
+            let v = cell(b, q, k);
+            v.is_infinite() && v < 0.0
+        };
+        // Row 0: history 0,1 attends; gap 2,3 blocked; block keys 4,5 sit at
+        // logical 2,3, so query 0 sees only key 4 and query 1 sees 4 and 5.
+        assert!(attended(0, 0, 0) && attended(0, 0, 1));
+        assert!(blocked(0, 0, 2) && blocked(0, 0, 3));
+        assert!(attended(0, 0, 4) && blocked(0, 0, 5));
+        assert!(attended(0, 1, 4) && attended(0, 1, 5));
+        // Row 1 is current: its whole history attends, and the block is causal.
+        for k in 0..4 {
+            assert!(attended(1, 0, k), "row1 history k={k}");
+        }
+        assert!(attended(1, 0, 4) && blocked(1, 0, 5));
+        assert!(attended(1, 1, 4) && attended(1, 1, 5));
     }
 
     /// A 4-D base `[B,1,n,K]` is preserved cell-for-cell outside the gap, and the

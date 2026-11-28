@@ -732,3 +732,5 @@ fn a_partial_final_block_contributes_only_its_live_tokens() {
     assert_eq!(selected.iter().copied().max(), Some(260));
     assert_eq!(selected.len(), (shape.budget * 16 + 5) as usize);
 }
+
+crate::models::last_row_logits_harness::last_row_case!(minimax_m3_last_row_logits, batched_model);

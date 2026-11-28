@@ -58,6 +58,7 @@ fn sample_input() -> ServerStartupInput {
         decode_timeout_was_set: false,
         api_prefix: String::new(),
         webui_enabled: false,
+        mcp: None,
         sse_ping_interval: 30,
         threads_http: -1,
         reuse_port: false,
@@ -89,6 +90,7 @@ fn sample_input() -> ServerStartupInput {
         embedding_request_timeout_secs: 120,
         reranker_model_path: None,
         rerank_batch_size: 0,
+        decision_model_path: None,
         prefill_chunk_size: None,
         prefill_grant_interval: None,
         batch_size: None,
@@ -133,6 +135,7 @@ fn sample_input() -> ServerStartupInput {
         repeat_last_n: 64,
         repeat_penalty: 1.1,
         presence_penalty: 0.2,
+        presence_penalty_was_set: true,
         frequency_penalty: 0.3,
         dry_multiplier: 0.4,
         dry_base: 1.75,
@@ -179,6 +182,8 @@ fn sample_input() -> ServerStartupInput {
         vision_cache_size: 20,
         video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
         video_fps: crate::multimodal::video::DEFAULT_FPS,
+        video_num_frames: None,
+        video_min_frames: None,
         max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -212,6 +217,7 @@ fn sample_input() -> ServerStartupInput {
         cache_type_k: None,
         cache_type_v: None,
         kv_cache_mode_legacy: None,
+        mla_latent_quant: None,
         // continuous-batching KV quantization knobs (off by default).
         kv_bits: 0,
         kv_group_size: mlxcel_core::cache::DEFAULT_KV_GROUP_SIZE,
@@ -231,6 +237,12 @@ fn sample_input() -> ServerStartupInput {
         responses_store_max_bytes:
             crate::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
+        responses_background_max_jobs:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        responses_background_ephemeral_ttl_secs:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        responses_background_event_log_bytes:
+            crate::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
         conversation_store_max_entries: 256,
         conversation_store_max_bytes:
             crate::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
@@ -447,6 +459,27 @@ fn into_startup_config_propagates_image_limits() {
     assert_eq!(startup.max_image_width, 4096);
     assert_eq!(startup.max_image_height, 2048);
     assert_eq!(startup.max_image_decode_alloc_bytes, 64 * 1024 * 1024);
+}
+
+#[test]
+fn into_startup_config_propagates_video_frame_knobs() {
+    // Issue #2399: both knobs must survive the `ServerStartupInput` ->
+    // `ServerStartupConfig` hop, or the worker-side video decode helpers would
+    // only ever see the defaults.
+    let mut input = sample_input();
+    input.video_num_frames = Some(24);
+    input.video_min_frames = Some(12);
+
+    let startup = input.into_startup_config().expect("valid startup input");
+    assert_eq!(startup.video_num_frames, Some(24));
+    assert_eq!(startup.video_min_frames, Some(12));
+
+    // An unflagged front stays a no-op rather than resolving to a count.
+    let startup = sample_input()
+        .into_startup_config()
+        .expect("valid startup input");
+    assert_eq!(startup.video_num_frames, None);
+    assert_eq!(startup.video_min_frames, None);
 }
 
 #[test]
@@ -3011,4 +3044,316 @@ fn image_only_names_each_conflicting_flag() {
         assert!(message.contains("--image-model"), "{flag}: {message}");
         assert!(message.contains(flag), "{flag}: {message}");
     }
+}
+
+/// Bytes the scheduler's per-layer modes hold for `groups` of
+/// `(layers, elems_per_token, window)` at `ctx`, batch 1: FP16 layers 2 bytes
+/// per element, INT8 layers 1. The last layer is the last group's.
+fn runtime_kv_bytes(
+    modes: &[mlxcel_core::cache::KVCacheMode],
+    layers: &[(u64, Option<u64>)],
+    ctx: u64,
+) -> u64 {
+    assert_eq!(modes.len(), layers.len());
+    modes
+        .iter()
+        .zip(layers)
+        .map(|(mode, (elems, window))| {
+            let eb = if *mode == mlxcel_core::cache::KVCacheMode::Int8 {
+                1
+            } else {
+                2
+            };
+            elems * window.map_or(ctx, |w| ctx.min(w)) * eb
+        })
+        .sum()
+}
+
+/// `--kv-bits 8` keeps the last layer FP16 under `--kv-skip-last-layer`, so
+/// the serve preflight and prompt-cache sizing must charge that layer at FP16
+/// width: at least what the runtime layer modes hold, below the all-FP16
+/// figure, and all INT8 when the skip is off (#3153).
+#[test]
+fn int8_sizing_charges_the_fp16_last_layer() {
+    use crate::execution::kv_arch::estimate_kv_arch_from_config;
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let ctx = 8192;
+    let size = |cfg: &serde_json::Value, skip: bool| {
+        let batch = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, skip).unwrap();
+        let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &batch);
+        assert_eq!(sizing.mode, KVCacheMode::Int8);
+        assert_eq!(sizing.fp16_last_layer, skip);
+        estimate_kv_arch_from_config(cfg, ctx, sizing, 1)
+            .unwrap()
+            .total_bytes
+    };
+    let fp16 = |cfg: &serde_json::Value| {
+        estimate_kv_arch_from_config(cfg, ctx, KVCacheMode::Fp16, 1)
+            .unwrap()
+            .total_bytes
+    };
+    let modes = |skip: bool, n: usize| {
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, skip)
+            .unwrap()
+            .resolve_layer_modes(n)
+    };
+
+    // Dense llama: 8 layers, 2 kv heads x 128 head_dim.
+    let llama = serde_json::json!({
+        "model_type": "llama",
+        "num_hidden_layers": 8,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 128,
+    });
+    let dense_layers = vec![(2 * 2 * 128, None); 8];
+    let skip = size(&llama, true);
+    assert!(skip >= runtime_kv_bytes(&modes(true, 8), &dense_layers, ctx));
+    assert!(skip < fp16(&llama));
+    assert_eq!(skip, runtime_kv_bytes(&modes(true, 8), &dense_layers, ctx));
+    let all_int8 = size(&llama, false);
+    assert_eq!(
+        all_int8,
+        runtime_kv_bytes(&modes(false, 8), &dense_layers, ctx)
+    );
+    assert_eq!(all_int8 * 2, fp16(&llama));
+    assert!(all_int8 < skip);
+
+    // Gemma 4 style stack: 5 sliding layers (window 1024) then a global one,
+    // which is the last layer the runtime keeps at FP16.
+    let gemma = serde_json::json!({
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "num_hidden_layers": 6,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 16,
+            "num_global_key_value_heads": 4,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "sliding_window": 1024,
+            "layer_types": [
+                "sliding_attention", "sliding_attention", "sliding_attention",
+                "sliding_attention", "sliding_attention", "full_attention"
+            ],
+        },
+    });
+    let mut gemma_layers = vec![(2 * 16 * 256, Some(1024)); 5];
+    gemma_layers.push((2 * 4 * 512, None));
+    let skip = size(&gemma, true);
+    assert!(skip >= runtime_kv_bytes(&modes(true, 6), &gemma_layers, ctx));
+    assert!(skip < fp16(&gemma));
+    let all_int8 = size(&gemma, false);
+    assert_eq!(
+        all_int8,
+        runtime_kv_bytes(&modes(false, 6), &gemma_layers, ctx)
+    );
+    assert!(all_int8 < skip);
+
+    // Skipping has nothing to skip when the table is off or a Turbo mode.
+    let off = BatchKvQuantConfig::default();
+    let sizing = super::kv_mode_for_batch(KVCacheMode::Fp16, &off);
+    assert!(!sizing.fp16_last_layer);
+}
+
+/// A model directory whose `config.json` carries only `model_type`.
+fn kv_quant_model_dir(model_type: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!("{{\"model_type\": \"{model_type}\"}}"),
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// `--kv-bits 8` is held on DeepSeek V2 in both absorption states (the affine
+/// MLA latent under absorbed decode, per-head int8 without it, issue #3155),
+/// and the serve preflight sizes that mode. It is also held on `deepseek_v3`,
+/// whose int8 cache stores the affine latent (issue #3160). A latent-pair
+/// family outside that list still has it taken off, and `--kv-quant-scheme turboquant` is still taken off V2 while
+/// it absorbs. `--kv-bits 4` uniform stays a startup error: 4-bit failed the
+/// quality gate, so no mode backs it.
+#[test]
+fn kv_bits_8_is_held_on_deepseek_v2() {
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let uniform8 = || BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true).unwrap();
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v2.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+    let sizing = super::effective_serve_kv_cache_mode(KVCacheMode::Fp16, uniform8(), v2.path());
+    assert_eq!(sizing.mode, KVCacheMode::Int8);
+    assert!(sizing.fp16_last_layer);
+
+    let v3 = kv_quant_model_dir("deepseek_v3");
+    let mut batch = uniform8();
+    assert_eq!(
+        super::disable_batch_kv_quant_for_family(&mut batch, v3.path()),
+        None
+    );
+    assert_eq!(batch.base_mode(), KVCacheMode::Int8);
+
+    // Every family in `mla::QUANTIZED_LATENT_FAMILIES` holds it too; the
+    // other latent-pair families, GLM-4.7-Flash among them (issue #3161),
+    // still have it taken off.
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        let dir = kv_quant_model_dir(family);
+        let mut batch = uniform8();
+        let refused = super::disable_batch_kv_quant_for_family(&mut batch, dir.path());
+        if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            assert_eq!(refused, None, "{family}");
+            assert_eq!(batch.base_mode(), KVCacheMode::Int8, "{family}");
+        } else {
+            assert_eq!(refused, Some(KVCacheMode::Int8), "{family}");
+            assert!(!batch.is_enabled(), "{family}");
+        }
+    }
+
+    let mut turbo = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true).unwrap();
+    let refused = super::disable_batch_kv_quant_for_family(&mut turbo, v2.path());
+    assert_eq!(refused.is_some(), absorbed);
+    assert_eq!(turbo.is_enabled(), !absorbed);
+
+    let err = BatchKvQuantConfig::new(KvQuantScheme::Uniform, 4, 64, true).unwrap_err();
+    assert!(err.contains("--kv-bits 4"), "{err}");
+}
+
+/// An absorbed MLA latent is grouped in 64s only, so a different
+/// `--kv-group-size` fails startup for such a model rather than being accepted
+/// and ignored. Models that do not store a quantized latent are unaffected.
+#[test]
+fn kv_group_size_other_than_64_is_rejected_for_a_quantized_latent() {
+    let v2 = kv_quant_model_dir("deepseek_v2");
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    let result = input.into_startup_config();
+    if mlxcel_core::mla::absorbed_enabled() {
+        let err = result.expect_err("group size 32 must fail startup");
+        let text = err.to_string();
+        assert!(text.contains("--kv-group-size 32"), "{text}");
+        assert!(text.contains("groups of 64"), "{text}");
+    } else {
+        result.expect("per-head int8 does not read the group size");
+    }
+
+    let mut input = sample_input();
+    input.model_path = v2.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 64;
+    input
+        .into_startup_config()
+        .expect("group size 64 is the latent's own");
+
+    let llama = kv_quant_model_dir("llama");
+    let mut input = sample_input();
+    input.model_path = llama.path().to_path_buf();
+    input.kv_bits = 8;
+    input.kv_group_size = 32;
+    input
+        .into_startup_config()
+        .expect("per-head int8 does not read the group size");
+}
+
+/// `--mla-latent-quant` at server startup (issue #3179): the option in force
+/// is carried in the startup config, decides the KV cache mode of a model
+/// that holds an MLA latent, takes the `--kv-bits` table off such a model,
+/// and raises its warnings once as startup notices.
+#[test]
+fn mla_latent_quant_reaches_the_startup_config_and_decides_an_mla_model() {
+    use mlxcel_core::mla::MlaLatentQuant::{Auto, Fp16, Int4, Int8};
+    use mlxcel_core::mla::with_mla_latent_quant;
+
+    let glm = kv_quant_model_dir("glm4_moe_lite");
+    let startup = |option, flag, kv_bits: i32, legacy: Option<&str>| {
+        with_mla_latent_quant(option, || {
+            let mut input = sample_input();
+            input.model_path = glm.path().to_path_buf();
+            input.mla_latent_quant = flag;
+            input.kv_bits = kv_bits;
+            input.kv_cache_mode_legacy = legacy.map(str::to_string);
+            input.into_startup_config()
+        })
+    };
+    let count = |startup: &crate::server::ServerStartupConfig, needle: &str| {
+        startup
+            .startup_notices
+            .iter()
+            .filter(|notice| notice.message.contains(needle))
+            .count()
+    };
+
+    // Unset: GLM keeps fp16 and nothing is said about the option.
+    let auto = startup(Auto, None, 0, None).expect("auto");
+    assert_eq!(auto.mla_latent_quant, Auto);
+    assert_eq!(auto.kv_cache_mode, KVCacheMode::Fp16);
+    assert_eq!(count(&auto, "mla-latent-quant"), 0);
+
+    // int4, from the flag or from the environment variable (flag absent).
+    for flag in [Some(Int4), None] {
+        let int4 = startup(Int4, flag, 0, None).expect("int4");
+        assert_eq!(int4.mla_latent_quant, Int4);
+        assert_eq!(int4.kv_cache_mode, KVCacheMode::Int8);
+        assert_eq!(count(&int4, "is experimental"), 1);
+        assert_eq!(count(&int4, "disagree on the MLA latent precision"), 0);
+    }
+
+    // `--kv-bits 8` under int4: the table steps aside, so the last layer is
+    // not left fp16, and the disagreement is named once.
+    let int4 = startup(Int4, Some(Int4), 8, None).expect("int4 with --kv-bits 8");
+    assert_eq!(int4.kv_cache_mode, KVCacheMode::Int8);
+    assert!(!int4.batch_kv_quant.is_enabled());
+    assert_eq!(count(&int4, "disagree on the MLA latent precision"), 1);
+    assert_eq!(count(&int4, "is experimental"), 1);
+    assert_eq!(count(&int4, "--kv-bits 8 is not applied"), 1);
+    assert_eq!(count(&int4, "cannot hold"), 0);
+
+    // fp16 under `--kv-cache-mode int8`: fp16 caches and one line naming both.
+    let fp16 = startup(Fp16, Some(Fp16), 0, Some("int8")).expect("fp16");
+    assert_eq!(fp16.kv_cache_mode, KVCacheMode::Fp16);
+    assert_eq!(count(&fp16, "disagree on the MLA latent precision"), 1);
+    assert_eq!(count(&fp16, "is experimental"), 0);
+
+    // A flag the process did not apply is a startup error, not a silent no-op.
+    let err = startup(Int8, Some(Int4), 0, None).expect_err("flag and process disagree");
+    assert!(err.to_string().contains("was not applied"), "{err}");
+
+    // A model with no MLA latent keeps its table and gets the ignored line.
+    let llama = kv_quant_model_dir("llama");
+    let ignored = with_mla_latent_quant(Fp16, || {
+        let mut input = sample_input();
+        input.model_path = llama.path().to_path_buf();
+        input.mla_latent_quant = Some(Fp16);
+        input.kv_bits = 8;
+        input.into_startup_config()
+    })
+    .expect("llama");
+    assert!(ignored.batch_kv_quant.is_enabled());
+    assert_eq!(count(&ignored, "is ignored"), 1);
+
+    // The serve preflight sizes what startup builds.
+    with_mla_latent_quant(Int4, || {
+        let sizing = super::effective_serve_kv_cache_mode(
+            KVCacheMode::Fp16,
+            mlxcel_core::cache::BatchKvQuantConfig::new(
+                mlxcel_core::cache::KvQuantScheme::Uniform,
+                8,
+                64,
+                true,
+            )
+            .unwrap(),
+            glm.path(),
+        );
+        assert_eq!(sizing.mode, KVCacheMode::Int8);
+        assert!(!sizing.fp16_last_layer);
+    });
 }

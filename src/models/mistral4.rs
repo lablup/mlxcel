@@ -26,7 +26,7 @@
 use mlxcel_core::cache::attend_batched;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -332,8 +332,12 @@ impl Mistral4Attention {
         let scale_arr = mlxcel_core::astype(&scale_arr, mlxcel_core::array_dtype(&queries));
         let queries = mlxcel_core::multiply(&queries, &scale_arr);
 
-        // Scaled dot-product attention
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention. A mask-less multi-token forward is a
+        // single-row prefill whose causality MLX's causal mode supplies
+        // (`prefill_causal_mask`, #3072).
+        let attn_out = if l > 1 && mask.is_none() {
+            mlxcel_core::maskless_prefill_attention(&queries, &keys, &values, self.scale, 0)
+        } else if l > 1 {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -771,10 +775,14 @@ pub struct Mistral4Model {
 
 impl Mistral4Model {
     /// Shared transformer body: mask + scale + layer loop + norm + lm_head.
+    ///
+    /// `row == None` projects every position; `Some(row)` projects only that
+    /// position (`[B, 1, vocab]`, the prefill's sampled row, #3070).
     fn transformer_body(
         &self,
         mut h: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1];
@@ -788,12 +796,21 @@ impl Mistral4Model {
         // (`live_start == 0`), `live_len == offset`, so this is byte-identical
         // to the untrimmed path. The Llama-4 attention scale below keeps the
         // monotonic `offset`. See issue #421 (mirrors #419/#420).
-        let mask = if l > 1 {
-            let live_len = caches[0].live_len();
-            Some(create_causal_mask(l, live_len))
-        } else {
-            None
-        };
+        //
+        // A single row leaves causality to MLX's causal mode where MLX fuses
+        // it (#3072). The concatenated query and key heads are wider than the
+        // value heads, so this usually keeps the array.
+        let mask = self.layers.first().and_then(|layer| {
+            let attn = &layer.self_attn;
+            let attention = PrefillAttention::new(
+                attn.num_heads as usize,
+                attn.num_heads as usize,
+                attn.qk_head_dim as usize,
+            )
+            .with_value_dim(attn.v_head_dim as usize);
+            let dtype = mlxcel_core::array_dtype(&h);
+            prefill_causal_mask(l, caches[0].live_len(), shape[0], attention, dtype)
+        });
 
         // Compute Llama 4 attention scale
         let offset = caches[0].offset;
@@ -819,6 +836,8 @@ impl Mistral4Model {
             );
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
+
         // Final norm
         let h = self.norm.forward(&h);
 
@@ -837,7 +856,7 @@ impl Mistral4Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.embed_tokens.forward(input_ids);
-        self.transformer_body(h, caches)
+        self.transformer_body(h, caches, None)
     }
 
     pub fn make_caches_impl(&self) -> Vec<KVCache> {
@@ -899,7 +918,7 @@ impl Mistral4Model {
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Run weight sanitization for MoE expert weight splitting
-        sanitize_weights(&mut weights, &config, "");
+        sanitize_weights(&mut weights, &config, "")?;
 
         let model = Self::from_weights(&weights, &config)?;
         Ok((model, config))
@@ -926,7 +945,7 @@ impl Mistral4Model {
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize with language_model. prefix for VLM weights
-        sanitize_weights(&mut weights, &args, "language_model.");
+        sanitize_weights(&mut weights, &args, "language_model.")?;
 
         let model = Self::from_weights_with_prefix(&weights, &args, "language_model.")?;
         Ok((model, args))
@@ -986,11 +1005,18 @@ impl Mistral4Model {
 /// Sanitize weights for Mistral4 models.
 /// Handles fused gate_up_proj splitting for MoE expert layers.
 ///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// per-expert plane differs in shape or dtype from expert 0's (issue #3320).
+///
 /// Used by: Mistral4
-pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix: &str) {
+pub fn sanitize_weights(
+    weights: &mut WeightMap,
+    config: &Mistral4Config,
+    prefix: &str,
+) -> Result<(), String> {
     let n_routed = match config.n_routed_experts {
         Some(n) if n > 0 => n,
-        _ => return,
+        _ => return Ok(()),
     };
 
     for l in 0..config.num_hidden_layers {
@@ -1031,16 +1057,25 @@ pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix
                 for k in crate::models::switch_layers::EXPERT_PLANE_LEAVES {
                     let check_key = format!("{layer_prefix}.experts.0.{m}.{k}");
                     if weights.contains_key(&check_key) {
-                        let mut expert_ptrs: Vec<*const mlxcel_core::MlxArray> = Vec::new();
-                        for e in 0..n_routed {
-                            let key = format!("{layer_prefix}.experts.{e}.{m}.{k}");
-                            if let Some(w) = weights.get(&key) {
-                                expert_ptrs
-                                    .push(w.as_ref().expect("weight map holds no null handles")
-                                        as *const mlxcel_core::MlxArray);
+                        let expert_key = |e: usize| format!("{layer_prefix}.experts.{e}.{m}.{k}");
+                        let parts: Vec<(usize, &MlxArray)> = (0..n_routed)
+                            .filter_map(|e| {
+                                weights.get(&expert_key(e)).map(|w| {
+                                    (e, w.as_ref().expect("weight map holds no null handles"))
+                                })
+                            })
+                            .collect();
+                        if !parts.is_empty() {
+                            // `stack` aborts on a shape mismatch, so refuse
+                            // one before it runs (issue #3320). The sidecar
+                            // is concatenated, not stacked.
+                            if k != "global_scale" {
+                                crate::models::switch_layers::refuse_mismatched_expert_parts(
+                                    &parts, expert_key,
+                                )?;
                             }
-                        }
-                        if !expert_ptrs.is_empty() {
+                            let expert_ptrs: Vec<*const MlxArray> =
+                                parts.iter().map(|(_, w)| *w as *const MlxArray).collect();
                             // Stacked before any expert key is removed, and
                             // the stack holds its own handles.
                             let (leaf, stacked) =
@@ -1077,6 +1112,7 @@ pub fn sanitize_weights(weights: &mut WeightMap, config: &Mistral4Config, prefix
     for key in scale_keys {
         weights.remove(&key);
     }
+    Ok(())
 }
 
 // Helper Functions.
@@ -1089,6 +1125,15 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Mistral4Model {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3072).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -1150,7 +1195,69 @@ impl LanguageModel for Mistral4Model {
         } else {
             self.embed_tokens.forward(input_ids)
         };
-        self.transformer_body(h, caches)
+        self.transformer_body(h, caches, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Same embedding choice as `forward_with_embeddings`, whose `None`
+        // branch is `forward_impl`.
+        let h = if let Some(embeds) = input_embeddings {
+            mlxcel_core::copy(embeds)
+        } else {
+            self.embed_tokens.forward(input_ids)
+        };
+        Some(self.transformer_body(h, caches, Some(last_pos)))
+    }
+}
+
+#[cfg(test)]
+mod mismatched_expert_tests {
+    use super::*;
+
+    /// One expert whose plane differs in shape from expert 0's is a load
+    /// error naming its key and both shapes, not an MLX `[stack]` abort
+    /// (issue #3320).
+    #[test]
+    fn sanitize_weights_refuses_a_mismatched_expert_plane() {
+        let config: Mistral4Config = serde_json::from_value(serde_json::json!({
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 4,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "rms_norm_eps": 1e-5,
+            "kv_lora_rank": 4,
+            "qk_rope_head_dim": 2,
+            "qk_nope_head_dim": 2,
+            "v_head_dim": 4,
+            "n_routed_experts": 2,
+            "moe_intermediate_size": 4
+        }))
+        .expect("tiny config parses");
+        let mut weights = WeightMap::new();
+        for (e, cols) in [(0usize, 8i32), (1, 6)] {
+            weights.insert(
+                format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+            );
+        }
+        let err = sanitize_weights(&mut weights, &config, "")
+            .expect_err("a mismatched expert must be refused");
+        assert!(
+            err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+                && err.contains("[4, 6]")
+                && err.contains("[4, 8]"),
+            "{err}"
+        );
+        assert!(!weights.contains_key("model.layers.0.mlp.switch_mlp.gate_proj.weight"));
     }
 }
 
@@ -1207,7 +1314,7 @@ mod modelopt_stack_tests {
                 );
             }
         }
-        sanitize_weights(&mut weights, &config, "");
+        sanitize_weights(&mut weights, &config, "").expect("well-formed experts stack");
         let prefix = "model.layers.0.mlp.switch_mlp";
         for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
             .into_iter()
@@ -1313,4 +1420,12 @@ mod batched_decode_tests {
         );
         crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
+
+    // The prefill projects only the sampled row; the embeddings path shares
+    // the same body (#3070).
+    crate::models::last_row_logits_harness::last_row_case!(
+        mistral4_last_row_logits,
+        tiny_model,
+        embeddings
+    );
 }

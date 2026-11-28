@@ -10,7 +10,7 @@
 
 ## 표준 빌드 파이프라인
 
-Python 3, Node **26.5.1**, pnpm **12.16.1**을 설치한 뒤 저장소 루트에서 실행합니다.
+Python 3, Node **26.5.1**, pnpm **12.23.0**을 설치한 뒤 저장소 루트에서 실행합니다.
 
 ```bash
 pnpm --dir webui install --frozen-lockfile
@@ -29,7 +29,7 @@ Python 진입점은 정확한 Node/pnpm 버전을 확인하고 Vite 실행, 매�
 
 | 예산 | 상한 |
 |---|---:|
-| 초기 JavaScript, gzip | 256 KiB |
+| 초기 JavaScript, gzip | 384 KiB |
 | 전체 JavaScript, gzip | 700 KiB |
 | 매니페스트 포함 전체 임베드 자산 | 5 MiB |
 

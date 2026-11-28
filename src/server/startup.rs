@@ -168,6 +168,10 @@ pub struct ServerStartupConfig {
     pub sse_ping_interval: Option<std::time::Duration>,
     /// Serve the bundled local WebUI and authenticated `/ui-api/v1` adapter routes.
     pub webui_enabled: bool,
+    /// Server-side MCP tool loop on `/v1/responses` (#1457): the stdio
+    /// servers to start and the loop's bounds. `None` (the default) leaves the
+    /// feature off and starts no process.
+    pub mcp: Option<super::mcp::McpStartupConfig>,
     /// Restart-local WebUI key generated before bind and printed after bind.
     #[cfg(feature = "webui")]
     pub(crate) webui_terminal_secret: Option<WebUiTerminalSecret>,
@@ -281,6 +285,10 @@ pub struct ServerStartupConfig {
     /// `--rerank-batch-size`. Forwarded to
     /// [`super::config::ServerConfig::rerank_batch_size`].
     pub rerank_batch_size: usize,
+    /// `--decision-model`: decision checkpoint served on `/v1/decisions` next
+    /// to the chat model. Read only at startup, so it is not mirrored into
+    /// `ServerConfig` (and stays out of the runtime-settings schema).
+    pub decision_model_path: Option<PathBuf>,
     /// Prefill chunk size when no other sequence is decoding (0 = disabled).
     pub prefill_chunk_size: usize,
     /// Prefill chunk size while at least one other sequence is decoding.
@@ -337,6 +345,9 @@ pub struct ServerStartupConfig {
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
     pub presence_penalty: f32,
+    /// `--presence-penalty` was passed; otherwise `generation_config.json`'s
+    /// value, when present, is the server default (issue #3457).
+    pub presence_penalty_was_set: bool,
     pub frequency_penalty: f32,
 
     // DRY
@@ -452,6 +463,12 @@ pub struct ServerStartupConfig {
     /// Sampling rate the video frame fallback decodes at when the request
     /// carries no `video_url.fps` of its own.
     pub video_fps: f64,
+    /// Exact frame count that replaces fps sampling (issue #2399). `None`
+    /// keeps fps sampling.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (issue #2399). `None` keeps
+    /// the built-in floor.
+    pub video_min_frames: Option<usize>,
 
     /// Maximum encoded image payload bytes accepted per image content block.
     pub max_image_payload_size: usize,
@@ -537,6 +554,13 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
+    /// The MLA latent precision option in force (`--mla-latent-quant`,
+    /// `MLXCEL_MLA_LATENT_QUANT`; issue #3179). `auto` is the default gate.
+    /// An explicit value has already been applied to [`Self::kv_cache_mode`]
+    /// for a model that holds an MLA latent: that mode is `int8` storage when
+    /// the latent is quantized (at 8 or 4 bits) and fp16 otherwise.
+    pub mla_latent_quant: mlxcel_core::mla::MlaLatentQuant,
+
     /// Operator-facing lines raised before [`initialize_server_logging`]
     /// installs a tracing subscriber (#2697, #2722), so a `tracing::` macro at
     /// the point they arise is written to nothing. They come from the
@@ -608,6 +632,21 @@ pub struct ServerStartupConfig {
     /// `0` disables TTL (entries are evicted only by capacity pressure).
     /// Resolved from `--responses-store-ttl-secs` / `LLAMA_ARG_RESPONSES_STORE_TTL_SECS`.
     pub responses_store_ttl_secs: u64,
+    /// Cap on concurrently active `background: true` responses. `0`
+    /// disables background mode. Resolved from
+    /// `--responses-background-max-jobs` / `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    pub responses_background_max_jobs: usize,
+    /// Retention (seconds) of the terminal object of a `store: false`
+    /// background response. Resolved from
+    /// `--responses-background-ephemeral-ttl-secs` /
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`; the CLI rejects `0`
+    /// and the store build clamps a programmatic `0` to 1.
+    pub responses_background_ephemeral_ttl_secs: u64,
+    /// Byte budget of the event log of one streamed background response.
+    /// `0` refuses `stream: true` on background responses. Resolved from
+    /// `--responses-background-event-log-bytes` /
+    /// `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    pub responses_background_event_log_bytes: usize,
     /// capacity cap for the conversation transcript store.
     /// `0` disables the store; requests referencing `conversation` still
     /// succeed but operate as if the transcript is empty.
@@ -691,6 +730,7 @@ impl Default for ServerStartupConfig {
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
             )),
             webui_enabled: false,
+            mcp: None,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]
@@ -725,6 +765,7 @@ impl Default for ServerStartupConfig {
                 crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: crate::server::config::DEFAULT_RERANK_BATCH_SIZE,
+            decision_model_path: None,
             prefill_chunk_size: prefill_chunk_policy.alone,
             prefill_chunk_size_contended: prefill_chunk_policy.contended,
             batch_size_conflict: false,
@@ -778,6 +819,7 @@ impl Default for ServerStartupConfig {
             repeat_last_n: 64,
             repeat_penalty: 1.0,
             presence_penalty: 0.0,
+            presence_penalty_was_set: false,
             frequency_penalty: 0.0,
             dry_multiplier: 0.0,
             dry_base: 1.75,
@@ -824,6 +866,8 @@ impl Default for ServerStartupConfig {
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
             video_fps: crate::multimodal::video::DEFAULT_FPS,
+            video_num_frames: None,
+            video_min_frames: None,
             max_image_payload_size: crate::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
             max_images_per_request: crate::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
             max_image_width: crate::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -840,6 +884,7 @@ impl Default for ServerStartupConfig {
             chat_template_kwargs: None,
             prompt_cache: super::prompt_cache::PromptCacheConfig::default(),
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
+            mla_latent_quant: mlxcel_core::mla::MlaLatentQuant::Auto,
             startup_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
@@ -853,6 +898,12 @@ impl Default for ServerStartupConfig {
             responses_store_max_entries: 1024,
             responses_store_max_bytes: super::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
             responses_store_ttl_secs: 3600,
+            responses_background_max_jobs:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+            responses_background_ephemeral_ttl_secs:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+            responses_background_event_log_bytes:
+                super::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
             conversation_store_max_entries: 256,
             conversation_store_max_bytes:
                 super::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
@@ -1339,12 +1390,20 @@ pub(crate) fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport
         );
     }
 
+    // Inkling 2 is a multimodal family with no audio encoder: its checkpoints
+    // hold only text and vision weights and its chat template raises on audio
+    // parts (issue #3376). Refuse audio here, with the family's own reason,
+    // before any clip is fetched. Inkling 1 (`InklingVLM`) has a real audio
+    // tower and keeps `audio: multimodal`.
+    let no_audio_encoder = matches!(model_type, ModelType::Inkling2VLM);
+
     ModelMediaSupport {
         image: multimodal,
-        audio: multimodal,
+        audio: multimodal && !no_audio_encoder,
         video_native,
         video_frames_fallback,
         video_with_audio,
+        audio_refusal: no_audio_encoder.then_some(crate::server::media::INKLING2_AUDIO_REFUSAL),
     }
 }
 
@@ -1353,6 +1412,19 @@ fn is_muse_glimmer_model_path(model_path: &Path) -> bool {
         crate::models::get_model_type(model_path),
         Ok(crate::models::ModelType::MuseGlimmerVLM | crate::models::ModelType::MuseGlimmer)
     )
+}
+
+/// Whether the OpenXLA engine serves this process's requests: an `xla-iree`
+/// build with `MLXCEL_BACKEND=xla`, the provider's own test.
+fn xla_serve_backend_active() -> bool {
+    #[cfg(feature = "xla-iree")]
+    {
+        crate::server::xla_prompt_cache_guard::xla_serve_backend_selected()
+    }
+    #[cfg(not(feature = "xla-iree"))]
+    {
+        false
+    }
 }
 
 fn xla_backend_requested_from_env() -> bool {
@@ -1664,6 +1736,88 @@ pub(super) fn resolve_chat_template(
     Ok(ChatTemplateProcessor::from_model_path(model_path)?.unwrap_or_default())
 }
 
+/// Whether `start_server` serves without the chat tokenizer and chat template,
+/// so it can skip [`load_chat_front`].
+///
+/// A server only qualifies when it is known never to read them. Everything
+/// else must keep loading them, because the missing-tokenizer error in
+/// [`load_chat_front`] is the only startup check that stops a checkpoint
+/// without a tokenizer: a failed side-model load (embedding, Whisper) only
+/// logs and leaves its routes answering 501.
+///
+/// - Image-only serving (#2825): there is no chat checkpoint at all, and
+///   every route that would read the tokenizer refuses in this mode.
+/// - Kokoro: a phoneme-input TTS model that ships no tokenizer file. It reads
+///   its phoneme vocab from `config.json` and serves `/v1/audio/speech`
+///   only, so loading the chat front would stop the server with "No tokenizer
+///   found" before the TTS wiring runs. Only a plain single-node server
+///   qualifies: the disaggregated roles front a chat model and have no TTS
+///   wiring at all. A config that names another architecture does not qualify
+///   either, because Kokoro detection is a heuristic (see
+///   [`is_genuine_kokoro_checkpoint`]).
+///
+/// This is deliberately a list of verified cases rather than a rule such as
+/// "every non-chat model": an embedding or Whisper checkpoint without a
+/// tokenizer would then start and serve nothing instead of failing at startup.
+fn chat_front_unused(
+    model_path: &Path,
+    image_only: bool,
+    serving_mode: crate::distributed::disaggregated::ServingMode,
+) -> bool {
+    // Image-only has an empty model path, so it never reaches detection.
+    image_only
+        || (serving_mode == crate::distributed::disaggregated::ServingMode::Hybrid
+            && is_genuine_kokoro_checkpoint(model_path))
+}
+
+/// Whether `model_path` is a Kokoro checkpoint and not merely detected as one.
+///
+/// Detection accepts an `istftnet` config block or a `kokoro-v1_0.safetensors`
+/// file, and runs before the `model_type` dispatch, so a chat checkpoint with
+/// a stray file of that name also detects as Kokoro. Published Kokoro configs
+/// carry no `model_type`, so one naming another architecture is not Kokoro and
+/// must keep the missing-tokenizer failure.
+fn is_genuine_kokoro_checkpoint(model_path: &Path) -> bool {
+    if !matches!(
+        crate::models::get_model_type(model_path),
+        Ok(crate::models::ModelType::Kokoro)
+    ) {
+        return false;
+    }
+    let Ok(config) = std::fs::read_to_string(model_path.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) =
+        serde_json::from_str::<serde_json::Value>(&crate::models::sanitize_config_json(&config))
+    else {
+        return false;
+    };
+    match config.get("model_type").and_then(serde_json::Value::as_str) {
+        None => true,
+        Some(model_type) => model_type.eq_ignore_ascii_case("kokoro"),
+    }
+}
+
+/// Load the Kokoro TTS provider for a primary `-m` Kokoro checkpoint.
+///
+/// A failure is fatal, like a failed realtime engine load. The audio slot is
+/// the only thing this checkpoint can serve, and [`chat_front_unused`] has
+/// already skipped the tokenizer check that used to stop such a server, so
+/// logging and continuing would leave a process that answers 501 forever.
+fn load_primary_kokoro_tts(
+    model_path: &Path,
+    queue_depth: usize,
+    request_timeout: std::time::Duration,
+) -> Result<Arc<dyn crate::server::audio_model::AudioModelProvider>> {
+    let provider = crate::server::kokoro_tts::KokoroTtsProvider::load(
+        model_path,
+        queue_depth,
+        request_timeout,
+    )
+    .with_context(|| format!("Failed to load Kokoro text-to-speech model from {model_path:?}"))?;
+    Ok(Arc::new(provider))
+}
+
 /// Load the tokenizer and the chat template the way `start_server` does,
 /// including the `enable_thinking` default for checkpoints whose tokenizer
 /// recognizes a think marker pair. Shared with the in-process server
@@ -1685,8 +1839,17 @@ pub(crate) fn load_chat_front(
     // #686). Per-request kwargs and `--chat-template-kwargs` still win via
     // `merge_server_and_request`.
     if crate::server::chat_front::apply_thinking_default(&mut chat_template, &tokenizer) {
-        let thinking_markers = tokenizer.infer_thinking_markers();
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
+        // mlx-lm#1974: a template that writes `<think>` as text turns the
+        // default on even without a vocabulary token, so say which one did.
+        let marker_source = if tokenizer.infer_thinking_markers().has_thinking() {
+            "vocab"
+        } else {
+            "template"
+        };
         tracing::info!(
+            marker_source,
             think_start = ?thinking_markers.think_start,
             think_end = ?thinking_markers.think_end,
             think_start_tokens_len = thinking_markers
@@ -1837,7 +2000,7 @@ pub(super) fn build_server_config(
         ),
         default_seed: startup.seed,
         default_frequency_penalty: startup.frequency_penalty,
-        default_presence_penalty: startup.presence_penalty,
+        default_presence_penalty: sampling_defaults.presence_penalty,
         default_dry_multiplier: startup.dry_multiplier,
         default_dry_base: sanitize_dry_base_default(startup.dry_base),
         default_dry_allowed_length: startup.dry_allowed_length,
@@ -1920,6 +2083,8 @@ pub(super) fn build_server_config(
         } else {
             crate::multimodal::video::DEFAULT_FPS
         },
+        video_num_frames: startup.video_num_frames,
+        video_min_frames: startup.video_min_frames,
         lang_bias_config: startup.lang_bias_config.clone(),
         reasoning_budget: startup.reasoning_budget,
         chat_template_kwargs: startup.chat_template_kwargs.clone(),
@@ -1988,6 +2153,7 @@ pub(super) struct ResolvedGenerationSamplingDefaults {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: i32,
+    pub presence_penalty: f32,
 }
 
 pub(super) fn resolve_generation_sampling_defaults(
@@ -2010,6 +2176,28 @@ pub(super) fn resolve_generation_sampling_defaults(
         } else {
             config_defaults.top_k.unwrap_or(startup.top_k)
         },
+        presence_penalty: resolve_presence_penalty_default(
+            startup,
+            config_defaults.presence_penalty,
+        ),
+    }
+}
+
+/// The server's default presence penalty: `--presence-penalty` when passed,
+/// else `generation_config.json`'s (Transformers applies it on every
+/// `generate` step), else the flag's 0.0 default. A request's own
+/// `presence_penalty` still overrides it (issue #3457).
+fn resolve_presence_penalty_default(startup: &ServerStartupConfig, config: Option<f32>) -> f32 {
+    match config {
+        Some(value) if !startup.presence_penalty_was_set => {
+            tracing::info!(
+                "Default presence_penalty {value} from {}/generation_config.json \
+                 (pass --presence-penalty to override)",
+                startup.model_path.display()
+            );
+            value
+        }
+        _ => startup.presence_penalty,
     }
 }
 
@@ -2163,6 +2351,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             // chat-templated prompt with `<think>\n` priming, so treat the
             // first token as not-yet-in-block.
             thinking_enter_block_on_start: false,
+            thinking_primed_close: None,
             // Warmup is not a client request; nothing can control it.
             reasoning_control: None,
             // Warmup bypasses the prompt cache entirely — a single literal
@@ -2173,7 +2362,11 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
             grammar: None,
             // Warmup is text-only; no image budget to override.
             image_soft_tokens: None,
+            // Warmup carries no media, so the frame knobs never apply.
+            video_num_frames: None,
+            video_min_frames: None,
             pre_rendered_prompt_tokens: None,
+            model_reasoning_effort: None,
         },
     )?;
     Ok(())
@@ -3272,6 +3465,47 @@ fn is_loopback_bind_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// Gate the server-side MCP tool loop (#1457). MCP children run with the
+/// server's privileges, so the loop needs a listener that is local-only or
+/// authenticated, and a single loaded chat model to run beside.
+fn validate_mcp_startup(
+    startup: &ServerStartupConfig,
+    api_keys: &crate::server::ApiKeys,
+    image_only: bool,
+) -> Result<()> {
+    if startup.mcp.is_none() {
+        return Ok(());
+    }
+    // The tensor-parallel, pipeline-stage, and router paths do not carry the
+    // MCP runtime: refuse instead of accepting the flag and ignoring it.
+    super::mcp::validate_mcp_single_node(ServerDistributedFlags::from(startup).first_requested())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let resolution = crate::server::transport::resolve_listen_target(&startup.host, startup.port)?;
+    let scope = match &resolution.target {
+        crate::server::transport::ListenTarget::Unix(_) => super::mcp::ListenerScope::LocalOnly,
+        crate::server::transport::ListenTarget::Tcp { host, .. } => {
+            if is_loopback_bind_host(host) {
+                super::mcp::ListenerScope::LocalOnly
+            } else {
+                super::mcp::ListenerScope::Network
+            }
+        }
+    };
+    super::mcp::validate_mcp_exposure(scope, &startup.host, !api_keys.is_empty())
+        .map_err(|message| anyhow::anyhow!(message))?;
+    let router_mode = startup.model_path.as_os_str().is_empty()
+        && (startup.router_models_dir.is_some()
+            || startup.models_preset.is_some()
+            || startup.webui_enabled);
+    anyhow::ensure!(
+        !router_mode && !image_only,
+        "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+         runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+         remove --mcp-tools and the MCP server configuration"
+    );
+    Ok(())
+}
+
 fn validate_settings_endpoint_exposure(
     enabled: bool,
     host: &str,
@@ -3298,6 +3532,55 @@ fn validate_settings_endpoint_exposure(
     )
 }
 
+/// The KV cache the scheduler builds each sequence in, which is what the
+/// prompt-cache stores receive: the `--kv-bits` / `--kv-quant-scheme` base mode
+/// when batch KV quantization is on, the `--kv-cache-mode` / `--cache-type-*`
+/// mode otherwise. With `--kv-skip-last-layer` the last layer stays FP16, which
+/// the returned sizing carries so INT8 is not undercounted (#3153).
+fn prompt_cache_sizing_kv_mode(config: &ServerConfig) -> crate::execution::kv_arch::KvSizing {
+    crate::server::kv_mode_for_batch(config.kv_cache_mode, &config.batch_kv_quant)
+}
+
+/// Resolve `--ctx-checkpoints` / `--checkpoint-min-step` against the
+/// prompt-cache environment switches and the model's family (issue #3255),
+/// copy the result into `config.prompt_cache`, and log what the resolution
+/// asks for.
+fn resolve_ctx_checkpoints(
+    config: &mut ServerConfig,
+    model_path: &Path,
+) -> crate::server::prompt_cache::CtxCheckpointPolicy {
+    use crate::server::prompt_cache::{
+        CtxCheckpointEnv, CtxCheckpointNotice, boundary_snapshot_disabled,
+        checkpoint_interval_tokens, ctx_checkpoints::family_default_ctx_checkpoints,
+        keep_previous_turn_enabled, resolve_ctx_checkpoint_policy,
+    };
+    let env = CtxCheckpointEnv {
+        boundary_disabled: boundary_snapshot_disabled(),
+        keep_previous_turn: keep_previous_turn_enabled(),
+        checkpoint_interval: checkpoint_interval_tokens(),
+    };
+    let (policy, notices) = resolve_ctx_checkpoint_policy(
+        config.prompt_cache.ctx_checkpoint_flags,
+        env,
+        family_default_ctx_checkpoints(model_path),
+    );
+    for notice in notices {
+        match notice {
+            CtxCheckpointNotice::Info(message) => tracing::info!("{message}"),
+            CtxCheckpointNotice::Warn(message) => tracing::warn!("{message}"),
+        }
+    }
+    let cache = &mut config.prompt_cache;
+    // A caller-built config that already keeps the previous turn keeps it
+    // unless `--ctx-checkpoints` says otherwise.
+    cache.keep_previous_turn = policy.keep_previous_turn
+        || (cache.ctx_checkpoint_flags.ctx_checkpoints.is_none() && cache.keep_previous_turn);
+    cache.checkpoint_interval_tokens = policy.checkpoint_interval;
+    cache.state_checkpoints_per_conversation = policy.per_conversation;
+    cache.state_checkpoint_min_spacing_tokens = policy.min_spacing_tokens;
+    policy
+}
+
 /// Size the cross-request prompt-prefix cache for this model and build its
 /// store, or `None` when the policy disables it.
 ///
@@ -3311,12 +3594,34 @@ pub(super) fn resolve_prompt_cache_store(
     model_path: &Path,
     batch_metrics: &Arc<BatchMetrics>,
 ) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
+    // A recurrent model on the OpenXLA backend never shares prefixes (#3341):
+    // no store is built, so neither the provider nor `AppState` holds one.
+    #[cfg(feature = "xla-iree")]
+    if crate::server::xla_prompt_cache_guard::xla_serve_backend_selected()
+        && crate::server::xla_prompt_cache_guard::disable_prompt_cache_for_xla_recurrent(
+            &mut config.prompt_cache,
+            model_path,
+        )
+        .is_some()
+    {
+        return None;
+    }
+    // `--ctx-checkpoints` / `--checkpoint-min-step` over the environment
+    // switches (#3255). Resolved before sizing so the default budget can make
+    // room for the extra snapshot per conversation keep-previous-turn holds
+    // (#3035).
+    let checkpoints = resolve_ctx_checkpoints(config, model_path);
+    let kv_mode = prompt_cache_sizing_kv_mode(config);
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.snapshot_capacity_bytes_explicit
         && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
             model_path,
             config.context_size,
             config.prompt_cache.snapshot_capacity_bytes,
+            crate::server::prompt_cache::model_aware_snapshot_target_entries(
+                config.prompt_cache.keep_previous_turn,
+            ),
+            kv_mode,
         )
         && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
     {
@@ -3335,12 +3640,45 @@ pub(super) fn resolve_prompt_cache_store(
         config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
     }
 
+    // Turn-boundary state checkpoints (#3047): `--ctx-checkpoints 0` turns
+    // them off, an operator byte count wins otherwise, and otherwise the
+    // hybrid families get a budget sized from their recurrent state, and the
+    // sliding-window families one sized from their rings when the flag (or
+    // their default) asks for them (#3255). Other families store none.
+    if config.prompt_cache.is_enabled() && checkpoints.state_checkpoints_off {
+        config.prompt_cache.state_checkpoint_capacity_bytes = 0;
+    } else if config.prompt_cache.is_enabled() {
+        match crate::server::prompt_cache::state_checkpoint_capacity_override() {
+            Some(bytes) => config.prompt_cache.state_checkpoint_capacity_bytes = bytes,
+            None => {
+                if let Some(rec) = crate::server::prompt_cache::recommend_state_checkpoint_capacity(
+                    model_path,
+                    config.context_size,
+                    kv_mode,
+                    checkpoints.ring_checkpoints,
+                    config.prefill_chunk_size,
+                ) {
+                    tracing::info!(
+                        state_checkpoint_capacity_bytes = rec.capacity_bytes,
+                        representative_checkpoint_bytes = rec.entry_bytes,
+                        target_entries = rec.target_entries,
+                        available_ceiling_bytes = rec.available_ceiling_bytes,
+                        architecture = %rec.architecture,
+                        "Applied model-aware prompt-cache state checkpoint capacity default"
+                    );
+                    config.prompt_cache.state_checkpoint_capacity_bytes = rec.capacity_bytes;
+                }
+            }
+        }
+    }
+
     if config.prompt_cache.is_enabled()
         && !config.prompt_cache.capacity_bytes_explicit
         && let Some(rec) = crate::server::prompt_cache::recommend_model_kv_store_capacity(
             model_path,
             config.context_size,
             config.prompt_cache.capacity_bytes,
+            kv_mode,
         )
         && rec.capacity_bytes > config.prompt_cache.capacity_bytes
     {
@@ -3351,6 +3689,8 @@ pub(super) fn resolve_prompt_cache_store(
             representative_tokens = rec.representative_tokens,
             target_entries = rec.target_entries,
             available_ceiling_bytes = rec.available_ceiling_bytes,
+            kv_cache_mode = %kv_mode.mode,
+            kv_fp16_last_layer = kv_mode.fp16_last_layer,
             architecture = %rec.architecture,
             "Applied model-aware prompt-cache KV store capacity default"
         );
@@ -3362,23 +3702,13 @@ pub(super) fn resolve_prompt_cache_store(
     // Detect by reading model_type / architectures from config.json and
     // force-disable APC at runtime (the whole-prefix prompt cache is still
     // safe and stays enabled).
-    if config.prompt_cache.apc.enabled
-        && let Ok(Some(family)) =
-            crate::server::prompt_cache::detect_hybrid_ssm_from_path(model_path)
-    {
-        tracing::warn!(
-            model_type = %family,
-            "Detected hybrid SSM / linear-attention model family ({family}); \
-             auto-disabling APC because recurrent state cannot decompose \
-             into hashable blocks. Whole-prefix prompt cache is unaffected."
-        );
-        config.prompt_cache.apc.enabled = false;
-    }
+    crate::server::prompt_cache::disable_apc_for_hybrid_ssm(&mut config.prompt_cache, model_path);
 
     // Cross-request prompt-prefix KV cache store.
     // Gated on the config flag so a disabled policy reserves zero memory.
-    // wire BatchMetrics into the store so hits/misses/evictions
-    // are counted and exposed via /metrics.
+    // wire BatchMetrics into the store so evictions and snapshot misses are
+    // counted and exposed via /metrics. Hits, dense misses, and reused tokens
+    // are recorded by the scheduler, not through this adapter (#3246).
     if config.prompt_cache.is_enabled() {
         let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
             batch_metrics.clone(),
@@ -3394,6 +3724,7 @@ pub(super) fn resolve_prompt_cache_store(
             snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
             snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
             snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
+            state_checkpoint_capacity_bytes = config.prompt_cache.state_checkpoint_capacity_bytes,
             min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
             apc_enabled = config.prompt_cache.apc.enabled,
             apc_block_size = config.prompt_cache.apc.block_size,
@@ -3480,6 +3811,9 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         startup.port,
         &api_keys,
     )?;
+    // Server-side MCP tool loop (#1457): refused before any child process
+    // starts and before the model loads.
+    validate_mcp_startup(&startup, &api_keys, image_only)?;
     if !api_keys.is_empty() {
         // Never the key material itself: a count is all an operator needs to
         // confirm the file was read, and it is all a log should ever carry.
@@ -3537,6 +3871,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     tracing::info!(
         kv_cache_mode = %startup.kv_cache_mode,
         kv_bits = startup.batch_kv_quant.bits,
+        mla_latent_quant = %startup.mla_latent_quant,
         "effective KV cache mode"
     );
 
@@ -3843,21 +4178,32 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             );
         }
     }
+    // A reasoning-effort steering model needs the per-request level, which
+    // only the batch scheduler carries (issue #3457).
+    super::reasoning_steering_startup_guard::refuse_reasoning_effort_steering_on_unsteered_paths(
+        &startup.model_path,
+        super::reasoning_steering_startup_guard::ServePaths {
+            pipeline_parallel: config.pipeline_parallel_runtime.is_some()
+                || distributed.remote_stage_service.is_some()
+                || startup.pp_peer,
+            serving_mode: config.serving_mode,
+            xla: xla_serve_backend_active(),
+        },
+    )?;
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }
-    // Image-only serving has no checkpoint for a tokenizer or a chat template;
-    // every route that would read them refuses in this mode (#2825). The
-    // router branch below is unreachable here because a router selector is a
-    // startup error alongside `--image-model` without `-m`.
-    let (tokenizer, chat_template) = if image_only {
-        (
-            crate::tokenizer::MlxcelTokenizer::empty(),
-            ChatTemplateProcessor::default(),
-        )
-    } else {
-        load_chat_front(&startup)?
-    };
+    // The router branch below is unreachable for image-only serving because a
+    // router selector is a startup error alongside `--image-model` without `-m`.
+    let (tokenizer, chat_template) =
+        if chat_front_unused(&startup.model_path, image_only, config.serving_mode) {
+            (
+                crate::tokenizer::MlxcelTokenizer::empty(),
+                ChatTemplateProcessor::default(),
+            )
+        } else {
+            load_chat_front(&startup)?
+        };
 
     // `--dry-sequence-breaker` carries b10621's string value domain since
     // #1485; the effective set (default set, replacement values, or the
@@ -4091,10 +4437,46 @@ impl SideWorkerProvider for Arc<dyn crate::server::rerank_model::RerankModelProv
     }
 }
 
+impl SideWorkerProvider for Arc<dyn crate::server::decision_model::DecisionModelProvider> {
+    fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
+        self.as_ref().shutdown_and_wait(timeout)
+    }
+}
+
 impl SideWorkerProvider for Arc<crate::server::realtime_engine::RealtimeVoiceChatEngine> {
     fn shutdown_and_wait(self, timeout: std::time::Duration) -> Result<()> {
         self.as_ref().shutdown_and_wait(timeout)
     }
+}
+
+/// Build the Responses-API store from the resolved limits, shared by the
+/// single-model server and by every model a router pool loads (issue #2901).
+///
+/// `--responses-store-max-entries 0` disables the store. A TTL of `0` means
+/// "no TTL", mapped to a very large duration so the sweep is a no-op.
+pub(crate) fn build_responses_store(
+    startup: &ServerStartupConfig,
+) -> Option<Arc<super::responses_store::ResponsesStore>> {
+    if startup.responses_store_max_entries == 0 {
+        return None;
+    }
+    let ttl = if startup.responses_store_ttl_secs == 0 {
+        std::time::Duration::from_secs(u64::MAX / 2)
+    } else {
+        std::time::Duration::from_secs(startup.responses_store_ttl_secs)
+    };
+    Some(Arc::new(super::responses_store::ResponsesStore::new(
+        super::responses_store::ResponsesStoreConfig {
+            max_entries: startup.responses_store_max_entries,
+            max_bytes: startup.responses_store_max_bytes,
+            ttl,
+            background_max_jobs: startup.responses_background_max_jobs,
+            background_ephemeral_ttl: std::time::Duration::from_secs(
+                startup.responses_background_ephemeral_ttl_secs.max(1),
+            ),
+            background_event_log_bytes: startup.responses_background_event_log_bytes,
+        },
+    )))
 }
 
 async fn serve_with_side_model_workers(
@@ -4152,26 +4534,8 @@ async fn serve_with_side_model_workers(
     // It also runs the writable-allowlist-directory warning.
     let video_dir_allowlist = resolve_video_request_inputs(media_support);
 
-    // build the Responses-API stores from the resolved limits.
-    // `max_entries = 0` disables the store entirely; otherwise build with
-    // the configured TTL (a TTL of 0 means "no TTL" which we map to a
-    // very large duration so the sweep is a no-op).
-    let responses_store = if startup.responses_store_max_entries == 0 {
-        None
-    } else {
-        let ttl = if startup.responses_store_ttl_secs == 0 {
-            std::time::Duration::from_secs(u64::MAX / 2)
-        } else {
-            std::time::Duration::from_secs(startup.responses_store_ttl_secs)
-        };
-        Some(Arc::new(super::responses_store::ResponsesStore::new(
-            super::responses_store::ResponsesStoreConfig {
-                max_entries: startup.responses_store_max_entries,
-                max_bytes: startup.responses_store_max_bytes,
-                ttl,
-            },
-        )))
-    };
+    // Build the Responses-API stores from the resolved limits.
+    let responses_store = build_responses_store(&startup);
     let conversation_store = if startup.conversation_store_max_entries == 0 {
         None
     } else {
@@ -4238,17 +4602,11 @@ async fn serve_with_side_model_workers(
                     "Detected Kokoro text-to-speech checkpoint; loading audio model for \
                      /v1/audio/speech"
                 );
-                match crate::server::kokoro_tts::KokoroTtsProvider::load(
+                Some(load_primary_kokoro_tts(
                     &startup.model_path,
                     audio_queue_depth,
                     audio_request_timeout,
-                ) {
-                    Ok(provider) => Some(Arc::new(provider)),
-                    Err(err) => {
-                        tracing::error!("Failed to load Kokoro text-to-speech model: {err}");
-                        None
-                    }
-                }
+                )?)
             }
             _ => None,
         }
@@ -4345,6 +4703,33 @@ async fn serve_with_side_model_workers(
     if let Some(provider) = &rerank_model {
         side_workers.push(SideWorkerExit::new("rerank", Arc::clone(provider)));
     }
+    // A multi-vector embedder also serves `/v1/rerank` by MaxSim when no
+    // reranker was configured (#1426). The provider shares the embedding
+    // worker, so it is not pushed as a second side worker.
+    let reranker_configured = config.reranker_model_path.is_some()
+        || resolve_rerank_source(&startup.model_path, None)
+            .is_ok_and(|source| source != RerankSource::None);
+    let rerank_model = crate::server::rerank_maxsim::resolve_late_interaction_reranker(
+        rerank_model,
+        reranker_configured,
+        embedding_model.as_ref(),
+        config.embd_normalize,
+    );
+    // `--decision-model` (#2343) is always an explicit side model, so a load
+    // failure is fatal like `--image-model`. Its id is the directory name.
+    let decision_model = crate::server::decision_worker::resolve_decision_provider(
+        startup.decision_model_path.as_deref(),
+        startup
+            .decision_model_path
+            .as_deref()
+            .map(side_model_id_for_path)
+            .unwrap_or_default(),
+        config.embedding_queue_depth,
+        config.embedding_request_timeout_secs,
+    )?;
+    if let Some(provider) = &decision_model {
+        side_workers.push(SideWorkerExit::new("decision", Arc::clone(provider)));
+    }
     // A mode flag that resolved no worker is a command line that cannot do
     // what it asked for, so it fails here rather than answering 501 to every
     // request for the life of the process (#1452).
@@ -4354,6 +4739,14 @@ async fn serve_with_side_model_workers(
         rerank_model.is_some(),
         image_model.is_some(),
     )?;
+
+    // The MCP servers start last (#1457), once the model is loaded and the
+    // exposure gate has passed: discovery lists each server's tools, and a
+    // server that fails is logged and left unavailable.
+    let mcp_runtime = match startup.mcp.clone() {
+        Some(mcp) => Some(super::mcp::McpRuntime::start(mcp).await),
+        None => None,
+    };
 
     let state = AppState::with_observability(
         model_provider,
@@ -4370,10 +4763,12 @@ async fn serve_with_side_model_workers(
     .with_prompt_cache(prompt_cache_store)
     .with_responses_store(responses_store)
     .with_conversation_store(conversation_store)
+    .with_mcp(mcp_runtime)
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
     .with_image_model(image_model)
     .with_rerank_model(rerank_model)
+    .with_decision_model(decision_model)
     .with_realtime_engine(realtime_engine);
     #[cfg(feature = "webui")]
     let state = state.with_webui_startup(Arc::new(startup.clone()));
@@ -4528,9 +4923,9 @@ pub(crate) fn check_serving_mode(
         ),
         EmbeddingServingMode::RerankOnly => anyhow::bail!(
             "--reranking restricts this server to rerank requests, but no reranker was loaded: \
-             pass a sequence-classifier checkpoint to -m, or name a reranker with \
-             --reranker-model <path>. The Qwen3 and Qwen3-VL generative rerankers are only \
-             reachable through --reranker-model."
+             pass a sequence-classifier checkpoint or a multi-vector (late-interaction) \
+             embedder to -m, or name a reranker with --reranker-model <path>. The Qwen3 and Qwen3-VL \
+             generative rerankers are only reachable through --reranker-model."
         ),
         EmbeddingServingMode::ImageOnly => anyhow::bail!(
             "--image-model without -m restricts this server to image generation, but no image \
@@ -4578,8 +4973,8 @@ pub(crate) fn resolve_embedding_source(
 
 /// Served id of an explicitly named side checkpoint: its directory name.
 ///
-/// Used by both `--embedding-model` and `--reranker-model`, which each get
-/// their own id next to the chat model's.
+/// Used by `--embedding-model`, `--reranker-model` and `--decision-model`,
+/// which each get their own id next to the chat model's.
 fn side_model_id_for_path(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())

@@ -216,7 +216,7 @@ impl VisionMLP {
         // `internvl_chat` port uses `nn.GELU(approx="precise")`, which in MLX is
         // the tanh approximation, so it departs from the trained activation
         // here; on internvl3-1b the two move logits by under 0.04 and change no
-        // decided token (#2423, docs/benchmark_results/gelu-erf-vs-tanh-2026-10-23.md).
+        // decided token (#2423, docs/benchmark_results/versions/v0.8.0.md#gelu-erf-vs-tanh-2026-10-23).
         let h = GeluActivation::Erf.apply(&h);
         self.fc2.forward(&h)
     }

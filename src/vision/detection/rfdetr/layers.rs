@@ -84,12 +84,18 @@ impl ConvNorm {
     ) -> Result<Self, String> {
         Ok(Self {
             conv: Conv2d::from_weights(weights, &format!("{prefix}.conv"), 1, kernel / 2, 1)?,
-            norm: load_norm(weights, &format!("{prefix}.bn"), 1.0e-5)?,
+            // rfdetr's channel LayerNorm default, not `nn.LayerNorm`'s 1e-5.
+            norm: load_norm(weights, &format!("{prefix}.bn"), 1.0e-6)?,
         })
     }
 
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         mlxcel_core::silu(&self.norm.forward(&self.conv.forward(x)))
+    }
+
+    #[cfg(test)]
+    pub(super) fn norm_eps(&self) -> f32 {
+        self.norm.eps
     }
 }
 

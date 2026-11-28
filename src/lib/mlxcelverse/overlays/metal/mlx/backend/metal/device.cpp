@@ -1,9 +1,10 @@
 // Copyright © 2023-2024 Apple Inc.
 // Patched by mlxcel: a runtime override for the per-command-buffer input
-// budget. Synced to upstream bff10220.
-// Modified from upstream MLX bff10220c742907f0c68e55ff174aaea56f74e3d mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
-// include below, the override read in `CommandEncoder::needs_commit`, and the
-// two bridge entry points `mlxcel_set_mb_per_buffer_override()` /
+// budget. Synced to upstream 9f806b36.
+// Modified from upstream MLX 9f806b3606eaa9f7c807238f6bd465185cd94d6d mlx/backend/metal/device.cpp
+// The delta is three hunks: the <atomic> include below, the override read in
+// `CommandEncoder::needs_commit`, and the two bridge entry points
+// `mlxcel_set_mb_per_buffer_override()` /
 // `mlxcel_mb_per_buffer_override()` at the end of the file. Everything else is
 // upstream verbatim, so a bump refreshes this file and re-applies those hunks.
 //
@@ -28,6 +29,11 @@
 #include <sstream>
 
 #include <fmt/format.h>
+
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <IOKit/IOKitLib.h>
+#endif
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
@@ -58,31 +64,42 @@ namespace {
 
 constexpr const char* default_mtllib_path = METAL_PATH;
 
+const std::string& metal_gpu_arch() {
+  static std::string gpu_arch_ = []() {
+    if (const char* str = std::getenv("MLX_METAL_GPU_ARCH")) {
+      return str;
+    } else {
+      return "";
+    }
+  }();
+  return gpu_arch_;
+}
+
 void set_compile_options(
     MTL::CompileOptions* mtl_options,
-    const CompileOptions& compile_options) {
+    const fast::CompileOptions& compile_options) {
   if (__builtin_available(macOS 15, iOS 18, tvOS 18, visionOS 2, *)) {
     switch (compile_options.math_mode) {
-      case MathMode::Safe:
+      case fast::MathMode::Safe:
         mtl_options->setMathMode(MTL::MathModeSafe);
         break;
-      case MathMode::Relaxed:
+      case fast::MathMode::Relaxed:
         mtl_options->setMathMode(MTL::MathModeRelaxed);
         break;
-      case MathMode::Fast:
+      case fast::MathMode::Fast:
         mtl_options->setMathMode(MTL::MathModeFast);
         break;
       default:
         throw std::invalid_argument("[metal::Device] Invalid math mode.");
     }
   } else {
-    if (compile_options.math_mode == MathMode::Relaxed) {
+    if (compile_options.math_mode == fast::MathMode::Relaxed) {
       throw std::runtime_error(
           "[metal::Device] Metal math mode `relaxed` requires macOS 15, "
           "iOS 18, tvOS 18, or visionOS 2.");
     }
     mtl_options->setFastMathEnabled(
-        compile_options.math_mode == MathMode::Fast);
+        compile_options.math_mode == fast::MathMode::Fast);
   }
 }
 
@@ -389,6 +406,12 @@ void CommandEncoder::set_input_array(
   if (all_inputs_.insert(a.buffer().ptr()).second) {
     buffer_sizes_ += a.data_size();
   }
+#ifndef NDEBUG
+  if (a.data_shared_ptr()->is_owned()) {
+    registered_data_ptrs_.push_back(a.buffer().raw_ptr());
+  }
+#endif
+
   auto r_buf = static_cast<MTL::Resource*>(const_cast<void*>(a.buffer().ptr()));
   next_inputs_.insert(r_buf);
   needs_barrier_ =
@@ -408,6 +431,11 @@ void CommandEncoder::set_output_array(
 
 void CommandEncoder::register_output_array(const array& a) {
   all_outputs_.insert(a.buffer().ptr());
+#ifndef NDEBUG
+  if (a.data_shared_ptr()->is_owned()) {
+    registered_data_ptrs_.push_back(a.buffer().raw_ptr());
+  }
+#endif
 
   auto buf = static_cast<MTL::Resource*>(const_cast<void*>(a.buffer().ptr()));
   if (concurrent_) {
@@ -544,6 +572,9 @@ void CommandEncoder::end_encoding(bool wait_in_flight) {
   next_outputs_.clear();
   concurrent_outputs_.clear();
   all_inputs_.clear();
+#ifndef NDEBUG
+  registered_data_ptrs_.clear();
+#endif
 }
 
 void CommandEncoder::signal_event(Event event, uint64_t value) {
@@ -565,7 +596,10 @@ static std::atomic<int>& mlxcel_mb_per_buffer_override_slot() {
 }
 
 bool CommandEncoder::needs_commit() const {
-  auto [max_ops, max_mb] = device_.get_max_ops_mb_per_buffer();
+  auto [max_ops, max_mb] = device_.get_default_max_ops_mb_per_buffer();
+  max_ops = env::max_ops_per_buffer(max_ops);
+  max_mb = env::max_mb_per_buffer(max_mb);
+  // mlxcel: the runtime override wins when set, otherwise the env value stands.
   if (int override_mb =
           mlxcel_mb_per_buffer_override_slot().load(std::memory_order_relaxed);
       override_mb > 0) {
@@ -634,6 +668,44 @@ void CommandEncoder::synchronize() {
   }
 }
 
+#ifndef NDEBUG
+void CommandEncoder::verify_graph(
+    const char* primitive_name,
+    const std::vector<array>& inputs,
+    const std::vector<array>& outputs) {
+  if (exiting_) {
+    return;
+  }
+  if (allocator::allocator().has_invalid_memory(registered_data_ptrs_)) {
+    throw std::runtime_error(
+        fmt::format(
+            "There are invalid memory registered when calling {}::eval_gpu, "
+            "which is a bug that corrupts the graph, and usually caused by "
+            "temporary arrays not registered with \"add_temporary\" method.",
+            primitive_name));
+  }
+  for (const auto& temp : temporaries_) {
+    auto pred = [&temp](auto& arr) {
+      return arr.data_shared_ptr() == temp.data_shared_ptr();
+    };
+    if (std::find_if(inputs.begin(), inputs.end(), pred) != inputs.end()) {
+      throw std::runtime_error(
+          fmt::format(
+              "An input of array is registered as temporary when calling "
+              "{}::eval_gpu, which is a bug that corrupts the graph.",
+              primitive_name));
+    }
+    if (std::find_if(outputs.begin(), outputs.end(), pred) != outputs.end()) {
+      throw std::runtime_error(
+          fmt::format(
+              "A output of array is registered as temporary when calling "
+              "{}::eval_gpu, which is a bug that corrupts the graph.",
+              primitive_name));
+    }
+  }
+}
+#endif
+
 MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
   if (!encoder_) {
     error_.check();
@@ -647,7 +719,7 @@ MTL::ComputeCommandEncoder* CommandEncoder::get_command_encoder() {
 Device::Device() : device_(load_device()), residency_sets_(device_.get()) {
   auto pool = new_scoped_memory_pool();
   default_library_ = NS::TransferPtr(load_default_library(device_.get()));
-  arch_ = env::metal_gpu_arch();
+  arch_ = metal_gpu_arch();
   if (arch_.empty()) {
     arch_ = std::string(device_->architecture()->name()->utf8String());
   }
@@ -683,8 +755,6 @@ Device::Device() : device_(load_device()), residency_sets_(device_.get()) {
       max_mb_per_buffer_ = 40;
       break;
   }
-  max_ops_per_buffer_ = env::max_ops_per_buffer(max_ops_per_buffer_);
-  max_mb_per_buffer_ = env::max_mb_per_buffer(max_mb_per_buffer_);
 }
 
 Device::~Device() = default;
@@ -711,7 +781,7 @@ MTL::Library* Device::get_library(
 
 NS::SharedPtr<MTL::Library> Device::build_library_(
     const std::string& source_string,
-    const CompileOptions& compile_options) {
+    const fast::CompileOptions& compile_options) {
   auto pool = new_scoped_memory_pool();
 
   auto ns_code =
@@ -860,7 +930,7 @@ NS::SharedPtr<MTL::ComputePipelineState> Device::get_kernel_(
 
 MTL::Library* Device::get_library(
     const std::string& name,
-    const CompileOptions& compile_options,
+    const fast::CompileOptions& compile_options,
     const std::function<std::string(void)>& builder) {
   {
     std::shared_lock rlock(library_mtx_);
@@ -1042,6 +1112,38 @@ void mlxcel_set_mb_per_buffer_override(int mb) {
 
 int mlxcel_mb_per_buffer_override() {
   return mlxcel_mb_per_buffer_override_slot().load(std::memory_order_relaxed);
+}
+
+int gpu_core_count() {
+  static int count = []() {
+    int count = 0;
+#if TARGET_OS_OSX
+    io_iterator_t it;
+    if (IOServiceGetMatchingServices(
+            kIOMainPortDefault, IOServiceMatching("AGXAccelerator"), &it) !=
+        KERN_SUCCESS) {
+      return count;
+    }
+    while (io_object_t entry = IOIteratorNext(it)) {
+      CFTypeRef prop = IORegistryEntryCreateCFProperty(
+          entry, CFSTR("gpu-core-count"), kCFAllocatorDefault, 0);
+      if (prop) {
+        if (CFGetTypeID(prop) == CFNumberGetTypeID()) {
+          CFNumberGetValue(
+              static_cast<CFNumberRef>(prop), kCFNumberIntType, &count);
+        }
+        CFRelease(prop);
+      }
+      IOObjectRelease(entry);
+      if (count > 0) {
+        break;
+      }
+    }
+    IOObjectRelease(it);
+#endif // TARGET_OS_OSX
+    return count;
+  }();
+  return count;
 }
 
 } // namespace mlx::core::metal

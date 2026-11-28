@@ -192,6 +192,7 @@ fn auto_kv_budget_leaves_room_for_the_inflight_reserve() {
         batch: 1,
         quant: QuantHint::Default,
         kv_dtype_int8: false,
+        kv_mode: KVCacheMode::Fp16,
     };
     // floor((25e9 - 1e9 - 1e9) / 1.2) - 10e9.
     let budget = auto_kv_budget_bytes(&est);
@@ -233,7 +234,7 @@ fn rocm_estimate_reserves_the_inflight_budget() {
 
     let est = {
         let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, None);
-        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, false)
+        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, KVCacheMode::Fp16)
     };
     assert_eq!(est.backend_inflight_bytes, GIB);
     assert_total_is_the_sum_of_its_terms(&est);
@@ -256,7 +257,7 @@ fn rocm_estimate_reserves_the_inflight_budget() {
 
     let small = {
         let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, Some("256"));
-        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, false)
+        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, KVCacheMode::Fp16)
     };
     assert_eq!(small.backend_inflight_bytes, 256 * MIB);
     assert_eq!(small.total_bytes + (GIB - 256 * MIB), est.total_bytes);
@@ -265,7 +266,7 @@ fn rocm_estimate_reserves_the_inflight_budget() {
     // not print the line.
     let off = {
         let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, Some("0"));
-        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, false)
+        estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, KVCacheMode::Fp16)
     };
     assert_eq!(off.backend_inflight_bytes, 0);
     assert_eq!(off.total_bytes + GIB, est.total_bytes);
@@ -279,7 +280,7 @@ fn rocm_largest_accepted_budget_saturates_the_total() {
     let _neutral = neutral_estimator_env();
     let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, Some("17592186044415"));
     let tmp = llama_8b_dir();
-    let est = estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, false);
+    let est = estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, KVCacheMode::Fp16);
     assert_eq!(est.backend_inflight_bytes, (u64::MAX >> 20) << 20);
     assert_eq!(est.total_bytes, u64::MAX);
     assert!(!est.fits);
@@ -294,7 +295,7 @@ fn non_rocm_estimate_reserves_nothing_for_inflight() {
     // their totals are what they were before issue #2155.
     let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, Some("4096"));
     let tmp = llama_8b_dir();
-    let est = estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, false);
+    let est = estimate_total_memory(tmp.path(), 640, 1, QuantHint::Default, KVCacheMode::Fp16);
     assert_eq!(est.backend_inflight_bytes, 0);
     assert_total_is_the_sum_of_its_terms(&est);
     assert!(!format_estimate(tmp.path(), &est).contains("Backend in-flight"));
@@ -360,7 +361,7 @@ mod measured {
     /// `scripts/rocm_gpu_guard.sh`. `peak` is the printed `MLX peak memory`
     /// (bytes / 1e9, two decimals) in hundredths of a GB; [`peak_upper_bound`]
     /// adds the 0.005 GB its rounding can hide. The table is "Estimate against
-    /// peak" in `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`.
+    /// peak" in `docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`.
     #[rustfmt::skip]
     const MEASURED_PEAKS: &[(Model, u64, Option<&str>, u64)] = &[
         (LLAMA, 640, None, 614), (LLAMA, 640, Some("256"), 518), (LLAMA, 640, Some("4096"), 923),
@@ -388,7 +389,13 @@ mod measured {
             write_model(tmp.path(), &config(), weights);
             let est = {
                 let _budget = EnvGuard::new(ROCM_MAX_INFLIGHT_ENV, budget_mb);
-                estimate_total_memory(tmp.path(), ctx_len, 1, QuantHint::Default, false)
+                estimate_total_memory(
+                    tmp.path(),
+                    ctx_len,
+                    1,
+                    QuantHint::Default,
+                    KVCacheMode::Fp16,
+                )
             };
             assert!(
                 est.total_bytes >= peak,

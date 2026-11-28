@@ -190,6 +190,88 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "unused.pre_ff_norm.weight",
             post_ff_norm: "unused.post_ff_norm.weight",
         },
+        // Jamba shares Falcon-H1's outer names; its MoE router is `router`.
+        WeightScheme::FalconH1 | WeightScheme::Jamba => SchemeNames {
+            final_norm: "model.final_layernorm.weight",
+            down: "feed_forward.down_proj.weight",
+            gate: "feed_forward.gate_proj.weight",
+            up: "feed_forward.up_proj.weight",
+            post_attention_layernorm: "pre_ff_layernorm.weight",
+            ..scheme_names(WeightScheme::Llama)
+        },
+        // PLaMo 2 (issue #3347): `model.layers.layers.{i}` blocks with four
+        // offset norms around a `mixer` (attention or Mamba) and a fused MLP.
+        // The q/k/v and gate/up names are row-sliced from the fused
+        // `mixer.qkv_proj` / `mlp.gate_up_proj` (`weights::fused_qkv_name`).
+        WeightScheme::Plamo2 => SchemeNames {
+            embed: "model.embed_tokens.weight",
+            final_norm: "model.norm.weight",
+            lm_head: "lm_head.weight",
+            layer_stem: "model.layers.layers.",
+            down: "mlp.down_proj.weight",
+            gate: "mlp.gate_up_proj.weight",
+            input_layernorm: "pre_mixer_norm.weight",
+            post_attention_layernorm: "post_mixer_norm.weight",
+            up: "mlp.gate_up_proj.weight",
+            k_proj: "mixer.qkv_proj.weight",
+            o_proj: "mixer.o_proj.weight",
+            q_proj: "mixer.qkv_proj.weight",
+            v_proj: "mixer.qkv_proj.weight",
+            k_bias: "unused.k_bias",
+            q_bias: "unused.q_bias",
+            v_bias: "unused.v_bias",
+            q_norm: "mixer.q_weight",
+            k_norm: "mixer.k_weight",
+            pre_ff_norm: "pre_mlp_norm.weight",
+            post_ff_norm: "post_mlp_norm.weight",
+        },
+        WeightScheme::NemotronH => SchemeNames {
+            down: "mixer.down_proj.weight",
+            up: "mixer.up_proj.weight",
+            k_proj: "mixer.k_proj.weight",
+            o_proj: "mixer.o_proj.weight",
+            q_proj: "mixer.q_proj.weight",
+            v_proj: "mixer.v_proj.weight",
+            k_bias: "mixer.k_proj.bias",
+            q_bias: "mixer.q_proj.bias",
+            v_bias: "mixer.v_proj.bias",
+            ..scheme_names(WeightScheme::Mamba2)
+        },
+        // HF Mamba2 (issue #3338). A Mamba2 layer reads only the block norm here
+        // (`input_layernorm`); its mixer tensors are named by
+        // `weights::push_ssm_layer_specs`. The attention / MLP names are never
+        // emitted for this scheme.
+        WeightScheme::Mamba2 | WeightScheme::Mamba1 => SchemeNames {
+            embed: "backbone.embeddings.weight",
+            final_norm: "backbone.norm_f.weight",
+            lm_head: "lm_head.weight",
+            layer_stem: "backbone.layers.",
+            down: "unused.down.weight",
+            gate: "unused.gate.weight",
+            input_layernorm: "norm.weight",
+            post_attention_layernorm: "unused.post_attention_layernorm.weight",
+            up: "unused.up.weight",
+            k_proj: "unused.k_proj.weight",
+            o_proj: "unused.o_proj.weight",
+            q_proj: "unused.q_proj.weight",
+            v_proj: "unused.v_proj.weight",
+            k_bias: "unused.k_proj.bias",
+            q_bias: "unused.q_proj.bias",
+            v_bias: "unused.v_proj.bias",
+            q_norm: "unused.q_norm.weight",
+            k_norm: "unused.k_norm.weight",
+            pre_ff_norm: "unused.pre_ff_norm.weight",
+            post_ff_norm: "unused.post_ff_norm.weight",
+        },
+    }
+}
+
+/// The MoE router tensor stem under a layer's `weight_prefix`: Jamba names it
+/// `router`, every other MoE family `gate`.
+pub(crate) fn moe_router_stem(scheme: WeightScheme) -> &'static str {
+    match scheme {
+        WeightScheme::Jamba => "router",
+        _ => "gate",
     }
 }
 

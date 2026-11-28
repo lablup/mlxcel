@@ -9,6 +9,11 @@
 //   - Added ReduceResult<Prod, __nv_bfloat16> specialization: accumulate in fp32
 //   - This ensures numerical precision for bf16 sum/prod reductions while
 //     allowing the output to remain bf16 (cast back at the write-back site).
+//   - Added ReduceOutput<Op, T>: the type the dispatch code writes to the
+//     output array (the accumulation type, except bf16 Sum/Prod, which write
+//     bf16). Writing the input type instead corrupts every reduction whose
+//     output dtype differs from its input: sum/prod over bool and the narrow
+//     integers, and any/all over a non-bool input.
 
 #pragma once
 
@@ -126,9 +131,10 @@ struct Max {
 
 // Traits to get the accumulation type of reduce op.
 //
-// For most types, accumulation type == input type. For bf16 Sum/Prod,
-// we accumulate in fp32 for numerical precision and cast back to bf16
-// when writing the final output.
+// It is not always the input type: And / Or accumulate in bool, Sum / Prod
+// over bool and the integers up to 32 bits accumulate in int32, and bf16
+// Sum / Prod accumulate in fp32 for numerical precision and are cast back to
+// bf16 when the final output is written (see ReduceOutput below).
 template <typename Op, typename T>
 struct ReduceResult;
 
@@ -178,6 +184,34 @@ struct ReduceResult<Min, T> {
 template <typename T>
 struct ReduceResult<Max, T> {
   using type = T;
+};
+
+// The type a reduction writes to its output array.
+//
+// It is the accumulation type, as in upstream MLX, because that is the type
+// MLX gives the output, up to signedness: `bool` for And / Or whatever the
+// input is, a 32-bit integer for Sum / Prod over `bool` and the narrow
+// integers (MLX makes it uint32 for an unsigned input; the kernel writes the
+// same 32 bits as int32_t, as upstream does), and the input type otherwise.
+// The one exception is the bf16 Sum / Prod above, which only accumulates in
+// fp32 and still writes bf16.
+//
+// The dispatch code must take the output pointer from this trait and not from
+// the input type: for `sum(bool)` or `any(float32)` the two differ in size,
+// and a kernel that writes the input type fills the output with garbage.
+template <typename Op, typename T>
+struct ReduceOutput {
+  using type = typename ReduceResult<Op, T>::type;
+};
+
+template <>
+struct ReduceOutput<Sum, __nv_bfloat16> {
+  using type = __nv_bfloat16;
+};
+
+template <>
+struct ReduceOutput<Prod, __nv_bfloat16> {
+  using type = __nv_bfloat16;
 };
 
 // Traits to get the init value of reduce op.

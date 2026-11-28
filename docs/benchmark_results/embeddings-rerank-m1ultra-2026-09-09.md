@@ -1,6 +1,8 @@
 # Embedding and rerank throughput on M1 Ultra (2026-09-09)
 
-Third host for the subsystem measured in [`embeddings-rerank-gb10-2026-08-26.md`](embeddings-rerank-gb10-2026-08-26.md) and [`embeddings-rerank-m5max-2026-09-04.md`](embeddings-rerank-m5max-2026-09-04.md): `POST /v1/embeddings` and `POST /v1/rerank`, same 20-checkpoint roster from `scripts/bench_embeddings.py`.
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
+Third host for the subsystem measured in [`versions/v0.7.0.md#embeddings-rerank-gb10-2026-08-26`](versions/v0.7.0.md#embeddings-rerank-gb10-2026-08-26) and [`versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04`](versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04): `POST /v1/embeddings` and `POST /v1/rerank`, same 20-checkpoint roster from `scripts/bench_embeddings.py`.
 
 Raw rows: `benchmarks/metal_m1ultra_embeddings_2026-09-09.csv` (102 rows, one per model, input kind and batch size; every roster entry resolved, none skipped, none failed). Taken at `f42d127d`, after the column-alignment fix described under Caveats.
 

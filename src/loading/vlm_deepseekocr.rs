@@ -139,6 +139,25 @@ fn deepseekocr_language_args(
         .map_err(|e| anyhow::anyhow!("Failed to parse {} language_config: {}", family, e))
 }
 
+/// The CLIP encoder configuration [`load_deepseekocr_vlm`] builds: the
+/// DeepSeek-OCR encoder layers normalize at eps 1e-6 (mlx-vlm
+/// `deepseekocr/config.py` `VisionConfig.layer_norm_eps`).
+fn deepseekocr_clip_config() -> ClipConfig {
+    ClipConfig::default()
+}
+
+/// The CLIP encoder configuration [`load_unlimited_ocr_vlm`] builds. The
+/// released Unlimited-OCR encoder layers normalize at the PyTorch default eps
+/// 1e-5 (mlx-vlm `unlimited_ocr/config.py`, #3235). Neither
+/// `baidu/Unlimited-OCR` nor `mlx-community/Unlimited-OCR-4bit` declares
+/// `vision_config.layer_norm_eps`, so it is hardcoded as upstream does.
+fn unlimited_ocr_clip_config() -> ClipConfig {
+    ClipConfig {
+        layer_norm_eps: 1e-5,
+        ..ClipConfig::default()
+    }
+}
+
 pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
@@ -150,8 +169,14 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let sam =
         SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
-        .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR CLIP encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(
+        &weights,
+        "vision_model",
+        deepseekocr_clip_config(),
+        gs,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load DeepSeek-OCR projector: {}", e))?;
     let image_newline = load_required_vector(
@@ -215,7 +240,8 @@ fn unlimited_ocr_sliding_window(full_config: &serde_json::Value) -> i32 {
 /// the same layout-B `model.*` prefixes, so it loads exactly like
 /// [`load_deepseekocr_vlm`]; the raw checkpoint stores MoE experts per-expert
 /// (`experts.{idx}`) rather than pre-stacked, which the DeepSeek `SwitchLinear`
-/// loader now folds in transparently. The only Unlimited-OCR-specific step is
+/// loader now folds in transparently. The Unlimited-OCR-specific steps are the
+/// processor's higher crop limit ([`DeepSeekOcrProcessor::unlimited_ocr`]) and
 /// wrapping the runtime with a ring sliding decode cache whose window comes from
 /// `language_config.sliding_window_size`.
 pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
@@ -230,8 +256,14 @@ pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let sam =
         SamEncoder::from_weights_with_quant(&weights, "sam_model", SamConfig::default(), gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR SAM encoder: {}", e))?;
-    let clip = ClipEncoder::from_weights(&weights, "vision_model", ClipConfig::default(), gs, bits)
-        .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
+    let clip = ClipEncoder::from_weights(
+        &weights,
+        "vision_model",
+        unlimited_ocr_clip_config(),
+        gs,
+        bits,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR CLIP encoder: {}", e))?;
     let projector = UnifiedLinear::from_weights(&weights, "projector.layers", gs, bits)
         .map_err(|e| anyhow::anyhow!("Failed to load Unlimited-OCR projector: {}", e))?;
     let image_newline = load_required_vector(
@@ -262,7 +294,7 @@ pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
         projector,
         image_newline,
         view_separator,
-        processor: DeepSeekOcrProcessor::default(),
+        processor: DeepSeekOcrProcessor::unlimited_ocr(&full_config),
         image_token_id: IMAGE_TOKEN_ID,
         eos_token_id: 1,
         n_embed: N_EMBED,

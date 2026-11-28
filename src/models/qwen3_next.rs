@@ -45,8 +45,11 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
-use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::layers::{
+    KVCache, LOADABLE_AFFINE_BITS, RMSNorm, SUPPORTED_AFFINE_GROUP_SIZES, UnifiedEmbedding,
+    UnifiedLinear,
+};
+use mlxcel_core::utils::{PrefillAttention, prefill_causal_mask, silu};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -183,28 +186,7 @@ impl Qwen3NextCache {
     ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                super::recurrent_snapshot::push_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                    kv.mode,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                    &kv.keys,
-                );
-                super::recurrent_snapshot::push_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                    &kv.values,
-                );
-                Ok(())
+                super::hybrid_snapshot::snapshot_attention(kv, snapshot, prefix)
             }
             Qwen3NextCache::Linear(gd) => {
                 gd.snapshot_into(snapshot, &format!("{prefix}.linear"));
@@ -220,37 +202,51 @@ impl Qwen3NextCache {
     ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
-                let snapshot_mode = super::recurrent_snapshot::restore_kv_cache_mode(
-                    snapshot,
-                    format!("{prefix}.attention.mode"),
-                )?
-                .unwrap_or(KVCacheMode::Fp16);
-                if snapshot_mode != kv.mode {
-                    return Err(format!(
-                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
-                        snapshot_mode, kv.mode
-                    ));
-                }
-                if kv.mode != KVCacheMode::Fp16 {
-                    return Err(format!(
-                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
-                        kv.mode
-                    ));
-                }
-                kv.keys = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.keys"),
-                );
-                kv.values = super::recurrent_snapshot::restore_optional(
-                    snapshot,
-                    format!("{prefix}.attention.values"),
-                );
-                kv.offset = snapshot.token_len() as i32;
-                Ok(())
+                super::hybrid_snapshot::restore_attention(kv, snapshot, prefix)
             }
             Qwen3NextCache::Linear(gd) => {
                 gd.restore_from(snapshot, &format!("{prefix}.linear"));
                 Ok(())
+            }
+        }
+    }
+
+    /// Whether a snapshot tensor belongs in a turn-boundary state checkpoint
+    /// (issue #3047): the GatedDeltaNet layers' state and convolution window.
+    /// The attention layers' rows are taken from a longer snapshot instead.
+    ///
+    /// Used by: Qwen3-Next `state_checkpoint_from_snapshot`.
+    pub fn is_checkpoint_tensor(name: &str) -> bool {
+        super::hybrid_snapshot::is_checkpoint_tensor(name)
+    }
+
+    /// Rebuild this layer for `checkpoint.token_len()` tokens from a state
+    /// checkpoint and a longer whole snapshot of the same conversation (issue
+    /// #3047).
+    ///
+    /// A GatedDeltaNet layer takes the checkpoint's state, which must be
+    /// present. An attention layer restores the donor's rows and cuts them
+    /// back with [`KVCache::trim`], the same trim a speculative rollback uses.
+    ///
+    /// Used by: Qwen3-Next `restore_sequence_state_from_checkpoint`.
+    pub fn restore_from_checkpoint(
+        &mut self,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
+        let (keep, have) = super::hybrid_snapshot::checkpoint_lengths(checkpoint, donor, prefix)?;
+        match self {
+            Qwen3NextCache::Linear(_) => {
+                super::hybrid_snapshot::require_checkpoint_fields(
+                    checkpoint,
+                    prefix,
+                    ["conv_state", "state_cache"],
+                )?;
+                self.restore_from(checkpoint, prefix)
+            }
+            Qwen3NextCache::Attention(kv) => {
+                super::hybrid_snapshot::restore_attention_from_donor(kv, donor, prefix, keep, have)
             }
         }
     }
@@ -401,21 +397,15 @@ impl GatedDeltaNet {
         // Concatenate with conv state
         let conv_input = concatenate(&conv_state, &mixed_qkv, 1);
 
-        // Update cache with new conv state.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // Update cache with new conv state: a fresh buffer, scheduled now on a
+        // long prefill so this layer's full conv_input is not held until the
+        // caches are evaluated after the forward (see the helper).
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Apply conv1d with SiLU activation
@@ -591,6 +581,16 @@ pub(crate) struct Qwen3NextAttention {
     scale: f32,
     rope_dims: i32,
     rope_base: f32,
+    /// YaRN frequency table (float32 `[rope_dims / 2]`, the divisors
+    /// `fast_rope_with_freqs` takes), set by [`Self::set_yarn_rope`] for a
+    /// Qwen 3.5 checkpoint whose `rope_parameters` declare `yarn` (#3215).
+    /// `None` for every other user of this attention, which keeps the plain
+    /// `rope_base` rotation.
+    rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// The YaRN attention factor: multiplies the first `rope_dims` lanes of
+    /// Q and K before the rotation, the pass-through lanes untouched, as
+    /// transformers and mlx-vlm do. `1.0` when `rope_freqs` is `None`.
+    rope_attention_factor: f32,
     /// Optional interleaved MRoPE for VLM (Qwen3.5 VLM)
     pub(crate) mrope: Option<super::qwen3_vl::InterleavedMRoPE>,
     /// Rotate a `B = 1` verify block's Q and K one row at a time, as classic
@@ -602,6 +602,121 @@ pub(crate) struct Qwen3NextAttention {
 }
 
 impl Qwen3NextAttention {
+    /// Head counts and head dim for [`prefill_causal_mask`] (#3051).
+    pub(crate) fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention {
+            q_heads: self.num_heads,
+            kv_heads: self.num_kv_heads,
+            head_dim: self.head_dim,
+            value_dim: self.head_dim,
+            sinks: false,
+        }
+    }
+
+    /// Rotate with a YaRN frequency table and attention factor instead of
+    /// the plain `rope_base` rotation (Blaizzy/mlx-vlm#2649).
+    ///
+    /// `freqs` is the float32 `[rope_dims / 2]` divisor table
+    /// `rope_utils::yarn_rope_setup` builds. Every non-MRoPE path of this
+    /// attention then rotates through it: the standard path, the per-row
+    /// verify paths and native batched decode. The MRoPE path takes the same
+    /// values through `InterleavedMRoPE::with_inv_freq`.
+    ///
+    /// Used by: Qwen 3.5 (`Qwen35DecoderLayer::from_weights`). Not used by
+    /// Qwen3-Next, Qwen4-Exp or the Qwen3-Omni talker, which keep `None`.
+    pub(crate) fn set_yarn_rope(&mut self, freqs: UniquePtr<MlxArray>, attention_factor: f32) {
+        self.rope_freqs = Some(freqs);
+        self.rope_attention_factor = attention_factor;
+    }
+
+    /// The YaRN table and attention factor, when [`Self::set_yarn_rope`] set
+    /// them.
+    pub(crate) fn yarn_rope(&self) -> Option<(&MlxArray, f32)> {
+        self.rope_freqs
+            .as_deref()
+            .map(|freqs| (freqs, self.rope_attention_factor))
+    }
+
+    /// Multiply the first `rope_dims` lanes of a `[.., D]` Q or K block by
+    /// the YaRN attention factor and leave the pass-through lanes as they
+    /// are. The scalar is materialized in the block's own dtype. Shared with
+    /// the Qwen 3.5 MTP drafter layer through
+    /// [`mlxcel_core::rope_lanes::scale_rotary_lanes`] (issue #3479).
+    fn scale_rotary_lanes(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        mlxcel_core::rope_lanes::scale_rotary_lanes(x, self.rope_dims, self.rope_attention_factor)
+    }
+
+    /// The standard rotation of a `[B, H, L, D]` block at `offset`: the
+    /// YaRN table when one is set, the plain `rope_base` rotation otherwise.
+    pub(crate) fn rope(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        match &self.rope_freqs {
+            Some(freqs) => mlxcel_core::fast_rope_with_freqs(
+                &self.scale_rotary_lanes(x),
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                freqs,
+            ),
+            None => mlxcel_core::fast_rope(x, self.rope_dims, false, self.rope_base, 1.0, offset),
+        }
+    }
+
+    /// [`verify_rope::fast_rope_rows_like_decode`] through the same choice of
+    /// table as [`Self::rope`].
+    pub(crate) fn rope_rows_like_decode(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        match &self.rope_freqs {
+            Some(freqs) => verify_rope::fast_rope_rows_like_decode_with_freqs(
+                &self.scale_rotary_lanes(x),
+                self.rope_dims,
+                freqs,
+                offset,
+            ),
+            None => {
+                verify_rope::fast_rope_rows_like_decode(x, self.rope_dims, self.rope_base, offset)
+            }
+        }
+    }
+
+    /// The interleaved-MRoPE rotation of `[B, H, L, D]` queries and keys:
+    /// only the first `rope_dims` lanes rotate. A YaRN attention factor
+    /// arrives inside `mrope`'s cos and sin, so it scales exactly those
+    /// lanes.
+    pub(crate) fn apply_mrope(
+        &self,
+        mrope: &super::qwen3_vl::InterleavedMRoPE,
+        position_ids: &MlxArray,
+        queries: &MlxArray,
+        keys: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q_shape = mlxcel_core::array_shape(queries);
+        let (b, l) = (q_shape[0], q_shape[2]);
+        let (cos, sin) = mrope.forward(position_ids);
+        let embed_dtype = mlxcel_core::array_dtype(queries);
+        let cos = mlxcel_core::astype(&cos, embed_dtype);
+        let sin = mlxcel_core::astype(&sin, embed_dtype);
+        // Partial rotary: only apply to first rope_dims dimensions
+        let rotary_dim = self.rope_dims;
+        let q_rot = mlxcel_core::slice(queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
+        let q_pass = mlxcel_core::slice(
+            queries,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_heads, l, self.head_dim],
+        );
+        let k_rot = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
+        let k_pass = mlxcel_core::slice(
+            keys,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_kv_heads, l, self.head_dim],
+        );
+        let (q_embed, k_embed) =
+            super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
+        (
+            mlxcel_core::concatenate(&q_embed, &q_pass, -1),
+            mlxcel_core::concatenate(&k_embed, &k_pass, -1),
+        )
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -620,7 +735,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_with_position_ids_verify(x, cache, mask, position_ids, false)
+        self.forward_with_position_ids_verify(x, cache, mask, position_ids, false, None)
     }
 
     /// Variant of [`Self::forward_with_position_ids`] that opts into the
@@ -636,8 +751,13 @@ impl Qwen3NextAttention {
     /// the batched-SDPA-vs-decode logit drift that flips speculative
     /// accept/reject decisions away from the drafter-less greedy pass.
     ///
+    /// `row_valid_ends` carries the per-row logical valid end for a ragged
+    /// batched verify round (issue #2442): rows below the shared physical
+    /// cache offset keep only a shorter contiguous prefix, and the block's
+    /// queries rotate and attend at each row's own logical positions.
+    ///
     /// Used by: `Qwen35DecoderLayer::forward_with_capture` (the Qwen 3.5 MTP
-    /// verify pass).
+    /// verify pass), and the per-row DFlash verify round.
     pub(crate) fn forward_with_position_ids_verify(
         &self,
         x: &MlxArray,
@@ -645,6 +765,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
         target_verify: bool,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let output = self.forward_hidden_with_position_ids_verify(
             x,
@@ -652,6 +773,7 @@ impl Qwen3NextAttention {
             mask,
             position_ids,
             target_verify,
+            row_valid_ends,
         );
         let out = self.o_proj.forward(&output);
         #[cfg(test)]
@@ -666,7 +788,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false)
+        self.forward_hidden_with_position_ids_verify(x, cache, mask, position_ids, false, None)
     }
 
     /// Native multi-sequence decode for the tensor-parallel Qwen 3.5 runtime.
@@ -745,6 +867,7 @@ impl Qwen3NextAttention {
         mask: Option<&MlxArray>,
         position_ids: Option<&MlxArray>,
         target_verify: bool,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -787,33 +910,31 @@ impl Qwen3NextAttention {
 
         let offset = cache.offset;
 
+        // Per-row (ragged) batched verify round (issue #2442): rows whose
+        // logical valid end lags the shared physical cache offset keep only a
+        // shorter contiguous prefix, so the block's queries and keys rotate at
+        // each row's own positions instead of the shared offset.
+        let divergent_rows: Option<&[i32]> = row_valid_ends.filter(|ends| {
+            target_verify
+                && l > 1
+                && ends.len() == b as usize
+                && ends.iter().any(|&end| end != offset)
+        });
+
         // Apply RoPE (standard or MRoPE with position_ids)
         if let (Some(mrope), Some(pos_ids)) = (&self.mrope, position_ids) {
+            assert!(
+                divergent_rows.is_none(),
+                "per-row DFlash verify is not supported with MRoPE position ids"
+            );
             // Interleaved MRoPE for VLM
-            let (cos, sin) = mrope.forward(pos_ids);
-            let embed_dtype = mlxcel_core::array_dtype(&queries);
-            let cos = mlxcel_core::astype(&cos, embed_dtype);
-            let sin = mlxcel_core::astype(&sin, embed_dtype);
-            // Partial rotary: only apply to first rope_dims dimensions
-            let rotary_dim = self.rope_dims;
-            let q_rot =
-                mlxcel_core::slice(&queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
-            let q_pass = mlxcel_core::slice(
-                &queries,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_heads, l, self.head_dim],
-            );
-            let k_rot =
-                mlxcel_core::slice(&keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
-            let k_pass = mlxcel_core::slice(
-                &keys,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_kv_heads, l, self.head_dim],
-            );
-            let (q_embed, k_embed) =
-                super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
-            queries = mlxcel_core::concatenate(&q_embed, &q_pass, -1);
-            keys = mlxcel_core::concatenate(&k_embed, &k_pass, -1);
+            (queries, keys) = self.apply_mrope(mrope, pos_ids, &queries, &keys);
+        } else if let Some(ends) = divergent_rows {
+            // Each row rotates its window at its own logical positions, so the
+            // relative RoPE distance to that row's valid history stays what a
+            // B = 1 chain would see.
+            queries = self.apply_rope_per_row(&queries, ends);
+            keys = self.apply_rope_per_row(&keys, ends);
         } else if target_verify && l > 1 && b == 1 && self.verify_rope_rows {
             // Verify block on CUDA: rotate each row through the same `L = 1`
             // call classic decode makes for that token, so the block's
@@ -821,30 +942,12 @@ impl Qwen3NextAttention {
             // is byte-identical to the chain's (#2191). `B > 1` blocks keep
             // the block call: batched classic decode does not take the
             // single-row kernel either.
-            queries = verify_rope::fast_rope_rows_like_decode(
-                &queries,
-                self.rope_dims,
-                self.rope_base,
-                offset,
-            );
-            keys = verify_rope::fast_rope_rows_like_decode(
-                &keys,
-                self.rope_dims,
-                self.rope_base,
-                offset,
-            );
+            queries = self.rope_rows_like_decode(&queries, offset);
+            keys = self.rope_rows_like_decode(&keys, offset);
         } else {
             // Standard RoPE with offset
-            queries = mlxcel_core::fast_rope(
-                &queries,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                1.0,
-                offset,
-            );
-            keys =
-                mlxcel_core::fast_rope(&keys, self.rope_dims, false, self.rope_base, 1.0, offset);
+            queries = self.rope(&queries, offset);
+            keys = self.rope(&keys, offset);
         }
 
         #[cfg(test)]
@@ -864,7 +967,9 @@ impl Qwen3NextAttention {
         // decode. This mirrors upstream `Qwen3_5Attention.__call__`'s
         // `target_verify and L > 1` branch and keeps the verify logits from
         // drifting away from the drafter-less greedy decode.
-        let attn_out = if target_verify && l > 1 {
+        let attn_out = if let Some(ends) = divergent_rows {
+            self.attend_per_position_rows(&queries, &cache_k, &cache_v, offset, ends)
+        } else if target_verify && l > 1 {
             self.attend_per_position(&queries, &cache_k, &cache_v)
         } else if l > 1 && mask.is_none() {
             mlxcel_core::causal_attention(&queries, &cache_k, &cache_v, self.scale, 0.0, 0)
@@ -941,6 +1046,96 @@ impl Qwen3NextAttention {
         out.expect("attend_per_position requires l_q >= 1")
     }
 
+    /// Rotate `[B, H, L, D]` query or key rows at per-row start offsets.
+    ///
+    /// Used by the per-row DFlash verify round (issue #2442): after a ragged
+    /// accept, row `r`'s window starts at its own logical valid end
+    /// `row_valid_ends[r]`, not at the shared physical cache offset.
+    fn apply_rope_per_row(&self, x: &MlxArray, row_valid_ends: &[i32]) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        debug_assert_eq!(shape.len(), 4, "rope input must be [B, H, L, D]");
+        let b = shape[0] as usize;
+        debug_assert_eq!(
+            b,
+            row_valid_ends.len(),
+            "apply_rope_per_row: one offset per batch row"
+        );
+        if b == 1 {
+            return self.rope(x, row_valid_ends[0]);
+        }
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for (r, &offset) in row_valid_ends.iter().enumerate() {
+            let row = mlxcel_core::slice(
+                x,
+                &[r as i32, 0, 0, 0],
+                &[r as i32 + 1, shape[1], shape[2], shape[3]],
+            );
+            let rotated = self.rope(&row, offset);
+            out = Some(match out {
+                None => rotated,
+                Some(prev) => mlxcel_core::concatenate(&prev, &rotated, 0),
+            });
+        }
+        out.expect("apply_rope_per_row requires b >= 1")
+    }
+
+    /// Per-query-position causal attention for a ragged batched verify block
+    /// (issue #2442).
+    ///
+    /// Row `r` keeps a contiguous valid history `[0, row_valid_ends[r])`, a
+    /// stale gap up to the shared physical `offset`, and this block's keys at
+    /// `[offset, offset + j]` for query `j`. One additive mask
+    /// (`build_divergent_row_mask`) encodes all three, and query `j` slices the
+    /// exact key width it would see in a B = 1 chain. Both blocks of
+    /// [0, offset + j + 1) that a row must not see are `-inf`.
+    fn attend_per_position_rows(
+        &self,
+        queries: &MlxArray,
+        keys: &MlxArray,
+        values: &MlxArray,
+        offset: i32,
+        row_valid_ends: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let q_shape = mlxcel_core::array_shape(queries);
+        let k_shape = mlxcel_core::array_shape(keys);
+        let v_shape = mlxcel_core::array_shape(values);
+        let b = q_shape[0];
+        let n_q_heads = q_shape[1];
+        let l_q = q_shape[2];
+        let head_dim = q_shape[3];
+        let n_kv_heads = k_shape[1];
+        debug_assert_eq!(
+            row_valid_ends.len(),
+            b as usize,
+            "attend_per_position_rows: one valid end per batch row"
+        );
+        let no_padding = vec![0_i32; b as usize];
+        let mask = mlxcel_core::utils::build_divergent_row_mask(
+            l_q,
+            offset,
+            row_valid_ends,
+            &no_padding,
+            None,
+        );
+
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        for j in 0..l_q {
+            let q_j = mlxcel_core::slice(queries, &[0, 0, j, 0], &[b, n_q_heads, j + 1, head_dim]);
+            let kv_len = offset + j + 1;
+            let k_j = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, head_dim]);
+            let v_j =
+                mlxcel_core::slice(values, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, v_shape[3]]);
+            let mask_j = mlxcel_core::slice(&mask, &[0, 0, j, 0], &[b, 1, j + 1, kv_len]);
+            let attn_j =
+                mlxcel_core::layers::attention(&q_j, &k_j, &v_j, self.scale, Some(&mask_j), 0.0, 0);
+            out = Some(match out {
+                None => attn_j,
+                Some(prev) => mlxcel_core::concatenate(&prev, &attn_j, 2),
+            });
+        }
+        out.expect("attend_per_position_rows requires l_q >= 1")
+    }
+
     pub(crate) fn from_weights(
         weights: &WeightMap,
         config: &Qwen3NextConfig,
@@ -982,6 +1177,8 @@ impl Qwen3NextAttention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: config.rope_dims(),
             rope_base: config.rope_theta,
+            rope_freqs: None,
+            rope_attention_factor: 1.0,
             mrope: None,
             verify_rope_rows: mlxcel_core::cuda_is_available(),
         })
@@ -1012,6 +1209,19 @@ impl mlxcel_core::batched_decode::SplitAttention for Qwen3NextAttention {
         k: &MlxArray,
         offsets: &[i32],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        if let Some(freqs) = &self.rope_freqs {
+            let rotate = |x: &MlxArray| {
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &self.scale_rotary_lanes(x),
+                    self.rope_dims,
+                    false,
+                    1.0,
+                    offsets,
+                    freqs,
+                )
+            };
+            return (rotate(q), rotate(k));
+        }
         (
             mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
             mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),
@@ -1079,6 +1289,11 @@ pub(crate) enum SwitchLinear {
         group_size: i32,
         bits: i32,
     },
+    /// A block-float plane (mxfp4, nvfp4 or mxfp8: `uint8` scales and no
+    /// `.biases`). The shared expert linear loads it: it infers the mode and
+    /// group size from the shapes and carries the per-expert scales such a
+    /// plane can come with.
+    BlockFloat(crate::models::switch_layers::SwitchLinear),
     Regular {
         weight: UniquePtr<MlxArray>,
     },
@@ -1092,6 +1307,7 @@ impl SwitchLinear {
         sorted: bool,
     ) -> UniquePtr<MlxArray> {
         match self {
+            Self::BlockFloat(linear) => linear.forward(x, indices, sorted),
             Self::Quantized {
                 weight,
                 scales,
@@ -1138,7 +1354,8 @@ impl SwitchLinear {
                 group_size,
                 bits,
             } => Some((weight, scales, biases, *group_size, *bits)),
-            Self::Regular { .. } => None,
+            // The fused kernel reads affine planes only.
+            Self::BlockFloat(_) | Self::Regular { .. } => None,
         }
     }
 
@@ -1163,7 +1380,21 @@ impl SwitchLinear {
             // `audio/qwen3_omni_moe/talker.rs`), so bounding the producer would
             // not have covered it.
             validate_expert_quantization_params(prefix, group_size, bits)?;
-            let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
+            // A block-float export (mlx-lm `mxfp4` / `nvfp4` / `mxfp8`) has
+            // `uint8` scales and no zero-point biases. This type's own
+            // variant is affine; hand such a plane to the shared loader. An
+            // affine plane that lost its biases has float scales and is still
+            // refused below, as before.
+            let scales_ref = weights.get(&scales_key).unwrap();
+            if !weights.contains_key(&format!("{}.biases", prefix))
+                && mlxcel_core::array_dtype(scales_ref) == dtype::UINT8
+            {
+                return crate::models::switch_layers::SwitchLinear::from_weights(
+                    weights, prefix, group_size, bits,
+                )
+                .map(Self::BlockFloat);
+            }
+            let scales = mlxcel_core::copy(scales_ref);
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w))
@@ -1190,11 +1421,28 @@ pub(crate) struct SwitchGLU {
 
 impl SwitchGLU {
     pub(crate) fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_with_sort(x, indices, true)
+    }
+
+    /// [`Self::forward`] with the expert-sorted gather under the caller's
+    /// control. Sorting groups the rows of one expert into one gathered
+    /// matmul, which reduces in a different order than the row-by-row gather
+    /// a single token takes; a speculative verify block that must match
+    /// single-token decode byte for byte passes `allow_sort = false`
+    /// (`qwen4_exp`, issue #2880).
+    ///
+    /// Used by: Qwen3Next, Qwen3.5, Qwen4-Exp
+    pub(crate) fn forward_with_sort(
+        &self,
+        x: &MlxArray,
+        indices: &MlxArray,
+        allow_sort: bool,
+    ) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let n_tokens = indices_shape[0];
         let top_k = indices_shape[1];
         let total = n_tokens * top_k;
-        let do_sort = total >= 64;
+        let do_sort = allow_sort && total >= 64;
 
         // Expand x: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
         let x_exp = mlxcel_core::expand_dims(x, -2);
@@ -1215,6 +1463,25 @@ impl SwitchGLU {
             let output = self.down_proj.forward(&activated, indices, false);
             mlxcel_core::squeeze_axis(&output, -2)
         }
+    }
+
+    /// The sorted branch of [`Self::forward_with_sort`] for rows already in
+    /// expert order: `sorted_x` is `[B, 1, hidden]`, `sorted_indices` `[B]`.
+    /// `sorted` is the flag the matmuls receive; the expert arena (issue
+    /// #2882) clears it when the resident path would not take the sorted
+    /// kernel at this batch size.
+    ///
+    /// Used by: Qwen4-Exp expert streaming
+    pub(crate) fn forward_presorted(
+        &self,
+        sorted_x: &MlxArray,
+        sorted_indices: &MlxArray,
+        sorted: bool,
+    ) -> UniquePtr<MlxArray> {
+        let x_gate = self.gate_proj.forward(sorted_x, sorted_indices, sorted);
+        let x_up = self.up_proj.forward(sorted_x, sorted_indices, sorted);
+        let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
+        self.down_proj.forward(&activated, sorted_indices, sorted)
     }
 
     /// Single-token decode via the fused MoE expert Metal kernel (#268).
@@ -1332,6 +1599,75 @@ impl SwitchGLU {
     }
 }
 
+/// Load a MoE router or gate linear, whose plane can be quantized differently
+/// from the checkpoint's default.
+///
+/// mlx-lm keeps these at 8-bit affine whatever the rest of the model uses, and
+/// records that as a per-layer entry of `quantization`, which this family's
+/// config reader does not keep. Under an affine default of the same group size
+/// the loader's own reconciliation recovers the bits. Under a block-float
+/// default (mxfp4 at group 32, nvfp4 at 16) the group size differs as well,
+/// and the declared pair then fails the bits check.
+///
+/// An affine plane (one with `.biases`) says what it is once the input width
+/// is known: `bits = packed_words * 32 / in_features` and `group_size =
+/// in_features / groups`. When that pair is loadable and differs from the
+/// declared one, the plane is loaded as affine with it. This also covers an
+/// nvfp4 default (group 16, 4-bit), where the shared reconciliation would
+/// otherwise read an 8-bit group-64 gate as 4-bit group 128 and route on
+/// misdecoded logits. Everything else goes
+/// to `UnifiedLinear::from_weights` unchanged.
+///
+/// Used by: [`SparseMoeBlock::from_weights`]
+fn gate_linear_from_weights(
+    weights: &WeightMap,
+    prefix: &str,
+    in_features: i32,
+    group_size: i32,
+    bits: i32,
+) -> Result<UnifiedLinear, String> {
+    let plane = |leaf: &str| weights.get(&format!("{prefix}.{leaf}"));
+    if let (Some(weight), Some(scales), Some(_biases)) =
+        (plane("weight"), plane("scales"), plane("biases"))
+    {
+        let packed_words = mlxcel_core::array_shape(weight)
+            .last()
+            .copied()
+            .unwrap_or(0);
+        let groups = mlxcel_core::array_shape(scales)
+            .last()
+            .copied()
+            .unwrap_or(0);
+        // `checked_mul`: the packed width comes from the checkpoint, and an
+        // unchecked i32 multiply panics in an overflow-checked build.
+        if let Some(packed_bits) = packed_words.checked_mul(32)
+            && in_features > 0
+            && packed_words > 0
+            && groups > 0
+            && packed_bits % in_features == 0
+            && in_features % groups == 0
+        {
+            let shape_bits = packed_bits / in_features;
+            let shape_group_size = in_features / groups;
+            // The affine bounds the shared loader enforces: no affine group 16
+            // (only NVFP4 uses it), and the loadable bit widths.
+            if (shape_group_size, shape_bits) != (group_size, bits)
+                && LOADABLE_AFFINE_BITS.contains(&shape_bits)
+                && SUPPORTED_AFFINE_GROUP_SIZES.contains(&shape_group_size)
+            {
+                return UnifiedLinear::from_weights_with_mode(
+                    weights,
+                    prefix,
+                    shape_group_size,
+                    shape_bits,
+                    "affine",
+                );
+            }
+        }
+    }
+    UnifiedLinear::from_weights(weights, prefix, group_size, bits)
+}
+
 /// Sparse MoE Block with shared expert
 pub(crate) struct SparseMoeBlock {
     router: UnifiedLinear,
@@ -1425,10 +1761,13 @@ impl SparseMoeBlock {
         let group_size = config.group_size();
         let bits = config.bits();
 
+        let hidden_size = config.hidden_size as i32;
+
         Ok(Self {
-            router: UnifiedLinear::from_weights(
+            router: gate_linear_from_weights(
                 weights,
                 &format!("{}.gate", prefix),
+                hidden_size,
                 group_size,
                 bits,
             )?,
@@ -1438,9 +1777,10 @@ impl SparseMoeBlock {
                 config,
                 &format!("{}.shared_expert", prefix),
             )?,
-            shared_expert_gate: UnifiedLinear::from_weights(
+            shared_expert_gate: gate_linear_from_weights(
                 weights,
                 &format!("{}.shared_expert_gate", prefix),
+                hidden_size,
                 group_size,
                 bits,
             )?,
@@ -1478,6 +1818,15 @@ pub(crate) struct DecoderLayer {
     mlp: MLPVariant,
     input_layernorm: RMSNorm,
     post_attention_layernorm: RMSNorm,
+}
+
+/// The full-attention geometry of `layers`, for the prefill mask choice
+/// (#3051); `None` when the slice holds no full-attention layer.
+fn full_attention_geometry(layers: &[DecoderLayer]) -> Option<PrefillAttention> {
+    layers.iter().find_map(|layer| match &layer.attention {
+        AttentionVariant::FullAttention(attn) => Some(attn.prefill_attention()),
+        AttentionVariant::LinearAttention(_) => None,
+    })
 }
 
 impl DecoderLayer {
@@ -1595,12 +1944,30 @@ impl Qwen3NextModel {
         caches: &mut [Qwen3NextCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_at(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] that, with `last_pos`, projects only that position's
+    /// hidden row through the final norm and the LM head and returns
+    /// `[batch, 1, vocab]` logits, so a prefill never materializes the
+    /// full-sequence logits it does not sample (#3045).
+    fn forward_at(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask, cache);
         }
 
+        let h = match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+            None => h,
+        };
         let h = self.norm.forward(&h);
 
         if let Some(ref lm_head) = self.lm_head {
@@ -1784,7 +2151,7 @@ impl Qwen3NextModel {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights
-        let weights = Self::sanitize_weights(weights, &config);
+        let weights = Self::sanitize_weights(weights, &config)?;
 
         // Build model
         tracing::info!("[Qwen3Next] Building model...");
@@ -1794,7 +2161,12 @@ impl Qwen3NextModel {
         Ok((model, config))
     }
 
-    fn sanitize_weights(mut weights: WeightMap, config: &Qwen3NextConfig) -> WeightMap {
+    /// Returns `Err` when the per-expert MoE planes disagree in shape or
+    /// dtype ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+    fn sanitize_weights(
+        mut weights: WeightMap,
+        config: &Qwen3NextConfig,
+    ) -> Result<WeightMap, String> {
         // Remove lm_head if tied
         if config.tie_word_embeddings {
             weights.remove("lm_head.weight");
@@ -1808,49 +2180,16 @@ impl Qwen3NextModel {
 
             let base = format!("model.layers.{}.mlp.switch_mlp", l);
             for proj in ["gate_proj", "up_proj", "down_proj"] {
-                let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-                let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-                let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-                let mut e = 0;
-                while let Some(w) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.weight",
-                    l, e, proj
-                )) {
-                    expert_weights.push(w);
-                    if let Some(s) = weights.remove(&format!(
-                        "model.layers.{}.mlp.experts.{}.{}.scales",
-                        l, e, proj
-                    )) {
-                        expert_scales.push(s);
-                    }
-                    if let Some(b) = weights.remove(&format!(
-                        "model.layers.{}.mlp.experts.{}.{}.biases",
-                        l, e, proj
-                    )) {
-                        expert_biases.push(b);
-                    }
-                    e += 1;
-                }
-
-                if !expert_weights.is_empty() {
-                    let stacked = stack_arrays(&expert_weights, 0);
-                    weights.insert(format!("{}.{}.weight", base, proj), stacked);
-
-                    if !expert_scales.is_empty() {
-                        let stacked = stack_arrays(&expert_scales, 0);
-                        weights.insert(format!("{}.{}.scales", base, proj), stacked);
-                    }
-
-                    if !expert_biases.is_empty() {
-                        let stacked = stack_arrays(&expert_biases, 0);
-                        weights.insert(format!("{}.{}.biases", base, proj), stacked);
-                    }
-                }
+                crate::models::switch_layers::drain_numbered_expert_planes(
+                    &mut weights,
+                    &format!("model.layers.{l}.mlp.experts"),
+                    proj,
+                    &format!("{base}.{proj}"),
+                )?;
             }
         }
 
-        weights
+        Ok(weights)
     }
 
     pub fn from_weights(weights: &WeightMap, config: &Qwen3NextConfig) -> Result<Self, String> {
@@ -1931,19 +2270,35 @@ impl Qwen3NextModel {
         input: &MlxArray,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] with the `last_pos` projection of
+    /// [`Self::forward_at`]. Used by: the `forward_last_logits*` overrides.
+    fn forward_for_sequence_at(
+        &self,
+        input: &MlxArray,
+        seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
             |caches| {
-                let mask = if seq_len > 1 {
-                    let fa_idx = self.full_attention_interval - 1;
-                    let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
-                    Some(create_causal_mask(seq_len, offset))
-                } else {
-                    None
+                // One row: MLX's causal mode instead of the array where MLX
+                // fuses it (#3051). The hidden state takes the norm's dtype.
+                let mask = match full_attention_geometry(&self.layers) {
+                    Some(attention) if seq_len > 1 => {
+                        let fa_idx = self.full_attention_interval - 1;
+                        let offset = caches.get(fa_idx).map(|c| c.offset()).unwrap_or(0);
+                        let batch = mlxcel_core::array_shape(input)[0];
+                        let dtype = mlxcel_core::array_dtype(&self.norm.weight);
+                        prefill_causal_mask(seq_len, offset, batch, attention, dtype)
+                    }
+                    _ => None,
                 };
-                self.forward(input, caches, mask.as_deref())
+                self.forward_at(input, caches, mask.as_deref(), last_pos)
             },
         )
     }
@@ -1970,6 +2325,42 @@ impl LanguageModel for Qwen3NextModel {
     ) -> UniquePtr<MlxArray> {
         // Server path: route through the scheduler's per-sequence model-owned cache.
         self.forward_for_sequence(input_ids, seq_id)
+    }
+
+    // The prefill entry points: project only the sampled row through the LM
+    // head (#3045).
+    fn forward_last_logits(
+        &self,
+        input: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input, None, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        // Text-only, like `forward_with_embeddings_and_sequence_id`.
+        self.forward_for_sequence_at(input_ids, seq_id, Some(last_pos))
     }
 
     fn forward_batched(
@@ -2083,8 +2474,8 @@ impl LanguageModel for Qwen3NextModel {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes
             .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
-                Some(layer) if !layer.is_linear => crate::models::model_owned::LayerKv::Full,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(layer) if !layer.is_linear => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             })
     }
 
@@ -2130,6 +2521,35 @@ impl LanguageModel for Qwen3NextModel {
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        (snapshot.family() == "qwen3_next")
+            .then(|| snapshot.subset(Qwen3NextCache::is_checkpoint_tensor))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        if checkpoint.family() != "qwen3_next" || donor.family() != "qwen3_next" {
+            return Err(format!(
+                "cannot restore a {} checkpoint over a {} snapshot into qwen3_next",
+                checkpoint.family(),
+                donor.family()
+            ));
+        }
+        let mut state = self.make_internal_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            cache.restore_from_checkpoint(checkpoint, donor, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())
@@ -2226,7 +2646,7 @@ impl Qwen3NextStageModel {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
-        weights = Qwen3NextModel::sanitize_weights(weights, &config);
+        weights = Qwen3NextModel::sanitize_weights(weights, &config)?;
 
         // When embeddings are tied, the final stage produces logits from the
         // embedding table, so it must keep `model.embed_tokens.weight` through
@@ -2239,7 +2659,7 @@ impl Qwen3NextStageModel {
         Self::from_filtered_weights(&weights, &config, filter, stage_index)
     }
 
-    fn from_filtered_weights(
+    pub(crate) fn from_filtered_weights(
         weights: &WeightMap,
         config: &Qwen3NextConfig,
         filter: &LayerFilter,
@@ -2326,6 +2746,7 @@ impl Qwen3NextStageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let hidden = self
             .embed_tokens
@@ -2334,24 +2755,28 @@ impl Qwen3NextStageModel {
                 "stage does not host embeddings; hidden-state input required".to_string()
             })?
             .forward(input_ids);
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         hidden_states: UniquePtr<MlxArray>,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
         }
-        self.execute_hidden(hidden_states, caches)
+        self.execute_hidden(hidden_states, caches, last_pos)
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm and LM head (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -2363,12 +2788,15 @@ impl Qwen3NextStageModel {
 
         let shape = mlxcel_core::array_shape(hidden.as_ref().unwrap());
         let seq_len = shape[1];
-        let fa_mask = if seq_len > 1 {
-            let is_linear: Vec<bool> = self.layers.iter().map(|layer| layer.is_linear).collect();
-            let offset = stage_attention_offset(&is_linear, caches);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
+        let fa_mask = match full_attention_geometry(&self.layers) {
+            Some(attention) if seq_len > 1 => {
+                let is_linear: Vec<bool> =
+                    self.layers.iter().map(|layer| layer.is_linear).collect();
+                let offset = stage_attention_offset(&is_linear, caches);
+                let dtype = mlxcel_core::array_dtype(hidden.as_ref().unwrap());
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            }
+            _ => None,
         };
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
@@ -2380,6 +2808,14 @@ impl Qwen3NextStageModel {
             hidden = layer.forward(hidden.as_ref().unwrap(), mask, cache);
         }
 
+        // Norm and head act per position, so slicing first yields the row the
+        // full projection would have (#3081).
+        let hidden = match (self.filter.has_lm_head, last_pos) {
+            (true, Some(pos)) => {
+                mlxcel_core::generate::logits_at_position(hidden.as_ref().unwrap(), pos)
+            }
+            _ => hidden,
+        };
         let hidden = if let Some(norm) = &self.norm {
             norm.forward(hidden.as_ref().unwrap())
         } else {

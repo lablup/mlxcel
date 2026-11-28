@@ -3,7 +3,7 @@
 #include <optional>
 #include <variant>
 
-#include "mlx/backend/common/metal_kernel.h"
+#include "mlx/backend/common/custom_kernel.h"
 #include "mlx/primitives.h"
 
 namespace mlx::core::fast {
@@ -408,13 +408,8 @@ class GatedDeltaUpdate : public Custom {
       std::function<std::vector<array>(std::vector<array>)> fallback)
       : Custom(stream, std::move(fallback)) {}
 
-  static bool use_fallback(
-      const int Hk,
-      const int Dk,
-      const int Hv,
-      const int Dv,
-      const bool has_mask,
-      Stream s);
+  static bool
+  use_fallback(int Hk, int Dk, int Hv, int Dv, bool has_mask, Stream s);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override {
@@ -447,12 +442,7 @@ class GatedDeltaUpdateVJP : public Custom {
       std::function<std::vector<array>(std::vector<array>)> fallback)
       : Custom(stream, std::move(fallback)) {}
 
-  static bool use_fallback(
-      const int Hk,
-      const int Dk,
-      const int Hv,
-      const int Dv,
-      Stream s);
+  static bool use_fallback(int Hk, int Dk, int Hv, int Dv, Stream s);
 
   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
       override {
@@ -516,6 +506,7 @@ class CustomKernel : public Primitive {
       Stream stream,
       std::string name,
       std::string source,
+      size_t source_hash,
       std::tuple<int, int, int> grid,
       std::tuple<int, int, int> threadgroup,
       std::vector<std::tuple<bool, bool, bool>> shape_infos,
@@ -529,6 +520,7 @@ class CustomKernel : public Primitive {
       : Primitive(stream),
         name_(std::move(name)),
         source_(std::move(source)),
+        source_hash_(source_hash),
         grid_(grid),
         threadgroup_(threadgroup),
         shape_infos_(std::move(shape_infos)),
@@ -553,6 +545,7 @@ class CustomKernel : public Primitive {
     return std::make_tuple(
         name_,
         source_,
+        source_hash_,
         grid_,
         threadgroup_,
         shape_infos_,
@@ -567,6 +560,7 @@ class CustomKernel : public Primitive {
  private:
   std::string name_;
   std::string source_;
+  size_t source_hash_;
   std::tuple<int, int, int> grid_;
   std::tuple<int, int, int> threadgroup_;
   std::vector<std::tuple<bool, bool, bool>> shape_infos_;

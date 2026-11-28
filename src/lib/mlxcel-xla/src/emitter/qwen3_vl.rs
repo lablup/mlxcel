@@ -24,7 +24,11 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val, precision_lowers_on};
+use super::qwen3_vl_ops::{
+    AttentionWeights, add_bf16, attention_bf16, exact_gelu_bf16, layer_norm_bf16, linear_bf16,
+    round_bf16, tanh_gelu_bf16,
+};
 
 /// Qualified flattened-patch capacities for the pinned Qwen3-VL image path.
 ///
@@ -38,6 +42,24 @@ pub(crate) const QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS: usize = 512 / 4;
 pub(crate) const QWEN3_VL_FIRST_DIAGNOSTIC_BLOCK: usize = 0;
 pub(crate) const QWEN3_VL_DIAGNOSTIC_BLOCK: usize = 2;
 pub(crate) const QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES: usize = 7;
+
+/// Contraction input type of this graph on `device`. The runtime binds the same
+/// value into the artifact's operator numeric contract (issue #3211).
+///
+/// Every activation is rounded to BF16 where eager MLX stores a BF16 tensor
+/// (#3291, `qwen3_vl_ops`), so each contraction reads BF16-exact values. They
+/// enter the GEMM as BF16 where the target lowers BF16; Metal has no BF16 type
+/// (#612), so there they stay in their f32 carrier. That forms the same
+/// products only while the vision weights are BF16-exact, as the BF16
+/// checkpoints are; a quantized vision tower dequantizes to values the carrier
+/// does not round, so it would not match the BF16 GEMM.
+pub(crate) fn qwen3_vl_vision_precision(device: &str) -> Precision {
+    if precision_lowers_on(device, Precision::Bf16) {
+        Precision::Bf16
+    } else {
+        Precision::F32
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Qwen3VlWeightSpec {
@@ -662,176 +684,6 @@ pub(crate) fn prepare_qwen3_vl_host_inputs(
     })
 }
 
-fn bias_2d(builder: &mut Builder, value: &Val, bias: &Val) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
-    builder.add(value, &bias)
-}
-
-fn linear_2d(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Val {
-    let value = builder.linear_seq(value, weight);
-    bias_2d(builder, &value, bias)
-}
-
-fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsilon: f32) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let zero = builder.const_f32(0.0);
-    let width_scalar = builder.const_f32(width as f32);
-    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
-    let sum = builder.reduce_add(value, 1, &zero);
-    let mean = builder.divide(&sum, &width_rows);
-    let mean = builder.broadcast(&mean, &[0], vec![rows, width]);
-    let centered = builder.subtract(value, &mean);
-    let squared = builder.multiply(&centered, &centered);
-    let squared_sum = builder.reduce_add(&squared, 1, &zero);
-    let variance = builder.divide(&squared_sum, &width_rows);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
-    let variance = builder.add(&variance, &epsilon);
-    let inv_std = builder.rsqrt(&variance);
-    let inv_std = builder.broadcast(&inv_std, &[0], vec![rows, width]);
-    let normalized = builder.multiply(&centered, &inv_std);
-    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
-    let normalized = builder.multiply(&normalized, &weight);
-    builder.add(&normalized, &bias)
-}
-
-fn exact_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = builder.const_f32(0.5);
-    let half = builder.broadcast(&half, &[], shape.clone());
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape.clone());
-    let inv_sqrt_two = builder.const_f32(std::f32::consts::FRAC_1_SQRT_2);
-    let inv_sqrt_two = builder.broadcast(&inv_sqrt_two, &[], shape);
-    let scaled = builder.multiply(value, &inv_sqrt_two);
-    let erf = builder.erf(&scaled);
-    let cdf = builder.add(&one, &erf);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
-fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = builder.const_f32(0.5);
-    let half = builder.broadcast(&half, &[], shape.clone());
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape.clone());
-    let coefficient = builder.const_f32(0.044_715);
-    let coefficient = builder.broadcast(&coefficient, &[], shape.clone());
-    let scale = builder.const_f32(0.797_884_6);
-    let scale = builder.broadcast(&scale, &[], shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
-fn rotate_half(builder: &mut Builder, value: &Val) -> Val {
-    let tokens = value.ty.shape[0];
-    let heads = value.ty.shape[1];
-    let width = value.ty.shape[2];
-    let half = width / 2;
-    let first = builder.slice(value, &[(0, tokens), (0, heads), (0, half)]);
-    let second = builder.slice(value, &[(0, tokens), (0, heads), (half, width)]);
-    let second = builder.negate(&second);
-    builder.concatenate(&second, &first, 2)
-}
-
-fn apply_vision_rope(builder: &mut Builder, value: &Val, freqs: &Val) -> Val {
-    let tokens = value.ty.shape[0];
-    let heads = value.ty.shape[1];
-    let half = freqs.ty.shape[1];
-    let cos = builder.cosine(freqs);
-    let sin = builder.sine(freqs);
-    let cos = builder.concatenate(&cos, &cos, 1);
-    let sin = builder.concatenate(&sin, &sin, 1);
-    let cos = builder.broadcast(&cos, &[0, 2], vec![tokens, heads, half * 2]);
-    let sin = builder.broadcast(&sin, &[0, 2], vec![tokens, heads, half * 2]);
-    let rotated = rotate_half(builder, value);
-    let direct = builder.multiply(value, &cos);
-    let rotated = builder.multiply(&rotated, &sin);
-    builder.add(&direct, &rotated)
-}
-
-fn attention(
-    builder: &mut Builder,
-    hidden: &Val,
-    args: &mut Args,
-    config: &Qwen3VlConfig,
-    freqs: &Val,
-    attention_bias: &Val,
-) -> Val {
-    let tokens = hidden.ty.shape[0];
-    let head_dim = config.hidden / config.heads;
-    let qkv = linear_2d(builder, hidden, &args.take(), &args.take());
-    let qkv = builder.reshape(&qkv, vec![tokens, 3, config.heads, head_dim]);
-    let q = builder.slice(
-        &qkv,
-        &[(0, tokens), (0, 1), (0, config.heads), (0, head_dim)],
-    );
-    let k = builder.slice(
-        &qkv,
-        &[(0, tokens), (1, 2), (0, config.heads), (0, head_dim)],
-    );
-    let v = builder.slice(
-        &qkv,
-        &[(0, tokens), (2, 3), (0, config.heads), (0, head_dim)],
-    );
-    let q = builder.reshape(&q, vec![tokens, config.heads, head_dim]);
-    let k = builder.reshape(&k, vec![tokens, config.heads, head_dim]);
-    let v = builder.reshape(&v, vec![tokens, config.heads, head_dim]);
-    let q = apply_vision_rope(builder, &q, freqs);
-    let k = apply_vision_rope(builder, &k, freqs);
-    let q = builder.transpose(&q, &[1, 0, 2]);
-    let k = builder.transpose(&k, &[1, 0, 2]);
-    let v = builder.transpose(&v, &[1, 0, 2]);
-    let scores = builder.dot_general(
-        &q,
-        &k,
-        &[0],
-        &[0],
-        &[2],
-        &[2],
-        vec![config.heads, tokens, tokens],
-    );
-    let scale = builder.const_f32((head_dim as f32).powf(-0.5));
-    let scale = builder.broadcast(&scale, &[], vec![config.heads, tokens, tokens]);
-    let scores = builder.multiply(&scores, &scale);
-    let attention_bias =
-        builder.broadcast(attention_bias, &[1, 2], vec![config.heads, tokens, tokens]);
-    let scores = builder.add(&scores, &attention_bias);
-    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(&scores, 2, &negative_infinity);
-    let maximum = builder.broadcast(&maximum, &[0, 1], vec![config.heads, tokens, tokens]);
-    let shifted = builder.subtract(&scores, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let denominator = builder.reduce_add(&exponentials, 2, &zero);
-    let denominator = builder.broadcast(&denominator, &[0, 1], vec![config.heads, tokens, tokens]);
-    let probabilities = builder.divide(&exponentials, &denominator);
-    let context = builder.dot_general(
-        &probabilities,
-        &v,
-        &[0],
-        &[0],
-        &[2],
-        &[1],
-        vec![config.heads, tokens, head_dim],
-    );
-    let context = builder.transpose(&context, &[1, 0, 2]);
-    let context = builder.reshape(&context, vec![tokens, config.hidden]);
-    linear_2d(builder, &context, &args.take(), &args.take())
-}
-
 struct EncoderLayerDiagnostics {
     input: Val,
     norm1: Val,
@@ -865,26 +717,39 @@ fn encoder_layer(
     attention_bias: &Val,
     diagnostics: bool,
 ) -> (Val, Option<EncoderLayerDiagnostics>) {
-    let norm1 = layer_norm(
+    let norm1 = layer_norm_bf16(
         builder,
         hidden,
         &args.take(),
         &args.take(),
         config.layer_norm_eps,
     );
-    let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
-    let residual = builder.add(hidden, &attention);
-    let norm2 = layer_norm(
+    let weights = AttentionWeights {
+        qkv_weight: args.take(),
+        qkv_bias: args.take(),
+        proj_weight: args.take(),
+        proj_bias: args.take(),
+    };
+    let attention = attention_bf16(
+        builder,
+        &norm1,
+        &weights,
+        config.heads,
+        freqs,
+        attention_bias,
+    );
+    let residual = add_bf16(builder, hidden, &attention);
+    let norm2 = layer_norm_bf16(
         builder,
         &residual,
         &args.take(),
         &args.take(),
         config.layer_norm_eps,
     );
-    let fc1 = linear_2d(builder, &norm2, &args.take(), &args.take());
-    let activated = tanh_gelu(builder, &fc1);
-    let mlp = linear_2d(builder, &activated, &args.take(), &args.take());
-    let output = builder.add(&residual, &mlp);
+    let fc1 = linear_bf16(builder, &norm2, &args.take(), &args.take());
+    let activated = tanh_gelu_bf16(builder, &fc1);
+    let mlp = linear_bf16(builder, &activated, &args.take(), &args.take());
+    let output = add_bf16(builder, &residual, &mlp);
     let diagnostic_values = diagnostics.then(|| EncoderLayerDiagnostics {
         input: hidden.clone(),
         norm1,
@@ -897,6 +762,9 @@ fn encoder_layer(
     (output, diagnostic_values)
 }
 
+/// Bilinear position embeddings: eager widens the BF16 table rows to f32,
+/// weights them, sums the corners as `(c0 + c1) + (c2 + c3)`, and casts the
+/// result to the BF16 hidden dtype.
 fn interpolated_position_embeddings(
     builder: &mut Builder,
     table: &Val,
@@ -910,8 +778,18 @@ fn interpolated_position_embeddings(
     let weights = builder.reshape(weights, vec![corners, tokens, 1]);
     let weights = builder.broadcast(&weights, &[0, 1, 2], vec![corners, tokens, hidden]);
     let weighted = builder.multiply(&gathered, &weights);
-    let zero = builder.const_f32(0.0);
-    builder.reduce_add(&weighted, 0, &zero)
+    let mut corner = |index: usize| {
+        let value = builder.slice(&weighted, &[(index, index + 1), (0, tokens), (0, hidden)]);
+        builder.reshape(&value, vec![tokens, hidden])
+    };
+    let c0 = corner(0);
+    let c1 = corner(1);
+    let c2 = corner(2);
+    let c3 = corner(3);
+    let first = builder.add(&c0, &c1);
+    let second = builder.add(&c2, &c3);
+    let sum = builder.add(&first, &second);
+    round_bf16(builder, &sum)
 }
 
 fn patch_merger_impl(
@@ -927,7 +805,7 @@ fn patch_merger_impl(
         hidden.ty.shape[0] / (config.spatial_merge_size * config.spatial_merge_size);
     let merged = if postshuffle_norm {
         let reshaped = builder.reshape(hidden, vec![merged_tokens, merge_width]);
-        layer_norm(
+        layer_norm_bf16(
             builder,
             &reshaped,
             &args.take(),
@@ -935,7 +813,7 @@ fn patch_merger_impl(
             config.layer_norm_eps,
         )
     } else {
-        let normalized = layer_norm(
+        let normalized = layer_norm_bf16(
             builder,
             hidden,
             &args.take(),
@@ -944,9 +822,9 @@ fn patch_merger_impl(
         );
         builder.reshape(&normalized, vec![merged_tokens, merge_width])
     };
-    let fc1 = linear_2d(builder, &merged, &args.take(), &args.take());
-    let activated = exact_gelu(builder, &fc1);
-    let projected = linear_2d(builder, &activated, &args.take(), &args.take());
+    let fc1 = linear_bf16(builder, &merged, &args.take(), &args.take());
+    let activated = exact_gelu_bf16(builder, &fc1);
+    let projected = linear_bf16(builder, &activated, &args.take(), &args.take());
     let diagnostic_values = diagnostics.then(|| [merged.clone(), fc1.clone(), activated.clone()]);
     (projected, diagnostic_values)
 }
@@ -955,14 +833,19 @@ fn patch_merger_impl(
 /// post-smart-resize, spatial-merge-grouped order. `vision_rope` and
 /// `attention_bias` are host-built from `grid_thw`/packed boundaries, keeping
 /// cross-image isolation explicit while preserving one finite static graph.
-fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: bool) -> String {
+fn emit_qwen3_vl_impl(
+    config: &Qwen3VlConfig,
+    patch_bucket: usize,
+    precision: Precision,
+    diagnostics: bool,
+) -> String {
     assert!(
         QWEN3_VL_PATCH_BUCKETS.contains(&patch_bucket),
         "unqualified Qwen3-VL patch bucket"
     );
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(precision);
     let patch_weight = args.take();
     let patch_bias = args.take();
     let position_table = args.take();
@@ -981,8 +864,9 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
     let position_indices =
         args.push_input(Ty::new(vec![4, patch_bucket, 1], "i32"), "position.indices");
     let position_weights = args.push_input(Ty::f32(vec![4, patch_bucket]), "position.weights");
-    let mut hidden = builder.linear_seq(&patches, &patch_weight);
-    hidden = bias_2d(&mut builder, &hidden, &patch_bias);
+    // Eager casts the processor's f32 pixels to the BF16 embedding dtype first.
+    let patches = round_bf16(&mut builder, &patches);
+    let mut hidden = linear_bf16(&mut builder, &patches, &patch_weight, &patch_bias);
     let patch_embeddings = diagnostics.then(|| hidden.clone());
     let position_embeddings = interpolated_position_embeddings(
         &mut builder,
@@ -991,7 +875,7 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
         &position_weights,
     );
     let diagnostic_position_embeddings = diagnostics.then(|| position_embeddings.clone());
-    hidden = builder.add(&hidden, &position_embeddings);
+    hidden = add_bf16(&mut builder, &hidden, &position_embeddings);
     let positioned_embeddings = diagnostics.then(|| hidden.clone());
     let mut deepstack_hidden = Vec::with_capacity(config.deepstack_visual_indexes.len());
     let mut block_hidden = diagnostics.then(|| Vec::with_capacity(config.depth));
@@ -1077,13 +961,21 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
     )
 }
 
-pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> String {
-    emit_qwen3_vl_impl(config, patch_bucket, false)
+pub(crate) fn emit_qwen3_vl(
+    config: &Qwen3VlConfig,
+    patch_bucket: usize,
+    precision: Precision,
+) -> String {
+    emit_qwen3_vl_impl(config, patch_bucket, precision, false)
 }
 
 #[cfg(feature = "diagnostics")]
-pub(crate) fn emit_qwen3_vl_diagnostics(config: &Qwen3VlConfig, patch_bucket: usize) -> String {
-    emit_qwen3_vl_impl(config, patch_bucket, true)
+pub(crate) fn emit_qwen3_vl_diagnostics(
+    config: &Qwen3VlConfig,
+    patch_bucket: usize,
+    precision: Precision,
+) -> String {
+    emit_qwen3_vl_impl(config, patch_bucket, precision, true)
 }
 
 #[cfg(test)]
@@ -1115,6 +1007,25 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn vision_precision_is_f32_on_metal_and_bf16_on_cuda() {
+        assert_eq!(qwen3_vl_vision_precision("metal"), Precision::F32);
+        assert_eq!(qwen3_vl_vision_precision("cuda"), Precision::Bf16);
+    }
+
+    #[test]
+    fn metal_precision_graph_contains_no_bf16_type() {
+        let config = config();
+        let precision = qwen3_vl_vision_precision("metal");
+        for bucket in [16, 512] {
+            let mlir = emit_qwen3_vl(&config, bucket, precision);
+            assert!(
+                !mlir.contains("bf16"),
+                "bucket {bucket} Metal graph must not name bf16"
+            );
+        }
     }
 
     #[test]
@@ -1189,7 +1100,7 @@ mod tests {
     #[test]
     fn emitted_bucket_has_packed_bias_rope_and_merged_output_contract() {
         let config = config();
-        let mlir = emit_qwen3_vl(&config, 16);
+        let mlir = emit_qwen3_vl(&config, 16, Precision::Bf16);
         assert!(mlir.contains("loc(\"patches.grouped\")"));
         assert!(mlir.contains("tensor<16x24xf32>"));
         assert!(mlir.contains("loc(\"vision_rope.freqs\")"));
@@ -1202,7 +1113,7 @@ mod tests {
         assert_eq!(mlir.matches("stablehlo.tanh").count(), config.depth);
         assert_eq!(mlir.matches("chlo.erf").count(), 3);
 
-        let two_image_mlir = emit_qwen3_vl(&config, 512);
+        let two_image_mlir = emit_qwen3_vl(&config, 512, Precision::Bf16);
         assert!(two_image_mlir.contains("loc(\"patches.grouped\")"));
         assert!(two_image_mlir.contains("tensor<512x24xf32>"));
         assert!(
@@ -1214,7 +1125,7 @@ mod tests {
     #[test]
     fn diagnostic_bucket_appends_ordered_pre_merger_stages() {
         let config = config();
-        let mlir = emit_qwen3_vl_impl(&config, 16, true);
+        let mlir = emit_qwen3_vl_impl(&config, 16, Precision::Bf16, true);
         let mut output_types = vec!["tensor<4x12xf32>"; 3];
         output_types.extend(vec!["tensor<16x8xf32>"; 5 + 7]);
         output_types.extend(vec!["tensor<4x32xf32>"; 9]);
@@ -1226,13 +1137,13 @@ mod tests {
     fn diagnostic_bucket_appends_all_block_0_and_block_2_substages_in_order() {
         let mut config = config();
         config.depth = 3;
-        let diagnostic = emit_qwen3_vl_impl(&config, 16, true);
+        let diagnostic = emit_qwen3_vl_impl(&config, 16, Precision::Bf16, true);
         let mut output_types = vec!["tensor<4x12xf32>"; 3];
         output_types.extend(vec!["tensor<16x8xf32>"; 3 + 3 + 2 * 7]);
         output_types.extend(vec!["tensor<4x32xf32>"; 9]);
         assert!(diagnostic.contains(&format!("-> ({})", output_types.join(", "))));
 
-        let production = emit_qwen3_vl_impl(&config, 16, false);
+        let production = emit_qwen3_vl_impl(&config, 16, Precision::Bf16, false);
         assert!(production.contains("-> (tensor<4x12xf32>, tensor<4x12xf32>, tensor<4x12xf32>)"));
         assert!(!production.contains(&format!("-> ({})", output_types.join(", "))));
     }
@@ -1243,7 +1154,7 @@ mod tests {
         let value = Builder::arg(0, Ty::f32(vec![2, 8]));
         let weight = Builder::arg(1, Ty::f32(vec![8]));
         let bias = Builder::arg(2, Ty::f32(vec![8]));
-        let output = layer_norm(&mut builder, &value, &weight, &bias, 1.0e-6);
+        let output = layer_norm_bf16(&mut builder, &value, &weight, &bias, 1.0e-6);
         let body = builder.body();
 
         assert_eq!(output.ty.render(), "tensor<2x8xf32>");

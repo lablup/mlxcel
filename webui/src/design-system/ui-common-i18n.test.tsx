@@ -29,6 +29,11 @@ function Sample(): React.JSX.Element {
 async function renderIn(locale: Locale): Promise<void> {
   act(() => root.render(<LibraryStrings locale={locale}><Sample /></LibraryStrings>));
   await act(async () => { await loadLibraryMessages(locale); });
+  await nextFrame();
+}
+// Astryx 0.7.11 fills a Button's loading live region one frame after the Button mounts loading.
+async function nextFrame(): Promise<void> {
+  await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
 }
 // Astryx's visually hidden loading announcement inside the busy Button.
 const loading = (): string => [...(host.querySelector('button')?.querySelectorAll('[role="status"]') ?? [])].map((node) => node.textContent).join('').trim();
@@ -57,7 +62,7 @@ describe('ui-common and Astryx strings follow the appearance locale', () => {
 
   it('switches back and forth with the locale through the product theme', async () => {
     act(() => root.render(<ProductTheme family="mlxcel" scheme="light" locale="ko"><Sample /></ProductTheme>));
-    await act(async () => { await loadLibraryMessages('ko'); });
+    await act(async () => { await loadLibraryMessages('ko'); }); await nextFrame();
     expect(loading()).toBe('로드 중');
     act(() => root.render(<ProductTheme family="mlxcel" scheme="light" locale="en"><Sample /></ProductTheme>));
     expect(loading()).toBe('Loading');

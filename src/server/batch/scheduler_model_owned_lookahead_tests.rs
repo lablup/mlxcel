@@ -86,14 +86,18 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 
@@ -176,11 +180,13 @@ struct SeqState {
 }
 
 fn seq_state(sched: &BatchScheduler, seq_id: SequenceId) -> SeqState {
-    let snapshot = sched
-        .engine
-        .model()
-        .snapshot_sequence_state(seq_id, 1)
-        .expect("Gemma 3 snapshots a live sequence");
+    let snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+        sched.engine.model(),
+        sched.engine.pool(),
+        seq_id,
+        1,
+    )
+    .expect("Gemma 3 snapshots a live sequence");
     let global_offset = scalar(&snapshot, "layer1.standard.offset");
     SeqState {
         sliding_offset: scalar(&snapshot, "layer0.rotating.offset"),

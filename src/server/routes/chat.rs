@@ -22,7 +22,7 @@ use std::sync::atomic::Ordering;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -102,18 +102,19 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 /// the pre-#124 path. Callers must therefore build the context **after**
 /// preparing the request so the resolved bytes are available.
 ///
-/// `history_prompt` is the request re-rendered with `add_generation_prompt =
-/// false` (see [`crate::server::chat_request::PreparedChatRequest::history_prompt`]).
-/// It travels with the context so the scheduler can capture a history-boundary
-/// snapshot during prefill for snapshot-only families (issue #1143). Pass
-/// `None` to opt this request out.
+/// `renders` carries the request re-rendered with `add_generation_prompt =
+/// false` (see [`crate::server::chat_request::PreparedChatRequest::history_prompt`])
+/// and, when enabled, its system-prompt root render (#2885 Part B). They travel
+/// with the context so the scheduler can capture boundary snapshots during
+/// prefill for snapshot-only families (issue #1143). Pass
+/// `BoundaryRenders::default()` to opt this request out.
 pub(crate) fn build_prompt_cache_request_context(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
     image_data: &[Vec<u8>],
     audio_data: &[Vec<u8>],
-    history_prompt: Option<&str>,
+    renders: crate::server::chat_request::BoundaryRenders<'_>,
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
     // b10621 `cache_prompt: false` opts this one request out. Returning `None`
@@ -147,8 +148,12 @@ pub(crate) fn build_prompt_cache_request_context(
         template_sig: template_signature,
         session_key,
         mm_digest,
-        history_prompt: history_prompt.map(str::to_string),
+        history_prompt: renders.history.map(str::to_string),
         history_prefix_tokens: None,
+        root_prompt: renders.root.map(str::to_string),
+        root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
+        model_reasoning_effort: chat_model_reasoning_effort(state, live, request),
     })
 }
 
@@ -174,7 +179,7 @@ pub(crate) fn chat_template_signature(
         live.chat_template_kwargs.as_ref(),
         &request.merged_extra_body(),
     );
-    template_sig(
+    let signature = template_sig(
         state.chat_template.template_source(),
         &merged_kwargs,
         request.tool_choice.as_ref(),
@@ -186,7 +191,32 @@ pub(crate) fn chat_template_signature(
         state.prefill_assistant()
             && crate::server::assistant_prefill::resolve(request, true)
                 .is_ok_and(|prefill| prefill.is_some()),
+    );
+    // A steering model's effort changes every hidden state from its first
+    // steered layer on without touching the prompt (#3435), so it is part of
+    // the bucket. Unchanged for every other model.
+    crate::server::prompt_cache::key::fold_model_reasoning_effort(
+        signature,
+        chat_model_reasoning_effort(state, live, request).as_deref(),
     )
+}
+
+/// The model-side reasoning effort of a chat request (#3435), or `None` for a
+/// model that does not steer by it. A level the model refuses yields `None`
+/// here: request preparation refuses the same request with a 400 first.
+pub(crate) fn chat_model_reasoning_effort(
+    state: &AppState,
+    live: &LiveSettings,
+    request: &ChatCompletionRequest,
+) -> Option<String> {
+    crate::server::reasoning_steering::resolve_model_reasoning_effort(
+        &state.chat_template,
+        request,
+        live.chat_template_kwargs.as_ref(),
+        &request.merged_extra_body(),
+    )
+    .ok()
+    .flatten()
 }
 
 /// Cache-key template dimension for the two raw-prompt routes (#1473).
@@ -228,6 +258,12 @@ pub(crate) fn build_raw_prompt_cache_context(
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
+        // Raw prompts run at the model's default effort, under their own
+        // sentinel bucket.
+        model_reasoning_effort: None,
     })
 }
 
@@ -303,8 +339,12 @@ pub(crate) fn build_single_token_chat_logprobs(
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut request): Json<ChatCompletionRequest>,
+    request: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Response {
+    let mut request = match super::parse_json_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
@@ -684,7 +724,8 @@ pub(crate) async fn non_stream_chat_completion(
         // way inside `plain_chat_reply`.
         let reasoning = extract_reasoning_content(&result.text, primed_open_thinking);
         let tools = request.tools.as_deref();
-        let mut parsed = tool_calls::parse_tool_calls(&result.text, tools);
+        let mut parsed =
+            tool_calls::parse_tool_calls_with_context(&result.text, tools, primed_open_thinking);
         if answer_wrapper {
             parsed.content = tool_calls::strip_answer_wrapper(&parsed.content);
         }
@@ -926,6 +967,8 @@ pub(crate) fn submit_next_turn_warmup(
     // identity from here on.
     warm_ctx.history_prompt = None;
     warm_ctx.history_prefix_tokens = None;
+    warm_ctx.root_prompt = None;
+    warm_ctx.root_prefix_tokens = None;
     state
         .model_provider
         .submit_prompt_cache_warmup(tokens, warm_ctx);
@@ -1144,7 +1187,7 @@ pub(crate) async fn stream_asr_completion(
         &request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
     let primed_open_thinking =
         is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
@@ -1155,6 +1198,8 @@ pub(crate) async fn stream_asr_completion(
     options.priority = priority;
     options.prompt_cache_ctx = prompt_cache_ctx;
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3's XTML format, #1338) produced the
     // prompt as token ids. Handing them to the provider is what keeps the
     // rendered structure intact: re-tokenizing `prepared.prompt` would have to
@@ -1162,6 +1207,8 @@ pub(crate) async fn stream_asr_completion(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
         Ok(reservation) => reservation,
@@ -1865,7 +1912,11 @@ async fn stream_chat_completion(
 
         if parse_tools && let Ok(cb) = cb_state.lock() {
             let tools_ref = tools_for_parser.as_deref();
-            let mut parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
+            let mut parsed = tool_calls::parse_tool_calls_with_context(
+                &cb.accumulated,
+                tools_ref,
+                primed_open_thinking,
+            );
             let specific_fn = tool_choice
                 .as_ref()
                 .and_then(|tc| tc.specific_function())
@@ -1891,7 +1942,9 @@ async fn stream_chat_completion(
             // Only calls that actually reached the client count: when the
             // named-function filter dropped every parsed call, the stream
             // carried no tool-call delta and must not claim `tool_calls`.
-            if emitted > 0 {
+            // A failed generation stays `error` whatever its partial output
+            // parsed as (#2877).
+            if emitted > 0 && result.is_ok() {
                 finish_reason = "tool_calls".to_string();
             }
         }
@@ -1958,6 +2011,13 @@ async fn stream_chat_completion(
                 .unwrap_or(false),
             Err(_) => false,
         };
+
+        // The stream is already open, so a failure travels as a frame, ahead
+        // of the finish chunk so a client that stops reading at
+        // `finish_reason` still receives it (#2877).
+        if let Err(err) = &result {
+            let _ = finish_events.json(&super::generation_error_response(err));
+        }
 
         // Send finish chunk. It is the frame that carries this request's
         // speculative acceptance counters (#1314): the totals are final here,
@@ -2111,9 +2171,14 @@ pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Resu
 }
 
 /// Whether `response_format` asks for constrained decoding. Absent and
-/// `{"type": "text"}` both mean no; every other shape is either a schema or a
-/// malformed value that the structured-output builder reports on its own.
-fn response_format_requests_constraint(response_format: Option<&serde_json::Value>) -> bool {
+/// `{"type": "text"}` both mean no. Every other shape counts as yes, including
+/// an object with a missing or non-string `type`, which the structured-output
+/// builder reads as text: such a value may be a schema request with a typo, so
+/// callers fail closed on it. The disaggregated router front rejects every
+/// value that counts, since its handoff cannot carry a constraint.
+pub(crate) fn response_format_requests_constraint(
+    response_format: Option<&serde_json::Value>,
+) -> bool {
     response_format
         .is_some_and(|value| value.get("type").and_then(serde_json::Value::as_str) != Some("text"))
 }
@@ -2196,7 +2261,15 @@ pub(crate) fn primed_open_thinking_close_marker(
 /// by family with [`OPEN_THINKING_SUFFIXES`] — either one closes "a block
 /// the prompt opened", so the post-processor treats the generation as
 /// closed when any of them appears in the raw output.
-const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &["<channel|>", "</think>", "<|close|>think<|sep|>"];
+const OPEN_THINKING_CLOSE_MARKERS: &[&str] = &[
+    "<channel|>",
+    "</think>",
+    "<|close|>think<|sep|>",
+    "</ifm|think>",
+    "</ifm|think_fast>",
+    "</ifm|think_faster>",
+    "</think:opensource>",
+];
 
 /// Whether the prompt primed an open thinking block that the raw output never
 /// closed.

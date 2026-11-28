@@ -41,7 +41,8 @@
 use crate::models::laguna_layers::{DecoderLayer, LagunaCache};
 use crate::models::laguna_sanitize::sanitize_weights;
 use crate::models::mellum::{YarnRope, compute_yarn_rope};
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use mlxcel_core::cache::LayerStateKind;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
@@ -491,9 +492,22 @@ impl LagunaModel {
         caches: &mut [LagunaCache],
         capture_layer_ids: &[usize],
     ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
+        self.forward_rows_with_capture(input_ids, caches, capture_layer_ids, None)
+    }
+
+    /// [`Self::forward_with_capture`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). Captured layers always hold every position.
+    fn forward_rows_with_capture(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [LagunaCache],
+        capture_layer_ids: &[usize],
+        row: Option<usize>,
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         debug_assert_eq!(caches.len(), self.layers.len(), "one cache per layer");
-        // Each attention layer builds its own prefill mask from the keys its
-        // cache returns (see `Attention::forward`); decode passes none.
+        // Each attention layer masks the keys its cache returns itself (see
+        // `Attention::forward`, #3098); decode passes no mask.
         let mut h = self.embed_tokens.forward(input_ids);
         let mut captured: Vec<Option<UniquePtr<MlxArray>>> =
             (0..capture_layer_ids.len()).map(|_| None).collect();
@@ -510,6 +524,7 @@ impl LagunaModel {
             .into_iter()
             .map(|slot| slot.unwrap_or_else(|| mlxcel_core::zeros_like(&h)))
             .collect();
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         let logits = match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -753,7 +768,7 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
                 .get(layer_idx)
                 .is_some_and(|layer| layer.self_attn.is_sliding)
                 .then_some(window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
+                .map_or(LayerStateKind::Full, LayerStateKind::sliding)
         })
     }
 
@@ -788,6 +803,29 @@ impl mlxcel_core::generate::LanguageModel for LagunaWrapper {
             || self.fresh_caches(),
             |caches| self.model.forward_with_caches(input_ids, caches),
         )
+    }
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.fresh_caches(),
+            |caches| {
+                self.model
+                    .forward_rows_with_capture(input_ids, caches, &[], Some(last_pos))
+                    .0
+            },
+        ))
     }
     fn sync_sequence_storage(
         &self,

@@ -191,6 +191,149 @@ pub fn decode_detections(
     Ok(detections)
 }
 
+/// Decode PP-DocLayoutV3 with mlx-vlm's `detect()` semantics.
+///
+/// Unlike the Hugging Face path, every query contributes at most one detection:
+/// its argmax class at `sigmoid(logit) > conf`. Reading order is decoded over
+/// the retained sub-block of the pairwise order matrix only, which is what
+/// IndicOCR was trained against. Boxes arrive normalized `cxcywh` and are
+/// returned as original-image pixel `l, t, r, b` without clipping.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_mlx_vlm_detections(
+    logits: &[f32],
+    boxes: &[f32],
+    order_logits: &[f32],
+    q: usize,
+    num_labels: usize,
+    image_width: f32,
+    image_height: f32,
+    conf: f32,
+    labels: Option<&[String]>,
+) -> Result<Vec<Detection>, String> {
+    validate_query_count(q)?;
+    if num_labels == 0 || num_labels > 4096 {
+        return Err(format!("num_labels must be in 1..=4096; got {num_labels}"));
+    }
+    if !image_width.is_finite()
+        || !image_height.is_finite()
+        || image_width <= 0.0
+        || image_height <= 0.0
+    {
+        return Err(format!(
+            "image dimensions must be finite and positive; got {image_width}x{image_height}"
+        ));
+    }
+    if !conf.is_finite() || !(0.0..=1.0).contains(&conf) {
+        return Err(format!(
+            "confidence threshold must be finite and in [0, 1]; got {conf}"
+        ));
+    }
+    if let Some(names) = labels
+        && names.len() != num_labels
+    {
+        return Err(format!(
+            "label name count {} does not match num_labels {num_labels}",
+            names.len()
+        ));
+    }
+    let logit_count = q
+        .checked_mul(num_labels)
+        .ok_or_else(|| format!("{q} queries x {num_labels} labels overflows usize"))?;
+    let box_count = q
+        .checked_mul(4)
+        .ok_or_else(|| format!("{q} queries x 4 coordinates overflows usize"))?;
+    if logits.len() != logit_count || boxes.len() != box_count {
+        return Err(format!(
+            "PP-DocLayoutV3 output shape mismatch: logits has {} values (expected \
+             {q}x{num_labels}={logit_count}), boxes has {} values (expected {q}x4={box_count})",
+            logits.len(),
+            boxes.len()
+        ));
+    }
+    ensure_finite("logits", logits)?;
+    ensure_finite("boxes", boxes)?;
+    ensure_finite("order_logits", order_logits)?;
+    let order_count = q
+        .checked_mul(q)
+        .ok_or_else(|| format!("{q} queries x {q} order logits overflows usize"))?;
+    if order_logits.len() != order_count {
+        return Err(format!(
+            "order_logits has {} values; expected {q}x{q}={order_count}",
+            order_logits.len()
+        ));
+    }
+
+    let mut kept: Vec<usize> = Vec::new();
+    let mut scores: Vec<f32> = Vec::new();
+    let mut best_labels: Vec<usize> = Vec::new();
+    for query in 0..q {
+        let start = query * num_labels;
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_label = 0usize;
+        for label in 0..num_labels {
+            let score = sigmoid(logits[start + label]);
+            if score > best_score {
+                best_score = score;
+                best_label = label;
+            }
+        }
+        if best_score > conf {
+            kept.push(query);
+            scores.push(best_score);
+            best_labels.push(best_label);
+        }
+    }
+    if kept.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The order head is a page-wide pairwise matrix. Decoding only the kept
+    // submatrix is deliberate: it is exactly what mlx-vlm's `detect()` does.
+    let retained = kept.len();
+    let mut sub_order = Vec::with_capacity(retained * retained);
+    for &row in &kept {
+        for &column in &kept {
+            sub_order.push(order_logits[row * q + column]);
+        }
+    }
+    let sequence = decode_reading_order(&sub_order, retained)?;
+    let mut rank = vec![0usize; retained];
+    for (position, index) in sequence.into_iter().enumerate() {
+        rank[index] = position + 1;
+    }
+
+    let mut detections = Vec::with_capacity(retained);
+    for (position, &query) in kept.iter().enumerate() {
+        let base = query * 4;
+        let (cx, cy, width, height) = (
+            boxes[base],
+            boxes[base + 1],
+            boxes[base + 2],
+            boxes[base + 3],
+        );
+        let bbox = [
+            (cx - width / 2.0) * image_width,
+            (cy - height / 2.0) * image_height,
+            (cx + width / 2.0) * image_width,
+            (cy + height / 2.0) * image_height,
+        ];
+        let label = best_labels[position];
+        let class_name = labels
+            .and_then(|names| names.get(label))
+            .cloned()
+            .unwrap_or_else(|| label.to_string());
+        detections.push(Detection {
+            bbox,
+            score: scores[position],
+            label,
+            class_name,
+            reading_order: Some(rank[position] as u32),
+            mask: None,
+        });
+    }
+    Ok(detections)
+}
+
 fn validate_query_count(q: usize) -> Result<(), String> {
     if q == 0 || q > 512 {
         return Err(format!("query count must be in 1..=512; got {q}"));
@@ -309,5 +452,82 @@ mod tests {
                 .unwrap_err()
                 .contains("1..=512")
         );
+    }
+
+    #[test]
+    fn mlx_vlm_decode_takes_one_argmax_per_query() {
+        // Query 0 clearly prefers label 1, query 1 label 0.
+        let logits = [0.0, 4.0, 4.0, 0.0];
+        let boxes = [0.5, 0.5, 0.4, 0.2, 0.2, 0.3, 0.2, 0.2];
+        let order = [0.0, -10.0, 10.0, 0.0]; // query 1 first, then query 0
+        let names = ["a".to_string(), "b".to_string()];
+        let detections = decode_mlx_vlm_detections(
+            &logits,
+            &boxes,
+            &order,
+            2,
+            2,
+            100.0,
+            200.0,
+            0.5,
+            Some(&names),
+        )
+        .unwrap();
+        assert_eq!(detections.len(), 2);
+        assert_eq!(detections[0].label, 1);
+        assert_eq!(detections[0].class_name, "b");
+        assert_eq!(detections[0].reading_order, Some(2));
+        assert_eq!(detections[1].label, 0);
+        assert_eq!(detections[1].reading_order, Some(1));
+        for (actual, expected) in detections[1].bbox.iter().zip([10.0, 40.0, 30.0, 80.0]) {
+            assert!((*actual - expected).abs() < 1e-4, "{actual} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn mlx_vlm_decode_filters_by_confidence_strictly() {
+        // sigmoid(0) = 0.5, so `conf = 0.5` keeps neither query.
+        let logits = [0.0, 0.0];
+        let boxes = [0.5, 0.5, 0.2, 0.2, 0.5, 0.5, 0.2, 0.2];
+        let order = [0.0, 0.0, 0.0, 0.0];
+        let empty = decode_mlx_vlm_detections(&logits, &boxes, &order, 2, 1, 10.0, 10.0, 0.5, None)
+            .unwrap();
+        assert!(empty.is_empty());
+        let kept = decode_mlx_vlm_detections(&logits, &boxes, &order, 2, 1, 10.0, 10.0, 0.49, None)
+            .unwrap();
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn mlx_vlm_decode_orders_only_the_kept_sub_block() {
+        // Query 1 is filtered out. Its votes must not affect queries 0 and 2:
+        // the sub-block order says query 2 first, then query 0.
+        let logits = [4.0, 4.0, -10.0, -10.0, 4.0, 4.0];
+        let boxes = [
+            0.25, 0.25, 0.2, 0.2, // query 0
+            0.5, 0.5, 0.2, 0.2, // query 1 (dropped)
+            0.75, 0.75, 0.2, 0.2, // query 2
+        ];
+        // The kept sub-block (queries 0 and 2) orders query 2 before query 0.
+        let order = [0.0, -10.0, -10.0, 10.0, 0.0, -10.0, 10.0, 10.0, 0.0];
+        let detections =
+            decode_mlx_vlm_detections(&logits, &boxes, &order, 3, 2, 100.0, 100.0, 0.5, None)
+                .unwrap();
+        assert_eq!(detections.len(), 2);
+        assert_eq!(detections[0].reading_order, Some(2));
+        assert_eq!(detections[1].reading_order, Some(1));
+    }
+
+    #[test]
+    fn mlx_vlm_decode_rejects_malformed_inputs() {
+        let error = decode_mlx_vlm_detections(&[0.0], &[0.0; 4], &[0.0], 1, 2, 1.0, 1.0, 0.5, None)
+            .unwrap_err();
+        assert!(error.contains("expected"), "{error}");
+        let error = decode_mlx_vlm_detections(&[0.0], &[0.0; 4], &[], 1, 1, 1.0, 1.0, 0.5, None)
+            .unwrap_err();
+        assert!(error.contains("order_logits"), "{error}");
+        let error = decode_mlx_vlm_detections(&[0.0], &[0.0; 4], &[0.0], 1, 1, 1.0, 1.0, 1.5, None)
+            .unwrap_err();
+        assert!(error.contains("confidence"), "{error}");
     }
 }

@@ -128,14 +128,18 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 

@@ -90,6 +90,23 @@ mod delegated_parity_diag;
 #[path = "cache/delegated_parity_diag_tests.rs"]
 mod delegated_parity_diag_tests;
 mod detach;
+mod first_fill;
+#[cfg(test)]
+#[path = "cache/first_fill_tests.rs"]
+mod first_fill_tests;
+mod fp16_growth;
+#[cfg(test)]
+#[path = "cache/fp16_growth_tests.rs"]
+mod fp16_growth_tests;
+pub mod latent_quant;
+// Scheduler-owned per-layer sequence state: `LayerStateKind`, `LayerState`,
+// `RecurrentState` and the forward request (issue #3254, ADR 0010).
+#[cfg(test)]
+#[path = "cache/latent_quant_tests.rs"]
+mod latent_quant_tests;
+mod layer_state;
+mod layer_state_request;
+pub use first_fill::{FIRST_FILL_REWIND_SLACK, FullFirstFillScope};
 #[cfg(test)]
 #[path = "cache/kv_trim_tests.rs"]
 mod kv_trim_tests;
@@ -112,6 +129,7 @@ mod paged_pool_tests;
 mod paged_turbo_tests;
 pub use decode_undo::{
     DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope, flush_decode_undo_rows,
+    speculative_append_active,
 };
 mod prefill_rewind;
 #[cfg(test)]
@@ -135,6 +153,8 @@ pub use batch_quant::{
     KvQuantScheme,
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
+pub use layer_state::{LayerState, LayerStateKind, RecurrentState};
+pub use layer_state_request::{LayerStateEncoding, LayerStateForward, LayerStateSnapshotSpec};
 pub use paged::{
     GatheredKv, POOL_SLAB_BLOCKS, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout,
     PagedLayerState, PagedSequenceState,
@@ -253,6 +273,10 @@ pub enum KVCacheMode {
     Fp16,
     /// Per-token INT8 absmax quantization. Reduces KV cache memory by ~50%
     /// at the cost of small quantization error per token.
+    ///
+    /// On an absorbed MLA latent cache (`mla::MlaLatentCache`) the same mode
+    /// stores the shared latent as an MLX affine group-64 8-bit triple and
+    /// leaves `k_pe` FP16 instead (issue #3155, `cache/latent_quant.rs`).
     Int8,
     /// Asymmetric Fp16-K + Turbo4-V. K side stays in FP16; V side uses 4-bit
     /// PolarQuant with Walsh–Hadamard rotation for ~26% net KV memory savings
@@ -996,6 +1020,12 @@ impl KVCache {
             self.write_paged(&new_keys, &new_values);
             return;
         }
+        // A quantized MLA latent is appended through
+        // `update_latent_quantized` only; per-head rows never join it.
+        debug_assert!(
+            !self.holds_quantized_latent(),
+            "per-head K/V written to a cache that holds a quantized MLA latent"
+        );
         match self.mode {
             KVCacheMode::Int8 => self.update_int8(new_keys, new_values),
             KVCacheMode::Turbo4Asym => self.update_turbo4_asym(new_keys, new_values),
@@ -1027,46 +1057,11 @@ impl KVCache {
             return;
         }
 
-        if self.keys.is_none() || (prev + new_seq_len) > self.buffer_seq_len() {
-            let b = key_shape[0];
-            let n_kv_heads = key_shape[1];
-            let k_head_dim = key_shape[3];
-            let val_shape = ffi::array_shape(&new_values);
-            let v_head_dim = val_shape[3];
-
-            let n_steps = (self.step + new_seq_len - 1) / self.step;
-            let buf_size = n_steps * self.step;
-
-            let k_dtype = ffi::array_dtype(&new_keys);
-            let v_dtype = ffi::array_dtype(&new_values);
-            let new_k = ffi::zeros(&[b, n_kv_heads, buf_size, k_head_dim], k_dtype);
-            let new_v = ffi::zeros(&[b, n_kv_heads, buf_size, v_head_dim], v_dtype);
-
-            if self.keys.is_some() {
-                // Normalize the buffer to the live prefix before extending.
-                // The buffer can be longer than `prev`: a logical `trim`
-                // keeps the old capacity (issue #1209), and a partial growth
-                // chunk leaves a non-step-aligned length. Either way the
-                // slots past `prev` are dead and must not survive the
-                // concatenate.
-                if prev != self.buffer_seq_len() {
-                    self.keys = Some(ffi::slice(
-                        self.keys.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, k_head_dim],
-                    ));
-                    self.values = Some(ffi::slice(
-                        self.values.as_ref().unwrap(),
-                        &[0, 0, 0, 0],
-                        &[b, n_kv_heads, prev, v_head_dim],
-                    ));
-                }
-                self.keys = Some(concatenate(self.keys.as_ref().unwrap(), &new_k, 2));
-                self.values = Some(concatenate(self.values.as_ref().unwrap(), &new_v, 2));
-            } else {
-                self.keys = Some(new_k);
-                self.values = Some(new_v);
-            }
+        // A multi-token growth of an existing buffer (a chunked-prefill piece)
+        // also releases the superseded buffer before the graph runs; see
+        // `cache/fp16_growth.rs` (issues #3084, #3092).
+        if self.fp16_append_needs_growth(new_seq_len) {
+            self.grow_fp16_buffers(&new_keys, &new_values);
         }
 
         self.offset += new_seq_len;
@@ -2823,7 +2818,7 @@ impl KVCache {
                 .values
                 .as_ref()
                 .map(|v| Self::slice_keep_sink(v, keep, n, live_len));
-            if self.mode == KVCacheMode::Int8 {
+            if self.mode.uses_scale_sidecars() {
                 self.key_scales = self
                     .key_scales
                     .as_ref()
@@ -2854,14 +2849,16 @@ impl KVCache {
                     &[v_shape[0], v_shape[1], live_len, v_shape[3]],
                 ));
             }
-            // Slice INT8 scale sidecars in lockstep.
-            if self.mode == KVCacheMode::Int8 {
+            // Slice the scale sidecars in lockstep. Their last dim is read
+            // from the array: 1 for per-head INT8, one entry per group for a
+            // quantized MLA latent (`cache/latent_quant.rs`).
+            if self.mode.uses_scale_sidecars() {
                 if let Some(ref ks) = self.key_scales {
                     let ks_shape = ffi::array_shape(ks);
                     self.key_scales = Some(ffi::slice(
                         ks,
                         &[0, 0, n, 0],
-                        &[ks_shape[0], ks_shape[1], live_len, 1],
+                        &[ks_shape[0], ks_shape[1], live_len, ks_shape[3]],
                     ));
                 }
                 if let Some(ref vs) = self.val_scales {
@@ -2869,7 +2866,7 @@ impl KVCache {
                     self.val_scales = Some(ffi::slice(
                         vs,
                         &[0, 0, n, 0],
-                        &[vs_shape[0], vs_shape[1], live_len, 1],
+                        &[vs_shape[0], vs_shape[1], live_len, vs_shape[3]],
                     ));
                 }
             }
@@ -4399,7 +4396,10 @@ pub fn cache_window(family: &str, window: usize, has_sliding_layer: bool) -> Res
 /// in practice. The constructor enforces it with a clear error message
 /// rather than silently accepting an invalid configuration.
 ///
-/// Used by: Gemma3, Gemma4, Ministral3, GPT-OSS, RecurrentGemma, Exaone
+/// Used by: AFMoE, DeepSeek V4, Exaone4, Exaone MoE, Gemma3 (and its backbone
+/// and embedding variants), Gemma4 (MTP target and verify rows included),
+/// GPT-OSS, IQuestLoopCoder, Kolibri-1, Laguna, Llama4, Mellum, Ministral3, MiMo V2
+/// Flash, Muse Glimmer, OpenAI privacy filter, RecurrentGemma, Step3.5
 pub struct RotatingKVCache {
     pub keys: Option<UniquePtr<MlxArray>>,
     pub values: Option<UniquePtr<MlxArray>>,
@@ -4487,10 +4487,12 @@ impl RotatingKVCacheSnapshotState {
     ///   not happened yet.
     /// * **Over-window prefill.** `update_concat` deliberately stores more
     ///   than `max_size` entries for one step after a prefill longer than the
-    ///   window, keeping `idx == offset`. That buffer is temporary: the next
-    ///   single-token update re-slices it from the back and pins `idx` to
-    ///   `max_size`. Trimming into that state would desynchronize `idx` from
-    ///   the physical layout, so `offset <= max_size` is required as well.
+    ///   window (on a first fill past the rewind slack, the newest `max_size +
+    ///   FIRST_FILL_REWIND_SLACK` with `idx` at that length, #3062). That
+    ///   buffer is temporary: the next single-token update re-slices it from
+    ///   the back and pins `idx` to `max_size`. Trimming into that state would
+    ///   desynchronize `idx` from the physical layout, so `offset <= max_size`
+    ///   is required as well.
     ///
     /// Buffered speculative mode (`buffer_size > 0`) keeps its own compaction
     /// invariants and is excluded outright. Exact snapshots may retain that
@@ -5004,9 +5006,18 @@ impl RotatingKVCache {
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         if self.keys.is_none() {
             self.offset += new_seq_len;
-            self.idx = new_seq_len;
-            self.keys = Some(ffi::contiguous(&new_keys, false));
-            self.values = Some(ffi::contiguous(&new_values, false));
+            // A fill past the window stores only its newest positions as a
+            // fresh buffer, so every sliding layer stops holding its whole
+            // prompt until decode; attention still gets every key (#3062).
+            if let Some(keep) = self.first_fill_keep(new_seq_len) {
+                self.idx = keep;
+                self.keys = Some(Self::first_fill_tail(&new_keys, keep));
+                self.values = Some(Self::first_fill_tail(&new_values, keep));
+            } else {
+                self.idx = new_seq_len;
+                self.keys = Some(ffi::contiguous(&new_keys, false));
+                self.values = Some(ffi::contiguous(&new_values, false));
+            }
             return (new_keys, new_values);
         }
 
@@ -5373,11 +5384,21 @@ impl RotatingKVCache {
         // First update: just install (Same shape semantics as Fp16 path.)
         if self.keys.is_none() {
             self.offset += new_seq_len;
-            self.idx = new_seq_len;
-            self.keys = Some(ffi::contiguous(&new_keys_f16, false));
-            self.v_packed = Some(ffi::contiguous(&v_packed_new, false));
-            self.v_norms = Some(ffi::contiguous(&v_norms_new, false));
-            self.v_rescale = Some(ffi::contiguous(&v_rescale_new, false));
+            // Window-only first fill, as in `update_concat` (#3062). The V
+            // sidecars are quantized per token, so they slice like the keys.
+            if let Some(keep) = self.first_fill_keep(new_seq_len) {
+                self.idx = keep;
+                self.keys = Some(Self::first_fill_tail(&new_keys_f16, keep));
+                self.v_packed = Some(Self::first_fill_tail(&v_packed_new, keep));
+                self.v_norms = Some(Self::first_fill_tail(&v_norms_new, keep));
+                self.v_rescale = Some(Self::first_fill_tail(&v_rescale_new, keep));
+            } else {
+                self.idx = new_seq_len;
+                self.keys = Some(ffi::contiguous(&new_keys_f16, false));
+                self.v_packed = Some(ffi::contiguous(&v_packed_new, false));
+                self.v_norms = Some(ffi::contiguous(&v_norms_new, false));
+                self.v_rescale = Some(ffi::contiguous(&v_rescale_new, false));
+            }
             // Build fp16 V output by dequantizing the packed slice we just stored.
             let params = self
                 .turbo_params
@@ -6498,6 +6519,20 @@ pub enum SequenceStateBackend {
     /// Model-owned/internal state. The exposed `Vec<KVCache>` acts only as a
     /// compatibility placeholder for existing generation and scheduler paths.
     ModelOwned,
+    /// Per-layer [`LayerState`] owned by the pool entry and handed to the
+    /// model's forward (issue #3254, ADR 0010). The `Vec<KVCache>` is an
+    /// empty placeholder, as for `ModelOwned`.
+    SchedulerOwned,
+}
+
+impl SequenceStateBackend {
+    /// Whether a family's per-token state lives outside the pool entry's
+    /// `Vec<KVCache>`: inside the model (`ModelOwned`) or in the entry's
+    /// [`LayerState`] vector (`SchedulerOwned`). Trimming or detaching that
+    /// `KVCache` slice reaches nothing for such a family.
+    pub const fn keeps_state_outside_kv_slice(self) -> bool {
+        matches!(self, Self::ModelOwned | Self::SchedulerOwned)
+    }
 }
 
 /// Backend/layout descriptor for allocating one sequence's runtime state.
@@ -6537,6 +6572,16 @@ impl SequenceStateLayout {
             paged_layout: None,
         }
     }
+
+    /// Allocate per-layer [`LayerState`] owned by the pool entry, built from
+    /// the model's [`crate::generate::LanguageModel::make_layer_state`].
+    pub const fn scheduler_owned(num_layers: usize) -> Self {
+        Self {
+            backend: SequenceStateBackend::SchedulerOwned,
+            num_layers,
+            paged_layout: None,
+        }
+    }
 }
 
 /// One sequence's full set of layer caches.
@@ -6561,6 +6606,11 @@ pub struct SequenceCacheSet {
     /// borrows stay non-overlapping (see the borrow-discipline notes on the
     /// `CachePool` paged methods).
     pub paged: Option<Rc<RefCell<PagedSequenceState>>>,
+    /// Per-layer state of a scheduler-owned family (issue #3254), `None` for
+    /// every other family. Present whatever `backend` says: under the paged
+    /// decode override the entry is a `PagedKvCache` shadow for accounting
+    /// while the real state lives here.
+    layer_state: Option<Vec<LayerState>>,
     /// Unique identifier assigned by the pool.
     pub seq_id: SequenceId,
     /// Number of prompt tokens originally prefilled.
@@ -6584,6 +6634,7 @@ impl SequenceCacheSet {
             backend,
             caches,
             paged,
+            layer_state: None,
             seq_id,
             prompt_len: 0,
             current_offset: 0,
@@ -6624,6 +6675,58 @@ impl SequenceCacheSet {
             None,
             None,
         )
+    }
+
+    /// Attach the per-layer state of a scheduler-owned family.
+    fn with_layer_state(mut self, layer_state: Option<Vec<LayerState>>) -> Self {
+        self.layer_state = layer_state;
+        self
+    }
+
+    /// The per-layer state of a scheduler-owned sequence, `None` for every
+    /// other family.
+    pub fn layer_state(&self) -> Option<&[LayerState]> {
+        self.layer_state.as_deref()
+    }
+
+    /// Mutable per-layer state of a scheduler-owned sequence: what the
+    /// model's forward and the prompt cache's restore write.
+    pub fn layer_state_mut(&mut self) -> Option<&mut [LayerState]> {
+        self.layer_state.as_deref_mut()
+    }
+
+    /// Replace the whole per-layer state (a snapshot restore builds a fresh
+    /// vector and installs it only once every layer validated).
+    ///
+    /// # Errors
+    ///
+    /// The sequence is not scheduler-owned, or the layer count differs.
+    pub fn install_layer_state(&mut self, layer_state: Vec<LayerState>) -> Result<(), String> {
+        let Some(current) = self.layer_state.as_mut() else {
+            return Err(format!(
+                "sequence {} holds no scheduler-owned layer state",
+                self.seq_id
+            ));
+        };
+        if current.len() != layer_state.len() {
+            return Err(format!(
+                "sequence {}: {} layers of state cannot replace {}",
+                self.seq_id,
+                layer_state.len(),
+                current.len()
+            ));
+        }
+        *current = layer_state;
+        Ok(())
+    }
+
+    /// Bytes held by a scheduler-owned sequence's per-layer state. Not part
+    /// of [`Self::nbytes`], which keeps reporting what it reported while the
+    /// same state lived inside the model.
+    pub fn layer_state_nbytes(&self) -> usize {
+        self.layer_state
+            .as_deref()
+            .map_or(0, |layers| layers.iter().map(LayerState::nbytes).sum())
     }
 
     /// Total memory footprint of all layer caches in bytes.
@@ -6764,6 +6867,25 @@ impl CachePool {
             ));
         }
 
+        // A scheduler-owned family's state is built from the model's own
+        // table whatever backend the entry is allocated on: under the paged
+        // decode override the entry is a `PagedKvCache` shadow for
+        // accounting, and the real state is still this vector (issue #3254).
+        let natural_backend = model.sequence_state_layout().backend;
+        let layer_state = if natural_backend == SequenceStateBackend::SchedulerOwned {
+            Some(model.make_layer_state().ok_or_else(|| {
+                "CachePool: the model reports a scheduler-owned layout but builds no layer state"
+                    .to_string()
+            })?)
+        } else if layout.backend == SequenceStateBackend::SchedulerOwned {
+            return Err(
+                "CachePool: a scheduler-owned layout needs a model that reports layer_state_kinds()"
+                    .to_string(),
+            );
+        } else {
+            None
+        };
+
         let id = SequenceId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let entry = match layout.backend {
             SequenceStateBackend::DenseKvCache => {
@@ -6784,8 +6906,10 @@ impl CachePool {
                 //    These actually read/write the caches handed to `forward`, so
                 //    pool-backing routes their `update_and_fetch` straight into
                 //    the shared `PagedBlockPool` (`write_prefill` + `gather_visible`).
-                //    Model-owned families (gemma3 / llama4 / qwen3_5) ignore the
-                //    caller's slice and drive their own `ModelOwnedSequenceState`;
+                //    Model-owned families (llama4 / gemma4) ignore the caller's
+                //    slice and drive their own `ModelOwnedSequenceState`, and
+                //    scheduler-owned ones (gemma3 / qwen3_5) run on the entry's
+                //    layer state;
                 //    the scheduler still routes them through the paged backend for
                 //    shadow block-table accounting (`sync_paged_state_with_lengths`),
                 //    so their placeholders stay dense — byte-identical to before.
@@ -6795,7 +6919,6 @@ impl CachePool {
                 //    intercept stores raw Fp16 K/V (the #152-validated path);
                 //    Turbo4 paged layouts carry their own `cache_mode` and keep
                 //    the existing dense quantized path untouched.
-                let natural_backend = model.sequence_state_layout().backend;
                 let pool_backed = natural_backend == SequenceStateBackend::DenseKvCache
                     && paged_layout.cache_mode == KVCacheMode::Fp16;
                 let caches = if pool_backed {
@@ -6822,8 +6945,15 @@ impl CachePool {
                 )
             }
             SequenceStateBackend::ModelOwned => SequenceCacheSet::model_owned(id),
+            SequenceStateBackend::SchedulerOwned => SequenceCacheSet::with_backend(
+                id,
+                SequenceStateBackend::SchedulerOwned,
+                Vec::new(),
+                None,
+                None,
+            ),
         };
-        self.active.insert(id, entry);
+        self.active.insert(id, entry.with_layer_state(layer_state));
         Ok(id)
     }
 
@@ -6854,6 +6984,75 @@ impl CachePool {
     /// in `model.forward()`, or `None` if the ID is not active.
     pub fn get_caches_mut(&mut self, id: SequenceId) -> Option<&mut [KVCache]> {
         self.active.get_mut(&id).map(|s| s.caches.as_mut_slice())
+    }
+
+    /// The per-layer state of a scheduler-owned sequence, `None` when the id
+    /// is not active or the family is not scheduler-owned.
+    pub fn layer_state(&self, id: SequenceId) -> Option<&[LayerState]> {
+        self.active.get(&id)?.layer_state()
+    }
+
+    /// Mutable per-layer state of a scheduler-owned sequence.
+    pub fn layer_state_mut(&mut self, id: SequenceId) -> Option<&mut [LayerState]> {
+        self.active.get_mut(&id)?.layer_state_mut()
+    }
+
+    /// Per-layer state slices for several scheduler-owned sequences in one
+    /// call, the [`Self::get_batch_caches_mut`] of scheduler-owned state.
+    ///
+    /// # Errors
+    ///
+    /// A duplicate id, an inactive id, or a sequence with no layer state.
+    pub fn batch_layer_state_mut<'a>(
+        &'a mut self,
+        ids: &[SequenceId],
+    ) -> Result<Vec<&'a mut [LayerState]>, String> {
+        // Reject aliases before collecting raw pointers, for the same reason
+        // as `get_batch_caches_mut`.
+        let mut unique = HashSet::with_capacity(ids.len());
+        for &id in ids {
+            if !unique.insert(id) {
+                return Err(format!(
+                    "CachePool: duplicate sequence {id} in layer-state batch"
+                ));
+            }
+        }
+
+        let mut state_ptrs: Vec<(*mut LayerState, usize)> = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let layers = self
+                .active
+                .get_mut(&id)
+                .ok_or_else(|| format!("CachePool: sequence {id} not found"))?
+                .layer_state_mut()
+                .ok_or_else(|| format!("CachePool: sequence {id} holds no layer state"))?;
+            state_ptrs.push((layers.as_mut_ptr(), layers.len()));
+        }
+
+        // SAFETY: each `SequenceId` maps to a distinct `SequenceCacheSet`, and
+        // each set owns its own `Vec<LayerState>` allocation, so the slices
+        // are disjoint; duplicates were rejected above. The slices are tied
+        // to the lifetime of `&mut self`, and `self.active` is not mutated
+        // between pointer extraction and slice reconstruction.
+        Ok(state_ptrs
+            .iter()
+            .map(|&(ptr, len)| unsafe { std::slice::from_raw_parts_mut(ptr, len) })
+            .collect())
+    }
+
+    /// Mirror a scheduler-owned sequence's visible lengths into the paged
+    /// shadow state. A no-op for every other sequence and for a pool with no
+    /// paged shadow.
+    pub fn sync_paged_state_with_layer_state(&mut self, id: SequenceId) -> Result<(), String> {
+        let Some(visible_lens) = self.layer_state(id).map(|layers| {
+            layers
+                .iter()
+                .map(LayerState::visible_len)
+                .collect::<Vec<_>>()
+        }) else {
+            return Ok(());
+        };
+        self.sync_paged_state_with_lengths(id, &visible_lens)
     }
 
     /// Return cache slices for multiple active sequences in one call.

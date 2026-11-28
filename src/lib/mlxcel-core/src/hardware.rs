@@ -58,24 +58,67 @@ pub enum AppleSiliconGen {
     M3,
     M4,
     M5,
+    M6,
     Unknown,
 }
 
 impl AppleSiliconGen {
+    /// Position of this generation in Apple's ordering, or `None` for
+    /// [`AppleSiliconGen::Unknown`].
+    ///
+    /// Every capability predicate below is expressed in terms of this rank
+    /// rather than as a `matches!` over the enumerated variants, so adding a
+    /// generation to the enum, to `parse_silicon_gen` and to this rank is all
+    /// it takes for that generation to inherit every capability of the ones
+    /// below it. A `matches!(self, M5)` predicate would also need each
+    /// predicate edited by hand, and missing one leaves the new chip off a
+    /// path MLX takes on it.
+    ///
+    /// The rank does not help a chip that is not enumerated yet. Until the
+    /// enum is extended, a newer Apple chip parses as `Unknown` and declines
+    /// every capability, while MLX's own `is_nax_available()` reads the GPU
+    /// generation and may still dispatch NAx kernels on it. That divergence
+    /// is what issue #2824 observed on runners whose brand string the parser
+    /// did not recognise; see [`is_m5_neural_accelerator`] for which of the
+    /// two views a caller should consult.
+    #[inline]
+    fn rank(self) -> Option<u32> {
+        match self {
+            AppleSiliconGen::M1 => Some(1),
+            AppleSiliconGen::M2 => Some(2),
+            AppleSiliconGen::M3 => Some(3),
+            AppleSiliconGen::M4 => Some(4),
+            AppleSiliconGen::M5 => Some(5),
+            AppleSiliconGen::M6 => Some(6),
+            AppleSiliconGen::Unknown => None,
+        }
+    }
+
+    /// Returns true for generations at or above `floor`.
+    ///
+    /// `Unknown` is always false: it covers both a non-Apple GPU and an Apple
+    /// generation newer than the enumerated ones, and neither may claim a
+    /// capability this build has not established.
+    #[inline]
+    fn at_least(self, floor: u32) -> bool {
+        matches!(self.rank(), Some(rank) if rank >= floor)
+    }
+
     /// Returns true for chips that have a Neural Accelerator (M5+).
     #[inline]
     pub fn has_neural_accelerator(self) -> bool {
-        matches!(self, AppleSiliconGen::M5)
+        self.at_least(5)
     }
 
     /// Whether this generation runs an affine-quantized projection at `M >= 2`
     /// as one wide pass rather than as narrow per-position passes.
     ///
     /// This is MLX's `use_qmv_wide` predicate (`mode != "affine" || arch_gen
-    /// >= 15` in `mlx/backend/metal/quantized.cpp`) reduced to the part that
+    /// \>= 15` in `mlx/backend/metal/quantized.cpp`) reduced to the part that
     /// depends only on the chip: Apple GPU generation 15 and newer, which is
-    /// M3, M4 and M5. Generation 13 (M1, M2) has no such path and runs a
-    /// verify block as `K` narrow passes whose cost grows with the block.
+    /// M3 and everything after it. Generation 13 (M1, M2) has no such path and
+    /// runs a verify block as `K` narrow passes whose cost grows with the
+    /// block.
     ///
     /// That difference is what decides whether a speculative verify round pays
     /// for itself, so it is the discriminator behind the B=1 MTP gate
@@ -86,24 +129,20 @@ impl AppleSiliconGen {
     /// covers: a non-Apple GPU (CUDA / GB10), where a K-wide verify does not
     /// amortize at all (issue #638), and an Apple generation newer than the
     /// enumerated ones, which `parse_silicon_gen` also maps to `Unknown`. Both
-    /// decline rather than assume. Extend the enum when a new Apple generation
-    /// ships; this carries the same staleness contract as
-    /// [`Self::has_neural_accelerator`].
+    /// decline rather than assume. Once a generation is enumerated, this
+    /// predicate follows it automatically.
     #[inline]
     pub fn wide_quantized_projections(self) -> bool {
-        matches!(
-            self,
-            AppleSiliconGen::M3 | AppleSiliconGen::M4 | AppleSiliconGen::M5
-        )
+        self.at_least(3)
     }
 
     /// Returns the expected Metal GPU family version (3 for M1–M4, 4 for M5+).
+    ///
+    /// Expressed as a rank comparison so a generation enumerated after M5
+    /// reports 4 rather than falling through to the M1–M4 value.
     #[inline]
     pub fn metal_version(self) -> u32 {
-        match self {
-            AppleSiliconGen::M5 => 4,
-            _ => 3,
-        }
+        if self.at_least(5) { 4 } else { 3 }
     }
 }
 
@@ -115,6 +154,7 @@ impl std::fmt::Display for AppleSiliconGen {
             AppleSiliconGen::M3 => write!(f, "M3"),
             AppleSiliconGen::M4 => write!(f, "M4"),
             AppleSiliconGen::M5 => write!(f, "M5"),
+            AppleSiliconGen::M6 => write!(f, "M6"),
             AppleSiliconGen::Unknown => write!(f, "Unknown"),
         }
     }
@@ -317,7 +357,7 @@ impl GpuBackendKind {
     ///   `quantized_matmul` against a host-decoded reference, the gather cases
     ///   seen to fail with item 10 reverted, plus a vendor FP8 block
     ///   checkpoint requantized to mxfp8 at load and traced against the CPU
-    ///   device (`docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`).
+    ///   device (`docs/benchmark_results/versions/v0.8.0.md#rocm-fp8-block-gfx1151-2026-09-30`).
     ///   NVFP4 converts to affine: the ROCm qmv dispatch implements group
     ///   sizes 32, 64 and 128 only and throws for NVFP4's 16, and there is no
     ///   E4M3 block-scale path.
@@ -440,18 +480,58 @@ pub fn get_hardware() -> &'static HardwareCapabilities {
 }
 
 /// True only on M5-class Apple Silicon whose Neural Accelerator is driven by
-/// the running macOS (Metal GPU Family 4).
+/// the running macOS (Metal GPU Family 4), judged from the sysctl brand string
+/// and `kern.osproductversion`.
 ///
-/// This is the gate for M5-Max-specific numerical workarounds. The M5 Max NAx
-/// GEMM kernels can fuse a lazy float32/float16 graph into NaN within a single
-/// Metal command buffer; code that builds such graphs (the Mamba2/SSM mixers)
-/// forces an intermediate `eval` boundary, but only when this returns true. On
-/// every other chip that eval boundary is pure throughput loss, so it is
-/// skipped. See CLAUDE.md "Apple Silicon precision".
+/// This is mlxcel's view of the chip, not MLX's. MLX picks its Neural
+/// Accelerator (NAx) kernels from [`mlx_nax_available`], and the two can
+/// legitimately differ:
+///
+/// - `MLX_METAL_GPU_ARCH` overrides the GPU architecture MLX reads, so an M5
+///   host can be made to run the non-NAx kernels, and another host can be
+///   told it has an NAx generation.
+/// - A build with `MLX_METAL_NO_NAX`, or any non-Metal backend, never
+///   dispatches NAx kernels.
+/// - A chip whose brand string `parse_silicon_gen` does not recognise reads
+///   as `Unknown` here, while MLX still sees its GPU generation.
+///
+/// So code that works around the behaviour of an NAx kernel must gate on
+/// [`mlx_nax_available`]. Use this function only for decisions about the chip
+/// itself, not about what MLX dispatches. Since #3123 the SSM `eval`
+/// boundaries and the Mamba2 hybrid finite-decode test gate on
+/// [`mlx_nax_available`] instead.
 #[inline]
 pub fn is_m5_neural_accelerator() -> bool {
     let hw = get_hardware();
     hw.has_neural_accelerator && hw.macos_supports_na
+}
+
+static MLX_NAX_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+/// Whether MLX dispatches its Neural Accelerator (NAx) GEMM and SDPA kernels
+/// in this process: MLX's own `metal::is_nax_available()`, which requires
+/// macOS 26.2+ and a GPU architecture generation of at least 17 (18 for `p`
+/// parts), and reads `MLX_METAL_GPU_ARCH` when it is set.
+///
+/// This is the gate for workarounds of NAx kernel behaviour, such as the
+/// per-layer `eval` boundary in the Nemotron-H and PLaMo 2 SSM mixers against
+/// the M5 Max NAx GEMM fusing a lazy float32/float16 graph into NaN within one
+/// Metal command buffer. Keying on the flag MLX dispatches on means the
+/// workaround is on exactly where those kernels can run, whatever the brand
+/// string says (see [`is_m5_neural_accelerator`] for where the views differ).
+///
+/// Returns false off Metal: CUDA and ROCm builds, or a Metal build without a
+/// Metal device. It reports the GPU's capability, not the default device, so
+/// a CPU-device run on an NAx host still reads true; a gated `eval` there
+/// costs a sync and is never wrong.
+///
+/// MLX caches the answer in a function-local static, so it cannot change
+/// within a process. It is cached again here so per-forward callers pay one
+/// atomic load instead of an FFI crossing.
+#[must_use]
+#[inline]
+pub fn mlx_nax_available() -> bool {
+    *MLX_NAX_AVAILABLE.get_or_init(crate::ffi::metal_nax_available)
 }
 
 /// The `MLX_MAX_OPS_PER_BUFFER` default to apply for an Apple Silicon class, or
@@ -463,14 +543,14 @@ pub fn is_m5_neural_accelerator() -> bool {
 /// 4-plane, LAUREL, per-layer input gating, dual norms) stalls the GPU at
 /// command-buffer boundaries; raising the cap to 1000 closes that dispatch-gap
 /// idle and recovers +11 to 13% decode throughput on M1 Ultra (see
-/// docs/benchmark_results/gemma3n-decode-profile.md, #329/#345).
+/// docs/benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile, #329/#345).
 ///
 /// The lever is hardware-specific, so it is gated:
 /// - M1 through M4 (no Neural Accelerator, Metal family 3): apply 1000.
 /// - M5+ (has Neural Accelerator): leave MLX's default. The same sweep is flat
 ///   on M5 Max (within run-to-run noise, no plateau) and an earlier M5 study
 ///   recorded larger buffers as slower, so raising it offers no gain and risks a
-///   regression (docs/benchmark_results/gemma3n-decode-profile-m5max.md, #358).
+///   regression (docs/benchmark_results/versions/v0.3.2.md#gemma3n-decode-profile-m5max, #358).
 /// - Unknown (non-Apple, e.g. CUDA): leave untouched; this is a Metal command
 ///   buffer scheduling knob, irrelevant off Apple GPUs.
 ///
@@ -537,7 +617,7 @@ pub fn apply_metal_ops_per_buffer_default() {
 /// 4-bit +7%, Llama 3.1 8B 4-bit +5.6%, Qwen2.5 7B 4-bit +8%, Gemma 3n E4B +3%,
 /// Granite 4.0 H Tiny +10%, Qwen3-30B-A3B +20%, Mixtral 8x7B +21%, Llama 3.1
 /// 8B bf16 +17%, Gemma 3 4B flat. See
-/// docs/benchmark_results/metal-mb-per-buffer-m1ultra-2026-09-21.md.
+/// docs/benchmark_results/versions/v0.8.0.md#metal-mb-per-buffer-m1ultra-2026-09-21.
 ///
 /// The value applies to decode only. The same budget during prefill keeps a
 /// whole prompt's activations alive until the buffer completes: at 1000 the
@@ -628,7 +708,7 @@ pub fn decode_mb_per_buffer() -> Option<u32> {
 /// Qwen2.5 loses 3.1% and Gemma 2 1.3%, and at 384 rows Qwen2.5 loses 11%. 1024
 /// is the lowest row count with no measured regression; a per-shape threshold
 /// could recover the 512 to 768 gains later. Prefill peak memory grows 0.1 to
-/// 0.6 GB. See docs/benchmark_results/prefill-dense-gemm-m1ultra-2026-09-27.md.
+/// 0.6 GB. See docs/benchmark_results/versions/v0.8.0.md#prefill-dense-gemm-m1ultra-2026-09-27.
 pub const PREFILL_DENSE_GEMM_MIN_ROWS: i64 = 1024;
 
 /// Environment variable that sets the dense-GEMM prefill row threshold on any
@@ -1037,6 +1117,7 @@ fn parse_silicon_gen(brand: &str) -> AppleSiliconGen {
             "3" => AppleSiliconGen::M3,
             "4" => AppleSiliconGen::M4,
             "5" => AppleSiliconGen::M5,
+            "6" => AppleSiliconGen::M6,
             _ => AppleSiliconGen::Unknown,
         }
     } else {
@@ -1103,6 +1184,14 @@ fn estimate_bandwidth(r#gen: AppleSiliconGen, memory_gb: u32) -> f64 {
         }
         AppleSiliconGen::M5 => {
             // Estimated; update once Apple publishes official specs.
+            if memory_gb > 64 { 1000.0 } else { 150.0 }
+        }
+        AppleSiliconGen::M6 => {
+            // Not measured, and Apple has not published specs. Reuse the M5
+            // curve rather than extrapolating upward: this figure only feeds the
+            // startup banner and the quant advisor's context, so an
+            // underestimate is inert, while an invented higher number would read
+            // as a measurement this build never took.
             if memory_gb > 64 { 1000.0 } else { 150.0 }
         }
         AppleSiliconGen::Unknown => 0.0,
@@ -1367,6 +1456,8 @@ mod tests {
         assert_eq!(parse_silicon_gen("Apple M3 Max"), AppleSiliconGen::M3);
         assert_eq!(parse_silicon_gen("Apple M4"), AppleSiliconGen::M4);
         assert_eq!(parse_silicon_gen("Apple M5 Pro"), AppleSiliconGen::M5);
+        assert_eq!(parse_silicon_gen("Apple M6"), AppleSiliconGen::M6);
+        assert_eq!(parse_silicon_gen("Apple M6 Pro"), AppleSiliconGen::M6);
         assert_eq!(parse_silicon_gen("Intel Core i9"), AppleSiliconGen::Unknown);
         assert_eq!(parse_silicon_gen(""), AppleSiliconGen::Unknown);
         // Multi-digit generation should not mis-parse as single digit.
@@ -1386,7 +1477,100 @@ mod tests {
     fn neural_accelerator_flag() {
         assert!(!AppleSiliconGen::M4.has_neural_accelerator());
         assert!(AppleSiliconGen::M5.has_neural_accelerator());
+        assert!(AppleSiliconGen::M6.has_neural_accelerator());
         assert!(!AppleSiliconGen::Unknown.has_neural_accelerator());
+    }
+
+    /// Moving the predicates onto ranks must not change any answer for the
+    /// generations that were already enumerated, or for `Unknown`. These rows
+    /// are what the `matches!` predicates returned before the change.
+    #[test]
+    fn ranked_predicates_keep_the_m1_to_m5_and_unknown_answers() {
+        // (generation, neural accelerator, wide quantized projections, Metal)
+        let rows = [
+            (AppleSiliconGen::M1, false, false, 3),
+            (AppleSiliconGen::M2, false, false, 3),
+            (AppleSiliconGen::M3, false, true, 3),
+            (AppleSiliconGen::M4, false, true, 3),
+            (AppleSiliconGen::M5, true, true, 4),
+            (AppleSiliconGen::Unknown, false, false, 3),
+        ];
+        for (r#gen, na, wide, metal) in rows {
+            assert_eq!(r#gen.has_neural_accelerator(), na, "{gen:?}");
+            assert_eq!(r#gen.wide_quantized_projections(), wide, "{gen:?}");
+            assert_eq!(r#gen.metal_version(), metal, "{gen:?}");
+        }
+    }
+
+    /// The capability predicates are ordering statements, not equality tests,
+    /// so every enumerated generation above a floor inherits its capability.
+    #[test]
+    fn capability_predicates_are_monotonic_in_generation() {
+        let ordered = [
+            AppleSiliconGen::M1,
+            AppleSiliconGen::M2,
+            AppleSiliconGen::M3,
+            AppleSiliconGen::M4,
+            AppleSiliconGen::M5,
+            AppleSiliconGen::M6,
+        ];
+        assert!(ordered.iter().all(|g| g.rank().is_some()));
+        assert_eq!(AppleSiliconGen::Unknown.rank(), None);
+
+        // Once a capability turns on it never turns back off for a newer part.
+        let mut seen_na = false;
+        let mut seen_wide = false;
+        let mut seen_metal4 = false;
+        for r#gen in ordered {
+            if r#gen.has_neural_accelerator() {
+                seen_na = true;
+            } else {
+                assert!(!seen_na, "{gen:?} lost the neural accelerator");
+            }
+            if r#gen.wide_quantized_projections() {
+                seen_wide = true;
+            } else {
+                assert!(!seen_wide, "{gen:?} lost wide quantized projections");
+            }
+            if r#gen.metal_version() == 4 {
+                seen_metal4 = true;
+            } else {
+                assert!(!seen_metal4, "{gen:?} regressed below Metal 4");
+            }
+        }
+    }
+
+    #[test]
+    fn m6_carries_the_post_m5_capabilities() {
+        assert_eq!(AppleSiliconGen::M6.rank(), Some(6));
+        assert!(AppleSiliconGen::M6.has_neural_accelerator());
+        assert!(AppleSiliconGen::M6.wide_quantized_projections());
+        assert_eq!(AppleSiliconGen::M6.metal_version(), 4);
+        assert_eq!(AppleSiliconGen::M6.to_string(), "M6");
+        // `is_apple_silicon` keys off the enum not being `Unknown`, so the new
+        // variant must not change what the bf16->f16 conversion sites do.
+        assert_ne!(AppleSiliconGen::M6, AppleSiliconGen::Unknown);
+    }
+
+    /// An unmeasured generation keeps MLX's own buffer defaults: raising the op
+    /// cap is a measured tuning decision, and no M6 measurement exists.
+    #[test]
+    fn measured_buffer_defaults_stay_off_for_unmeasured_generations() {
+        // M1-M4 predate the Neural Accelerator, so they take the measurement.
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M4, false),
+            Some(1000)
+        );
+        // M5+ was never measured, and the `has_neural_accelerator` gate keeps
+        // it on MLX's default.
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M6, true),
+            None
+        );
+        assert_eq!(
+            metal_decode_mb_per_buffer_default(AppleSiliconGen::M6, true),
+            None
+        );
     }
 
     #[test]
@@ -1398,6 +1582,7 @@ mod tests {
         assert!(AppleSiliconGen::M3.wide_quantized_projections());
         assert!(AppleSiliconGen::M4.wide_quantized_projections());
         assert!(AppleSiliconGen::M5.wide_quantized_projections());
+        assert!(AppleSiliconGen::M6.wide_quantized_projections());
         // Non-Apple and not-yet-enumerated Apple parts decline rather than
         // assume; on CUDA a K-wide verify does not amortize at all (#638).
         assert!(!AppleSiliconGen::Unknown.wide_quantized_projections());
@@ -1417,6 +1602,7 @@ mod tests {
             AppleSiliconGen::M3,
             AppleSiliconGen::M4,
             AppleSiliconGen::M5,
+            AppleSiliconGen::M6,
             AppleSiliconGen::Unknown,
         ] {
             assert!(
@@ -1452,6 +1638,12 @@ mod tests {
             metal_ops_per_buffer_default(AppleSiliconGen::M5, true),
             None
         );
+        // M6 inherits MLX's default: the cap was never measured on it, and the
+        // `has_neural_accelerator` gate keeps every post-M5 part on the default.
+        assert_eq!(
+            metal_ops_per_buffer_default(AppleSiliconGen::M6, true),
+            None
+        );
         assert_eq!(
             metal_ops_per_buffer_default(AppleSiliconGen::Unknown, false),
             None
@@ -1470,6 +1662,7 @@ mod tests {
             (AppleSiliconGen::M3, false),
             (AppleSiliconGen::M4, false),
             (AppleSiliconGen::M5, true),
+            (AppleSiliconGen::M6, true),
             (AppleSiliconGen::Unknown, false),
         ] {
             let ops = metal_ops_per_buffer_default(r#gen, na);
@@ -1507,6 +1700,7 @@ mod tests {
             AppleSiliconGen::M3,
             AppleSiliconGen::M4,
             AppleSiliconGen::M5,
+            AppleSiliconGen::M6,
             AppleSiliconGen::Unknown,
         ] {
             assert_eq!(
@@ -1601,6 +1795,7 @@ mod tests {
         assert_eq!(AppleSiliconGen::M1.metal_version(), 3);
         assert_eq!(AppleSiliconGen::M4.metal_version(), 3);
         assert_eq!(AppleSiliconGen::M5.metal_version(), 4);
+        assert_eq!(AppleSiliconGen::M6.metal_version(), 4);
     }
 
     #[test]
@@ -2102,6 +2297,36 @@ mod tests {
                 quant_mode_support(mode),
                 gpu_backend_kind().quant_mode_support(mode)
             );
+        }
+    }
+
+    // ── MLX NAX flag (#3123) ──────────────────────────────────────────────────
+
+    /// The cached helper reports exactly what MLX's own flag says, every call.
+    /// The SSM `eval` boundaries gate on the helper, so a stale or inverted
+    /// cache would turn the M5 Max NaN workaround off where NAx kernels run.
+    #[test]
+    fn mlx_nax_available_matches_the_mlx_flag() {
+        let raw = crate::ffi::metal_nax_available();
+        assert_eq!(mlx_nax_available(), raw);
+        assert_eq!(mlx_nax_available(), raw, "the cached value must be stable");
+        let hw = get_hardware();
+        eprintln!(
+            "MLX NAX {raw}; sysctl view {:?}, Neural Accelerator {}, macOS NA support {}, \
+             is_m5_neural_accelerator {}",
+            hw.silicon_gen,
+            hw.has_neural_accelerator,
+            hw.macos_supports_na,
+            is_m5_neural_accelerator(),
+        );
+    }
+
+    /// Off Metal (CUDA, ROCm, or no GPU backend) MLX never dispatches NAx
+    /// kernels, so the helper must read false and the models skip the eval.
+    #[test]
+    fn mlx_nax_available_is_false_off_metal() {
+        if gpu_backend_kind() != GpuBackendKind::Metal {
+            assert!(!mlx_nax_available(), "MLX's NAX flag is a Metal-only fact");
         }
     }
 }

@@ -57,6 +57,9 @@ use self::nonstandard::try_load_nonstandard_model_from_dir;
 use self::special::try_load_special_model_from_weights;
 use self::vlm::*;
 
+// The decoder config the KV cache rules read (`execution::config_fields`).
+pub(crate) use self::vlm::deepseek_vl2_language_config;
+
 // Re-exported at the crate root for the CLI's lazy `--output-audio` load.
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_gemma3_iree_host_preprocessor;
@@ -92,6 +95,12 @@ pub(crate) use self::vlm::{
 // with pooling, so its loader goes through the same entry point rather than
 // duplicating the weight remap and the token-id resolution.
 pub(crate) use self::vlm::load_qwen3_vl;
+// LiquidAI d1 decisions (`src/decision/d1.rs`) run on the LFM2-VL stack
+// unchanged and only replace the head with an answer-slot readout.
+pub(crate) use self::vlm::load_lfm2_vl;
+// Clef decisions (`src/decision/clef.rs`) run on the Qwen3.5 VLM stack
+// unchanged and only add a joint schema head over its post-norm hidden.
+pub(crate) use self::vlm::load_qwen3_5_vlm;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     load_qwen2_5_vl_iree_host_preprocessor, load_qwen2_vl_iree_host_preprocessor,
@@ -126,6 +135,38 @@ fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// A config's `eos_token_id` (an integer or a list of integers) as token ids,
+/// refusing an integer that is not a valid id: a negative id can never match
+/// a sampled token, and one past `i32::MAX` would wrap to a different token
+/// if narrowed with `as` (#3299). Non-integer entries are skipped, as
+/// [`parse_eos_token_ids`] skips them. The error names the offending value.
+///
+/// Used by: `models::limite_config::ModelArgs::validate`,
+/// `models::xing4_0::Xing40Config` deserialization.
+pub(crate) fn checked_eos_token_ids(value: Option<&serde_json::Value>) -> Result<Vec<i32>, String> {
+    let items: &[serde_json::Value] = match value {
+        Some(serde_json::Value::Array(items)) => items,
+        Some(v @ serde_json::Value::Number(_)) => std::slice::from_ref(v),
+        _ => return Ok(Vec::new()),
+    };
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let serde_json::Value::Number(n) = item else {
+            continue;
+        };
+        if !(n.is_i64() || n.is_u64()) {
+            continue;
+        }
+        let id = n
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .filter(|id| *id >= 0)
+            .ok_or_else(|| format!("eos_token_id {n} is outside 0..={}", i32::MAX))?;
+        ids.push(id);
+    }
+    Ok(ids)
 }
 
 fn tokenizer_eos_token_content(config: &serde_json::Value) -> Option<&str> {
@@ -169,6 +210,58 @@ fn parse_tokenizer_config_eos_token_ids(config: &serde_json::Value) -> Vec<i32> 
         .collect()
 }
 
+/// The ids of the tokenizer's `eos_token` looked up in `tokenizer.json`, for a
+/// `tokenizer_config.json` that names the token but whose
+/// `added_tokens_decoder` does not resolve it.
+///
+/// Recent `transformers` releases write no such table at all: the added tokens
+/// live only in `tokenizer.json`. The Qwen3.5 conversions on the Hub are such
+/// checkpoints. Their tokenizer config says `eos_token: "<|im_end|>"`, while
+/// the only id the model config declares (`text_config.eos_token_id`) is
+/// `<|endoftext|>`, so the end-of-turn token was not a stop id, was printed,
+/// and generation ran on until the model happened to emit `<|endoftext|>`.
+/// Only `added_tokens` is deserialized; the vocabulary, which is most of the
+/// file, is skipped. A token that exists only in the vocabulary is not found.
+///
+/// Used by: [`read_eos_token_ids`]
+fn tokenizer_json_eos_token_ids(
+    model_dir: &Path,
+    tokenizer_config: &serde_json::Value,
+) -> Vec<i32> {
+    // Optional fields: one entry of an unexpected shape must not discard the
+    // whole list.
+    #[derive(serde::Deserialize)]
+    struct AddedToken {
+        #[serde(default)]
+        id: Option<i64>,
+        #[serde(default)]
+        content: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct AddedTokens {
+        #[serde(default)]
+        added_tokens: Vec<AddedToken>,
+    }
+
+    let Some(eos_token) = tokenizer_eos_token_content(tokenizer_config) else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(model_dir.join("tokenizer.json")) else {
+        return Vec::new();
+    };
+    let Ok(tokenizer) = serde_json::from_str::<AddedTokens>(&content) else {
+        return Vec::new();
+    };
+    tokenizer
+        .added_tokens
+        .into_iter()
+        .filter(|token| token.content.as_deref() == Some(eos_token))
+        .filter_map(|token| token.id)
+        .filter(|id| *id >= 0)
+        .filter_map(|id| i32::try_from(id).ok())
+        .collect()
+}
+
 /// Sampling and stop-token defaults read from `generation_config.json`.
 ///
 /// Fields are optional because many checkpoints omit some or all sampling
@@ -180,6 +273,10 @@ pub struct GenerationConfigDefaults {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<i32>,
+    /// Transformers' `presence_penalty`, which `generate` applies on every
+    /// step (Raon-1 sets 1.5). Read for the server default only; `mlxcel
+    /// generate` keeps 0.0 (issue #3457). A negative value is ignored.
+    pub presence_penalty: Option<f32>,
 }
 
 fn parse_generation_config_defaults(config: &serde_json::Value) -> GenerationConfigDefaults {
@@ -188,6 +285,25 @@ fn parse_generation_config_defaults(config: &serde_json::Value) -> GenerationCon
         temperature: parse_finite_f32_field(config, "temperature"),
         top_p: parse_finite_f32_field(config, "top_p"),
         top_k: parse_i32_field(config, "top_k"),
+        presence_penalty: parse_presence_penalty(config),
+    }
+}
+
+/// `presence_penalty` when it is a finite, non-negative number. Anything else
+/// present (negative, non-numeric) is ignored with a warning, so the server
+/// keeps its 0.0 default rather than rewarding repetition.
+fn parse_presence_penalty(config: &serde_json::Value) -> Option<f32> {
+    let raw = config.get("presence_penalty")?;
+    match parse_finite_f32_field(config, "presence_penalty") {
+        Some(value) if value >= 0.0 => Some(value),
+        _ if raw.is_null() => None,
+        _ => {
+            tracing::warn!(
+                "generation_config.json presence_penalty {raw} is not a finite non-negative \
+                 number; ignoring it"
+            );
+            None
+        }
     }
 }
 
@@ -309,6 +425,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::MiniMaxM3VL => Some(load_minimax_m3_vl(model_path)?),
         ModelType::MuseGlimmerVLM => Some(load_muse_glimmer_vlm(model_path)?),
         ModelType::InklingVLM => Some(load_inkling_vlm(model_path)?),
+        ModelType::Inkling2VLM => Some(load_inkling2_vlm(model_path)?),
         ModelType::LlavaBunnyVLM => Some(load_llava_bunny_vlm(model_path)?),
         ModelType::AyaVisionVLM => Some(load_aya_vision_vlm(model_path)?),
         ModelType::PaliGemmaVLM => Some(load_paligemma_vlm(model_path)?),
@@ -344,6 +461,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::MolmoVLM => Some(load_molmo_vlm(model_path)?),
         ModelType::Molmo2VLM => Some(load_molmo2_vlm(model_path)?),
         ModelType::MolmoPointVLM => Some(load_molmo_point_vlm(model_path)?),
+        ModelType::MiMoV2VLM => Some(load_mimo_v2_vlm(model_path)?),
         ModelType::NemotronHNanoOmniVLM => Some(load_nemotron_h_nano_omni_vlm(model_path)?),
         ModelType::YoutuVLM => Some(load_youtu_vl_vlm(model_path)?),
         ModelType::InternVLChatVLM => Some(load_internvl_vlm(model_path)?),
@@ -356,6 +474,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),
         ModelType::Idefics2 => Some(load_idefics2_vlm(model_path)?),
         ModelType::Lfm2VL => Some(load_lfm2_vl(model_path)?),
+        ModelType::Plamo2VLM => Some(load_plamo2_vl(model_path)?),
         _ => None,
     })
 }
@@ -421,7 +540,8 @@ fn load_llama_family_from_weights(
             .ok_or_else(|| anyhow::anyhow!("Missing text_config for Mistral4"))?;
         let args: models::mistral4::Mistral4Config = serde_json::from_value(text_config.clone())
             .map_err(|err| anyhow::anyhow!("Failed to parse text_config: {}", err))?;
-        models::mistral4::sanitize_weights(weights, &args, "");
+        models::mistral4::sanitize_weights(weights, &args, "")
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
         let model = models::Mistral4Model::from_weights(weights, &args)
             .map_err(|err| anyhow::anyhow!("{}", err))?;
         return Ok(LoadedModel::Mistral4(model));
@@ -463,8 +583,9 @@ pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefa
 /// generation config lists only one of the model's stop ids therefore still
 /// stops on the others. Each `eos_token_id` field can be either a single
 /// integer or an array of integers. Tokenizer configs that declare only an
-/// `eos_token` string are resolved through `added_tokens_decoder`. Returns an
-/// empty vec if no source declares an id.
+/// `eos_token` string are resolved through `added_tokens_decoder`, or through
+/// the `added_tokens` of `tokenizer.json` when that table is absent or does
+/// not list the token. Returns an empty vec if no source declares an id.
 pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
     let model_dir = resolve_model_dir(model_dir);
     let mut ids = read_generation_config_defaults(&model_dir).eos_token_ids;
@@ -484,7 +605,11 @@ pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
         let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        for id in parser(&config) {
+        let mut declared = parser(&config);
+        if declared.is_empty() && file_name == "tokenizer_config.json" {
+            declared = tokenizer_json_eos_token_ids(&model_dir, &config);
+        }
+        for id in declared {
             if seen.insert(id) {
                 ids.push(id);
             }
@@ -743,6 +868,16 @@ fn load_model_unscoped(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenize
             "Whisper is a speech-to-text model served through the /v1/audio/* \
              endpoints, not a text-generation model. The mlxcel-server populates \
              its speech-to-text slot from this checkpoint automatically."
+        );
+    }
+
+    // Kokoro is a speech synthesizer with no text-generation path; the server
+    // wires it to `/v1/audio/speech` at startup.
+    if model_type == ModelType::Kokoro {
+        anyhow::bail!(
+            "Kokoro is a text-to-speech model served through /v1/audio/speech, not a \
+             text-generation model. The mlxcel-server populates its text-to-speech slot from \
+             this checkpoint automatically."
         );
     }
 

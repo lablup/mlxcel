@@ -21,6 +21,7 @@
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm_moe_dsa.py
 
 use crate::models::deepseek_v32::{self, DeepSeekV32Model};
+use crate::models::rope_utils::RopeScalingSpec;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
@@ -91,7 +92,7 @@ pub struct ModelArgs {
 
     // These may be provided directly or derived from rope_parameters
     #[serde(default)]
-    pub rope_scaling: Option<deepseek_v32::RopeScaling>,
+    pub rope_scaling: Option<RopeScalingSpec>,
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
 
@@ -175,20 +176,11 @@ impl ModelArgs {
             .map(|v| v as f32)
             .unwrap_or(self.rope_theta);
 
-        // Convert rope_parameters to RopeScaling
+        // `rope_parameters` is the whole block, as upstream's
+        // `self.rope_scaling = self.rope_parameters`; every YaRN key in it
+        // reaches the shared RoPE table (#3178).
         let rope_scaling = if let Some(ref rp) = self.rope_parameters {
-            Some(deepseek_v32::RopeScaling {
-                scaling_type: rp
-                    .get("type")
-                    .or_else(|| rp.get("rope_type"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                factor: rp.get("factor").and_then(|v| v.as_f64()).map(|v| v as f32),
-                mscale_all_dim: rp
-                    .get("mscale_all_dim")
-                    .and_then(|v| v.as_f64())
-                    .map(|v| v as f32),
-            })
+            Some(RopeScalingSpec::from_lookup(|key| rp.get(key)))
         } else {
             self.rope_scaling.clone()
         };
@@ -283,6 +275,30 @@ impl LanguageModel for GlmMoeDsaModel {
         self.inner.forward(input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.inner,
+            input_ids,
+            None,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
@@ -360,17 +376,18 @@ mod tests {
         rope_parameters.insert("mscale_all_dim".to_string(), serde_json::json!(1.5));
         args.rope_parameters = Some(rope_parameters);
         args.rope_theta = 1234.0;
-        args.rope_scaling = Some(deepseek_v32::RopeScaling {
-            scaling_type: Some("ignored".to_string()),
+        args.rope_scaling = Some(RopeScalingSpec {
+            rope_type: Some("ignored".to_string()),
             factor: Some(2.0),
             mscale_all_dim: Some(3.0),
+            ..Default::default()
         });
 
         let mapped = args.to_dsv32_args();
 
         assert_eq!(mapped.rope_theta, 500000.0);
         let rope_scaling = mapped.rope_scaling.expect("rope scaling");
-        assert_eq!(rope_scaling.scaling_type.as_deref(), Some("yarn"));
+        assert_eq!(rope_scaling.rope_type.as_deref(), Some("yarn"));
         assert_eq!(rope_scaling.factor, Some(32.0));
         assert_eq!(rope_scaling.mscale_all_dim, Some(1.5));
     }
@@ -379,17 +396,17 @@ mod tests {
     fn glm_moe_dsa_falls_back_to_direct_rope_fields() {
         let mut args = sample_args();
         args.rope_theta = 320000.0;
-        args.rope_scaling = Some(deepseek_v32::RopeScaling {
-            scaling_type: Some("linear".to_string()),
+        args.rope_scaling = Some(RopeScalingSpec {
+            rope_type: Some("linear".to_string()),
             factor: Some(8.0),
-            mscale_all_dim: None,
+            ..Default::default()
         });
 
         let mapped = args.to_dsv32_args();
 
         assert_eq!(mapped.rope_theta, 320000.0);
         let rope_scaling = mapped.rope_scaling.expect("rope scaling");
-        assert_eq!(rope_scaling.scaling_type.as_deref(), Some("linear"));
+        assert_eq!(rope_scaling.rope_type.as_deref(), Some("linear"));
         assert_eq!(rope_scaling.factor, Some(8.0));
         assert_eq!(rope_scaling.mscale_all_dim, None);
     }
@@ -434,9 +451,8 @@ mod tests {
         assert!(!mapped.indexer_rope_interleave);
     }
 
-    #[test]
-    fn glm_moe_dsa_wrapper_delegates_the_real_batched_forward() {
-        let _runtime = crate::initialize_runtime();
+    /// A zero-layer wrapper with tied embeddings over an 8-token vocabulary.
+    fn tiny_wrapper() -> GlmMoeDsaModel {
         let mut args = sample_args();
         args.vocab_size = 8;
         args.hidden_size = 4;
@@ -454,7 +470,13 @@ mod tests {
             "model.norm.weight".to_string(),
             mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT32),
         );
-        let model = GlmMoeDsaModel::from_weights(&weights, &args).expect("tiny wrapper loads");
+        GlmMoeDsaModel::from_weights(&weights, &args).expect("tiny wrapper loads")
+    }
+
+    #[test]
+    fn glm_moe_dsa_wrapper_delegates_the_real_batched_forward() {
+        let _runtime = crate::initialize_runtime();
+        let model = tiny_wrapper();
         assert_eq!(
             model.batched_decode_kind(),
             mlxcel_core::generate::BatchedDecodeKind::Native
@@ -478,5 +500,13 @@ mod tests {
         assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
             &got, &want, 0.0, 0.0
         )));
+    }
+    #[test]
+    fn glm_moe_dsa_last_row_logits_match_the_full_forward() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        crate::models::last_row_logits_harness::assert_last_row_logits(
+            tiny_wrapper,
+            &[3, 1, 4, 1, 5, 7, 2, 6, 5, 3, 7],
+        );
     }
 }

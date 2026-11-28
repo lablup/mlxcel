@@ -101,6 +101,21 @@ impl Qwen3VLConfig {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
+    /// Give the config the layout of an NVFP4 export's repacked linears
+    /// (ModelOpt's triplets, or compressed-tensors' under other names): 4-bit
+    /// codes in the 16-element blocks the transcode keeps.
+    ///
+    /// Such an export has no MLX `quantization` block, and without one
+    /// [`Self::group_size`] and [`Self::bits`] are 0, which the quantized
+    /// loaders refuse. A config that already has the block is left alone.
+    ///
+    /// Used by: `load_qwen3_vl` (`src/loading/vlm_qwen.rs`)
+    pub(crate) fn declare_modelopt_nvfp4_layout(&mut self) {
+        self.quantization.get_or_insert(QuantConfig {
+            group_size: crate::models::sanitize::NVFP4_SOURCE_GROUP_SIZE as i32,
+            bits: 4,
+        });
+    }
     fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
@@ -122,6 +137,10 @@ impl Qwen3VLConfig {
 pub(crate) struct InterleavedMRoPE {
     inv_freq: Vec<f32>,
     mrope_section: Vec<i32>,
+    /// Multiplies cos and sin in [`Self::forward`], so the rotated lanes of
+    /// Q and K carry it and nothing else does. `1.0` (no multiply) except
+    /// for a table built by [`Self::with_inv_freq`].
+    attention_factor: f32,
 }
 
 impl InterleavedMRoPE {
@@ -133,6 +152,30 @@ impl InterleavedMRoPE {
         Self {
             inv_freq,
             mrope_section,
+            attention_factor: 1.0,
+        }
+    }
+
+    /// An MRoPE over explicit inverse frequencies, with an attention factor
+    /// that scales cos and sin.
+    ///
+    /// For a YaRN `rope_parameters` block (Blaizzy/mlx-vlm#2649): `inv_freq`
+    /// is the reciprocal of the YaRN divisor table and `attention_factor` the
+    /// transformers attention factor, which upstream's
+    /// `Qwen3_5RotaryEmbedding` applies to cos and sin the same way.
+    /// [`Self::apply_metal`] does not read the factor; its one caller,
+    /// Qwen4-Exp, never builds this variant.
+    ///
+    /// Used by: Qwen 3.5 VLM (`Qwen35Model::set_mrope`)
+    pub(crate) fn with_inv_freq(
+        inv_freq: Vec<f32>,
+        mrope_section: Vec<i32>,
+        attention_factor: f32,
+    ) -> Self {
+        Self {
+            inv_freq,
+            mrope_section,
+            attention_factor,
         }
     }
 
@@ -155,6 +198,7 @@ impl InterleavedMRoPE {
         Self {
             inv_freq: mlxcel_core::utils::array_to_vec_f32(&frequencies),
             mrope_section,
+            attention_factor: 1.0,
         }
     }
 
@@ -257,6 +301,12 @@ impl InterleavedMRoPE {
         let cos = mlxcel_core::cos(&emb);
         let sin = mlxcel_core::sin(&emb);
 
+        if self.attention_factor != 1.0 {
+            return (
+                mlxcel_core::multiply_scalar(&cos, self.attention_factor),
+                mlxcel_core::multiply_scalar(&sin, self.attention_factor),
+            );
+        }
         (cos, sin)
     }
 
@@ -533,6 +583,11 @@ impl Attention {
                     0,
                 )
             }
+        } else if l > 1 {
+            // A mask-less multi-token forward is a single-row prefill whose
+            // causality MLX's causal mode supplies (`prefill_causal_mask`,
+            // #3051).
+            mlxcel_core::causal_attention(&q, &k, &v, self.scale, 0.0, 0)
         } else {
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -766,6 +821,16 @@ pub struct Qwen3VLDeepStackDiagnostics {
 }
 
 impl Qwen3VLModel {
+    /// Head counts and head dim for [`mlxcel_core::utils::prefill_causal_mask`]
+    /// (#3051).
+    fn prefill_attention(&self) -> mlxcel_core::utils::PrefillAttention {
+        mlxcel_core::utils::PrefillAttention::new(
+            self._config.num_attention_heads,
+            self._config.num_kv_heads(),
+            self._config.head_dim(),
+        )
+    }
+
     pub fn from_weights(weights: &WeightMap, config: &Qwen3VLConfig) -> Result<Self, String> {
         let gs = config.group_size();
         let bits = config.bits();
@@ -1060,6 +1125,28 @@ impl Qwen3VLModel {
         self.lm_head.forward(&h)
     }
 
+    /// [`Self::forward_for_sequence`] projecting only position `last_pos`
+    /// through the LM head: `[B, 1, vocab]`, the row a prefill samples
+    /// (#3070). MRoPE resolution and DeepStack injection run over every
+    /// position exactly as in the full forward, and the final norm acts per
+    /// position, so the row equals the full forward's.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` of `Qwen3VLModel` and of the
+    /// Qwen3-VL wrapper.
+    pub(crate) fn last_logits_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, mask, seq_id);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
     /// Apply the language-model head to `[B, L, hidden_size]` hidden states.
     ///
     /// Used by: the Qwen3-VL reranker (#1356), which needs the yes/no logits at
@@ -1223,12 +1310,22 @@ impl Qwen3VLModel {
         // byte-identical to the untrimmed path. `cache_offset` stays monotonic
         // above because position_ids/RoPE need absolute positions. See issue
         // #421 (mirrors #419/#420).
+        // A single-row prefill takes MLX's causal mode instead of the array
+        // (`prefill_causal_mask`, #3051); the attention layer routes a
+        // mask-less multi-token forward through `causal_attention`, whose
+        // bottom-right alignment matches the `live_len` offset below.
         let auto_mask;
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            auto_mask = mlxcel_core::utils::prefill_causal_mask(
+                seq_len,
+                caches[0].live_len(),
+                batch,
+                self.prefill_attention(),
+                mlxcel_core::array_dtype(&h),
+            );
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be
@@ -1532,6 +1629,25 @@ impl mlxcel_core::generate::LanguageModel for Qwen3VLModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.last_logits_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            last_pos,
+        ))
     }
 
     fn forward_batched_with_ids(

@@ -357,6 +357,12 @@ pub fn load_xla_image_preprocessor(
 /// without a formula here, or a config this cannot read, falls through without
 /// a capacity guard rather than inventing a number.
 ///
+/// This bound only decides which shapes a server compiles before any request
+/// is seen, and the startup guard for an unsized session. A request with an
+/// image is sized and admitted on its processed length instead
+/// ([`crate::multimodal::xla_image_prefill`], issue #3361), so the worst case
+/// is never added on top of a real expansion.
+///
 /// # Molmo2
 ///
 /// The prompt carries one pooled token per pooled patch, plus one column token
@@ -499,6 +505,55 @@ pub fn ensure_xla_image_context_capacity(
          {env}={context_capacity} explicitly.",
         env = CONTEXT_CAPACITY_ENV,
     )))
+}
+
+/// Warning for a bucket set that lost the only shape able to admit an image.
+///
+/// The startup guard decides on the REQUESTED capacities, before any engine is
+/// built, so it can pass and a later bucket load can still drop the image-sized
+/// shape. This helper re-evaluates the decision on the capacities that
+/// actually survived and returns a warning instead of an error: text serving
+/// still works, and the dropped-bucket tolerance is deliberate (issue #2923).
+///
+/// Returns `None` when no floor is derived, when a surviving shape meets it,
+/// when nothing was dropped, or when the requested set never held an
+/// image-capable shape (that case is the pre-load guard's, not this one).
+#[must_use]
+pub fn xla_image_surviving_bucket_warning(
+    surviving: &[usize],
+    requested: &[usize],
+    image_floor: Option<usize>,
+) -> Option<String> {
+    let floor = image_floor?;
+    if surviving.iter().any(|&capacity| capacity >= floor) {
+        return None;
+    }
+    if !requested.iter().any(|&capacity| capacity >= floor) {
+        return None;
+    }
+    let dropped: Vec<usize> = requested
+        .iter()
+        .copied()
+        .filter(|capacity| !surviving.contains(capacity))
+        .collect();
+    if dropped.is_empty() {
+        return None;
+    }
+    let image_capable: Vec<usize> = dropped
+        .iter()
+        .copied()
+        .filter(|&capacity| capacity >= floor)
+        .collect();
+    let named = if image_capable.is_empty() {
+        dropped
+    } else {
+        image_capable
+    };
+    let largest = surviving.iter().copied().max().unwrap_or(0);
+    Some(format!(
+        "image requests will now be refused at admission: the largest surviving OpenXLA context capacity is {largest}, below this checkpoint's image floor of {floor} tokens, because capacity/capacities {named:?} did not load. Text requests still fit the surviving shapes; raise the OpenXLA memory budget or set {env} to keep an image-capable bucket.",
+        env = CONTEXT_CAPACITY_ENV,
+    ))
 }
 
 /// Worst-case Molmo2 image expansion, read from `preprocessor_config.json`.

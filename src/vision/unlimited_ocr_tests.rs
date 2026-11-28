@@ -223,3 +223,17 @@ fn unlimited_ocr_wrapper_declines_batching() {
     let wrapper = build_wrapper();
     assert!(!wrapper.supports_batching());
 }
+
+/// The fixture's vocabulary holds two ids and its LM head is zero, so this
+/// pins the wiring (the hook answers on both paths with `[1, 1, vocab]`)
+/// rather than the values.
+#[test]
+fn unlimited_ocr_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tokens = &[0, 1, 1, 0, 1, 0, 1];
+    crate::models::last_row_logits_harness::assert_last_row_logits(build_wrapper, tokens);
+    crate::models::last_row_logits_harness::assert_last_row_logits_with_embeddings(
+        build_wrapper,
+        tokens,
+    );
+}

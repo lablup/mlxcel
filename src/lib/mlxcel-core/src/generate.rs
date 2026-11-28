@@ -169,6 +169,11 @@ impl ModelStateSnapshot {
             .map(ModelStateTensor::array)
     }
 
+    /// Names of the captured tensors, in capture order.
+    pub fn tensor_names(&self) -> impl Iterator<Item = &str> {
+        self.tensors.iter().map(ModelStateTensor::name)
+    }
+
     /// Whether no tensor payload was captured.
     pub fn is_empty(&self) -> bool {
         self.tensors.is_empty()
@@ -177,6 +182,23 @@ impl ModelStateSnapshot {
     /// Sum of all captured tensor byte footprints.
     pub fn nbytes(&self) -> usize {
         self.tensors.iter().map(ModelStateTensor::nbytes).sum()
+    }
+
+    /// A snapshot of the same family and length holding only the tensors
+    /// whose name `keep` accepts (issue #3047).
+    ///
+    /// Each kept tensor is captured through [`ModelStateTensor::new`], so it
+    /// shares the source tensor's buffer instead of duplicating it, and the
+    /// tensors left out are not referenced at all: once the source snapshot is
+    /// dropped, their memory goes with it.
+    ///
+    /// Used by: the hybrid families' turn-boundary state checkpoints.
+    pub fn subset(&self, keep: impl Fn(&str) -> bool) -> Self {
+        let mut subset = Self::new(self.family.clone(), self.token_len);
+        for tensor in self.tensors.iter().filter(|t| keep(t.name())) {
+            subset.push_tensor(tensor.name(), tensor.array());
+        }
+        subset
     }
 }
 
@@ -295,13 +317,67 @@ pub(crate) fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<
 /// override also uses it to slice the hidden state before its LM head.
 ///
 /// Used by: the `forward_last_logits*` defaults, Llama3Model::last_logits,
-/// Gemma4Model::logits_at
+/// Gemma4Model::logits_at, every `LanguageModel::last_row_logits`
+/// implementation
 pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     let batch = shape[0];
     let vocab = shape[2];
     // Slice [batch, pos:pos+1, vocab]  →  shape [batch, 1, vocab].
     ffi::slice(logits, &[0, pos as i32, 0], &[batch, pos as i32 + 1, vocab])
+}
+
+/// The rows of a `[batch, seq_len, hidden]` hidden state a forward goes on to
+/// project: all of them for `None`, row `row` alone (as `[batch, 1, hidden]`)
+/// for `Some(row)`.
+///
+/// A model's forward calls this once, right before its final norm and LM
+/// head, so one body serves both the full forward (`None`) and its
+/// [`LanguageModel::last_row_logits`] hook (`Some(last_pos)`). Everything
+/// after the call must act on each position independently.
+///
+/// Used by: every `LanguageModel::last_row_logits` implementation that
+/// threads the row through its forward
+pub fn select_row(hidden: UniquePtr<MlxArray>, row: Option<usize>) -> UniquePtr<MlxArray> {
+    match row {
+        Some(row) => logits_at_position(&hidden, row),
+        None => hidden,
+    }
+}
+
+/// [`LanguageModel::last_row_logits`] for a wrapper whose single-sequence
+/// forwards are plain delegations to `inner`'s trait methods: the row comes
+/// from `inner`'s own last-logits entry points, so the wrapper inherits
+/// whatever last-row projection `inner` has (its hook or its overrides).
+///
+/// Only correct when the wrapper's `forward_with_sequence_id` and
+/// `forward_with_embeddings_and_sequence_id` add nothing to `inner`'s. A
+/// wrapper that prepares positions, injects features or post-processes the
+/// logits implements the hook itself.
+///
+/// Used by: VLM wrappers around a text `LanguageModel` (`src/vision/`)
+pub fn last_row_logits_from<M: LanguageModel + ?Sized>(
+    inner: &M,
+    input_ids: &MlxArray,
+    input_embeddings: Option<&MlxArray>,
+    seq_id: Option<SequenceId>,
+    caches: &mut [KVCache],
+    mask: Option<&MlxArray>,
+    last_pos: usize,
+) -> UniquePtr<MlxArray> {
+    match input_embeddings {
+        Some(embeddings) => inner.forward_last_logits_with_embeddings_and_sequence_id(
+            input_ids,
+            Some(embeddings),
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ),
+        None => {
+            inner.forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+        }
+    }
 }
 
 pub use crate::prefill_plan::{DEFAULT_PREFILL_CHUNK, prefill_chunk_len};
@@ -429,8 +505,51 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if let Some(logits) = self.last_row_logits(input_ids, None, None, caches, mask, last_pos) {
+            return logits;
+        }
         let logits = self.forward(input_ids, caches, mask);
         logits_at_position(&logits, last_pos)
+    }
+
+    /// Opt-in hook behind the three `forward_last_logits*` defaults: run the
+    /// single-sequence forward up to the final hidden states, slice row
+    /// `last_pos`, and project only that row through the final norm, the LM
+    /// head and any logit softcap, scale or bias. Returns `[batch, 1, vocab]`.
+    ///
+    /// A model implements this once instead of overriding the three entry
+    /// points. The contract mirrors the forwards the defaults would have run:
+    ///
+    /// - `input_embeddings == None` must be the forward
+    ///   [`Self::forward_with_sequence_id`] runs for `seq_id` (which is
+    ///   [`Self::forward`] when `seq_id` is `None`).
+    /// - `input_embeddings == Some(_)` must be the forward
+    ///   [`Self::forward_with_embeddings_and_sequence_id`] runs.
+    /// - Everything applied after the slice must act on each position
+    ///   independently, so the row equals the full forward's row.
+    /// - To decline a combination (for example a model with no embeddings
+    ///   path), return `None` before touching `caches` or any model-owned
+    ///   state; the caller then runs the full forward and slices.
+    ///
+    /// The default declines, which keeps the full-logits behavior. At a 262K
+    /// vocabulary the full tensor is about 1 GB per 2048-token prefill piece
+    /// and tens of GB in a single pass, none of it sampled (issue #3070).
+    ///
+    /// Used by: the `forward_last_logits`,
+    /// `forward_last_logits_with_sequence_id` and
+    /// `forward_last_logits_with_embeddings_and_sequence_id` defaults, and VLM
+    /// wrappers that forward it to their text model.
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        let _ = (input_ids, input_embeddings, seq_id, caches, mask, last_pos);
+        None
     }
 
     /// Forward with pre-computed embeddings (for VLM prefill)
@@ -477,6 +596,14 @@ pub trait LanguageModel {
         None // default: not supported
     }
 
+    /// Number of residual streams this model carries before its final mixer
+    /// (`hc_count` on `qwen4_exp`); `None` for a family without them.
+    ///
+    /// Used by: the `qwen4_exp_mtp` drafter's `validate_target_compat`.
+    fn residual_stream_count(&self) -> Option<usize> {
+        None
+    }
+
     /// Hand out a shared-buffer handle to this model's output projection
     /// when the projection is untied from the input embedding table.
     ///
@@ -494,6 +621,18 @@ pub trait LanguageModel {
 
     /// Hand out the target's final RMSNorm to a native MTP drafter.
     fn final_norm_module(&self) -> Option<crate::layers::RMSNorm> {
+        None
+    }
+
+    /// The embedding, `embed_norm`, LM head and shape an Inkling 2 target
+    /// lends its bundled DSpark drafter (issue #3374). `None` for every other
+    /// family, which the drafter's bind refuses by name.
+    ///
+    /// Used by: `drafter::inkling2_dspark::Inkling2DsparkDraftModel` (bind and
+    /// `validate_target_compat`); implemented by Inkling 2 and its VL wrapper.
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<crate::drafter::inkling2_dspark::Inkling2DsparkBinding> {
         None
     }
 
@@ -565,6 +704,30 @@ pub trait LanguageModel {
     ///
     /// Used by: server batch scheduler `lookahead_params`.
     fn supports_decode_lookahead_rewind(&self) -> bool {
+        false
+    }
+
+    /// Whether [`Self::rewind_decode_appends`] can unwind the rejected tail
+    /// of a speculative verify block ([`crate::engine::Engine::verify`]
+    /// followed by `Engine::unwind_appends`) from this model's own
+    /// per-sequence state, for a family whose state the pool trim cannot reach
+    /// (a model-owned layout, or [`Self::kv_cache_captures_sequence_state`]
+    /// `false`).
+    ///
+    /// Defaults to `false`, and is deliberately independent of
+    /// [`Self::supports_decode_lookahead_rewind`]: the lookahead rewinds whole
+    /// single-token forwards, while a verify block rejects positions inside
+    /// one multi-token forward, so a family that logs one entry per forward
+    /// (Baichuan) or per overwritten row (Gemma 3) cannot unwind a block
+    /// through the same hook. A model answers `true` only when its rewind
+    /// can stop anywhere inside a block: `qwen4_exp` captures the rewind state
+    /// for the forwards the engine marks speculative
+    /// ([`crate::cache::speculative_append_active`]) and replays its
+    /// GatedDeltaNet and PLE state over the accepted prefix (issue #2880).
+    ///
+    /// Used by: `prompt_lookup_unsupported_reason`,
+    /// `Engine::verify_rounds_unsupported`.
+    fn supports_speculative_verify_rewind(&self) -> bool {
         false
     }
 
@@ -644,6 +807,34 @@ pub trait LanguageModel {
 
     /// Release model-owned/runtime sequence state by its scheduler `SequenceId`.
     fn release_sequence_state_by_id(&self, _seq_id: SequenceId) {}
+
+    /// Set the reasoning effort a sequence's forward runs at, for a model
+    /// whose weights steer by it (Raon-1 mini's `reasoning_effort_steering`,
+    /// #3435). `seq_id == None` sets the model default that every sequence
+    /// without its own setting uses; `level == None` selects the config's
+    /// default level. The effort changes hidden states, not the prompt, so
+    /// the caller keys any prefix reuse by it as well.
+    ///
+    /// Models that do not steer ignore it, which is the default.
+    ///
+    /// # Errors
+    /// Returns a client-facing message when the level is not one this model
+    /// accepts; the caller fails that request before prefill.
+    fn set_sequence_reasoning_effort(
+        &self,
+        _seq_id: Option<SequenceId>,
+        _level: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The level `seq_id` set through [`Self::set_sequence_reasoning_effort`],
+    /// so a caller that moves a request to a new id (preemption) can carry it
+    /// over. `None` for models that do not steer and for a sequence at the
+    /// model default.
+    fn sequence_reasoning_effort(&self, _seq_id: SequenceId) -> Option<String> {
+        None
+    }
 
     /// Which RoPE frequency table a prompt of `total_prompt_len` tokens will be
     /// rotated with, when this model chooses one from the sequence length.
@@ -738,15 +929,133 @@ pub trait LanguageModel {
         Err("model does not support truncated state snapshot restore".to_string())
     }
 
+    /// The turn-boundary state checkpoint of `snapshot` (issue #3047): the
+    /// part of the state that cannot be rebuilt from a longer snapshot of the
+    /// same conversation, or `None` when this model does not split its state.
+    ///
+    /// A hybrid model's attention KV and per-token index rows for a prefix
+    /// are the leading rows of the same tensors in any longer snapshot whose
+    /// rows were computed by the same prefill, so they need not be stored
+    /// again at every turn. Its recurrent and convolution state is a summary
+    /// of every token consumed and cannot be rewound, so that part is what
+    /// the checkpoint keeps. The default is `None`, which keeps a family on
+    /// whole snapshots only.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        _snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        None
+    }
+
+    /// Restore into `seq_id` the state for `checkpoint.token_len()` tokens,
+    /// built from a checkpoint made by [`Self::state_checkpoint_from_snapshot`]
+    /// and a longer whole snapshot `donor` of the same conversation (issue
+    /// #3047): the donor's attention state truncated to the checkpoint's
+    /// length, and the checkpoint's recurrent state.
+    ///
+    /// The caller guarantees that the donor's first `checkpoint.token_len()`
+    /// tokens are the checkpoint's tokens and that both were produced by the
+    /// same prefill computation over them. Implementors validate everything
+    /// they can see (family, lengths, layer layout) and return `Err` instead
+    /// of installing a partial state.
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        _seq_id: SequenceId,
+        _checkpoint: &ModelStateSnapshot,
+        _donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        Err("model does not support turn-boundary state checkpoints".to_string())
+    }
+
+    /// What each layer keeps per sequence, for a family whose state the
+    /// scheduler owns (issue #3254, ADR 0010).
+    ///
+    /// `Some` moves the family's per-sequence state out of its wrapper: the
+    /// pool builds one [`crate::cache::LayerState`] per layer
+    /// ([`Self::make_layer_state`]), keeps it in the sequence's
+    /// [`crate::cache::SequenceCacheSet`] and hands it to
+    /// [`Self::forward_layer_state`], and the prompt cache snapshots, restores
+    /// and truncates it without per-family code. The table has one entry per
+    /// layer, and storage reporting ([`Self::kv_cache_storage_modes`]) derives
+    /// from the same entries.
+    ///
+    /// `None`, the default, keeps the family on its current path: dense or
+    /// paged `KVCache` rows, or state inside the model.
+    ///
+    /// Used by: the default [`Self::sequence_state_layout`] and
+    /// [`Self::make_layer_state`], and the server prompt cache.
+    fn layer_state_kinds(&self) -> Option<Vec<crate::cache::LayerStateKind>> {
+        None
+    }
+
+    /// Fresh per-layer state for one sequence of a scheduler-owned family.
+    ///
+    /// The default builds it from [`Self::layer_state_kinds`] and the modes
+    /// [`Self::kv_cache_layer_modes`] holds at the time of the call, and gives
+    /// every sliding layer a decode undo log when the family reports
+    /// [`Self::supports_decode_lookahead_rewind`]. A family overrides it to
+    /// declare recurrent tensor slots or to reuse its own cache builder.
+    ///
+    /// Used by: `CachePool::allocate_with_layout` and the prompt cache's
+    /// snapshot restore, which fills a fresh vector before installing it.
+    fn make_layer_state(&self) -> Option<Vec<crate::cache::LayerState>> {
+        let kinds = self.layer_state_kinds()?;
+        let modes = self.kv_cache_layer_modes();
+        let undo_depth = if self.supports_decode_lookahead_rewind() {
+            crate::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+        } else {
+            0
+        };
+        Some(crate::cache::LayerState::for_kinds(
+            &kinds,
+            modes.as_deref(),
+            undo_depth,
+        ))
+    }
+
+    /// The snapshot vocabulary of a scheduler-owned family: the family tag and
+    /// the tensor names its per-layer state is stored under. `None` for a
+    /// family that does not donate snapshots.
+    ///
+    /// Used by: the server prompt cache's generic snapshot code.
+    fn layer_state_snapshot_spec(&self) -> Option<crate::cache::LayerStateSnapshotSpec> {
+        None
+    }
+
+    /// The forward of a scheduler-owned family over the per-layer state the
+    /// pool holds: `rows[i]` is the state of row `i` of `request.input_ids`.
+    ///
+    /// One row is a single-sequence forward (a prefill piece or a decode
+    /// step) and honours `request.last_pos`; several rows are a batched decode
+    /// step or a batched prefill cohort. The forward leaves every row's state
+    /// advanced by the tokens it consumed and schedules any pending decode
+    /// undo rows before returning. `Err` promises that no row was advanced,
+    /// or that the rows are discarded with the request.
+    ///
+    /// Used by: `Engine::step`, the engine's prefill and verify entries, and
+    /// the scheduler's planned prefill, for every sequence whose pool entry
+    /// holds layer state.
+    fn forward_layer_state(
+        &self,
+        _request: &crate::cache::LayerStateForward<'_>,
+        _rows: &mut [&mut [crate::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        Err("model does not run on scheduler-owned layer state".to_string())
+    }
+
     /// Describe how one sequence's runtime state should be allocated.
     ///
-    /// Phase 0 keeps the default behavior aligned with today's
-    /// `supports_batching()` split while giving the control plane an explicit
-    /// backend/layout seam for future paged and model-owned sequence state.
+    /// A family that reports [`Self::layer_state_kinds`] is scheduler-owned.
+    /// Otherwise the default follows the `supports_batching()` split: dense
+    /// external KV caches for a batching model, model-owned state for one
+    /// that cannot batch.
     ///
     /// Used by: `CachePool::allocate()`
     fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
         let num_layers = self.num_layers();
+        if self.layer_state_kinds().is_some() {
+            return crate::cache::SequenceStateLayout::scheduler_owned(num_layers);
+        }
         if self.supports_batching() {
             crate::cache::SequenceStateLayout::dense_kv_cache(num_layers)
         } else {
@@ -882,6 +1191,10 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        if let Some(logits) = self.last_row_logits(input_ids, None, seq_id, caches, mask, last_pos)
+        {
+            return logits;
+        }
         let logits = self.forward_with_sequence_id(input_ids, seq_id, caches, mask);
         logits_at_position(&logits, last_pos)
     }
@@ -924,6 +1237,14 @@ pub trait LanguageModel {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
+        // The hook's `None` embeddings mean the text forward, which is not
+        // what this entry runs when a caller passes no embeddings.
+        if input_embeddings.is_some()
+            && let Some(logits) =
+                self.last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+        {
+            return logits;
+        }
         let logits = self.forward_with_embeddings_and_sequence_id(
             input_ids,
             input_embeddings,
@@ -946,9 +1267,10 @@ pub trait LanguageModel {
     /// Batched forward with the scheduler's sequence identities.
     ///
     /// `seq_ids[i]` names the sequence whose per-model state row `i` uses; a
-    /// family whose per-sequence state lives inside the model (Gemma 3,
-    /// Llama 4, Qwen3.5, Muse Glimmer, the VLM wrappers) overrides this so
-    /// each row resolves its own state. The default ignores the ids and runs
+    /// family whose per-sequence state lives inside the model (Llama 4,
+    /// Gemma 4, Muse Glimmer, the VLM wrappers) overrides this so
+    /// each row resolves its own state. A scheduler-owned family (Gemma 3,
+    /// Qwen 3.5) is forwarded through [`Self::forward_layer_state`] instead. The default ignores the ids and runs
     /// `forward_batched`. Storage is a property of each row's cache
     /// (`KVCache::attend`, ADR 0008), so there is no per-step storage hint:
     /// the `DecodeBatchContext` argument this entry used to take was removed
@@ -1469,8 +1791,36 @@ pub struct GenerationStats {
     pub decode_time_ms: f64,
     /// Prefill throughput: prompt tokens per second
     pub prefill_tok_per_sec: f64,
-    /// Decode throughput: generated tokens per second
+    /// Decode throughput: tokens produced inside the decode window per
+    /// second of that window. See [`decode_tok_per_sec`] for why a path
+    /// whose first token comes out of prefill counts `generated_tokens - 1`.
     pub decode_tok_per_sec: f64,
+}
+
+/// Decode throughput over a timed decode window, in tokens per second.
+///
+/// `window_tokens` counts only the tokens produced inside the window that
+/// `decode_ms` measures. A path whose first token comes out of prefill (it is
+/// sampled and evaluated before the decode timer starts) passes
+/// `generated_tokens - 1`: its window holds N-1 forward steps, and putting
+/// the prefill token in the numerator as well overstates the rate by
+/// N/(N-1), 0.79% at N = 128. A path that produces every token inside the
+/// window passes N.
+///
+/// This is the rule llama-server's `predicted_per_second` follows (see
+/// `src/server/types/native_completion.rs`). mlx-lm's and mlx-vlm's
+/// `generation_tps` start their clock after the first token but count all N
+/// tokens ([mlx-lm](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py)
+/// `stream_generate`), so they read N/(N-1) higher than this for the same run;
+/// `scripts/bench_mlxlm.py` converts them before comparing.
+///
+/// Returns 0.0 for an empty or zero-length window instead of dividing by zero.
+pub fn decode_tok_per_sec(window_tokens: usize, decode_ms: f64) -> f64 {
+    if window_tokens > 0 && decode_ms > 0.0 {
+        window_tokens as f64 / (decode_ms / 1000.0)
+    } else {
+        0.0
+    }
 }
 
 impl GenerationStats {
@@ -1507,7 +1857,7 @@ impl GenerationStats {
 /// modules, the graphs and the kernels all land. A large `build` points at
 /// host-side op-recording overhead; a large `eval` points at the device, the
 /// PCIe link, or the CUDA graph machinery, and separating those two is what
-/// `docs/benchmark_results/volta-ttft-fixed-cost-2026-09-01.md` needed.
+/// `docs/benchmark_results/versions/v0.7.0.md#volta-ttft-fixed-cost-2026-09-01` needed.
 ///
 /// `setup_ns` sits *outside* the reported prefill time, because the generator
 /// resets its caches before the prefill clock starts. Every other field sits
@@ -1729,6 +2079,105 @@ mod tests {
             ffi::eval(&first);
             assert_eq!(ffi::item_f32(&first), pos as f32, "wrong row at pos {pos}");
         }
+    }
+
+    /// A model that implements only the `last_row_logits` hook: its row is
+    /// filled with `100 + pos`, while its full forward answers `pos`, so each
+    /// entry point shows which of the two it ran.
+    struct HookedStubModel;
+
+    impl LanguageModel for HookedStubModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            caches: &mut [KVCache],
+            mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            SeqStubModel.forward(input_ids, caches, mask)
+        }
+
+        fn last_row_logits(
+            &self,
+            _input_ids: &MlxArray,
+            _input_embeddings: Option<&MlxArray>,
+            _seq_id: Option<SequenceId>,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+            last_pos: usize,
+        ) -> Option<UniquePtr<MlxArray>> {
+            Some(ffi::from_slice_f32(
+                &[100.0 + last_pos as f32; 4],
+                &[1, 1, 4],
+            ))
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new()]
+        }
+
+        fn num_layers(&self) -> usize {
+            1
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    /// Every `forward_last_logits*` default takes the model's last-row
+    /// projection when the hook offers one (#3070). The embeddings entry
+    /// called without embeddings keeps the full forward, because the hook
+    /// reads `None` embeddings as the text forward.
+    #[test]
+    fn forward_last_logits_defaults_use_the_last_row_hook() {
+        let model = HookedStubModel;
+        let input = ffi::from_slice_i32(&[5, 6, 7, 8], &[1, 4]);
+        let embeds = ffi::zeros(&[1, 4, 2], crate::dtype::FLOAT32);
+        let seq = SequenceId::from_raw(307_000);
+        let first = |logits: &MlxArray| {
+            assert_eq!(ffi::array_shape(logits).as_slice(), &[1, 1, 4]);
+            let first = ffi::slice(logits, &[0, 0, 0], &[1, 1, 1]);
+            ffi::eval(&first);
+            ffi::item_f32(&first)
+        };
+
+        let mut caches = model.make_caches();
+        let text = model.forward_last_logits(&input, &mut caches, None, 2);
+        assert_eq!(first(&text), 102.0);
+        let by_id =
+            model.forward_last_logits_with_sequence_id(&input, Some(seq), &mut caches, None, 3);
+        assert_eq!(first(&by_id), 103.0);
+        let fallible = model
+            .try_forward_last_logits_with_sequence_id(&input, Some(seq), &mut caches, None, 1)
+            .expect("the default wraps the infallible hook");
+        assert_eq!(first(&fallible), 101.0);
+        let embedded = model.forward_last_logits_with_embeddings_and_sequence_id(
+            &input,
+            Some(&embeds),
+            Some(seq),
+            &mut caches,
+            None,
+            2,
+        );
+        assert_eq!(first(&embedded), 102.0);
+        let no_embeddings = model.forward_last_logits_with_embeddings_and_sequence_id(
+            &input,
+            None,
+            Some(seq),
+            &mut caches,
+            None,
+            2,
+        );
+        assert_eq!(first(&no_embeddings), 2.0);
+        // The same hook is reachable through a borrowed model.
+        let by_ref = <&HookedStubModel as LanguageModel>::forward_last_logits(
+            &&model,
+            &input,
+            &mut caches,
+            None,
+            0,
+        );
+        assert_eq!(first(&by_ref), 100.0);
     }
 
     #[test]
@@ -2195,3 +2644,7 @@ mod history_tests;
 #[cfg(test)]
 #[path = "generate_finish_tests.rs"]
 mod finish_tests;
+
+#[cfg(test)]
+#[path = "generate_rate_tests.rs"]
+mod rate_tests;

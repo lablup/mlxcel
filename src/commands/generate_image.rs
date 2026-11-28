@@ -83,7 +83,7 @@ pub(crate) fn build_request(args: &GenerateImageArgs, seed: u64) -> Result<Image
             bail!("Image file does not exist: {}", path.display());
         }
         references.push(
-            image::open(path)
+            mlxcel::multimodal::image_orientation::open_upright(path)
                 .with_context(|| format!("cannot read reference image {}", path.display()))?,
         );
     }

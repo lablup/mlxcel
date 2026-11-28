@@ -13,7 +13,7 @@ use std::time::Instant;
 use memmap2::Mmap;
 use safetensors::SafeTensors;
 
-use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+use crate::aux_manifest::qualify_auxiliary_artifact;
 use crate::auxiliary::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
     AuxiliaryWeightStorage, IreeAuxiliaryModule,
@@ -23,9 +23,16 @@ use crate::emitter::YOUTU_VL_DIAGNOSTIC_ABI_VERSION;
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_youtu_vl_diagnostics;
 use crate::emitter::{
-    YoutuVlHostInputs, YoutuVlVisionConfig, emit_youtu_vl, prepare_youtu_vl_host_inputs,
+    YOUTU_VL_VISION_PRECISION, YoutuVlHostInputs, YoutuVlVisionConfig, emit_youtu_vl,
+    prepare_youtu_vl_host_inputs,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
+use crate::iree_identity::{
+    ProductionNumerics, observe_float_tensor, production_artifact_contract,
+};
+use crate::operator_numeric_contract::{
+    AffineExecution, CheckpointSourceObserver, youtu_vl_operators,
+};
 use crate::qwen2_vl_runtime::{
     checked_f32_output, compiler_generation_identity, decode_direct_f32, f32_as_bytes,
     model_shards, native_f32_bytes, sha256_hex, validate_finite,
@@ -156,6 +163,7 @@ fn tensor_locations(
 fn load_weights(
     model_dir: &Path,
     config: &YoutuVlVisionConfig,
+    observer: &mut CheckpointSourceObserver,
 ) -> Result<(Vec<AuxiliaryWeight>, String), String> {
     let specs = config.weight_specs();
     let required = specs
@@ -215,6 +223,7 @@ fn load_weights(
             })?;
             let dtype = tensor.dtype();
             let source_shape = tensor.shape().to_vec();
+            observe_float_tensor(observer, dtype)?;
             let values =
                 decode_direct_f32(&spec.name, dtype, tensor.data(), &spec.shape, &source_shape)?;
             validate_finite(&spec.name, &values)?;
@@ -249,11 +258,11 @@ fn compile_and_load(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-youtu-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::YoutuVl)?;
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
+    let operators = youtu_vl_operators();
+    let contract = production_artifact_contract(
         ENTRY_NAME,
         format!(
             "{};{};checkpoint_schema_sha256={}",
@@ -262,10 +271,18 @@ fn compile_and_load(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, &mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "youtu-vl-vision",
+            operators: &operators,
+            precision: YOUTU_VL_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     let tag = format!("youtu-vl-vision-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, &flags, &cache, &tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
@@ -285,11 +302,11 @@ fn compile_and_load_diagnostics(
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-youtu-vl-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::YoutuVl)?;
+    let mut observer = CheckpointSourceObserver::default();
+    let (weights, checkpoint_schema) = load_weights(model_dir, config, &mut observer)?;
+    let operators = youtu_vl_operators();
+    let contract = production_artifact_contract(
         DIAGNOSTIC_ENTRY_NAME,
         format!(
             "{};diagnostic_contract={};{};checkpoint_schema_sha256={}",
@@ -299,11 +316,19 @@ fn compile_and_load_diagnostics(
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, &flags, &mlir)?,
+        &compiler,
+        device,
+        &ProductionNumerics {
+            family: "youtu-vl-vision",
+            operators: &operators,
+            precision: YOUTU_VL_VISION_PRECISION,
+            weights: observer.resolve(AffineExecution::Host)?,
+        },
     )?;
     let tag =
         format!("youtu-vl-vision-diagnostics-v{YOUTU_VL_DIAGNOSTIC_ABI_VERSION}-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
-    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+    let vmfb = qualify_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, &flags, &cache, &tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)

@@ -243,6 +243,27 @@ impl LanguageModel for Lfm2VlModel {
         )
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Both single-sequence forwards delegate to the text model unchanged.
+        Some(mlxcel_core::generate::last_row_logits_from(
+            &self.text_model,
+            input_ids,
+            input_embeddings,
+            seq_id,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
@@ -443,6 +464,12 @@ mod tests {
     use crate::vision::encoders::lfm2_vl::Lfm2VlVisionConfig;
     use crate::vision::feature_cache::ModelVisionCaches;
     use crate::vision::processors::lfm2_vl::Lfm2VlTilingPolicy;
+
+    crate::models::last_row_logits_harness::last_row_case!(
+        lfm2_vl_last_row_logits,
+        build_synthetic_lfm2_vl,
+        embeddings
+    );
 
     fn build_synthetic_lfm2_vl() -> Lfm2VlModel {
         let vocab_size = 512usize;

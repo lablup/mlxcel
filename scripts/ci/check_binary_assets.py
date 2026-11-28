@@ -75,26 +75,6 @@ class Rule:
 
 DECLARED = (
     Rule(
-        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/qwen35/baseline/input-image.png",
-        max_bytes=679,
-        why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
-    ),
-    Rule(
-        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/qwen35/candidate/input-image.png",
-        max_bytes=679,
-        why="Pinned Qwen3.5-VL benchmark input image for hash-verifiable request replay.",
-    ),
-    Rule(
-        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/lfm2/baseline/input-image.png",
-        max_bytes=679,
-        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
-    ),
-    Rule(
-        pattern="docs/benchmark_results/data/native-batched-decode-m3ultra-2026-10-27/raw/vlm/lfm2/candidate/input-image.png",
-        max_bytes=679,
-        why="Pinned LFM2-VL benchmark input image for hash-verifiable request replay.",
-    ),
-    Rule(
         pattern="tests/fixtures/bonsai/generate_512_seed9909.safetensors",
         max_bytes=524_480,
         why="Pinned Bonsai FLUX.2 generation latent trajectory for full-model parity.",
@@ -513,24 +493,27 @@ DECLARED = (
         ),
     ),
     Rule(
-        pattern="docs/benchmark_results/data/*.tar.gz",
-        max_bytes=32 * 1024,
+        pattern="spike/cuda-oxide-smoke/artifacts/vecadd.sm_121.cubin",
+        max_bytes=8 * 1024,
         why=(
-            "Raw per-run logs behind a committed benchmark report, archived "
-            "because nobody reads them in normal review; the report's tables "
-            "and CSVs carry the numbers, and the archive is there to audit a "
-            "run. Keep each under 32 KB compressed; larger log sets belong "
-            "outside the repository."
+            "Committed consumer artifact for the cuda-oxide GB10 smoke (#2831). "
+            "The manifest and evidence report pin its SHA-256 and its ABI "
+            "parameter layout, and reproducing it needs LLVM 21, CUDA 13.0 and "
+            "the pinned cuda-oxide compiler, so the verified bytes ship with "
+            "the evidence."
         ),
     ),
     Rule(
-        pattern="docs/benchmark_results/data/*.7z",
-        max_bytes=32 * 1024,
+        pattern="spike/cuda-oxide-fused-norm/artifacts/fused_add_rms_norm.sm_121.cubin",
+        max_bytes=80 * 1024,
         why=(
-            "Evidence from a failed acceptance attempt whose report keeps the "
-            "conclusions in plain text. One archive per attempt replaces hundreds "
-            "of loose files nobody reads in review, following the archived-log "
-            "precedent of #2267. Same 32 KB ceiling as the tarballs above."
+            "Committed consumer artifact for the cuda-oxide fused residual-add + "
+            "RMSNorm kernel (#2832): one module, five dtype entry points. The "
+            "five manifests and the evidence report pin its SHA-256 and ABI "
+            "layout, and it was validated bit for bit against the existing "
+            "fused CUDA kernel on GB10; reproducing it needs LLVM 21, CUDA 13.0 "
+            "and the pinned cuda-oxide compiler, so the verified bytes ship "
+            "with the evidence."
         ),
     ),
 )

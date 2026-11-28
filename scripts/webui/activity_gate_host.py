@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -421,10 +423,24 @@ def gpu_line(app: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def precheck(args: argparse.Namespace, *, root: Path = PROC, gpu_query: Callable[[], list[dict[str, Any]]] = gpu_apps, read_runnable: Callable[[], int] | None = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
+def precheck(args: argparse.Namespace, *, root: Path = PROC, gpu_query: Callable[[], list[dict[str, Any]]] = gpu_apps, read_runnable: Callable[[], int] | None = None, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic, disk_usage: Callable[[Path], Any] = shutil.disk_usage) -> int:
     identity = Identity.from_paths(args.installed_dir, args.run_root)
     state: dict[str, Any] = {"observed_at": now(), "cpu_count": os.cpu_count(), "reaped_leaks": []}
     try:
+        # First, so a full disk fails at once instead of after the leak sweep and the quiet wait.
+        # The default of 5 GB (decimal, 1e9 bytes) is sized to the gate's own footprint: a private run
+        # directory under $RUNNER_TEMP with a reflink/copy view of the 336 MB qwen3-0.6b-4bit fixture,
+        # the Chromium profile under the run directory's HOME, and server, xvfb, openbox and activity
+        # logs plus the evidence JSON (tens of KB each), well under 1 GB per run; the installed
+        # binaries (672 MB) and fixture (336 MB) already exist before the precheck runs. 5 GB leaves
+        # several times that for other writers on the same filesystem during the 10 to 45 minute gate,
+        # while a 20 GB floor would refuse healthy runs on a runner with 26 to 28 GB free. A start-time
+        # threshold cannot catch a disk that fills mid-run (run 42753658537 started with about 48 GB
+        # free); the verifier's log classification labels that case.
+        free = disk_usage(args.run_root).free
+        state["disk"] = {"path": str(args.run_root), "free_bytes": free, "min_free_bytes": int(args.min_free_gb * 1e9)}
+        if free < args.min_free_gb * 1e9:
+            raise GateRefused(f"infrastructure: only {free / 1e9:.1f} GB free on {args.run_root}, need {args.min_free_gb:g} GB")
         for info, match in identity.candidates(root, own_lineage(root)):
             if not is_leak(info, match):
                 raise GateRefused(f"a live process of this job's identity is already running ({match.reason}): {json.dumps(info.describe())}")
@@ -468,7 +484,11 @@ def precheck(args: argparse.Namespace, *, root: Path = PROC, gpu_query: Callable
         if "refused" in state and "quiet" in state and "host did not become quiet" in state["refused"]:
             print(f"host at refusal: {json.dumps(state['at_end'])}", flush=True)
         if args.host_state:
-            write_atomic(args.host_state, json.dumps(state, indent=2, sort_keys=True) + "\n")
+            # Best effort: after a disk refusal this write can fail too, and must not mask the refusal or its exit code.
+            try:
+                write_atomic(args.host_state, json.dumps(state, indent=2, sort_keys=True) + "\n")
+            except OSError as exc:
+                annotate("warning", f"could not write the host state file {args.host_state}: {exc}")
 
 
 def pid_file_targets(path: Path, root: Path = PROC) -> tuple[list[tuple[str, ProcInfo]], list[dict[str, Any]], bool]:
@@ -545,6 +565,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         command.add_argument("--run-root", type=Path, required=True, help="Parent of the verifier's run directories (the --work-dir it was given)")
     pre = sub.choices["precheck"]
     pre.add_argument("--host-state", type=Path, help="Write the observed host state here as JSON")
+    pre.add_argument("--min-free-gb", type=float, default=5.0, help="Refuse as an infrastructure failure when --run-root has less free space than this many GB (1e9 bytes)")
     pre.add_argument("--quiet-timeout", type=float, default=600.0)
     pre.add_argument("--quiet-window", type=int, default=10, help="Samples, one per second, whose mean must be at or below --max-runnable")
     pre.add_argument("--max-runnable", type=float, default=max(2.0, (os.cpu_count() or 8) / 4), help="Default: a quarter of the CPUs, at least 2")
@@ -552,6 +573,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command == "precheck" and (args.quiet_window < 1 or args.quiet_timeout < 0):
         parser.error("--quiet-window must be positive and --quiet-timeout non-negative")
+    if args.command == "precheck" and (not math.isfinite(args.min_free_gb) or args.min_free_gb < 0):
+        parser.error("--min-free-gb must be a finite non-negative number")
     return args
 
 

@@ -135,7 +135,10 @@ fn assert_close(actual: &MlxArray, expected: &MlxArray, tolerance: f32) {
     let error = mlxcel_core::item_f32(&maximum);
     assert!(error <= tolerance, "max logit error {error}");
 }
-fn contracts<M: LanguageModel>(make: impl Fn() -> M, offsets: impl Fn(&M, SequenceId) -> Vec<i32>) {
+pub(super) fn contracts<M: LanguageModel>(
+    make: impl Fn() -> M,
+    offsets: impl Fn(&M, SequenceId) -> Vec<i32>,
+) {
     let model = make();
     assert!(model.supports_batching());
     assert!(!model.supports_padded_prefill());

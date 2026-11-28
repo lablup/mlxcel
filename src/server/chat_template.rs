@@ -28,8 +28,8 @@
 //! * `raise_exception(msg)`: the template refusing a caller-supplied value.
 //!   Errors it raises carry a [`TemplateRejection`] source so the caller can tell
 //!   them apart from an engine-side render failure.
-//! * `strftime_now(format)`: the current date, for templates that stamp one into
-//!   a system prompt.
+//! * `strftime_now(format)`: the current time in the host zone, formatted with
+//!   `format`, for templates that stamp a date into a system prompt.
 //! * `tojson(value, ensure_ascii=..., indent=..., separators=..., sort_keys=...)`: an
 //!   mlxcel-owned filter that shadows minijinja's builtin and reproduces CPython
 //!   `json.dumps` byte for byte, defaulting to `ensure_ascii=False` the way
@@ -256,6 +256,16 @@ pub struct ChatTemplateProcessor {
     /// boundary snapshot) and a template that already emitted the channel are
     /// both left alone.
     generation_prompt_suffix: Option<GenerationPromptSuffix>,
+    /// How the server numbers image tags in each message for a family whose
+    /// template renders `content` as a string (#3265).
+    ///
+    /// Phi-3V and Phi-4MM templates drop image parts, so the server writes each
+    /// image's `<|image_N|>` tag into the message the image came from, numbered
+    /// across the whole conversation. Without this the runtime inserts every
+    /// tag at the first user turn. Keyed on the model family, like
+    /// [`Self::generation_prompt_suffix`], and set only when the template does
+    /// not render image parts itself.
+    numbered_image_tags: Option<NumberedImageTags>,
     /// A native, code-rendered chat format that replaces the Jinja template
     /// entirely (#1338).
     ///
@@ -281,6 +291,13 @@ pub struct ChatTemplateProcessor {
     /// instead of the disaggregated router. `prepare_chat_request_with_cache`
     /// refuses the request instead of reaching that fallback when this is set.
     kimi_k3_family_unrenderable: bool,
+    /// The checkpoint's `reasoning_effort_steering` block (Raon-1 mini,
+    /// #3435): the effort levels the model steers by, read from
+    /// `config.json` next to the template. `Some` means a request's
+    /// reasoning effort also reaches the model, not only the template; see
+    /// [`crate::server::reasoning_steering`].
+    reasoning_effort_steering:
+        Option<Arc<crate::models::reasoning_effort_steering::ReasoningEffortSteering>>,
     #[cfg(test)]
     template_compile_count: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -315,6 +332,43 @@ fn generation_prompt_suffix_for(model_path: &Path) -> Option<GenerationPromptSuf
             opener: crate::multimodal::llmjp_vl_prompt::LLMJP_ASSISTANT_OPENER,
             suffix: crate::multimodal::llmjp_vl_prompt::LLMJP_GENERATION_PROMPT_SUFFIX,
         }),
+        _ => None,
+    }
+}
+
+/// The image tag a family's runtime turns into an image slot, written by the
+/// server into each message for templates that render `content` as a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberedImageTags {
+    /// Phi-3V: `<|image_N|>` followed by a newline, the spelling
+    /// `phi3v_prompt::ensure_phi3v_image_tags` inserts.
+    Phi3V,
+    /// Phi-4MM: `<|image_N|>` with no separator, the spelling
+    /// `phi4mm_prompt::prepare_phi4mm_prompt_tokens` normalizes.
+    Phi4MM,
+}
+
+impl NumberedImageTags {
+    /// The tag for the conversation's `ordinal`-th image (1-based).
+    pub fn tag(self, ordinal: usize) -> String {
+        format!("<|image_{ordinal}|>")
+    }
+
+    /// What follows a tag the server inserts.
+    pub fn separator(self) -> &'static str {
+        match self {
+            Self::Phi3V => "\n",
+            Self::Phi4MM => "",
+        }
+    }
+}
+
+/// The per-message image tag numbering a model family needs, or `None` for
+/// every family whose runtime places image tokens some other way.
+fn numbered_image_tags_for(model_path: &Path) -> Option<NumberedImageTags> {
+    match crate::models::get_model_type(model_path).ok()? {
+        crate::models::ModelType::Phi3VLM => Some(NumberedImageTags::Phi3V),
+        crate::models::ModelType::Phi4MMVLM => Some(NumberedImageTags::Phi4MM),
         _ => None,
     }
 }
@@ -454,12 +508,17 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: generation_prompt_suffix_for(model_path),
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
+            reasoning_effort_steering: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         processor.wrap_string_content = template_requires_typed_text_content(&processor);
+        processor.attach_reasoning_effort_steering_from(model_path);
+        processor.numbered_image_tags =
+            numbered_image_tags_for(model_path).filter(|_| !processor.supports_image_content());
         Ok(Some(processor))
     }
 
@@ -478,8 +537,10 @@ impl ChatTemplateProcessor {
             forced_tool_call_format,
             default_enable_thinking: false,
             generation_prompt_suffix: None,
+            numbered_image_tags: None,
             kimi_k3: None,
             kimi_k3_family_unrenderable: false,
+            reasoning_effort_steering: None,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -511,6 +572,11 @@ impl ChatTemplateProcessor {
         self.generation_prompt_suffix
     }
 
+    /// The per-message image tag numbering in force, if any.
+    pub fn numbered_image_tags(&self) -> Option<NumberedImageTags> {
+        self.numbered_image_tags
+    }
+
     /// Complete a render that stopped at a bare role opener.
     ///
     /// A history render (`add_generation_prompt == false`) is never completed:
@@ -531,6 +597,33 @@ impl ChatTemplateProcessor {
     /// renders through [`Self::kimi_k3`] rather than through the template.
     pub(crate) fn attach_kimi_k3(&mut self, renderer: Arc<super::kimi_k3_chat::KimiK3Renderer>) {
         self.kimi_k3 = Some(renderer);
+    }
+
+    /// Read the checkpoint's `reasoning_effort_steering` block from
+    /// `model_dir/config.json` (#3435). A block that does not validate is
+    /// left unattached with a warning: the model load refuses it by name.
+    pub(crate) fn attach_reasoning_effort_steering_from(&mut self, model_dir: &Path) {
+        use crate::models::reasoning_effort_steering::ReasoningEffortSteering;
+        match ReasoningEffortSteering::from_model_dir(model_dir) {
+            Ok(steering) => self.reasoning_effort_steering = steering.map(Arc::new),
+            Err(err) => tracing::warn!("reasoning_effort_steering not attached: {err}"),
+        }
+    }
+
+    /// Attach a steering block directly (tests).
+    #[cfg(test)]
+    pub(crate) fn set_reasoning_effort_steering(
+        &mut self,
+        steering: Option<crate::models::reasoning_effort_steering::ReasoningEffortSteering>,
+    ) {
+        self.reasoning_effort_steering = steering.map(Arc::new);
+    }
+
+    /// The model's reasoning-effort steering block, when it declares one.
+    pub(crate) fn reasoning_effort_steering(
+        &self,
+    ) -> Option<&crate::models::reasoning_effort_steering::ReasoningEffortSteering> {
+        self.reasoning_effort_steering.as_deref()
     }
 
     /// The native Kimi K3 renderer, when one is attached.
@@ -762,12 +855,18 @@ impl ChatTemplateProcessor {
     /// architecture name — any future template that adopts the same idiom is
     /// covered automatically.
     ///
-    /// The check requires the literal `not thinking is defined` substring, so
-    /// templates that instead declare `enable_thinking is not defined` (e.g.
-    /// GLM-5.2's `glm_moe_dsa` template) do not match: `"is not defined"` is
-    /// not the same substring as `"is defined"` preceded by `not `.
+    /// The check matches the literal `not thinking is defined` substring, or,
+    /// as mlx-lm's `_infer_thinking_kwarg` does since mlx-lm#1974, a
+    /// ` thinking is defined` test in a template that never mentions
+    /// `enable_thinking` (`{% if thinking is defined and thinking %}`). A
+    /// template that reads `enable_thinking` keeps getting that kwarg alone:
+    /// GLM-5.2's `glm_moe_dsa` template declares `enable_thinking is not
+    /// defined`, and `"is not defined"` is not `"is defined"` preceded by
+    /// `not `, so it matches neither form.
     fn wants_bare_thinking_alias(&self) -> bool {
         self.template.contains("not thinking is defined")
+            || (self.template.contains(" thinking is defined")
+                && !self.template.contains("enable_thinking"))
     }
 
     /// Detect a chat template that gates reasoning on a `thinking_mode`
@@ -1696,8 +1795,8 @@ fn configure_environment(env: &mut Environment<'_>) -> std::result::Result<(), m
         },
     );
 
-    env.add_function("strftime_now", |_format: String| -> String {
-        chrono::Utc::now().format("%d %b %Y").to_string()
+    env.add_function("strftime_now", |format: String| -> String {
+        crate::server::clock::strftime_now(&format)
     });
 
     // Shadow minijinja's builtin `tojson` with a CPython `json.dumps` compatible
@@ -2110,6 +2209,60 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"
 );
 
+/// Unlimited-OCR's serving template: the messages' text, joined by one space,
+/// with nothing after the last message.
+///
+/// This is mlx-vlm's `UnlimitedOCRProcessor.default_chat_template`, which is
+/// what mlx-vlm renders whatever the checkpoint ships, and it matches
+/// `baidu/Unlimited-OCR`'s own prompts (`<image>document parsing.`) and its
+/// `format_messages`, which strips the rendered prompt. The
+/// `mlx-community/Unlimited-OCR-4bit` conversion instead ships DeepSeek-OCR's
+/// template, `{{message['content']}} ` with a space after every message, so
+/// the prompt ended in a space token (id 223) the reference never feeds: 898
+/// prompt tokens for mlx-vlm's 897 on a 1920x1280 page, and the model then
+/// opened its answer with an invented date line. Typed content renders its
+/// `text` parts; the page images reach the prompt as tokens after BOS, the
+/// position mlx-vlm's single `<image>` marker takes.
+const UNLIMITED_OCR_CHAT_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- if not loop.last %}{{- ' ' }}{%- endif %}",
+    "{%- endfor %}"
+);
+
+/// PLaMo 2.1 VL's serving template (issue #1380).
+///
+/// `pfnet/plamo-2.1-2b-vl` ships no chat template: its processor joins the
+/// text of every message with newlines and wraps the result in one fixed
+/// Japanese instruction template (`_apply_ja01_template`), with no roles. This
+/// renders that template with no image markers;
+/// [`crate::multimodal::plamo2_vl_prompt::build_plamo2_vl_prompt`] then places
+/// one `<plamo:image>` per image after the `### 指示:` line, which is where the
+/// bare CLI text gets them too. The template already ends with the response
+/// opener, so `add_generation_prompt` changes nothing.
+const PLAMO2_VL_CHAT_TEMPLATE: &str = concat!(
+    // The header is an expression, not template text: the `{%-` that opens
+    // the loop would otherwise trim the newline after `### 指示:`.
+    "{{- '以下はタスクを説明する指示で、文脈を説明した入力とペアになっています。要求を適切に補完するよう応答を書いてください。\\n\\n### 指示:\\n' }}",
+    "{%- for message in messages %}",
+    "{%- if not loop.first %}{{- '\n' }}{%- endif %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- endfor %}",
+    "{{- '\n\n### 応答:\n' }}"
+);
+
 /// MiniCPM-V 4.6 and MiniCPM-o's fallback template: plain ChatML turns with
 /// the assistant opener as the generation prompt (issue #2547).
 ///
@@ -2160,11 +2313,14 @@ const MINICPM_CHATML_TEMPLATE: &str = concat!(
 /// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
 /// every request at the task-marker parse.
 /// Families whose built-in template replaces any template the checkpoint
-/// ships (see the Nemotron-Parse note in the loader above).
+/// ships (see the Nemotron-Parse note in the loader above). Unlimited-OCR is
+/// here because its MLX conversion ships DeepSeek-OCR's template, whose
+/// trailing space the reference never renders (see
+/// [`UNLIMITED_OCR_CHAT_TEMPLATE`]).
 fn builtin_template_overrides_checkpoint(model_path: &Path) -> bool {
     matches!(
         crate::models::get_model_type(model_path),
-        Ok(crate::models::ModelType::NemotronParseVLM)
+        Ok(crate::models::ModelType::NemotronParseVLM | crate::models::ModelType::UnlimitedOcrVLM)
     )
 }
 
@@ -2176,6 +2332,8 @@ fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
         // that seeds the decoder, and the page travels out-of-band.
         crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
+        crate::models::ModelType::Plamo2VLM => Some(PLAMO2_VL_CHAT_TEMPLATE),
+        crate::models::ModelType::UnlimitedOcrVLM => Some(UNLIMITED_OCR_CHAT_TEMPLATE),
         crate::models::ModelType::MiniCPMV46VLM | crate::models::ModelType::MiniCPMOVLM => {
             Some(MINICPM_CHATML_TEMPLATE)
         }
@@ -5205,8 +5363,41 @@ TOOL
             .unwrap();
         assert!(out.starts_with("<think>"));
     }
+
+    /// `strftime_now` honours its format argument on the real render path
+    /// (it used to return `%d %b %Y` whatever the template asked for).
+    #[test]
+    fn strftime_now_renders_the_requested_format() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let render = |template: &str| {
+            ChatTemplateProcessor::with_template(template.to_string())
+                .apply(&messages, None)
+                .unwrap()
+        };
+
+        let iso = render(r#"{{ strftime_now("%Y-%m-%d") }}"#);
+        let b = iso.as_bytes();
+        assert!(
+            iso.len() == 10
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b.iter()
+                    .enumerate()
+                    .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()),
+            "expected YYYY-MM-DD, got {iso:?}"
+        );
+        // A malformed directive renders instead of failing the request.
+        assert_eq!(render(r#"{{ strftime_now("%J") }}"#), "%J");
+    }
 }
 
 #[cfg(test)]
 #[path = "chat_template_text_wrap_tests.rs"]
 mod text_wrap_tests;
+
+#[cfg(test)]
+#[path = "chat_template_thinking_alias_tests.rs"]
+mod thinking_alias_tests;

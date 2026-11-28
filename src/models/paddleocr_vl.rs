@@ -404,6 +404,11 @@ impl Attention {
                     0,
                 )
             }
+        } else if l > 1 {
+            // A mask-less multi-token forward is a single-row prefill whose
+            // causality MLX's causal mode supplies (`prefill_causal_mask`,
+            // #3072).
+            mlxcel_core::maskless_prefill_attention(&q, &k, &v, self.scale, 0)
         } else {
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -667,6 +672,21 @@ impl PaddleOcrTextModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_for_sequence(input_ids, input_embeddings, caches, mask, seq_id, None)
+    }
+
+    /// [`Self::forward_for_sequence`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
+    pub(crate) fn forward_rows_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -717,8 +737,27 @@ impl PaddleOcrTextModel {
         let mask = if mask.is_some() {
             mask
         } else if seq_len > 1 {
-            auto_mask = mlxcel_core::utils::create_causal_mask(seq_len, caches[0].live_len());
-            Some(auto_mask.as_ref().unwrap() as &MlxArray)
+            // A single row takes MLX's causal mode instead of the array
+            // where MLX fuses it (`prefill_causal_mask`, #3072); the attention
+            // layer routes a mask-less multi-token forward through
+            // `maskless_prefill_attention`, whose bottom-right alignment
+            // matches the `live_len` offset.
+            auto_mask = self.layers.first().and_then(|layer| {
+                let attn = &layer.attn;
+                let attention = mlxcel_core::utils::PrefillAttention::new(
+                    attn.num_heads as usize,
+                    attn.num_kv_heads as usize,
+                    attn.head_dim as usize,
+                );
+                mlxcel_core::utils::prefill_causal_mask(
+                    seq_len,
+                    caches[0].live_len(),
+                    batch,
+                    attention,
+                    mlxcel_core::array_dtype(&h),
+                )
+            });
+            auto_mask.as_deref()
         } else {
             // Decode width. The one query row sits at logical position
             // `live_len`, so every key column is permitted: the mask would be
@@ -733,7 +772,8 @@ impl PaddleOcrTextModel {
             h = layer.forward(&h, &mut caches[i], mask, &position_ids);
         }
 
-        h = self.norm.forward(&h);
+        let h = mlxcel_core::generate::select_row(h, row);
+        let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
     }
 
@@ -964,6 +1004,25 @@ impl mlxcel_core::generate::LanguageModel for PaddleOcrTextModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows_for_sequence(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            seq_id,
+            Some(last_pos),
+        ))
     }
 
     fn forward_batched_with_ids(

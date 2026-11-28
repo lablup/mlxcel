@@ -257,6 +257,219 @@ fn smart_nframes_policy_can_keep_all_frames_without_an_fps_target() {
     );
 }
 
+// ─── VideoFrameKnobs (#2399) ────────────────────────────────────────────────
+
+#[test]
+fn video_frame_knobs_default_keep_the_historical_policy() {
+    // `None`/`None` must be byte-identical to a plain `load_video_source`
+    // call, so an unflagged server behaves exactly as before #2399.
+    let knobs = VideoFrameKnobs::default();
+    assert_eq!(
+        knobs,
+        VideoFrameKnobs {
+            num_frames: None,
+            min_frames: None
+        }
+    );
+    assert_eq!(knobs.sampling_policy(), FrameSamplingPolicy::default());
+    assert_eq!(
+        knobs.apply_to(FrameSamplingPolicy::default()),
+        FrameSamplingPolicy::default()
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_raises_the_sampling_policy_floor() {
+    let knobs = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(12),
+    };
+    assert_eq!(knobs.sampling_policy().min_frames, 12);
+    // Everything else stays at the historical Gemma/Kimi default.
+    assert_eq!(
+        knobs.sampling_policy(),
+        FrameSamplingPolicy {
+            min_frames: 12,
+            ..FrameSamplingPolicy::default()
+        }
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_never_lowers_a_checkpoint_floor() {
+    // Qwen-VL derives its policy from `processor_config.json`; a knob below
+    // that checkpoint's own minimum must not shrink it, or a checkpoint that
+    // requires more frames would be handed fewer than it can encode.
+    let checkpoint = FrameSamplingPolicy {
+        min_frames: 8,
+        max_frames: 64,
+        frame_factor: 2,
+        reject_over_max: true,
+        keep_all_without_target_fps: false,
+    };
+    let lowered = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(4),
+    }
+    .apply_to(checkpoint);
+    assert_eq!(lowered, checkpoint);
+
+    let raised = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(16),
+    }
+    .apply_to(checkpoint);
+    assert_eq!(raised.min_frames, 16);
+    // The checkpoint's own bounds and flags survive the overlay.
+    assert_eq!(raised.max_frames, 64);
+    assert_eq!(raised.frame_factor, 2);
+    assert!(raised.reject_over_max);
+}
+
+#[test]
+fn video_frame_knobs_num_frames_rounds_to_the_frame_factor() {
+    // `--video-num-frames` is an exact count, but it still has to be a
+    // multiple of the frame factor or the patchifier's pooling breaks.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(7),
+        min_frames: None,
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(40, 30.0, None, knobs.num_frames, policy).unwrap(),
+        8
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_wins_over_the_fps_target() {
+    // Both knobs can be set at once: the exact count replaces fps sampling
+    // and the floor still applies to the resolution.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(16),
+        min_frames: Some(4),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(60.0), knobs.num_frames, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_min_frames_raises_the_fps_sampling_floor() {
+    // 300 frames at 30 fps is a 10 s clip, so 1 fps asks for 10 frames. The
+    // `--video-min-frames 16` floor raises that to 16 before the max-frames
+    // cap is applied, which is the whole point of the flag: a slow fps target
+    // on a short clip must not collapse to a handful of frames.
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, FrameSamplingPolicy::default())
+            .unwrap(),
+        10
+    );
+    let knobs = VideoFrameKnobs {
+        num_frames: None,
+        min_frames: Some(16),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(policy.min_frames, 16);
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_stays_exact_above_the_min_frames_floor() {
+    // `--video-num-frames` is an exact count: the floor shapes fps sampling
+    // only, so an explicit 8 with `--video-min-frames 16` decodes 8 rather
+    // than silently inflating the count the caller pinned.
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(8),
+        min_frames: Some(16),
+    };
+    let policy = knobs.sampling_policy();
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, None, knobs.num_frames, policy).unwrap(),
+        8
+    );
+    // Drop the exact count and the same clip resolves to the floor instead.
+    assert_eq!(
+        smart_nframes_with_policy(300, 30.0, Some(1.0), None, policy).unwrap(),
+        16
+    );
+}
+
+#[test]
+fn video_frame_knobs_num_frames_out_of_range_errors_before_decoding() {
+    // `--video-num-frames` is validated inside `smart_nframes_with_policy`,
+    // which every decode path calls before it touches ffmpeg. That is what
+    // lets `load_video_source_frames_fallback` report an out-of-range count as
+    // `VideoError::Extract` against the caller's canonical path (and the HTTP
+    // layer map it to a 400) instead of spending the decode first (#2399).
+    let case = |requested: usize| {
+        let knobs = VideoFrameKnobs {
+            num_frames: Some(requested),
+            min_frames: None,
+        };
+        smart_nframes_with_policy(300, 30.0, None, knobs.num_frames, knobs.sampling_policy())
+    };
+
+    // Zero rounds to zero, which is below the frame factor.
+    let err = case(0).expect_err("a zero frame count must be refused");
+    assert!(
+        matches!(err, VideoError::Extract { .. }),
+        "expected VideoError::Extract, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("out of range"),
+        "the message must name the range, got {err}"
+    );
+
+    // A count above the clip's own frame total is equally out of range, so a
+    // caller can never be handed a padded or duplicated sample. (301 would
+    // round half to even down to 300, which fits, as in the reference.)
+    let err = case(303).expect_err("an over-long frame count must be refused");
+    assert!(
+        matches!(err, VideoError::Extract { .. }),
+        "expected VideoError::Extract, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("out of range"),
+        "the message must name the range, got {err}"
+    );
+}
+
+#[test]
+fn video_frame_knobs_clamped_to_a_processor_cap_keeps_min_frames() {
+    // The Gemma 4 VLM processor takes no target count, so `process_videos`
+    // resamples whatever it is handed down to its own `video_num_frames`. A
+    // larger `--video-num-frames` therefore has to be clamped before decode,
+    // and the floor must survive the clamp so `--video-min-frames` still
+    // reaches the sampler (#2399).
+    let knobs = VideoFrameKnobs {
+        num_frames: Some(64),
+        min_frames: Some(8),
+    };
+    assert_eq!(
+        knobs.clamped_to_processor_cap(32),
+        VideoFrameKnobs {
+            num_frames: Some(32),
+            min_frames: Some(8)
+        }
+    );
+    // At or below the cap nothing changes, so a caller can detect a clamp by
+    // comparing `num_frames` before and after.
+    assert_eq!(knobs.clamped_to_processor_cap(64), knobs);
+    assert_eq!(knobs.clamped_to_processor_cap(128), knobs);
+    // An unflagged request stays unflagged: the clamp must not turn `None`
+    // into a sampled count the caller never asked for.
+    assert_eq!(
+        VideoFrameKnobs::default().clamped_to_processor_cap(32),
+        VideoFrameKnobs::default()
+    );
+}
+
 #[test]
 fn keep_all_policy_uses_a_consecutive_prefix_above_the_cap() {
     let total = 100;
@@ -289,6 +502,19 @@ fn smart_nframes_explicit_nframes_rounds_to_factor() {
     // Caller supplies an odd target — round to the nearest even.
     let n = smart_nframes(40, 30.0, None, Some(7)).unwrap();
     assert_eq!(n, 8);
+}
+
+#[test]
+fn smart_nframes_explicit_nframes_breaks_ties_to_even_like_python_round() {
+    // mlx-vlm `_round(n) = round(n / frame_factor) * frame_factor` with
+    // Python's half-to-even `round`: 5 / 2 = 2.5 -> 2, 9 / 2 = 4.5 -> 4.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(5)).unwrap(), 4);
+    assert_eq!(smart_nframes(40, 30.0, None, Some(9)).unwrap(), 8);
+    // Odd ties round up under both rules: 3 / 2 = 1.5 -> 2.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(3)).unwrap(), 4);
+    // A 5-frame clip asked for all 5 frames samples 4, as the reference does,
+    // instead of rounding to 6 and rejecting the request.
+    assert_eq!(smart_nframes(5, 30.0, None, Some(5)).unwrap(), 4);
 }
 
 #[test]
@@ -1371,12 +1597,13 @@ fn extract_frames_preserves_color_increment_per_frame() {
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
     // Compute the expected source-frame indices for the sampled frames.
-    // uniform_indices(50, 25) → linspace(0, 49, 25).round() = [0,2,4,...,48].
+    // uniform_indices(50, 25) → linspace(0, 49, 25).round() =
+    // [0, 2, ..., 24, 27, ..., 49]; numpy rounds the 24.5 at i = 12 to 24.
     let expected_indices: Vec<usize> = (0..frames.len())
         .map(|i| {
             let last = (TOTAL_FRAMES - 1) as f64;
             let step = last / (frames.len() as f64 - 1.0);
-            (i as f64 * step).round() as usize
+            (i as f64 * step).round_ties_even() as usize
         })
         .collect();
 
@@ -1401,6 +1628,119 @@ fn extract_frames_preserves_color_increment_per_frame() {
         assert!(
             (mean_b - expected_b).abs() <= TOLERANCE,
             "frame {frame_idx} (src_idx {src_idx}): B channel mean {mean_b:.1} != expected {expected_b:.1} (tolerance ±{TOLERANCE})"
+        );
+    }
+}
+
+/// The sampled loader reports the source index of every returned frame and
+/// the probed container frame rate, which is what the Qwen3-VL per-group video
+/// timestamps are computed from (#2402).
+#[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+fn sampled_loader_reports_source_indices_and_fps() {
+    if !video_capability_available("sampled_loader_reports_source_indices_and_fps") {
+        return;
+    }
+
+    const TOTAL_FRAMES: usize = 50;
+    const VIDEO_FPS: u32 = 10;
+    let video_path = std::env::temp_dir().join("mlxcel-test-sampled-indices.mp4");
+    let _ = std::fs::remove_file(&video_path);
+    if !synth_color_increment_video(&video_path, TOTAL_FRAMES, VIDEO_FPS, 64, 64) {
+        skip_or_fail_video_fixture(
+            "sampled_loader_reports_source_indices_and_fps",
+            "could not synthesize the color-increment video",
+        );
+        return;
+    }
+
+    let source = VideoSource::from_path(video_path.clone());
+    let sampled = load_video_source_sampled_with_policy(
+        &source,
+        Some(5.0),
+        None,
+        FrameSamplingPolicy::default(),
+        &VideoLimits::default(),
+    );
+    let _ = std::fs::remove_file(&video_path);
+    let sampled = sampled.expect("the sampled loader must decode the synthetic video");
+
+    assert!(!sampled.frames.is_empty());
+    assert_eq!(
+        sampled.frames.len(),
+        sampled.frame_indices.len(),
+        "every returned frame needs its source index"
+    );
+    assert!(
+        (sampled.source_fps - f64::from(VIDEO_FPS)).abs() < 0.01,
+        "source fps {} should be the container's {VIDEO_FPS}",
+        sampled.source_fps
+    );
+    assert!(
+        sampled
+            .frame_indices
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1]),
+        "indices must be in source order, got {:?}",
+        sampled.frame_indices
+    );
+    assert!(sampled.frame_indices.iter().all(|&idx| idx < TOTAL_FRAMES));
+    // The probed frame count travels with the sample, so the achieved rate
+    // (#3234) is the frames kept over the clip's 5 seconds.
+    assert_eq!(sampled.total_frames, TOTAL_FRAMES);
+    let sampled_fps = sampled.sampled_fps().expect("a decoded clip has a rate");
+    let expected_fps = sampled.frames.len() as f64 / TOTAL_FRAMES as f64 * sampled.source_fps;
+    assert!(
+        (sampled_fps - expected_fps).abs() < 1e-9,
+        "sampled fps {sampled_fps} != {expected_fps}"
+    );
+    // Frame i of the color-increment clip has R = 5 * i (clamped), so the
+    // reported index must agree with the decoded pixels, not just the plan.
+    for (frame, &idx) in sampled.frames.iter().zip(&sampled.frame_indices) {
+        let (mean_r, _, _) = rgb_channel_means(frame);
+        let expected_r = (idx * 5).min(255) as f64;
+        assert!(
+            (mean_r - expected_r).abs() <= 15.0,
+            "index {idx}: decoded R {mean_r:.1} != expected {expected_r:.1}"
+        );
+    }
+}
+
+fn sampled_clip(sampled_frames: usize, total_frames: usize, source_fps: f64) -> SampledVideo {
+    SampledVideo {
+        frames: (0..sampled_frames)
+            .map(|_| DynamicImage::new_rgb8(2, 2))
+            .collect(),
+        frame_indices: (0..sampled_frames).collect(),
+        source_fps,
+        total_frames,
+    }
+}
+
+/// `sampled_fps` is transformers' `VideoMetadata.sampled_fps`:
+/// `len(frames_indices) / total_num_frames * fps`. Eight frames kept from a
+/// 120-frame clip at 30 fps (4 s) are 2 frames per second.
+#[test]
+fn sampled_fps_matches_transformers_definition() {
+    assert_eq!(sampled_clip(8, 120, 30.0).sampled_fps().unwrap(), 2.0);
+    // It is the achieved rate, not the requested one: 16 frames fixed by a
+    // `num_frames` request over the same clip are 4 fps.
+    assert_eq!(sampled_clip(16, 120, 30.0).sampled_fps().unwrap(), 4.0);
+
+    let no_frames = sampled_clip(0, 120, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_frames.to_string().contains("no sampled frames"),
+        "got: {no_frames}"
+    );
+    let no_source_frames = sampled_clip(8, 0, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_source_frames.to_string().contains("zero source frames"),
+        "got: {no_source_frames}"
+    );
+    for source_fps in [0.0, -30.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            sampled_clip(8, 120, source_fps).sampled_fps().is_err(),
+            "source fps {source_fps} must not give a sampled fps"
         );
     }
 }
@@ -1646,6 +1986,29 @@ fn subsample_evenly_identity_when_under_cap() {
     }
 }
 
+/// numpy's `np.linspace(0, T - 1, n).round()` rounds half to even, so a tie
+/// samples the even neighbour: `np.linspace(0, 5, 3).round()` is `[0, 2, 5]`
+/// and `np.linspace(0, 49, 25).round()` puts 24.5 on 24.
+#[test]
+fn frame_indices_round_ties_to_even_like_numpy() {
+    assert_eq!(uniform_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(evenly_spaced_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(uniform_indices(50, 25)[12], 24);
+    assert_eq!(evenly_spaced_indices(50, 25)[12], 24);
+    // Non-ties are unchanged.
+    assert_eq!(uniform_indices(12, 4), vec![0, 4, 7, 11]);
+}
+
+/// Inkling's anchor formula is `round(i * (padded - 2) / (pairs - 1))` with
+/// Python's `round` (half to even): 12 frames in 5 pairs give anchors at
+/// 0, 2.5, 5, 7.5, 10, which round to 0, 2, 5, 8, 10.
+#[test]
+fn pair_adjacent_frame_anchors_round_ties_to_even() {
+    let plan = pair_adjacent_frame_indices(12, 5).unwrap();
+    assert_eq!(plan.anchors, vec![0, 2, 5, 8, 10]);
+    assert_eq!(plan.pairs, vec![[0, 1], [2, 3], [5, 6], [8, 9], [10, 11]]);
+}
+
 #[test]
 fn subsample_evenly_indices_match_formula() {
     // round(i * (sampled - 1) / (max - 1)) for sampled = 37, max = 16.
@@ -1691,4 +2054,69 @@ fn frames_to_png_round_trips_every_frame_in_order() {
         let decoded = image::load_from_memory(bytes).expect("frame decodes back");
         assert_eq!(decoded.to_rgb8().get_pixel(0, 0)[0], index as u8);
     }
+}
+
+// ─── load_video_source_frames_at (caller-side sampler, Clef) ─────────────────
+
+#[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+fn source_frames_at_decodes_the_sampler_picks_and_rejects_bad_ones() {
+    let name = "source_frames_at_decodes_the_sampler_picks_and_rejects_bad_ones";
+    if !video_capability_available(name) {
+        return;
+    }
+    let Some(path) = make_test_video(64, 48, 5, 2.0) else {
+        skip_or_fail_video_fixture(name, "could not create the 64x48 test video");
+        return;
+    };
+    let source = VideoSource::from_path(path.clone());
+    let limits = VideoLimits::default();
+
+    // The sampler sees the probed total and its picks come back in order.
+    let seen = std::cell::Cell::new(0usize);
+    let sampled = load_video_source_frames_at(&source, &limits, None, |total| {
+        seen.set(total);
+        Ok(vec![0, total / 2, total - 1])
+    })
+    .expect("valid picks decode");
+    assert!(seen.get() >= 8, "probed total {}", seen.get());
+    assert_eq!(sampled.frames.len(), 3);
+    assert_eq!(
+        sampled.frame_indices,
+        vec![0, seen.get() / 2, seen.get() - 1]
+    );
+
+    // Empty, out-of-order, and past-the-end picks are refused before decoding.
+    for bad in [vec![], vec![3, 1], vec![usize::MAX]] {
+        let result = load_video_source_frames_at(&source, &limits, None, |_| Ok(bad.clone()))
+            .map(|video| video.frames.len());
+        assert!(
+            matches!(result, Err(VideoError::Extract { .. })),
+            "{bad:?} -> {result:?}"
+        );
+    }
+
+    // A sampler error is returned unchanged and never reaches ffmpeg.
+    let result = load_video_source_frames_at(&source, &limits, None, |_| {
+        Err(VideoError::Extract {
+            path: std::path::PathBuf::from("sampler"),
+            message: "no".to_string(),
+        })
+    })
+    .map(|video| video.frames.len());
+    assert!(matches!(result, Err(VideoError::Extract { ref message, .. }) if message == "no"));
+
+    // The decoded-bytes budget is charged at the source resolution.
+    let result = load_video_source_frames_at(&source, &limits, Some(64 * 48 * 4 * 2), |_| {
+        Ok(vec![0, 1, 2])
+    })
+    .map(|video| video.frames.len());
+    assert!(result.is_err(), "3 frames exceed a 2-frame budget");
+    let result = load_video_source_frames_at(&source, &limits, Some(64 * 48 * 4 * 3), |_| {
+        Ok(vec![0, 1, 2])
+    })
+    .map(|video| video.frames.len());
+    assert!(result.is_ok(), "3 frames fit a 3-frame budget: {result:?}");
+
+    let _ = std::fs::remove_file(&path);
 }

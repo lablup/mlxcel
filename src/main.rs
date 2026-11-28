@@ -200,17 +200,20 @@ enum Commands {
 
     /// Detect objects or document regions in an image.
     ///
-    /// Loads an RT-DETRv2, PP-DocLayoutV3, or RF-DETR checkpoint and prints bounding
-    /// boxes (`l, t, r, b`), class labels, and confidences in original-image
-    /// pixel coordinates. PP-DocLayoutV3 detections also carry the model's
-    /// global reading order. RF-DETR Seg Small can also write one instance-mask
-    /// PNG per detection with `--masks-dir`. Detection models output boxes and
-    /// masks rather than a token stream, so this is separate from `generate`.
+    /// Loads an RT-DETRv2, PP-DocLayoutV3, YOLO11, or RF-DETR checkpoint and
+    /// prints bounding boxes (`l, t, r, b`), class labels, and confidences in
+    /// original-image pixel coordinates. PP-DocLayoutV3 detections also carry
+    /// the model's global reading order. RF-DETR Seg Small can also write one
+    /// instance-mask PNG per detection with `--masks-dir`. YOLO11 accepts
+    /// `--size` (longest-side resize) and `--iou` (NMS IoU). Detection models
+    /// output boxes and masks rather than a token stream, so this is separate
+    /// from `generate`.
     ///
     /// Examples:
     ///
     ///     mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
     ///     mlxcel detect -m models/rt-detr-v2 -i img.jpg --threshold 0.5 --format json
+    ///     mlxcel detect -m axiom-of-choice/OmniParser-v2-icon-detect -i ui.png --size 1280 --format json
     ///     mlxcel detect -m models/rf-detr-seg-small -i img.jpg --masks-dir masks --format json
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
@@ -276,6 +279,21 @@ enum Commands {
     ///     mlxcel rerank -m Qwen/Qwen3-VL-Reranker-2B -q "a chart of quarterly revenue" --image chart.png --image cat.jpg
     #[command(verbatim_doc_comment)]
     Rerank(commands::RerankArgs),
+
+    /// Answer typed questions with a decision checkpoint.
+    ///
+    /// Loads a decision model the way `--decision-model` does and answers
+    /// named `choice`, `score`, `bool` and `multi_label` questions about a
+    /// state (text) and optional media with calibrated probabilities. Prints
+    /// the `POST /v1/decisions` response JSON. Questions are checked before
+    /// the model loads. See docs/decisions.md.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel decide -m <decision checkpoint> --state "My invoice was charged twice" --questions '{"topic": {"type": "choice", "instructions": "Route the ticket", "criteria": ["billing", "technical", "sales"]}}'
+    ///     mlxcel decide -m <decision checkpoint> --image screenshot.png --questions-file questions.json
+    #[command(verbatim_doc_comment)]
+    Decide(commands::DecideArgs),
 
     /// Tag and redact entities with a token-classification checkpoint.
     ///
@@ -357,6 +375,22 @@ enum Commands {
     #[cfg(feature = "surgery")]
     #[command(name = "split-mtp", verbatim_doc_comment)]
     SplitMtp(commands::SplitMtpArgs),
+
+    /// Build a Qwen3.8-Flash-Next model view whose n-gram table is read from
+    /// disk instead of kept resident: hard links for the non-table shards plus
+    /// a `ple-store.json` manifest and, by default, a `ple-q4.rows` file.
+    ///
+    ///     mlxcel prepare-external-ple -m models/qwen3.8-flash -o models/qwen3.8-flash-external-ple
+    ///     MLXCEL_PLE_IO=direct mlxcel generate -m models/qwen3.8-flash-external-ple -p "Hi"
+    #[command(name = "prepare-external-ple", verbatim_doc_comment)]
+    PrepareExternalPle(commands::PrepareExternalPleArgs),
+
+    /// Write a contiguous copy of a Qwen3.8-Flash-Next checkpoint's routed
+    /// experts for SSD expert streaming, so one read fetches a whole expert.
+    ///
+    ///     mlxcel prepare-expert-stream -m models/qwen3.8-flash
+    #[command(name = "prepare-expert-stream", verbatim_doc_comment)]
+    PrepareExpertStream(commands::PrepareExpertStreamArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -646,6 +680,9 @@ pub(crate) struct ModelOptions {
     /// ordinary smaller checkpoint that shares the target's tokenizer
     /// (`--draft-kind full-model`, auto-detected for any other model directory),
     /// which drafts from its own KV caches on the engine's token-only loop.
+    /// A target checkpoint that keeps its own MTP head (Inkling, or a
+    /// Qwen3.8-Flash-Next `qwen4_exp` conversion with `mtp.*` tensors) is
+    /// passed again here, as the same directory as `-m`.
     /// `--prompt-lookup` needs no checkpoint.
     #[arg(long, value_name = "PATH")]
     pub(crate) draft_model: Option<PathBuf>,
@@ -700,6 +737,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) layout_detections: Option<PathBuf>,
 
+    /// Write the IndicOCR page result as JSON.
+    ///
+    /// The document is `{image, width, height, blocks: [{order, label, type,
+    /// bbox_xyxy, conf, text}]}`, where `order` is zero-based reading order and
+    /// `bbox_xyxy` is in page pixels. Markdown still goes to stdout.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) output_json: Option<PathBuf>,
+
+    /// Table transcription format for IndicOCR (`html` or `markdown`).
+    #[arg(long, value_name = "FORMAT", default_value = "html")]
+    pub(crate) table_format: String,
+
     /// Audio file path for audio-language models (e.g. Gemma4 with audio).
     /// May be combined with `--video` on `gemma4_unified` checkpoints, which
     /// merge video frames and audio into one prompt; other families reject
@@ -738,6 +787,37 @@ pub(crate) struct GenerationOptions {
         default_value_t = mlxcel::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES
     )]
     pub(crate) video_max_frames: usize,
+
+    /// Exact number of frames to sample from a `--video` clip, overriding
+    /// `--fps` sampling (issue #2399).
+    ///
+    /// Read by the ordered-image fallback and by the native-video decode, so
+    /// the frames handed to the model are the requested count whenever the
+    /// checkpoint can take them. Two limits still apply: on the fallback the
+    /// count is capped by `--video-max-frames`, and the Gemma 4 VLM processor
+    /// samples at most its own 32-frame cap regardless (a larger request is
+    /// clamped and logged with a warning). Inkling pairs adjacent frames, so it
+    /// ignores this flag. Also reads `MLXCEL_VIDEO_NUM_FRAMES`.
+    #[arg(
+        long = "video-num-frames",
+        env = "MLXCEL_VIDEO_NUM_FRAMES",
+        value_name = "N"
+    )]
+    pub(crate) video_num_frames: Option<usize>,
+
+    /// Lower bound on the number of frames sampled from a `--video` clip
+    /// (issue #2399).
+    ///
+    /// Applied before the `--video-max-frames` cap on the fallback and before
+    /// each native-video family's own sampling. `--video-num-frames` wins when
+    /// both are set, and Inkling ignores both. Also reads
+    /// `MLXCEL_VIDEO_MIN_FRAMES`.
+    #[arg(
+        long = "video-min-frames",
+        env = "MLXCEL_VIDEO_MIN_FRAMES",
+        value_name = "N"
+    )]
+    pub(crate) video_min_frames: Option<usize>,
 
     /// Write synthesized speech for the generated answer to this WAV path
     /// (mono PCM16). Qwen3-Omni: 24 kHz, the talker + code2wav speech stack
@@ -782,6 +862,7 @@ pub(crate) struct GenerationOptions {
         long,
         default_value = "-1",
         value_parser = mlxcel::cli::max_tokens::parse_max_tokens,
+        allow_negative_numbers = true,
         value_name = "N"
     )]
     pub(crate) max_tokens: usize,
@@ -803,6 +884,23 @@ pub(crate) struct GenerationOptions {
     /// shown either way.
     #[arg(long, default_value_t = false)]
     pub(crate) show_reasoning: bool,
+
+    /// Reasoning effort handed to the chat template, for checkpoints whose
+    /// template reads one (Inkling 2).
+    ///
+    /// Inkling 2 takes a named level (`none`, `minimal`, `low`, `medium`,
+    /// `high`, `xhigh`, `max`) or a number in [0.0, 0.99]; without the flag the
+    /// template default (0.9) applies. A template that does not read a reasoning
+    /// level ignores the flag and renders the same prompt. The template decides
+    /// which values are valid and its own message is shown for a bad one. The
+    /// template part has no effect with `--no-chat-template`.
+    ///
+    /// Raon-1 mini applies the level in its weights (reasoning-effort steering):
+    /// `none`, `low`, `medium`, `high` (the default), `xhigh` or `max`; `none`
+    /// also turns thinking off in the prompt, and any other value is refused.
+    /// The steering applies with `--no-chat-template` too.
+    #[arg(long, value_name = "LEVEL", value_parser = parse_reasoning_effort)]
+    pub(crate) reasoning_effort: Option<String>,
 
     /// Print the recommended quantization mode for this model on the current hardware.
     ///
@@ -955,7 +1053,7 @@ pub(crate) struct InspectArgs {
 /// Arguments for the `mlxcel detect` subcommand.
 #[derive(Args, Debug)]
 pub(crate) struct DetectArgs {
-    /// Path to an RT-DETRv2, PP-DocLayoutV3, or RF-DETR model directory.
+    /// Path to an RT-DETRv2, PP-DocLayoutV3, YOLO11, or RF-DETR model directory.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) model: std::path::PathBuf,
 
@@ -963,10 +1061,20 @@ pub(crate) struct DetectArgs {
     #[arg(short, long, value_name = "PATH")]
     pub(crate) image: std::path::PathBuf,
 
-    /// Confidence threshold in [0, 1]. Defaults to 0.5 for RF-DETR and 0.3
-    /// for RT-DETRv2 and PP-DocLayoutV3.
+    /// Confidence threshold in [0, 1]. Unset uses the detector's own default
+    /// (RT-DETRv2 0.3, PP-DocLayoutV3 0.3, RF-DETR 0.5, YOLO11 0.05).
     #[arg(short, long, value_name = "FLOAT")]
     pub(crate) threshold: Option<f32>,
+
+    /// Longest side in pixels before inference. Unset keeps the native
+    /// resolution. YOLO11 only; detectors with a fixed input size ignore it
+    /// with a warning.
+    #[arg(long, value_name = "PIXELS")]
+    pub(crate) size: Option<usize>,
+
+    /// NMS IoU threshold in [0, 1] (default 0.1). YOLO11 only.
+    #[arg(long, value_name = "FLOAT")]
+    pub(crate) iou: Option<f32>,
 
     /// Save one binary instance-mask PNG per detection (RF-DETR segmentation
     /// checkpoints only). JSON output includes each saved mask path.
@@ -1235,6 +1343,12 @@ fn parse_image_soft_tokens(s: &str) -> Result<usize, String> {
     mlxcel::vision::processors::gemma4::validate_image_soft_tokens(v)
 }
 
+/// Normalize `--reasoning-effort` (trimmed, lowercase) at parse time so an
+/// empty value is rejected before any model is loaded.
+fn parse_reasoning_effort(s: &str) -> Result<String, String> {
+    mlxcel::server::in_process::reasoning_effort::parse_reasoning_effort(s)
+}
+
 /// Block-diffusion generation options.
 ///
 /// These flags only affect diffusion models (e.g. DiffusionGemma); ordinary
@@ -1432,6 +1546,13 @@ Embeddings and Reranking:
   flags for both endpoints.
   Full request schemas, examples, and supported families:
     https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
+
+Typed Decisions:
+  --decision-model <checkpoint> serves POST /v1/decisions beside the chat model
+  in -m: named choice, score, bool and multi_label questions answered with
+  calibrated probabilities. A load failure is a startup error.
+  Request schema and validation rules:
+    https://github.com/lablup/mlxcel/blob/main/docs/decisions.md
 
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
@@ -1870,6 +1991,19 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "LLAMA_ARG_RERANKER_MODEL", value_name = "PATH_OR_REPO_ID")]
     reranker_model: Option<String>,
 
+    /// Decision checkpoint to serve on /v1/decisions next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread and answers typed questions
+    /// (`choice`, `score`, `bool`, `multi_label`) with calibrated
+    /// probabilities; `-m` keeps serving chat. A decision model is never
+    /// served through `-m`. A load failure, including a checkpoint that is not
+    /// a decision model, is a startup error. Queue depth and timeout use the
+    /// `--embedding-*` worker flags. Also reads `MLXCEL_DECISION_MODEL`. See
+    /// docs/decisions.md.
+    #[arg(long, env = "MLXCEL_DECISION_MODEL", value_name = "PATH_OR_REPO_ID")]
+    decision_model: Option<String>,
+
     /// Query/document pairs per rerank forward pass (0 = the reranker kind's default)
     ///
     /// `/v1/rerank` scores documents in micro-batches of this size. The
@@ -2091,6 +2225,42 @@ pub(crate) struct ServeArgs {
         value_name = "SECS"
     )]
     responses_store_ttl_secs: u64,
+
+    /// Maximum number of concurrently active `background: true` Responses
+    /// API jobs. Each active job holds one generation thread. `0` disables
+    /// background mode. Also reads `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS`.
+    #[arg(
+        long = "responses-background-max-jobs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        value_name = "N"
+    )]
+    responses_background_max_jobs: usize,
+
+    /// Seconds a finished `background: true` response created with
+    /// `store: false` stays readable by polling. It is never readable through
+    /// `previous_response_id`. Must be at least 1. Also reads
+    /// `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS`.
+    #[arg(
+        long = "responses-background-ephemeral-ttl-secs",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        value_parser = clap::value_parser!(u64).range(1..),
+        value_name = "SECS"
+    )]
+    responses_background_ephemeral_ttl_secs: u64,
+
+    /// Byte budget of the replayable event log of one `background: true`
+    /// Responses API response created with `stream: true`. The oldest events
+    /// are dropped when it is full. `0` refuses `stream: true` on background
+    /// responses. Also reads `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES`.
+    #[arg(
+        long = "responses-background-event-log-bytes",
+        env = "MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES",
+        default_value_t = mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
+        value_name = "BYTES"
+    )]
+    responses_background_event_log_bytes: usize,
 
     /// Maximum number of conversation transcripts persisted
     /// for the OpenAI Responses API `conversation` field. `0` disables
@@ -2707,7 +2877,8 @@ pub(crate) struct ServeArgs {
     ///
     /// When set to N > 1, model weights are sharded across N in-process ranks.
     /// Current multi-rank runtime support is limited to dense Llama, Qwen2/2.5,
-    /// Qwen3, Gemma 3 text, ERNIE 4.5, and Hunyuan v1 Dense models.
+    /// Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, and
+    /// Hunyuan v1 Dense models.
     #[arg(long = "tp-size", default_value_t = 1, value_name = "N")]
     tp_size: usize,
 
@@ -2782,6 +2953,36 @@ pub(crate) struct ServeArgs {
         value_name = "FLOAT"
     )]
     video_fps: f64,
+
+    /// Exact number of frames to sample from a video, overriding `--video-fps`
+    /// sampling (issue #2399).
+    ///
+    /// Read by the no-native-video-path fallback and by the native-video
+    /// decode, so the frames handed to the model are the requested count
+    /// whenever the checkpoint can take them. Two limits still apply: on the
+    /// fallback the count is capped by `--video-max-frames`, and the Gemma 4 VLM
+    /// processor samples at most its own 32-frame cap regardless (a larger
+    /// request is clamped and logged with a warning). Inkling pairs adjacent
+    /// frames, so it ignores this flag. Also reads `MLXCEL_VIDEO_NUM_FRAMES`.
+    #[arg(
+        long = "video-num-frames",
+        env = "MLXCEL_VIDEO_NUM_FRAMES",
+        value_name = "N"
+    )]
+    video_num_frames: Option<usize>,
+
+    /// Lower bound on the number of frames sampled from a video (issue #2399).
+    ///
+    /// Applied before the frame cap on the fallback and before each
+    /// native-video family's own sampling. `--video-num-frames` wins when both
+    /// are set, and Inkling ignores both. Also reads
+    /// `MLXCEL_VIDEO_MIN_FRAMES`.
+    #[arg(
+        long = "video-min-frames",
+        env = "MLXCEL_VIDEO_MIN_FRAMES",
+        value_name = "N"
+    )]
+    video_min_frames: Option<usize>,
 
     /// Maximum encoded bytes accepted for each image input.
     ///
@@ -3166,10 +3367,10 @@ pub(crate) struct ServeArgs {
     /// a long system prompt but diverge afterwards never reuse KV. With the
     /// non-consuming paged adoption a partial match shares the prefix blocks
     /// without copying or destroying the stored entry, so APC is on by
-    /// default. When enabled on a hybrid SSM/attention model (jamba, mamba,
-    /// mamba2, nemotron_h, gated_delta, kimi_linear, qwen3_next), APC is
-    /// automatically disabled at runtime since SSM state cannot be
-    /// decomposed into hashable blocks.
+    /// default. When enabled on a recurrent or hybrid SSM / linear-attention
+    /// model (Mamba, Jamba, Nemotron-H, Qwen3-Next, Qwen 3.5, Granite 4.0-H,
+    /// Falcon-H1, PLaMo 2, ...), APC is automatically disabled at runtime
+    /// since recurrent state cannot be decomposed into hashable blocks.
     ///
     /// Also reads `APC_ENABLED`.
     #[arg(
@@ -3349,6 +3550,7 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Serve(args) => args.model.as_deref(),
         Commands::Embed(args) => Some(args.model.as_path()),
         Commands::Rerank(args) => Some(args.model.as_path()),
+        Commands::Decide(args) => Some(args.model.as_path()),
         Commands::Tag(args) => Some(args.model.as_path()),
         Commands::Extract(args) => Some(args.model.as_path()),
         Commands::Tune(args) => args.model.as_deref(),
@@ -3356,7 +3558,12 @@ fn cli_model_dir(command: &Commands) -> Option<&std::path::Path> {
         Commands::Detect(args) => Some(args.model.as_path()),
         Commands::Predict(args) => Some(args.model.as_path()),
         Commands::GenerateImage(args) => Some(args.model.as_path()),
-        Commands::List(_) | Commands::Arch(_) | Commands::Download(_) | Commands::Rm(_) => None,
+        Commands::List(_)
+        | Commands::Arch(_)
+        | Commands::Download(_)
+        | Commands::Rm(_)
+        | Commands::PrepareExternalPle(_)
+        | Commands::PrepareExpertStream(_) => None,
         // Gated exactly like the variant itself and its dispatch arm below;
         // without the gate this arm does not compile in feature sets that
         // exclude `surgery`.
@@ -3446,6 +3653,26 @@ fn main() -> anyhow::Result<()> {
 
     init_cli_tracing(&cli.command);
 
+    // Fix `--mla-latent-quant` (or `MLXCEL_MLA_LATENT_QUANT`) for the process
+    // before the command resolves a KV cache mode, so the banner, the
+    // estimators and the caches read one value (issue #3179). The commands
+    // that take the flag validate it, and so do `tune` and `predict`, which
+    // take no flag but load or size a model from `-m`: a bad environment
+    // value is a startup error there too. The remaining commands never build
+    // a KV cache; should one reach the option anyway, the lazy read reports a
+    // bad value on stderr.
+    let mla_latent_cli = match &cli.command {
+        Commands::Run(args) => Some(args.generation.turbo.mla_latent_quant),
+        Commands::Generate(args) => Some(args.generation.turbo.mla_latent_quant),
+        Commands::Serve(args) => Some(args.turbo.mla_latent_quant),
+        Commands::Inspect(args) => Some(args.turbo.mla_latent_quant),
+        Commands::Tune(_) | Commands::Predict(_) => Some(None),
+        _ => None,
+    };
+    if let Some(cli_value) = mla_latent_cli {
+        mlxcel::cli::mla_latent_option::init_mla_latent_quant(cli_value)?;
+    }
+
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.
     mlxcel_core::ensure_persistent_ptx_cache();
@@ -3515,6 +3742,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GenerateImage(args) => commands::run_generate_image(args),
         Commands::Embed(args) => commands::run_embed(args),
         Commands::Rerank(args) => commands::run_rerank(args),
+        Commands::Decide(args) => commands::run_decide(args),
         Commands::Tag(args) => commands::run_tag(args),
         Commands::Extract(args) => commands::run_extract(args),
         Commands::Rm(args) => commands::run_remove(
@@ -3526,6 +3754,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Tune(args) => commands::run_tune(args),
         #[cfg(feature = "surgery")]
         Commands::SplitMtp(args) => commands::run_split_mtp(args),
+        Commands::PrepareExternalPle(args) => commands::run_prepare_external_ple(args),
+        Commands::PrepareExpertStream(args) => commands::run_prepare_expert_stream(args),
     }
 }
 
@@ -3549,6 +3779,7 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM",
     "ERNIE",
     "Hunyuan",
+    "Tencent",
     "Bailing",
     "Arcee",
     "Klear",
@@ -3564,7 +3795,9 @@ const FAMILY_ORDER: &[&str] = &[
     "LFM2",
     "Inkling",
     "PLaMo",
+    "Aleph Alpha",
     "RWKV",
+    "Z1T",
     "BitNet",
     "Speech-to-text",
     "Text-to-speech",
@@ -3587,6 +3820,7 @@ const FAMILY_ORDER: &[&str] = &[
     "MiniMax VLM",
     "Muse VLM",
     "Step VLM",
+    "Xiaomi",
     "Other VLM",
 ];
 

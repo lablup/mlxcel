@@ -252,6 +252,7 @@ fn ocr_region(
         model,
         args,
         &prompt_tokens,
+        args.generation.max_tokens,
         sampling_config,
         embeddings.as_ref(),
         kv_cache_mode,

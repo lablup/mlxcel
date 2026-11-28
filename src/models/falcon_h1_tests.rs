@@ -204,6 +204,13 @@ fn falcon_h1_unquantized_config_uses_quantization_defaults() {
 }
 
 fn batching_model() -> super::falcon_h1::FalconH1Model {
+    batching_model_with(|_| {})
+}
+
+/// [`batching_model`] with `edit` applied to its weights before loading.
+fn batching_model_with(
+    edit: impl FnOnce(&mut mlxcel_core::weights::WeightMap),
+) -> super::falcon_h1::FalconH1Model {
     use crate::models::embedding_test_support::Rng;
     use mlxcel_core::{dtype, weights::WeightMap};
     let config = serde_json::from_value(
@@ -259,6 +266,7 @@ fn batching_model() -> super::falcon_h1::FalconH1Model {
             mlxcel_core::ones(&[2], dtype::FLOAT32),
         );
     }
+    edit(&mut weights);
     super::falcon_h1::FalconH1Model::from_weights(config, weights).unwrap()
 }
 
@@ -321,4 +329,29 @@ fn falcon_h1_fresh_and_mixed_recurrent_states_match_solo_rows() {
             }
         }
     }
+}
+
+// The prefill's last-row projection (#3070): the hook is taken and returns the
+// full forward's row while the recurrent state still advances over every row.
+crate::models::last_row_logits_harness::last_row_case!(falcon_h1_last_row_logits, batching_model);
+
+/// Issue #3057: the SSD scan computes `A` from a float32 copy of `A_log`, so
+/// an f16 `A_log` (values up to 19.5, past the 11.09 where f16 `exp`
+/// overflows) gives finite prefill logits, bit-identical to a float32 copy.
+#[test]
+fn falcon_h1_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{
+        assert_f16_a_log_prefill_matches_its_f32_copy, zero_step_dt_bias,
+    };
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let build = |a_log: &mlxcel_core::MlxArray| {
+        batching_model_with(|weights| {
+            for layer in 0..2 {
+                let mamba = format!("model.layers.{layer}.mamba");
+                weights.insert(format!("{mamba}.A_log"), mlxcel_core::copy(a_log));
+                weights.insert(format!("{mamba}.dt_bias"), zero_step_dt_bias(2));
+            }
+        })
+    };
+    assert_f16_a_log_prefill_matches_its_f32_copy(build, &[2], "falcon_h1");
 }

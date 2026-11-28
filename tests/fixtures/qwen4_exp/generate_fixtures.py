@@ -25,10 +25,12 @@ import importlib.metadata
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 
 from mlx_vlm.models.cache import ArraysCache
@@ -581,11 +583,79 @@ def vlm_case() -> dict:
     }
 
 
+# The native MTP head: six fused positions on an empty cache, then one cached
+# step continuing from the last position's pre-mixer streams.
+MTP_TOKENS = [5, 9, 21, 33, 40, 12]
+MTP_NEXT_TOKEN = 7
+
+
+def mtp_case() -> dict:
+    """`Qwen4ExpMTPDraftModel`: `fuse_inputs`, one multi-token `_forward_hidden`
+    on an empty cache and one cached single-token step, with the target
+    embedding and LM head the drafter borrows (hashed under `target.*`).
+
+    The recorded `streams` are the layer output before the drafter's own
+    mixer (upstream `pre_hc_hidden`), the recurrent input of the next step;
+    `logits` go through the mixer and the target LM head.
+    """
+    from mlx_vlm.speculative.drafters.qwen4_exp_mtp.config import Qwen4ExpMTPConfig
+    from mlx_vlm.speculative.drafters.qwen4_exp_mtp.qwen4_exp_mtp import (
+        Qwen4ExpMTPDraftModel,
+    )
+
+    config = text_config()
+    drafter = Qwen4ExpMTPDraftModel(Qwen4ExpMTPConfig(text_config=config))
+    drafter.eval()
+    specs = build_weights(drafter, "")
+    embed = nn.Embedding(config.vocab_size, config.hidden_size)
+    lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+    specs += build_weights(embed, "target.embed_tokens.")
+    specs += build_weights(lm_head, "target.lm_head.")
+
+    width = config.hc_count * config.hidden_size
+    hidden_spec = {"name": "mtp.hidden", "shape": [1, len(MTP_TOKENS), width], "scale": 1.0}
+    tokens = mx.array([MTP_TOKENS], dtype=mx.int32)
+    hidden = hashed_input(hidden_spec["name"], hidden_spec["shape"], hidden_spec["scale"])
+    token_embed = embed(tokens)
+    fused = drafter.fuse_inputs(token_embed, hidden)
+    cache = drafter.make_cache()
+    mixed, streams = drafter._forward_hidden(token_embed, hidden, tokens, cache)
+    logits = lm_head(mixed)
+
+    drafter._next_position = len(MTP_TOKENS)
+    next_token = mx.array([[MTP_NEXT_TOKEN]], dtype=mx.int32)
+    next_mixed, next_streams = drafter._forward_hidden(
+        embed(next_token), streams[:, -1:], next_token, cache
+    )
+    next_logits = lm_head(next_mixed)
+    return {
+        "config": dict(TINY_CONFIG),
+        "tensors": specs,
+        "tokens": MTP_TOKENS,
+        "hidden": hidden_spec,
+        "fused": as_list(fused[0]),
+        "streams": as_list(streams[0]),
+        "logits": as_list(logits[0]),
+        "next_token": MTP_NEXT_TOKEN,
+        "next_streams": as_list(next_streams[0]),
+        "next_logits": as_list(next_logits[0]),
+    }
+
+
 def provenance() -> dict:
     import mlx_vlm
 
-    dist = importlib.metadata.distribution("mlx-vlm")
-    source = Path(mlx_vlm.__file__).resolve().parent
+    # `__path__` rather than `__file__`: a namespace shim that points at a
+    # checkout keeps its own `__init__.py` elsewhere.
+    source = Path(next(iter(mlx_vlm.__path__))).resolve()
+    try:
+        version = importlib.metadata.distribution("mlx-vlm").version
+    except importlib.metadata.PackageNotFoundError:
+        # A checkout on the path without an installed distribution: read
+        # the version module the package ships.
+        version = getattr(
+            importlib.import_module("mlx_vlm.version"), "__version__", None
+        )
     try:
         commit = subprocess.run(
             ["git", "-C", str(source), "rev-parse", "HEAD"],
@@ -597,33 +667,43 @@ def provenance() -> dict:
         commit = None
     return {
         "device": "cpu",
-        "mlx_vlm": dist.version,
+        "mlx_vlm": version,
         "mlx_vlm_commit": commit,
         "mlx": importlib.metadata.version("mlx"),
     }
 
 
-def main() -> None:
+CASES = {
+    "norms": norms_case,
+    "gated_delta": gated_delta_case,
+    "hyper_connection": hyper_case,
+    "ple": ple_case,
+    "qsa": qsa_case,
+    "model": model_case,
+    "vlm": vlm_case,
+    "mtp": mtp_case,
+}
+
+
+def main(argv: list[str]) -> None:
+    """Regenerate every fixture, or only the cases named on the command line
+    (`generate_fixtures.py mtp`), so one new case can be recorded against the
+    current mlx-vlm checkout without rewriting the others."""
     # Float32 matmuls on recent Apple GPUs are not float32-accurate (measured
     # 7e-4 against float64 on an M5 Pro, 1e-7 on the CPU), so the reference
     # runs on the CPU.
     mx.set_default_device(mx.cpu)
     header = provenance()
-    cases = {
-        "norms": norms_case,
-        "gated_delta": gated_delta_case,
-        "hyper_connection": hyper_case,
-        "ple": ple_case,
-        "qsa": qsa_case,
-        "model": model_case,
-        "vlm": vlm_case,
-    }
-    for name, build in cases.items():
-        payload = {"provenance": header, "tiny_config": TINY_CONFIG, **build()}
+    selected = argv or list(CASES)
+    unknown = [name for name in selected if name not in CASES]
+    if unknown:
+        raise SystemExit(f"unknown fixture case(s) {unknown}; known: {sorted(CASES)}")
+    for name in selected:
+        payload = {"provenance": header, "tiny_config": TINY_CONFIG, **CASES[name]()}
         path = FIXTURE_DIR / f"{name}.json"
         path.write_text(json.dumps(payload, separators=(",", ":")) + "\n")
         print(f"wrote {path.name} ({path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

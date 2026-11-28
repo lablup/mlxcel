@@ -106,3 +106,89 @@ impl AudioConfig {
         self.attention_chunk_size + self.max_past_horizon() + self.attention_context_right
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// Deserialize an `AudioConfig` from `overrides`, leaving every field that
+    /// is absent at its serde default.
+    fn config(overrides: Value) -> AudioConfig {
+        serde_json::from_value(overrides).expect("audio config should deserialize")
+    }
+
+    #[test]
+    fn empty_config_yields_the_documented_default_geometry() {
+        let cfg = config(json!({}));
+
+        // The raw defaults the derived values are computed from.
+        assert_eq!(cfg.hidden_size, 1024);
+        assert_eq!(cfg.num_attention_heads, 8);
+        assert_eq!(cfg.attention_chunk_size, 12);
+        assert_eq!(cfg.attention_context_left, 13);
+        assert_eq!(cfg.attention_context_right, 0);
+
+        assert_eq!(cfg.head_dim(), 128);
+        assert_eq!(cfg.max_past_horizon(), 12);
+        // chunk (12) + past horizon (13 - 1) + right context (0).
+        assert_eq!(cfg.context_size(), 24);
+    }
+
+    #[test]
+    fn head_dim_is_hidden_size_over_attention_heads() {
+        for (hidden_size, heads, expected) in [
+            (1024, 8, 128),
+            (512, 4, 128),
+            (768, 12, 64),
+            (256, 1, 256),
+            (64, 64, 1),
+        ] {
+            let cfg = config(json!({
+                "hidden_size": hidden_size,
+                "num_attention_heads": heads,
+            }));
+            assert_eq!(
+                cfg.head_dim(),
+                expected,
+                "hidden_size={hidden_size} heads={heads}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_past_horizon_is_context_left_minus_one_saturating_at_zero() {
+        for (left, expected) in [(0, 0), (1, 0), (2, 1), (13, 12), (128, 127)] {
+            let cfg = config(json!({ "attention_context_left": left }));
+            assert_eq!(cfg.max_past_horizon(), expected, "left={left}");
+        }
+    }
+
+    #[test]
+    fn context_size_sums_chunk_past_horizon_and_right_context() {
+        // (chunk, left, right, expected context_size)
+        for (chunk, left, right, expected) in [
+            (12, 13, 0, 24),
+            // `attention_context_left == 0` saturates the past horizon to 0
+            // instead of underflowing, leaving only chunk + right context.
+            (12, 0, 0, 12),
+            // One left position is the query itself, so it adds no past horizon.
+            (12, 1, 0, 12),
+            (12, 2, 0, 13),
+            (12, 13, 5, 29),
+            (12, 0, 5, 17),
+            (1, 1, 0, 1),
+        ] {
+            let cfg = config(json!({
+                "attention_chunk_size": chunk,
+                "attention_context_left": left,
+                "attention_context_right": right,
+            }));
+            assert_eq!(
+                cfg.context_size(),
+                expected,
+                "chunk={chunk} left={left} right={right}"
+            );
+        }
+    }
+}

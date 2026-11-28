@@ -325,6 +325,13 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         // worker when one is loaded; a structured 501 otherwise.
         reg("/v1/rerank", Method::POST, post(routes::create_rerank)),
         reg("/v1/reranking", Method::POST, post(routes::create_rerank)),
+        // Typed decisions (mlx-vlm's decision API), served by the decision
+        // worker when `--decision-model` loaded one; a structured 501 otherwise.
+        reg(
+            "/v1/decisions",
+            Method::POST,
+            post(routes::create_decisions),
+        ),
         // Responses API (OpenAI /v1/responses surface).
         reg("/v1/responses", Method::POST, post(routes::create_response)),
         reg(
@@ -435,6 +442,7 @@ pub(crate) fn route_inventory(config: &crate::server::ServerConfig) -> Vec<Route
         ),
         reg("/rerank", Method::POST, post(routes::create_rerank)),
         reg("/reranking", Method::POST, post(routes::create_rerank)),
+        reg("/decisions", Method::POST, post(routes::create_decisions)),
         reg("/responses", Method::POST, post(routes::create_response)),
         reg(
             "/responses/{id}",
@@ -664,7 +672,7 @@ fn single_webui_error(
                 field_errors: None,
                 operation_id: None,
             },
-            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+            request_id: format!("req_{}", crate::server::clock::unix_micros_now()),
         }),
     )
         .into_response()
@@ -686,7 +694,7 @@ fn single_invalid_field(field: &'static str, message: &'static str) -> Response 
                 }]),
                 operation_id: None,
             },
-            request_id: format!("req_{}", chrono::Utc::now().timestamp_micros()),
+            request_id: format!("req_{}", crate::server::clock::unix_micros_now()),
         }),
     )
         .into_response()
@@ -1048,7 +1056,7 @@ mod tests {
         assert!(
             actual["emitted_at"]
                 .as_str()
-                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+                .is_some_and(crate::server::clock::is_rfc3339)
         );
         let mut expected: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/webui/examples/event.1.json"

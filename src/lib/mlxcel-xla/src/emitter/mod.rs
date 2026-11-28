@@ -47,6 +47,7 @@
 
 mod builder;
 mod config;
+mod falcon_h1_config;
 mod gemma3n;
 mod gemma3n_audio_attention;
 mod gemma3n_audio_emit;
@@ -60,19 +61,35 @@ mod gemma3n_math;
 mod gemma3n_qmv;
 mod gemma3n_schema;
 mod gemma3n_weights;
+mod jamba_config;
+mod mamba1_config;
 mod model;
 mod moe;
 mod molmo2_config;
 mod molmo2_vision;
 mod molmo_vision;
 mod molmo_vision_config;
+mod molmo_vision_f16;
 mod molmo_vision_ops;
+mod nemotron_h_config;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
+mod plamo2_config;
+pub(crate) mod production_probe_ops;
+mod quant_scale;
 mod qwen2_5_vl;
 mod qwen2_vl;
 mod qwen3_vl;
+mod qwen3_vl_ops;
+mod recurrent_checkpoint;
+mod recurrent_config;
 mod rope;
+mod ssm;
+mod ssm_mamba1;
+mod ssm_plamo2;
+mod ssm_scan;
+#[cfg(test)]
+mod ssm_tests;
 mod vision;
 mod vision_config;
 mod youtu_vl;
@@ -80,6 +97,18 @@ mod youtu_vl_plan;
 
 #[cfg(test)]
 mod context_tests;
+#[cfg(test)]
+mod falcon_h1_tests;
+#[cfg(test)]
+mod jamba_tests;
+#[cfg(test)]
+mod nemotron_h_tests;
+#[cfg(test)]
+mod plamo2_tests;
+#[cfg(test)]
+mod recurrent_ragged_tests;
+#[cfg(test)]
+mod recurrent_tests;
 
 #[allow(unused_imports)]
 pub(crate) use config::{
@@ -143,6 +172,8 @@ pub(crate) use phi4_audio::{
     emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
 };
+#[allow(unused_imports)]
+pub(crate) use quant_scale::{QuantScaleDtype, resolve_quant_scale_dtype};
 #[cfg(feature = "diagnostics")]
 pub(crate) use qwen2_5_vl::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 #[allow(unused_imports)]
@@ -165,7 +196,16 @@ pub(crate) use qwen3_vl::{
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
-pub(crate) use config::{MoeConfig, SharedExpertConfig};
+pub(crate) use config::{ExpertAct, MoeConfig, MoeScoring, SharedExpertConfig};
+// SSM mixer types (issue #3337), consumed by the probe runner and #3338.
+#[allow(unused_imports)]
+pub(crate) use config::{BcdtNorm, SSM_DEFAULT_CHUNK_SIZE, SsmConfig, SsmKind};
+// Per-layer mixer schedule and the threaded recurrent-state ABI (issue #3338),
+// consumed by the IREE runtime (#3339) and the SSM model check.
+#[allow(unused_imports)]
+pub(crate) use config::{MixerKind, StateElem, StateTensorSpec};
+#[allow(unused_imports)]
+pub(crate) use ssm_scan::SsmPrefillForm;
 // `resolve_precision` and the precision-taking `*_with` emit variants are consumed
 // by the IREE execution path; the f32-default `emit_*` wrappers by the byte-exact
 // regression tests. Which set is live depends on the build cfg (`iree` vs `test`),
@@ -173,16 +213,24 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // superseded uniform-B Stage-1 graph) is re-exported for the validation harness.
 #[allow(unused_imports)]
 pub(crate) use builder::{
-    Precision, check_packed_supported, precision_env_override, quant_in_graph, resolve_precision,
+    Precision, ProjectionLayout, check_packed_supported, default_precision, precision_env_override,
+    quant_in_graph, resolve_pinned_precision_with_override, resolve_precision,
     resolve_precision_checked, target_flags_with_rocm_target,
 };
+/// Test support only (issue #3060): toggle the single-sequence decode scalar ABI
+/// per thread so the device gate can compile and run both the scalar and the
+/// legacy buffer-view variants.
+#[cfg(feature = "test-support")]
+pub(crate) use model::set_decode_scalar_abi_for_thread;
 #[allow(unused_imports)]
 pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
-    PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
-    emit_decode_ragged_with, emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
-    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    PrefillEmbeddingsInputMetadata, ProbeMode, emit_decode, emit_decode_batched,
+    emit_decode_buffer_abi, emit_decode_ragged, emit_decode_ragged_with,
+    emit_decode_ragged_with_native, emit_decode_with, emit_decode_with_native, emit_moe_probe,
+    emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
+    emit_prefill_embeddings_deepstack_diagnostics_with, emit_prefill_embeddings_deepstack_with,
+    emit_prefill_embeddings_with, emit_prefill_with, emit_ssm_probe, emit_ssm_probe_with,
     mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
 };
@@ -200,8 +248,20 @@ pub(crate) use molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 pub(crate) use molmo2_vision::emit_molmo2_vision;
 #[cfg(feature = "diagnostics")]
 pub(crate) use molmo2_vision::emit_molmo2_vision_diagnostics;
+// Fixed contraction precision of each vision graph, shared with the runtime's
+// operator numeric contract (issue #3211).
+#[allow(unused_imports)]
+pub(crate) use molmo_vision::MOLMO_VISION_PRECISION;
+#[allow(unused_imports)]
+pub(crate) use molmo2_vision::MOLMO2_VISION_PRECISION;
+#[allow(unused_imports)]
+pub(crate) use qwen3_vl::qwen3_vl_vision_precision;
+#[allow(unused_imports)]
+pub(crate) use vision::LLAVA_VISION_PRECISION;
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
+#[allow(unused_imports)]
+pub(crate) use youtu_vl::YOUTU_VL_VISION_PRECISION;
 // The only consumer is `IreeVisionDiagnosticProjector` in `vision_runtime`, which
 // is gated on `diagnostics` alone. The `test` arm is kept deliberately: it is the
 // only thing that compiles `emit_vision_impl(config, true)` in a build that does
@@ -319,7 +379,7 @@ mod tests {
         let config = phi4_like();
         let prefill = emit_prefill(&config, false);
         let decode = emit_decode(&config, false);
-        let ragged = emit_decode_ragged(&config, 4, false);
+        let ragged = emit_decode_ragged(&config, 4, false).unwrap();
         assert!(prefill.contains("tensor<i32> loc(\"adapter_mode\")"));
         assert!(decode.contains("tensor<i32> loc(\"adapter_mode\")"));
         assert!(ragged.contains("tensor<4xi32> loc(\"adapter_mode\")"));
@@ -350,7 +410,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Phi4MM requires per-row ragged decode")]
     fn phi4mm_rejects_uniform_batched_decode() {
-        let _ = emit_decode_batched(&phi4_like(), 4, false);
+        let _ = emit_decode_batched(&phi4_like(), 4, false).unwrap();
     }
 
     fn mrope_qwen(layout: MropeLayout) -> Config {
@@ -432,6 +492,8 @@ mod tests {
                 intermediate: 12,
                 norm_topk_prob: true,
                 routed_scaling_factor: 1.0,
+                scoring: MoeScoring::Softmax,
+                expert_act: ExpertAct::SwiGlu,
                 shared: if shared {
                     Some(SharedExpertConfig {
                         intermediate: 10,
@@ -441,6 +503,7 @@ mod tests {
                     None
                 },
                 first_k_dense: 0,
+                layer_mask: None,
                 weight_prefix: "mlp",
             }),
             // sliding_pattern (2), use_rope_layers, weight_scheme, and the #498
@@ -490,21 +553,11 @@ mod tests {
         assert_eq!(c.eps, 1e-6);
     }
 
-    /// An unsupported `model_type` and an unsupported `rope_scaling` are each
-    /// rejected with a clear message rather than mis-emitted. (Untied embeddings and
-    /// the Gemma / Qwen3 / SmolLM3 / OLMo2/3 families are now accepted; see their
+    /// An unsupported `rope_scaling` is rejected with a clear message rather
+    /// than mis-emitted. (Mamba1 and the other supported families have their
     /// own parse tests.)
     #[test]
     fn from_json_rejects_unsupported_configs() {
-        let mamba = r#"{"model_type":"mamba","tie_word_embeddings":true,"hidden_size":8,
-            "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
-            "num_key_value_heads":1,"rms_norm_eps":1e-6,"rope_theta":1e4,"vocab_size":10}"#;
-        assert!(
-            Config::from_json_str(mamba)
-                .unwrap_err()
-                .contains("model_type")
-        );
-
         // yarn RoPE (e.g. OLMo3 at full size) is not supported yet.
         let yarn = r#"{"model_type":"qwen2","tie_word_embeddings":true,"hidden_size":8,
             "num_attention_heads":2,"intermediate_size":16,"num_hidden_layers":2,
@@ -613,13 +666,13 @@ mod tests {
                 "prefill",
             ),
             (
-                super::model::emit_decode_batched(&with, 4, false),
-                super::model::emit_decode_batched(&without, 4, false),
+                super::model::emit_decode_batched(&with, 4, false).unwrap(),
+                super::model::emit_decode_batched(&without, 4, false).unwrap(),
                 "batched",
             ),
             (
-                emit_decode_ragged(&with, 4, false),
-                emit_decode_ragged(&without, 4, false),
+                emit_decode_ragged(&with, 4, false).unwrap(),
+                emit_decode_ragged(&without, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -672,6 +725,457 @@ mod tests {
         assert!(!mlir.contains("['bv']"));
     }
 
+    /// Issue #3043: the single-token decode graph holds its KV cache in two
+    /// module-level mutable globals instead of the argument list, so IREE
+    /// updates the cache in place and stops copying the full cache into a fresh
+    /// output tensor every step. The graph must therefore take and return no
+    /// cache at all, and it must export the seeding entry the shim probes for.
+    /// The ragged and prefill graphs keep the full-cache ABI.
+    ///
+    /// Pinned to `Precision::F32` so the f32 global type asserted here does not
+    /// depend on `MLXCEL_XLA_PRECISION`; the narrowed (f16/bf16) global is
+    /// covered by `single_decode_cache_global_uses_the_contraction_precision`.
+    #[test]
+    fn single_decode_threads_kv_through_module_globals() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode_with(&c, true, Precision::F32);
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}xf32>",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @kcache : {cache_ty}")),
+            "decode must declare the K global: {cache_ty}"
+        );
+        assert!(
+            mlir.contains(&format!("util.global private mutable @vcache : {cache_ty}")),
+            "decode must declare the V global: {cache_ty}"
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                !mlir.contains(&format!("loc(\"{symbol}\")")),
+                "the cache must not stay an argument: {symbol}"
+            );
+            assert!(
+                mlir.contains(&format!("util.global.load @{symbol} : {cache_ty}")),
+                "the step must read {symbol} from its global"
+            );
+        }
+        assert!(
+            mlir.contains(&format!("func.func public @kv_import(%k: {cache_ty}")),
+            "the shim seeds the globals through @kv_import"
+        );
+        // One output (the sampled token), not the two full caches.
+        let main_signature = mlir
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("decode main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            main_signature.contains(") -> tensor<i32>"),
+            "decode returns the token only: {main_signature}"
+        );
+
+        // The other graph kinds keep the full-cache ABI: the ragged decode takes
+        // the caches as arguments, and prefill still returns them.
+        let ragged = emit_decode_ragged(&c, 4, false).unwrap();
+        assert!(
+            ragged.contains("loc(\"kcache\")"),
+            "ragged decode keeps the full-cache argument ABI"
+        );
+        let prefill = emit_prefill(&c, false);
+        let prefill_signature = prefill
+            .split("func.func public @main(")
+            .nth(1)
+            .expect("prefill main function")
+            .split("{\n")
+            .next()
+            .expect("signature text");
+        assert!(
+            prefill_signature.contains(&cache_ty),
+            "prefill still returns the full caches: {prefill_signature}"
+        );
+    }
+
+    /// Issue #2886: the single-sequence decode stores its KV globals in the
+    /// contraction precision, so the f16/bf16 dot_generals read the cache
+    /// without a per-step whole-slab `stablehlo.convert`. The import entry keeps
+    /// the f32 prefill signature and narrows once per request.
+    #[test]
+    fn single_decode_cache_global_uses_the_contraction_precision() {
+        let c = Config::llama_3_2_1b();
+        let f32_graph = emit_decode_with(&c, true, Precision::F32);
+        let f16_graph = emit_decode_with(&c, true, Precision::F16);
+        let bf16_graph = emit_decode_with(&c, true, Precision::Bf16);
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+        let bf16_ty = format!("tensor<{shape}xbf16>");
+        assert!(
+            f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")),
+            "f32 keeps the byte-identical f32 cache"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}"))
+                && f16_graph.contains(&format!("util.global private mutable @vcache : {f16_ty}")),
+            "f16 stores both caches narrowed"
+        );
+        assert!(
+            bf16_graph.contains(&format!("util.global private mutable @kcache : {bf16_ty}"))
+                && bf16_graph.contains(&format!("util.global private mutable @vcache : {bf16_ty}")),
+            "bf16 stores both caches in bf16"
+        );
+        // The import entry keeps the f32 prefill signature on every precision,
+        // and converts exactly once per request when the global is narrowed.
+        for (graph, narrow_ty) in [
+            (&f32_graph, None),
+            (&f16_graph, Some(&f16_ty)),
+            (&bf16_graph, Some(&bf16_ty)),
+        ] {
+            assert!(
+                graph.contains(&format!(
+                    "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+                )),
+                "the import entry must keep the f32 prefill signature"
+            );
+            match narrow_ty {
+                Some(ty) => {
+                    for (arg, dst, global) in
+                        [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")]
+                    {
+                        assert!(
+                            graph.contains(&format!(
+                                "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {ty}"
+                            )),
+                            "the import must narrow %{arg} f32 -> {ty}"
+                        );
+                        assert!(
+                            graph.contains(&format!("util.global.store {dst}, @{global} : {ty}")),
+                            "the import must store {dst} into the narrowed @{global}"
+                        );
+                    }
+                }
+                None => {
+                    assert!(
+                        !graph.contains("stablehlo.convert %k : "),
+                        "f32 must import without a conversion"
+                    );
+                    for (arg, global) in [("%k", "kcache"), ("%v", "vcache")] {
+                        assert!(
+                            graph.contains(&format!(
+                                "util.global.store {arg}, @{global} : {f32_ty}"
+                            )),
+                            "{arg} must be stored into the f32 @{global}"
+                        );
+                    }
+                }
+            }
+        }
+        // The narrow graph no longer converts the whole cache slab into the
+        // score and context contractions; only the new `[1, 1, nkv, d]` row is
+        // narrowed, at the update site.
+        let slab_f32 = format!(
+            "tensor<{}x{}x{}xf32>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let slab_f16 = format!(
+            "tensor<{}x{}x{}xf16>",
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let row_f32 = format!("tensor<1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !f16_graph.contains(&format!("({slab_f32}) -> {slab_f16}")),
+            "the whole-slab cache conversion must be gone"
+        );
+        assert!(
+            f16_graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the narrow graph converts only the new cache row"
+        );
+    }
+
+    /// Issue #2886: the graph that ships on `hip`/`cuda` is the native
+    /// packed-projection form, so the narrowed cache has to hold there too. The
+    /// native block replaces the projection dispatches, not the cache, and
+    /// `kv_import` keeps its f32 signature.
+    #[test]
+    fn native_decode_keeps_the_narrowed_cache_and_the_f32_import() {
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let native = Some(("#mlxcel_qmv_target = alias", "  source-block\n"));
+        let shape = format!(
+            "{}x{}x{}x{}",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("tensor<{shape}xf32>");
+        let f16_ty = format!("tensor<{shape}xf16>");
+
+        let f16_graph = emit_decode_with_native(&c, true, Precision::F16, native);
+        assert!(
+            f16_graph.contains("flow.dispatch @custom_qmv::@qmv4_kernel["),
+            "the native projection dispatch is the graph under test"
+        );
+        assert!(
+            f16_graph.contains(&format!("util.global private mutable @kcache : {f16_ty}")),
+            "the native decode stores the cache in the contraction precision"
+        );
+        for (arg, dst, global) in [("k", "%k_narrow", "kcache"), ("v", "%v_narrow", "vcache")] {
+            assert!(
+                f16_graph.contains(&format!(
+                    "{dst} = stablehlo.convert %{arg} : ({f32_ty}) -> {f16_ty}"
+                )),
+                "the native import must narrow %{arg} once per request"
+            );
+            assert!(
+                f16_graph.contains(&format!("util.global.store {dst}, @{global} : {f16_ty}")),
+                "the native import stores the narrowed {global}"
+            );
+        }
+
+        // The f32 native graph is unchanged: f32 globals, no import conversion.
+        let f32_graph = emit_decode_with_native(&c, true, Precision::F32, native);
+        assert!(f32_graph.contains(&format!("util.global private mutable @kcache : {f32_ty}")));
+        assert!(!f32_graph.contains("stablehlo.convert %k : "));
+        assert!(f32_graph.contains(&format!("util.global.store %k, @kcache : {f32_ty}")));
+    }
+
+    /// Issue #2886 guards the other graph kinds: the ragged decode takes the
+    /// full f32 cache through the ABI, because the batch engine's slot buffers
+    /// and the prefill result are f32. The narrowing must not leak into it even
+    /// when the contractions are f16, and its per-row update stays f32.
+    #[test]
+    fn ragged_decode_keeps_the_f32_cache_abi_under_f16() {
+        let c = Config::llama_3_2_1b();
+        let bsz = 4;
+        let graph = emit_decode_ragged_with(&c, bsz, false, Precision::F16).unwrap();
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x{}xf32>",
+            bsz,
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        for symbol in ["kcache", "vcache"] {
+            assert!(
+                graph.contains(&format!(": {cache_ty} loc(\"{symbol}\")")),
+                "ragged {symbol} keeps the f32 ABI under f16"
+            );
+        }
+        let row_f32 = format!("tensor<1x1x1x{}x{}xf32>", c.cache_heads(), c.cache_dim());
+        let row_f16 = format!("tensor<1x1x1x{}x{}xf16>", c.cache_heads(), c.cache_dim());
+        assert!(
+            !graph.contains(&format!("({row_f32}) -> {row_f16}")),
+            "the ragged cache write must not narrow the row"
+        );
+    }
+
+    /// Issue #2886: the MLA single-sequence decode shares the now-narrowed cache
+    /// global, so its write site must narrow the new row too. Without this the
+    /// `dynamic_update_slice` mixes an f16 operand with an f32 update and the
+    /// graph does not compile under an explicit f16/bf16 precision override.
+    #[test]
+    fn mla_single_decode_narrows_the_cache_row() {
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let c = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let width = c.cache_dim();
+        let cache_ty = format!(
+            "tensor<{}x{}x{}x{}x",
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim()
+        );
+        let f32_ty = format!("{cache_ty}f32>");
+        let f16_ty = format!("{cache_ty}f16>");
+        let g = emit_decode_with(&c, false, Precision::F16);
+        let row_f32 = format!("tensor<1x1x1x{width}xf32>");
+        let row_f16 = format!("tensor<1x1x1x{width}xf16>");
+        assert!(
+            g.contains(&format!("({row_f32}) -> {row_f16}")),
+            "MLA single decode must narrow the new cache row under f16"
+        );
+        assert!(
+            g.contains(&format!(
+                "func.func public @kv_import(%k: {f32_ty}, %v: {f32_ty})"
+            )),
+            "the MLA import keeps the f32 prefill signature"
+        );
+        assert!(
+            g.contains(&format!(
+                "%k_narrow = stablehlo.convert %k : ({f32_ty}) -> {f16_ty}"
+            )),
+            "the MLA import narrows the f32 prefill cache once per request"
+        );
+        let g_f32 = emit_decode_with(&c, false, Precision::F32);
+        assert!(
+            g_f32.contains(&format!(
+                "util.global private mutable @kcache : tensor<{}x{}x{}x{}xf32>",
+                c.n_layers,
+                c.context_capacity,
+                c.cache_heads(),
+                c.cache_dim()
+            )),
+            "f32 MLA keeps the f32 cache"
+        );
+        assert!(
+            !g_f32.contains(&format!("({row_f32}) -> {row_f16}")),
+            "f32 MLA emits no row conversion"
+        );
+    }
+
+    /// Issue #3364: the single-sequence engine uploads `kv_b_proj` transposed
+    /// (`[kv_lora_rank, n_q * (nope + v)]`, issue #2859). The latent expansion
+    /// must split that layout on its own axes; reshaping it as the
+    /// checkpoint's `[n_q, nope + v, kv_lora_rank]` scrambled every head and
+    /// made the production Youtu-VL CLI repeat one token.
+    #[test]
+    fn mla_latent_expansion_follows_the_projection_layout() {
+        // Distinct rank (12), heads (4) and head width (8 + 6) so each
+        // reshape target names exactly one layout.
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":12,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":6,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let base = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let checkpoint = "(tensor<56x12xf32>) -> tensor<4x14x12xf32>";
+        let transposed = "(tensor<12x56xf32>) -> tensor<12x4x14xf32>";
+        let mut inout = base.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        for graph in [
+            emit_decode_with(&inout, false, Precision::F32),
+            emit_prefill_with(&inout, false, Precision::F32),
+        ] {
+            assert!(
+                graph.contains(transposed),
+                "InOut must expand kv_b on its transposed axes"
+            );
+            assert!(
+                !graph.contains(checkpoint),
+                "InOut must not reshape kv_b as the checkpoint layout"
+            );
+        }
+        let mut outin = base;
+        outin.projection_layout = ProjectionLayout::OutIn;
+        let graph = emit_decode_ragged(&outin, 2, false).unwrap();
+        assert!(
+            graph.contains(checkpoint),
+            "OutIn keeps the checkpoint split"
+        );
+        assert!(!graph.contains(transposed));
+    }
+
+    fn main_signature<'a>(mlir: &'a str, graph: &str) -> &'a str {
+        mlir.split("func.func public @main(")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{graph} main function"))
+            .split("{\n")
+            .next()
+            .unwrap_or_else(|| panic!("{graph} signature text"))
+    }
+
+    /// Issue #3060: the single-sequence decode takes token, position and
+    /// cache_len as ABI-level `i32` arguments instead of rank-0 `tensor<i32>`
+    /// buffer views, so IREE stops materializing a host-visible staging resource
+    /// to bring them to the host. The prologue rebuilds the tensor operands, and
+    /// the module exports the capability marker the shim probes. Every other
+    /// graph keeps its current signature, and M-RoPE keeps its tensor position.
+    #[test]
+    fn single_decode_takes_its_scalars_as_abi_i32_arguments() {
+        let c = Config::llama_3_2_1b();
+        let mlir = emit_decode(&c, true);
+        let sig = main_signature(&mlir, "decode");
+        for (arg, loc) in [
+            ("token", "token"),
+            ("pos", "pos"),
+            ("cache_len", "cache_len"),
+        ] {
+            assert!(
+                sig.contains(&format!(": i32 loc(\"{loc}\")")),
+                "decode must pass {arg} as a bare i32: {sig}"
+            );
+            assert!(
+                !sig.contains(&format!("tensor<i32> loc(\"{loc}\")")),
+                "{loc} must not stay a rank-0 tensor argument: {sig}"
+            );
+        }
+        // The body still consumes rank-0 tensors: the prologue rebuilds one per
+        // ABI scalar, so the op sequence after it is unchanged.
+        let from_elements = mlir.matches("= tensor.from_elements %arg").count();
+        assert_eq!(
+            from_elements, 3,
+            "each ABI scalar must be rebuilt with tensor.from_elements"
+        );
+        assert!(
+            mlir.contains("func.func public @scalar_inputs()"),
+            "the shim probes this marker to choose the scalar push path"
+        );
+
+        // M-RoPE carries a tensor<3xi32> position, so that decode path keeps the
+        // whole buffer-argument ABI and does not export the marker.
+        let mrope = emit_decode(&mrope_qwen(MropeLayout::Interleaved), true);
+        let mrope_sig = main_signature(&mrope, "mrope decode");
+        assert!(mrope_sig.contains("tensor<i32> loc(\"token\")"));
+        assert!(mrope_sig.contains("tensor<3xi32> loc(\"pos\")"));
+        assert!(mrope_sig.contains("tensor<i32> loc(\"cache_len\")"));
+        assert!(!mrope.contains("@scalar_inputs"));
+
+        // Ragged / lockstep batch decode and prefill keep their signatures.
+        let ragged = emit_decode_ragged(&c, 4, false).unwrap();
+        let ragged_sig = main_signature(&ragged, "ragged decode");
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(ragged_sig.contains("tensor<4xi32> loc(\"cache_len\")"));
+        assert!(!ragged.contains("@scalar_inputs"));
+
+        let batched = emit_decode_batched(&c, 4, false).unwrap();
+        let batched_sig = main_signature(&batched, "batched decode");
+        assert!(batched_sig.contains("tensor<4xi32> loc(\"token\")"));
+        assert!(!batched.contains("@scalar_inputs"));
+
+        let prefill = emit_prefill(&c, false);
+        let prefill_sig = main_signature(&prefill, "prefill");
+        assert!(prefill_sig.contains("tensor<") && prefill_sig.contains("loc(\"tokens\")"));
+        assert!(prefill_sig.contains("loc(\"positions\")"));
+        assert!(!prefill.contains("@scalar_inputs"));
+    }
+
     /// The shared attention core (issue #494) keeps a family's attention / MLP
     /// deltas reaching every graph kind from one authoring site. Gemma2's GeGLU
     /// and its attention / final soft-caps are the only source of `stablehlo.tanh`
@@ -687,7 +1191,7 @@ mod tests {
         for (c, want_tanh) in [(&gemma, true), (&llama, false)] {
             let kinds = [
                 ("decode", emit_decode(c, false)),
-                ("ragged", emit_decode_ragged(c, 4, false)),
+                ("ragged", emit_decode_ragged(c, 4, false).unwrap()),
                 ("prefill", emit_prefill(c, false)),
             ];
             for (name, g) in kinds {
@@ -725,13 +1229,13 @@ mod tests {
                 "prefill",
             ),
             (
-                super::model::emit_decode_batched(&untied, 4, false),
-                super::model::emit_decode_batched(&tied, 4, false),
+                super::model::emit_decode_batched(&untied, 4, false).unwrap(),
+                super::model::emit_decode_batched(&tied, 4, false).unwrap(),
                 "batched",
             ),
             (
-                emit_decode_ragged(&untied, 4, false),
-                emit_decode_ragged(&tied, 4, false),
+                emit_decode_ragged(&untied, 4, false).unwrap(),
+                emit_decode_ragged(&tied, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -847,8 +1351,8 @@ mod tests {
                 "prefill",
             ),
             (
-                emit_decode_ragged(&with, 4, false),
-                emit_decode_ragged(&without, 4, false),
+                emit_decode_ragged(&with, 4, false).unwrap(),
+                emit_decode_ragged(&without, 4, false).unwrap(),
                 "ragged",
             ),
         ];
@@ -984,13 +1488,14 @@ mod tests {
             .expect("write token prefill graph");
         std::fs::write(
             dir.join("prefill_embeddings_logits.mlir"),
-            emit_prefill_embeddings(&cfg, false),
+            emit_prefill_embeddings(&cfg, false).unwrap(),
         )
         .expect("write embeddings prefill graph");
         if cfg.deepstack.is_some() {
             std::fs::write(
                 dir.join("prefill_embeddings_deepstack_logits.mlir"),
-                emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32),
+                emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                    .unwrap(),
             )
             .expect("write DeepStack embeddings prefill graph");
             std::fs::write(
@@ -998,7 +1503,8 @@ mod tests {
                 emit_prefill_embeddings_deepstack_diagnostics_with(
                     &cfg,
                     super::builder::Precision::F32,
-                ),
+                )
+                .unwrap(),
             )
             .expect("write DeepStack post-hook diagnostics graph");
         }
@@ -1009,8 +1515,8 @@ mod tests {
         let cfg = gemma2_like(None);
         let lp = cfg.context_capacity;
         let token = emit_prefill(&cfg, false);
-        let embeddings = emit_prefill_embeddings(&cfg, false);
-        let sampled_embeddings = emit_prefill_embeddings(&cfg, true);
+        let embeddings = emit_prefill_embeddings(&cfg, false).unwrap();
+        let sampled_embeddings = emit_prefill_embeddings(&cfg, true).unwrap();
 
         assert!(token.starts_with("module @prefill {"));
         assert!(embeddings.starts_with("module @prefill_embeddings {"));
@@ -1063,7 +1569,7 @@ mod tests {
     #[test]
     fn prefill_embeddings_preserves_tied_and_untied_head_weights() {
         let tied = qwen_like(false);
-        let tied_mlir = emit_prefill_embeddings(&tied, false);
+        let tied_mlir = emit_prefill_embeddings(&tied, false).unwrap();
         assert!(tied_mlir.contains("loc(\"params['embed']\")"));
         assert!(!tied_mlir.contains("params['lm_head']"));
         let tied_tail = tied_mlir
@@ -1074,7 +1580,7 @@ mod tests {
 
         let mut untied = tied;
         untied.tie_word_embeddings = false;
-        let untied_mlir = emit_prefill_embeddings(&untied, false);
+        let untied_mlir = emit_prefill_embeddings(&untied, false).unwrap();
         assert!(untied_mlir.contains("loc(\"params['embed']\")"));
         assert!(untied_mlir.contains("loc(\"params['lm_head']\")"));
         let untied_tail = untied_mlir
@@ -1088,7 +1594,7 @@ mod tests {
     fn deepstack_prefill_is_distinct_sparse_and_leaves_ordinary_graph_byte_exact() {
         let mut cfg = qwen_like(false);
         cfg.n_layers = 4;
-        let ordinary = emit_prefill_embeddings(&cfg, false);
+        let ordinary = emit_prefill_embeddings(&cfg, false).unwrap();
         let token = emit_prefill(&cfg, false);
         let decode = emit_decode(&cfg, false);
         cfg.deepstack = Some(DeepStackConfig {
@@ -1097,7 +1603,7 @@ mod tests {
         });
 
         assert_eq!(
-            emit_prefill_embeddings(&cfg, false),
+            emit_prefill_embeddings(&cfg, false).unwrap(),
             ordinary,
             "declaring DeepStack must not change the ordinary embeddings entry"
         );
@@ -1112,7 +1618,8 @@ mod tests {
             "declaring DeepStack must not change decode"
         );
         let deepstack =
-            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                .unwrap();
         assert!(deepstack.starts_with("module @prefill_embeddings_deepstack {"));
         assert!(
             !deepstack.contains("tensor<4x2048x8xf32>"),
@@ -1152,7 +1659,8 @@ mod tests {
         let diagnostics = emit_prefill_embeddings_deepstack_diagnostics_with(
             &cfg,
             super::builder::Precision::F32,
-        );
+        )
+        .unwrap();
         assert!(diagnostics.starts_with("module @prefill_embeddings_deepstack_diagnostics {"));
         assert!(
             diagnostics.contains("tensor<3x256x8xf32>"),
@@ -1436,6 +1944,65 @@ mod tests {
         assert!(!emit_decode_with(&c, true, Precision::F32).contains("f16"));
     }
 
+    /// issue #2921: the ROCm tuning spec (`match_gqa_score` in
+    /// `assets/rocm/bigk_vecmat_tuning.mlir`) selects the single-sequence score
+    /// dispatch by contraction shape: a batched f16 by f16 into f32 dot of
+    /// `[nkv, group, d]` against `[seq, nkv, d]` with group 4 and head_dim 64.
+    /// That config is what drops the dispatch from about 74 us to about 1.5 us
+    /// on gfx1151, so the emitter must keep producing that exact shape. A
+    /// non-batched dot, other operand dtypes, or another rank would silently
+    /// stop matching and put the attention cost back. The softmax order after
+    /// the dot (add mask, reduce max, subtract, exp) is asserted alongside it
+    /// because that sequence is what the same dispatch chain feeds.
+    #[test]
+    fn single_decode_score_contraction_keeps_the_tuning_spec_shape() {
+        use super::builder::Precision;
+        let c = Config::llama_3_2_1b();
+        let (nq, nkv, g, d, seq) = (c.n_q, c.n_kv, c.group(), c.head_dim, c.context_capacity);
+        assert_eq!((nq, nkv, g, d, seq), (32, 8, 4, 64, 256));
+        let mlir = emit_decode_with(&c, false, Precision::F16);
+
+        let score_dot = format!(
+            "batching_dims = [0] x [1], contracting_dims = [2] x [2] : (tensor<{nkv}x{g}x{d}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{seq}xf32>"
+        );
+        let score_dots = mlir.lines().filter(|l| l.contains(&score_dot)).count();
+        assert_eq!(
+            score_dots, 16,
+            "one tuned score contraction per layer, got {score_dots}"
+        );
+
+        let after_dot = &mlir[mlir.find(&score_dot).expect("score dot")..];
+        let scale_at = after_dot
+            .find(&format!(
+                "dims = [] : (tensor<f32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("attention scale broadcast");
+        let mask_at = after_dot
+            .find(&format!(
+                "dims = [1] : (tensor<{seq}xf32>) -> tensor<{nq}x{seq}xf32>"
+            ))
+            .expect("mask broadcast");
+        let max_at = after_dot
+            .find("applies stablehlo.maximum across dimensions = [1]")
+            .expect("key-axis max");
+        let sub_at = after_dot.find("stablehlo.subtract").expect("max subtract");
+        let exp_at = after_dot.find("stablehlo.exponential").expect("exp");
+        assert!(
+            scale_at < mask_at && mask_at < max_at && max_at < sub_at && sub_at < exp_at,
+            "scale, then mask, then max-subtract, then exp"
+        );
+
+        // The context contraction reuses the same batched layout in the other
+        // direction, which is why its dispatch is already fast; assert it stays
+        // that shape so the two dots are not silently re-associated.
+        assert!(
+            mlir.contains(&format!(
+                "batching_dims = [0] x [1], contracting_dims = [2] x [0] : (tensor<{nkv}x{g}x{seq}xf16>, tensor<{seq}x{nkv}x{d}xf16>) -> tensor<{nkv}x{g}x{d}xf32>"
+            )),
+            "the context dot keeps its tuned shape"
+        );
+    }
+
     /// issue #572: under f16 precision exactly the 7 per-layer linear projections
     /// (down/gate/up/wk/wo/wq/wv) are declared f16 weight args (uploaded f16-resident);
     /// embed / lm_head / norms / caches stay f32. Each signature arg renders as
@@ -1456,9 +2023,299 @@ mod tests {
         assert_eq!(f32.matches("xf16> loc(").count(), 0);
     }
 
+    /// issue #2863: with the `InOut` layout the single-sequence graphs take the
+    /// LM head as one transposed `[H, V]` operand and contract the hidden axis,
+    /// so IREE never materializes the per-step weight transpose and convert. The
+    /// `OutIn` graph keeps the checkpoint `[V, H]` head and its `[0] x [1]` form
+    /// (and therefore its byte-exact goldens).
+    #[test]
+    fn inout_graphs_take_the_lm_head_transposed() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        let mlir = emit_decode_with(&c, false, Precision::F16);
+        assert!(
+            mlir.contains("tensor<2048x128256xf16> loc(\"params['embed']\")"),
+            "the InOut head is one transposed f16 arg"
+        );
+        let head = mlir
+            .lines()
+            .find(|line| line.contains("stablehlo.dot_general") && line.contains("128256"))
+            .expect("head dot");
+        assert!(
+            head.contains("contracting_dims = [0] x [0]"),
+            "head dot contracts the hidden axis: {head}"
+        );
+        assert!(
+            head.contains("tensor<2048xf16>, tensor<2048x128256xf16>"),
+            "head operands are the hidden vector and the transposed head: {head}"
+        );
+
+        let out = emit_decode_with(&Config::llama_3_2_1b(), false, Precision::F16);
+        assert!(!out.contains("tensor<2048x128256xf16>"));
+        let head = out
+            .lines()
+            .find(|line| line.contains("stablehlo.dot_general") && line.contains("128256"))
+            .expect("head dot");
+        assert!(
+            head.contains("contracting_dims = [0] x [1]"),
+            "the OutIn head keeps the checkpoint layout: {head}"
+        );
+    }
+
     // ======================================================================
     // dense arch pack (issue #498)
     // ======================================================================
+
+    /// issue #2889: the native decode graph keeps the projections packed and
+    /// dispatches the native GEMV; the f16 path stays the default. issue #2891:
+    /// the packed LM head joins the same dispatch, with its grid rounded to the
+    /// rows one workgroup reduces.
+    #[test]
+    fn native_decode_emits_the_packed_projection_dispatch() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let mlir = emit_decode_with_native(
+            &c,
+            true,
+            Precision::F16,
+            Some(("#mlxcel_qmv_target = alias", "  source-block\n")),
+        );
+        assert!(
+            mlir.contains("flow.dispatch @custom_qmv::@qmv4_kernel"),
+            "the native dispatch is emitted"
+        );
+        assert!(
+            mlir.contains("tensor<8192x256xi32>"),
+            "the gate projection stays packed [out, in/8] as a signless i32 operand"
+        );
+        assert!(
+            mlir.contains("tensor<8192x32xf16>"),
+            "scales/biases are declared per group"
+        );
+        assert!(
+            mlir.contains("tensor<128256x256xi32>"),
+            "the packed LM head is [vocab, hidden/8]"
+        );
+        assert!(
+            mlir.contains("tensor<128256x32xf16>"),
+            "the LM head scales/biases are per group"
+        );
+        assert!(
+            mlir.contains(&format!(
+                "arith.constant {} : index",
+                128256usize.div_ceil(crate::native_qmv::ROWS_PER_BLOCK)
+            )),
+            "the head dispatch covers one workgroup per rows-per-block"
+        );
+        assert!(
+            mlir.starts_with("#mlxcel_qmv_target = alias") && mlir.contains("  source-block"),
+            "the alias precedes the module and the executable source sits inside it"
+        );
+
+        // issue #2895: q/k/v and gate/up are each one launch. llama-3.2-1b has
+        // q 2048 + k 512 + v 512 and gate 8192 + up 8192, all at K = 2048, so both
+        // groups use the warp export with `ceil(total / rows-per-block)` groups.
+        assert!(mlir.contains("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel["));
+        assert!(mlir.contains("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel["));
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv::@qmv4_qkv_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup::@qmv4_gateup_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_kernel[")
+                .count(),
+            17,
+            "o_proj per layer plus the LM head"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv::@qmv4_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer, on the long-row export"
+        );
+
+        // Without the native module the same config keeps the packed projection
+        // dequant path and uses the loader-dequantized f16 head operand (the
+        // prefill form), never the dispatch.
+        let fallback = emit_decode_with(&c, true, Precision::F16);
+        assert!(!fallback.contains("@custom_qmv"));
+        assert!(
+            fallback.contains("tensor<128256x256xui32>")
+                && fallback.contains("tensor<2048x128256xf16>"),
+            "the fallback declares the packed head and reads the f16 operand"
+        );
+    }
+
+    /// issue #2905: the emitter is device-agnostic, so the CUDA decode graph is
+    /// the hip one with only the target alias and the embedded object swapped.
+    /// Every dispatch, grid and operand type is shared.
+    #[test]
+    fn native_decode_graph_is_the_same_on_cuda_apart_from_the_embedded_object() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::InOut;
+        c.packed_args = true;
+        c.native_head = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let object = b"object";
+        let (hip_alias, hip_source) = crate::native_qmv::module_parts(object, "gfx1151");
+        let (cuda_alias, cuda_source) = crate::native_qmv::cuda_module_parts(object);
+        let hip =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&hip_alias, &hip_source)));
+        let cuda =
+            emit_decode_with_native(&c, true, Precision::F16, Some((&cuda_alias, &cuda_source)));
+        assert!(cuda.starts_with(
+            "#mlxcel_qmv_target = #hal.executable.target<\"cuda\", \"cuda-nvptx-fb\">"
+        ));
+        assert_eq!(
+            cuda,
+            hip.replace(&hip_alias, &cuda_alias)
+                .replace("qmv4-gfx1151.hsaco", "qmv4_compute80.ptx")
+        );
+        assert_eq!(cuda.matches("flow.dispatch @custom_qmv").count(), 65);
+    }
+
+    /// issue #2922: the ragged batch engine keeps the projections packed and
+    /// dispatches the multi-row HIP GEMV. q/k/v and gate/up stay one launch per
+    /// layer instead of one per row, and the f16 graph is emitted unchanged when
+    /// the native module is absent.
+    #[test]
+    fn native_ragged_decode_emits_multi_row_dispatches() {
+        use super::builder::Precision;
+        let mut c = Config::llama_3_2_1b();
+        c.projection_layout = ProjectionLayout::OutIn;
+        c.packed_args = true;
+        c.quantization = Some(super::config::QuantConfig {
+            bits: 4,
+            group_size: 64,
+        });
+        let mlir = emit_decode_ragged_with_native(
+            &c,
+            8,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        )
+        .unwrap();
+        assert!(
+            mlir.starts_with("#mlxcel_qmv_target = #hal.executable.target")
+                && mlir.contains("  source-block")
+                && mlir.contains("\nmodule @decode_step {"),
+            "the alias precedes the module and the executable source sits inside it"
+        );
+        // llama-3.2-1b: o_proj and down_proj per layer through the single-output
+        // multi-row export (down has K = 8192, so it takes the block-per-row
+        // export); q/k/v and gate/up through the fused multi-row exports.
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[")
+                .count(),
+            16,
+            "o_proj per layer"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[")
+                .count(),
+            16,
+            "down_proj per layer on the long-row export"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[")
+                .count(),
+            16,
+            "one q/k/v launch per layer, not one per row"
+        );
+        assert_eq!(
+            mlir.matches("flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[")
+                .count(),
+            16,
+            "one gate/up launch per layer, not one per row"
+        );
+        assert!(
+            !mlir.contains("@custom_qmv::@qmv4_kernel")
+                && !mlir.contains("@custom_qmv::@qmv4_row_kernel"),
+            "the rank-1 exports are not used by the ragged graph"
+        );
+        assert!(
+            mlir.contains("arith.constant 8 : i32"),
+            "the batch size travels as the kernel's B constant"
+        );
+        assert!(mlir.contains("arith.constant 384 : index"), "q/k/v grid");
+        assert!(mlir.contains("arith.constant 2048 : index"), "gate/up grid");
+        assert!(
+            mlir.contains("tensor<8x8192xf32>"),
+            "fused multi-row outputs keep the [B, N] shape"
+        );
+
+        // The other bundled graph (B=4) keeps the same launch structure: one
+        // dispatch per projection group, so the count does not grow with the
+        // batch, and only the B constant and output rows change. A regression
+        // that multiplies launches by B or hardcodes the B=8 constant fails here.
+        let b4 = emit_decode_ragged_with_native(
+            &c,
+            4,
+            true,
+            Precision::F16,
+            Some((
+                "#mlxcel_qmv_target = #hal.executable.target<\"rocm\", \"rocm-hsaco-fb\">\n",
+                "  source-block\n",
+            )),
+        )
+        .unwrap();
+        for dispatch in [
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_kernel[",
+            "flow.dispatch @custom_qmv_multi::@qmv4_multi_row_kernel[",
+            "flow.dispatch @custom_qmv_qkv_multi::@qmv4_qkv_multi_kernel[",
+            "flow.dispatch @custom_qmv_gateup_multi::@qmv4_gateup_multi_kernel[",
+        ] {
+            assert_eq!(
+                b4.matches(dispatch).count(),
+                mlir.matches(dispatch).count(),
+                "the ragged launch count is independent of B: {dispatch}"
+            );
+        }
+        assert!(
+            b4.contains("arith.constant 4 : i32"),
+            "the B=4 graph carries its batch size as the kernel's B constant"
+        );
+        assert!(
+            b4.contains("tensor<4x8192xf32>"),
+            "the B=4 graph writes [4, N] outputs"
+        );
+
+        // Without the native module the graph is the same f16 one emitted before
+        // this issue: the packed operands are never registered and no dispatch is
+        // emitted.
+        let mut fallback_cfg = Config::llama_3_2_1b();
+        fallback_cfg.projection_layout = ProjectionLayout::OutIn;
+        let fallback = emit_decode_ragged_with(&fallback_cfg, 8, true, Precision::F16).unwrap();
+        assert!(!fallback.contains("@custom_qmv"));
+        assert!(fallback.contains("stablehlo.dot_general"));
+        assert!(fallback.contains("tensor<8192x2048xf16>"));
+    }
 
     /// Each dense-pack family parses to its architecture switches. Cohere/Cohere2
     /// are LayerNorm + parallel-block + interleaved-RoPE with a logit multiply
@@ -1588,7 +2445,7 @@ mod tests {
         for (name, graph) in [
             ("prefill", emit_prefill(&config, false)),
             ("decode", emit_decode(&config, false)),
-            ("ragged", emit_decode_ragged(&config, 2, false)),
+            ("ragged", emit_decode_ragged(&config, 2, false).unwrap()),
         ] {
             let mlir_path = directory.join(format!("{name}.mlir"));
             let vmfb_path = directory.join(format!("{name}.vmfb"));
@@ -1623,7 +2480,7 @@ mod tests {
             let g_co = match kind {
                 "decode" => emit_decode(&co, false),
                 "prefill" => emit_prefill(&co, false),
-                _ => emit_decode_ragged(&co, 4, false),
+                _ => emit_decode_ragged(&co, 4, false).unwrap(),
             };
             assert!(
                 g_co.contains("['in_ln']"),
@@ -1649,7 +2506,7 @@ mod tests {
             let g = match kind {
                 "decode" => emit_decode(&sc, false),
                 "prefill" => emit_prefill(&sc, false),
-                _ => emit_decode_ragged(&sc, 4, false),
+                _ => emit_decode_ragged(&sc, 4, false).unwrap(),
             };
             assert!(!g.contains("['gate']"), "{kind}: dense MLP has no gate");
             assert!(
@@ -1857,11 +2714,12 @@ mod tests {
             max_visual_positions: 2,
         });
         let prefill = emit_prefill(&cfg, false);
-        let embeddings = emit_prefill_embeddings(&cfg, false);
+        let embeddings = emit_prefill_embeddings(&cfg, false).unwrap();
         let deepstack =
-            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32)
+                .unwrap();
         let decode = emit_decode(&cfg, false);
-        let ragged = emit_decode_ragged(&cfg, 4, false);
+        let ragged = emit_decode_ragged(&cfg, 4, false).unwrap();
 
         for graph in [&prefill, &embeddings, &deepstack] {
             assert!(
@@ -1957,7 +2815,7 @@ mod tests {
     fn shared_core_kinds(c: &Config) -> [(&'static str, String); 3] {
         [
             ("decode", emit_decode(c, false)),
-            ("ragged", emit_decode_ragged(c, 4, false)),
+            ("ragged", emit_decode_ragged(c, 4, false).unwrap()),
             ("prefill", emit_prefill(c, false)),
         ]
     }
@@ -2286,8 +3144,11 @@ mod tests {
         let graphs = [
             ("decode", emit_decode(&c, false)),
             ("prefill", emit_prefill(&c, false)),
-            ("ragged", emit_decode_ragged(&c, 4, false)),
-            ("batched", super::model::emit_decode_batched(&c, 4, false)),
+            ("ragged", emit_decode_ragged(&c, 4, false).unwrap()),
+            (
+                "batched",
+                super::model::emit_decode_batched(&c, 4, false).unwrap(),
+            ),
         ];
         for (name, g) in graphs {
             assert!(g.contains("['moe_router']"), "{name}: router arg");
@@ -2316,7 +3177,7 @@ mod tests {
         for g in [
             emit_decode(&Config::llama_3_2_1b(), true),
             emit_prefill(&qwen_like(true), false),
-            emit_decode_ragged(&qwen_like(true), 4, false),
+            emit_decode_ragged(&qwen_like(true), 4, false).unwrap(),
         ] {
             assert!(!g.contains("moe_"), "a dense config must emit no MoE arg");
         }
@@ -2415,7 +3276,7 @@ mod tests {
             for (kind, g) in [
                 ("decode", emit_decode(&c, false)),
                 ("prefill", emit_prefill(&c, false)),
-                ("ragged", emit_decode_ragged(&c, 4, false)),
+                ("ragged", emit_decode_ragged(&c, 4, false).unwrap()),
             ] {
                 assert!(
                     g.contains("['q_norm']") && g.contains("['k_norm']"),
@@ -2606,5 +3467,30 @@ mod tests {
         let text = std::fs::read_to_string(&cfg_path).expect("read MLXCEL_DUMP_CONFIG");
         let cfg = Config::from_json_str(&text).expect("parse MoE config.json");
         std::fs::write(&out_path, emit_moe_probe(&cfg, n)).expect("write MLXCEL_DUMP_OUT");
+    }
+
+    /// Opt-in graph dump for the out-of-crate SSM execution check (issue
+    /// #3337). Ignored by default; with `--ignored` and `MLXCEL_DUMP_OUT` set it
+    /// writes the single-layer Mamba2 mixer probe (`emit_ssm_probe`) for the
+    /// `ssm_oracle.py` tiny config, so the graph can be inspected or compiled
+    /// with a stock `iree-compile`. `MLXCEL_SSM_MODE` is `prefill` (default) or
+    /// `decode`; `MLXCEL_SSM_T` sets the rows (default 16). The executing check
+    /// is `examples/xla_ssm_probe.rs`, which emits the same graph in-process.
+    #[test]
+    #[ignore = "opt-in: writes the SSM probe graph to disk for the spike/openxla execution check"]
+    fn dump_ssm_probe_for_execution_check() {
+        let out_path =
+            std::env::var("MLXCEL_DUMP_OUT").expect("set MLXCEL_DUMP_OUT to the target .mlir path");
+        let t: usize = std::env::var("MLXCEL_SSM_T")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(16);
+        let mode = match std::env::var("MLXCEL_SSM_MODE").as_deref() {
+            Ok("decode") => ProbeMode::Decode,
+            _ => ProbeMode::Prefill,
+        };
+        let cfg = SsmConfig::tiny_mamba2();
+        std::fs::write(&out_path, emit_ssm_probe(&cfg, 16, t, mode))
+            .expect("write MLXCEL_DUMP_OUT");
     }
 }

@@ -264,7 +264,7 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
 /// than the checkpoint's own declared block size. Issue #1165 measured the
 /// published checkpoint's configured block size (3) faster than the flat
 /// constant (4): 16.48 against 13.81 tok/s, 0.591 against 0.465 acceptance
-/// (`docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`).
+/// (`docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`).
 pub fn resolve_draft_block_size_detailed(
     override_value: Option<u32>,
     kind: DrafterKind,
@@ -302,6 +302,24 @@ pub fn resolve_draft_block_size_detailed(
         && let Ok(n) = u32::try_from(configured)
     {
         return from_checkpoint(n, "the GLM 4 MoE Lite MTP drafter's configured block size");
+    }
+    // The DSpark drafter bundled with an Inkling 2 checkpoint (issue #3374)
+    // runs at its trained block (one anchor and `block_size - 1` proposals,
+    // 8 rows on both releases); it cannot serve a wider one.
+    if kind == DrafterKind::Dflash
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_inkling2_dspark_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return from_checkpoint(n, "the Inkling 2 DSpark drafter's trained block size");
+    }
+    // The Raon-1 mini DFlash2 drafter (issue #3436) runs at its measured
+    // width; the flat DFlash default of 16 is twice its trained block.
+    if kind == DrafterKind::Dflash
+        && let Some(width) = mlxcel_core::drafter::peek_raon_dflash2_default_block_size(model_path)
+        && let Ok(n) = u32::try_from(width)
+    {
+        return from_checkpoint(n, "the Raon DFlash2 drafter's measured verify width");
     }
     // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
     // and runs at `min(block_size + 1, runtime_block_size)` rows by default

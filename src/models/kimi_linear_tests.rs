@@ -128,6 +128,114 @@ fn kimi_mla_multi_token_prefill_keeps_the_last_query_row_finite() {
     );
 }
 
+/// Byte-reproducible values in `[-scale, scale]`.
+pub(super) fn noise(seed: u64, n: usize, scale: f32) -> Vec<f32> {
+    let mut state = seed | 1;
+    (0..n)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let unit = ((state >> 33) as u32) as f32 / (1u64 << 31) as f32;
+            (unit * 2.0 - 1.0) * scale
+        })
+        .collect()
+}
+
+/// An MLA layer on pseudo-random weights, so attention is far from uniform.
+fn random_mla_attention() -> KimiMLAAttention {
+    let config = mla_config(8);
+    let heads = config.num_attention_heads as i32;
+    let hidden = config.hidden_size as i32;
+    let q_head = config.q_head_dim() as i32;
+    let nope = config.qk_nope() as i32;
+    let rope = config.qk_rope() as i32;
+    let value = config.v_head() as i32;
+    let rank = config.kv_lora_rank as i32;
+    let prefix = "model.layers.0.self_attn";
+    let mut weights = WeightMap::new();
+    let mut seed = 3099u64;
+    let mut put = |name: &str, shape: &[i32], scale: f32| {
+        seed += 1;
+        let n = shape.iter().product::<i32>() as usize;
+        weights.insert(
+            format!("{prefix}.{name}.weight"),
+            mlxcel_core::from_slice_f32(&noise(seed, n, scale), shape),
+        );
+    };
+    put("q_proj", &[heads * q_head, hidden], 0.4);
+    put("kv_a_proj_with_mqa", &[rank + rope, hidden], 0.4);
+    put("embed_q", &[heads, rank, nope], 0.6);
+    put("unembed_out", &[heads, value, rank], 0.6);
+    put("o_proj", &[hidden, heads * value], 0.4);
+    weights.insert(
+        format!("{prefix}.kv_a_layernorm.weight"),
+        mlxcel_core::ones(&[rank], mlxcel_core::dtype::FLOAT32),
+    );
+    KimiMLAAttention::from_weights(&weights, &config, prefix)
+        .unwrap_or_else(|e| panic!("random MLA fixture must load: {e}"))
+}
+
+fn max_abs_diff(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
+    assert_eq!(mlxcel_core::array_shape(a), mlxcel_core::array_shape(b));
+    let d = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(a, b)));
+    mlxcel_core::eval(&d);
+    mlxcel_core::item_f32(&d)
+}
+
+/// The rope-folded causal-mode prefill (#3099) reproduces the manual
+/// nope-plus-positional score form, which the single-query path still
+/// computes, for a cold prefill (materializing), a warm two-token chunk
+/// (absorbed) and an explicit mask.
+#[test]
+fn kimi_mla_rope_folded_prefill_matches_the_manual_score_path() {
+    let attention = random_mla_attention();
+    let x = mlxcel_core::from_slice_f32(&noise(7, 6 * 32, 1.0), &[1, 6, 32]);
+    let token = |i: i32| mlxcel_core::slice(&x, &[0, i, 0], &[1, i + 1, 32]);
+
+    let mut cache = KVCache::new();
+    let rows: Vec<_> = (0..6)
+        .map(|i| {
+            let out = attention.forward(&token(i), None, &mut cache);
+            mlxcel_core::eval(&out);
+            out
+        })
+        .collect();
+    let reference =
+        mlxcel_core::concatenate_many(&rows.iter().map(|r| &**r).collect::<Vec<_>>(), 1);
+
+    let cold = attention.forward(&x, None, &mut KVCache::new());
+    let diff = max_abs_diff(&cold, &reference);
+    assert!(diff < 1e-4, "cold prefill vs single-query path: {diff}");
+
+    let masked = attention.forward(&x, Some(&create_causal_mask(6, 0)), &mut KVCache::new());
+    let diff = max_abs_diff(&masked, &cold);
+    assert!(diff < 1e-5, "explicit mask vs causal mode: {diff}");
+
+    assert!(
+        mlxcel_core::mla::use_absorbed_mla(2, 6, 8, 4, 4),
+        "the warm chunk must select the absorbed path"
+    );
+    let mut cache = KVCache::new();
+    let warm = attention.forward(
+        &mlxcel_core::slice(&x, &[0, 0, 0], &[1, 4, 32]),
+        None,
+        &mut cache,
+    );
+    mlxcel_core::eval(&warm);
+    let chunk = attention.forward(
+        &mlxcel_core::slice(&x, &[0, 4, 0], &[1, 6, 32]),
+        None,
+        &mut cache,
+    );
+    let want = mlxcel_core::slice(&reference, &[0, 4, 0], &[1, 6, 32]);
+    let diff = max_abs_diff(&chunk, &want);
+    assert!(
+        diff < 1e-4,
+        "warm absorbed chunk vs single-query path: {diff}"
+    );
+}
+
 /// The pair this loader stores is handed straight to `quantized_matmul`, which
 /// crosses the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++
 /// throw there is an uncatchable `std::terminate`,
@@ -183,7 +291,7 @@ fn kimi_linear_multi_linear_rejects_quantization_params_that_would_abort_quantiz
 /// `is_linear_layer` is always false) and MoE stacking is inert (`num_experts`
 /// 0), so `sanitize_weights` only exercises the `kv_b_proj` decomposition this
 /// test targets.
-fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
+pub(super) fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
     KimiLinearConfig {
         model_type: "kimi_linear".to_string(),
         vocab_size: 32,
@@ -224,14 +332,14 @@ fn mla_config(kv_lora_rank: usize) -> KimiLinearConfig {
     }
 }
 
-fn hybrid_batching_config() -> KimiLinearConfig {
+pub(super) fn hybrid_batching_config() -> KimiLinearConfig {
     let mut config = mla_config(8);
     config.num_hidden_layers = 2;
     config.linear_attn_config.kda_layers = vec![1];
     config
 }
 
-fn hybrid_batching_weights(config: &KimiLinearConfig) -> WeightMap {
+pub(super) fn hybrid_batching_weights(config: &KimiLinearConfig) -> WeightMap {
     let mut weights = WeightMap::new();
     let mut seed = 2_572u32;
     let mut put = |name: String, shape: &[i32]| {
@@ -686,3 +794,9 @@ fn kimi_linear_model_owned_sequence_state_refuses_missing_sequence_id() {
 
     assert!(err.contains("missing model-owned sequence state"));
 }
+
+crate::models::last_row_logits_harness::last_row_case!(kimi_linear_last_row_logits, || {
+    let config = hybrid_batching_config();
+    KimiLinearModel::from_weights(&hybrid_batching_weights(&config), &config)
+        .expect("two-layer KDA/MLA model loads")
+});

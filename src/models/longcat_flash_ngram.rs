@@ -23,14 +23,15 @@
 //!
 //! Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/longcat_flash.py, longcat_flash_ngram.py
 
+use crate::models::gpt2::validate_embedding_table;
+use crate::models::mla_rope::MlaRope;
+use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{
-    Embedding, KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
-};
-use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
+use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::utils::{slice_axis, stack_arrays};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -111,14 +112,14 @@ impl LongcatFlashNgramConfig {
         self.qk_nope_head_dim + self.qk_rope_head_dim
     }
 
-    fn group_size(&self) -> i32 {
+    pub(super) fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
             .map(|q| q.group_size)
             .unwrap_or(64)
     }
 
-    fn bits(&self) -> i32 {
+    pub(super) fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
@@ -147,7 +148,10 @@ impl LongcatFlashNgramConfig {
 }
 
 // Helper: get weight with copy.
-fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
+pub(super) fn get_weight_copy(
+    weights: &WeightMap,
+    name: &str,
+) -> Result<UniquePtr<MlxArray>, String> {
     weights
         .get(name)
         .map(|w| mlxcel_core::copy(w))
@@ -155,8 +159,9 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 }
 
 // LongcatFlashMLA - Multi-head Latent Attention.
-// Used by: LongcatFlash, LongcatFlashNgram.
-struct LongcatFlashMLA {
+// Used by: LongcatFlash, LongcatFlashNgram, LongcatFlashSparse (which runs
+// `project` and `attend_window` around its own RoPE and LSA key selection).
+pub(super) struct LongcatFlashMLA {
     // Q projection with LoRA
     q_a_proj: Option<UnifiedLinear>,
     q_a_layernorm: Option<RMSNorm>,
@@ -174,16 +179,34 @@ struct LongcatFlashMLA {
 
     o_proj: UnifiedLinear,
 
-    num_heads: i32,
+    pub(super) num_heads: i32,
     qk_head_dim: i32,
-    qk_rope_head_dim: i32,
-    qk_nope_head_dim: i32,
-    v_head_dim: i32,
-    kv_lora_rank: i32,
+    pub(super) qk_rope_head_dim: i32,
+    pub(super) qk_nope_head_dim: i32,
+    pub(super) v_head_dim: i32,
+    pub(super) kv_lora_rank: i32,
     scale: f32,
-    rope_base: f32,
+    /// The `q_pe` / `k_pe` rotation: the checkpoint's YaRN table
+    /// (`longcat-flash-lite` ships `factor` 10 over 32768) or plain
+    /// `fast_rope` at `rope_theta` (#3295).
+    pub(super) rope: MlaRope,
     mla_scale_q_lora: Option<f32>,
     mla_scale_kv_lora: Option<f32>,
+}
+
+/// One step's MLA projections before RoPE.
+pub(super) struct MlaProjections {
+    /// The LoRA query hidden `q_a_layernorm(q_a_proj(x))`, the input of a
+    /// LongCat-Flash-Lite-Sparse indexer; `None` without a query LoRA.
+    pub(super) qr: Option<UniquePtr<MlxArray>>,
+    /// `[B, H, L, qk_nope_head_dim]`.
+    pub(super) q_nope: UniquePtr<MlxArray>,
+    /// `[B, H, L, qk_rope_head_dim]`, not yet rotated.
+    pub(super) q_pe: UniquePtr<MlxArray>,
+    /// `[B, 1, L, kv_lora_rank]`, normed and scaled.
+    pub(super) kv_latent: UniquePtr<MlxArray>,
+    /// `[B, 1, L, qk_rope_head_dim]`, not yet rotated.
+    pub(super) k_pe: UniquePtr<MlxArray>,
 }
 
 impl LongcatFlashMLA {
@@ -196,16 +219,80 @@ impl LongcatFlashMLA {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
+        let MlaProjections {
+            q_nope,
+            q_pe,
+            kv_latent,
+            k_pe,
+            ..
+        } = self.project(x);
+
+        // Apply RoPE
+        let offset = cache.offset;
+        let q_pe = self.rope.apply(&q_pe, true, offset);
+        let k_pe = self.rope.apply(&k_pe, true, offset);
+
+        // Cache stores (kv_latent, k_pe). An `int8` cache stores the latent as
+        // the affine group-64 triple and hands back a quantized window; the
+        // fresh chunk is quantized before this step reads it, so a prefill
+        // reads what later decode steps read (#3161).
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "longcat_flash",
+            true,
+        );
+        debug_assert!(
+            l == 1 || mask.is_some() || window.seq_len() == cache.live_len(),
+            "causal mode needs the live window to end at this step"
+        );
+        let absorbed = self.absorbed(l, cache);
+        self.attend_window(window, &q_nope, &q_pe, absorbed, mask, b, l)
+    }
+
+    /// The layer's MLA shape, for the latent cache view.
+    pub(super) fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        crate::models::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+    }
+
+    /// Cost-model gate (issue #2408): one query is always absorbed, and a
+    /// multi-token step behind a long enough cache can be cheaper absorbed
+    /// than up-projecting the whole window. A cold prefill stays on the
+    /// materializing side. `cache` is the latent cache after this step's write.
+    pub(super) fn absorbed(&self, l: i32, cache: &KVCache) -> bool {
+        mlxcel_core::mla::use_absorbed_mla(
+            l as usize,
+            cache.seq_len() as usize,
+            self.kv_lora_rank as usize,
+            self.qk_nope_head_dim as usize,
+            self.v_head_dim as usize,
+        )
+    }
+
+    /// The query, the latent and the rope keys of one step, before RoPE.
+    pub(super) fn project(&self, x: &MlxArray) -> MlaProjections {
+        let shape = mlxcel_core::array_shape(x);
+        let b = shape[0];
+        let l = shape[1];
 
         // Compute Q
-        let q = if let (Some(q_a_proj), Some(q_a_norm), Some(q_b_proj)) =
+        let (qr, q) = if let (Some(q_a_proj), Some(q_a_norm), Some(q_b_proj)) =
             (&self.q_a_proj, &self.q_a_layernorm, &self.q_b_proj)
         {
             let q_a = q_a_proj.forward(x);
             let q_a_norm = q_a_norm.forward(&q_a);
-            q_b_proj.forward(&q_a_norm)
+            let q = q_b_proj.forward(&q_a_norm);
+            (Some(q_a_norm), q)
         } else {
-            self.q_proj.as_ref().unwrap().forward(x)
+            (None, self.q_proj.as_ref().unwrap().forward(x))
         };
 
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads, self.qk_head_dim]);
@@ -237,88 +324,207 @@ impl LongcatFlashMLA {
             kv_latent = mlxcel_core::multiply(&kv_latent, &s);
         }
 
-        // Apply RoPE
-        let offset = cache.offset;
-        let q_pe = mlxcel_core::fast_rope(
-            &q_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-        let k_pe = mlxcel_core::fast_rope(
-            &k_pe,
-            self.qk_rope_head_dim,
-            true,
-            self.rope_base,
-            1.0,
-            offset,
-        );
-
         // Expand kv_latent to [B, 1, L, kv_lora_rank] for cache
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Cache stores (kv_latent, k_pe)
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
-
-        // Compute PE scores: (q_pe * scale) @ k_pe^T
-        let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let scaled_q_pe = mlxcel_core::multiply(&q_pe, &scale_arr);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let mut pe_scores = mlxcel_core::matmul(&scaled_q_pe, &k_pe_t);
-
-        // Apply causal mask to pe_scores (additive: 0 for attend, -inf for don't attend)
-        if let Some(m) = mask {
-            pe_scores = mlxcel_core::add(&pe_scores, m);
+        MlaProjections {
+            qr,
+            q_nope,
+            q_pe,
+            kv_latent,
+            k_pe,
         }
+    }
 
-        // MLA attention: different paths for decode vs prefill
-        let output = if l == 1 {
-            // Decode: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+    /// Attend `q_nope` / `q_pe` (rotated) over a latent window and project
+    /// the result to `[B, L, hidden]`.
+    ///
+    /// `mask` is additive. A multi-token step with no mask runs MLX's causal
+    /// mode over the window, which must then end at this step; a mask is
+    /// applied as given (LongCat-Flash-Lite-Sparse folds its top-k selection
+    /// into one). A single query attends every row of the window it is handed,
+    /// which is how the sparse variant's gathered rows reach it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attend_window(
+        &self,
+        window: mlxcel_core::mla::LatentWindow,
+        q_nope: &MlxArray,
+        q_pe: &MlxArray,
+        absorbed: bool,
+        mask: Option<&MlxArray>,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention` (the fused kernel's quantized variant
+        // where it applies, #3156, the #3155 composed decode otherwise), which
+        // records its own path. Every other step over a quantized window
+        // dequantizes it once and runs the fp16 code below.
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
                     &q_projected,
+                    q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            // A multi-token step reads the window dequantized, in the
+            // queries' dtype so a bf16 model stays bf16 (#3161).
+            window => {
+                crate::models::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(q_pe))
+            }
+        };
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask. A maskless step is causal over the live window
+            // `update_and_fetch` returned, through MLX's bottom-right aligned
+            // causal mode; a caller mask is applied as given.
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
+                    &q_projected,
+                    q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Prefill: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q_nope,
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
+                    q_nope,
+                    q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice.
+            // PE scores: (q_pe * scale) @ k_pe^T
+            let scale_arr = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(q_pe));
+            let scaled_q_pe = mlxcel_core::multiply(q_pe, &scale_arr);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let mut pe_scores = mlxcel_core::matmul(&scaled_q_pe, &k_pe_t);
+            // Additive caller mask: 0 for attend, -inf for don't attend.
+            if let Some(m) = mask {
+                pe_scores = mlxcel_core::add(&pe_scores, m);
+            }
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                // Absorbed: project Q into latent space, use kv_latent as K=V
+                let q_projected = self.embed_q.forward(q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                // Project output from latent space to v_head_dim
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to K and V
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
-        let attn_out = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    pub(super) fn project_attention_output(
+        &self,
+        output: &MlxArray,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let attn_out = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&attn_out)
     }
 
-    fn from_weights(
+    /// Resolve this config's RoPE once, for every attention to duplicate.
+    ///
+    /// No training-context fallback, matching upstream `longcat_flash`:
+    /// it passes `max_position_embeddings` to `initialize_rope`, but
+    /// `YarnRoPE` never reads it for the original context and defaults a
+    /// missing `original_max_position_embeddings` to 4096.
+    pub(super) fn resolve_rope(args: &LongcatFlashNgramConfig) -> MlaRope {
+        MlaRope::from_block(
+            args.rope_scaling.as_ref(),
+            args.qk_rope_head_dim,
+            args.rope_theta,
+            None,
+            &args.model_type,
+        )
+    }
+
+    pub(super) fn from_weights(
         weights: &WeightMap,
         args: &LongcatFlashNgramConfig,
         prefix: &str,
+        rope: MlaRope,
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
@@ -384,7 +590,7 @@ impl LongcatFlashMLA {
             v_head_dim: args.v_head_dim as i32,
             kv_lora_rank: args.kv_lora_rank as i32,
             scale: args.get_attention_scale(),
-            rope_base: args.rope_theta,
+            rope,
             mla_scale_q_lora,
             mla_scale_kv_lora,
         })
@@ -392,21 +598,21 @@ impl LongcatFlashMLA {
 }
 
 // LongcatFlashMLP - Dense MLP (used for per-sublayer MLPs).
-struct LongcatFlashMLP {
+pub(super) struct LongcatFlashMLP {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
     down_proj: UnifiedLinear,
 }
 
 impl LongcatFlashMLP {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let gate = self.gate_proj.forward(x);
         let up = self.up_proj.forward(x);
         let activated = mlxcel_core::compiled_swiglu_activation(&gate, &up);
         self.down_proj.forward(&activated)
     }
 
-    fn from_weights(
+    pub(super) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         hidden_size: usize,
@@ -528,14 +734,14 @@ impl LongcatFlashTopkRouter {
 }
 
 // LongcatFlashMoE - MoE with identity zero experts.
-struct LongcatFlashMoE {
+pub(super) struct LongcatFlashMoE {
     router: LongcatFlashTopkRouter,
     switch_mlp: SwitchGLU,
     n_routed_experts: usize, // number of actual routed experts (not including zero)
 }
 
 impl LongcatFlashMoE {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(super) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let (topk_indices, topk_weights) = self.router.forward(x);
 
         // Mask indices that point to zero (identity) experts
@@ -550,8 +756,22 @@ impl LongcatFlashMoE {
         let zero_f = mlxcel_core::zeros_like(&topk_weights);
         let regular_weights = mlxcel_core::where_cond(&mask, &zero_f, &topk_weights);
 
-        // Run SwitchGLU for regular experts
-        let regular_outputs = self.switch_mlp.forward(x, &clamped_indices);
+        // Run SwitchGLU for regular experts. It takes `[tokens, hidden]` and
+        // `[tokens, k]`: handed `[B, L, ..]` it read `B` as the token count and
+        // `L` as `k`, which broadcast by accident below 64 positions and threw
+        // in the sorted path's reshape at 64 or more (#3161).
+        let x_shape = mlxcel_core::array_shape(x);
+        let hidden = x_shape[x_shape.len() - 1];
+        // The router slices its indices to `[..., :top_k]`, so `top_k` is the
+        // last axis; reading the configured value leaves no panic path.
+        let k = self.router.top_k as i32;
+        let flat = self.switch_mlp.forward(
+            &mlxcel_core::reshape(x, &[-1, hidden]),
+            &mlxcel_core::reshape(&clamped_indices, &[-1, k]),
+        );
+        let mut out_shape = x_shape[..x_shape.len() - 1].to_vec();
+        out_shape.extend([k, hidden]);
+        let regular_outputs = mlxcel_core::reshape(&flat, &out_shape);
 
         // Weight and sum expert outputs
         let weights_exp = mlxcel_core::expand_dims(&regular_weights, -1);
@@ -567,7 +787,7 @@ impl LongcatFlashMoE {
         output
     }
 
-    fn from_weights(
+    pub(super) fn from_weights(
         weights: &WeightMap,
         args: &LongcatFlashNgramConfig,
         prefix: &str,
@@ -643,15 +863,24 @@ impl LongcatFlashDecoderLayer {
     fn from_weights(
         weights: &WeightMap,
         args: &LongcatFlashNgramConfig,
+        rope: &MlaRope,
         prefix: &str,
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
 
-        let self_attn_0 =
-            LongcatFlashMLA::from_weights(weights, args, &format!("{prefix}.self_attn.0"))?;
-        let self_attn_1 =
-            LongcatFlashMLA::from_weights(weights, args, &format!("{prefix}.self_attn.1"))?;
+        let self_attn_0 = LongcatFlashMLA::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn.0"),
+            rope.duplicate(),
+        )?;
+        let self_attn_1 = LongcatFlashMLA::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn.1"),
+            rope.duplicate(),
+        )?;
 
         let mlp_0 = LongcatFlashMLP::from_weights(
             weights,
@@ -704,7 +933,7 @@ struct NgramEmbedder {
     _vocab_dim: usize,
 }
 
-struct NgramEmbedding {
+pub(super) struct NgramEmbedding {
     word_embeddings: UnifiedEmbedding,
     embedders: Vec<NgramEmbedder>,
     vocab_mods: HashMap<(usize, usize), Vec<i64>>,
@@ -715,7 +944,63 @@ struct NgramEmbedding {
 }
 
 impl NgramEmbedding {
-    fn compute_vocab_mods(
+    /// Check the config fields the n-gram arithmetic divides by, multiplies
+    /// and casts to INT32, returning `(m, num_embedders)`. A checkpoint config
+    /// is untrusted, so every case that would otherwise underflow, divide by
+    /// zero, overflow or truncate is an `Err` here, before any of it runs.
+    pub(super) fn validate_config(
+        args: &LongcatFlashNgramConfig,
+    ) -> Result<(usize, usize), String> {
+        let k = args.emb_split_num;
+        let n = args.emb_neighbor_num;
+        if n < 2 {
+            return Err(format!(
+                "config emb_neighbor_num ({n}) must be at least 2 for an n-gram model"
+            ));
+        }
+        if k == 0 {
+            return Err("config emb_split_num must be at least 1".to_string());
+        }
+        let num_embedders = k.checked_mul(n - 1).ok_or_else(|| {
+            format!("config emb_split_num ({k}) * (emb_neighbor_num ({n}) - 1) overflows")
+        })?;
+        if args.hidden_size == 0 || !args.hidden_size.is_multiple_of(num_embedders) {
+            return Err(format!(
+                "config hidden_size ({}) must be a positive multiple of \
+                 emb_split_num * (emb_neighbor_num - 1) ({num_embedders})",
+                args.hidden_size
+            ));
+        }
+        if i32::try_from(args.vocab_size).is_err() {
+            return Err(format!(
+                "config vocab_size ({}) exceeds i32::MAX",
+                args.vocab_size
+            ));
+        }
+        let m = args
+            .ngram_vocab_size_ratio
+            .checked_mul(args.vocab_size)
+            .ok_or_else(|| {
+                format!(
+                    "config ngram_vocab_size_ratio ({}) * vocab_size ({}) overflows",
+                    args.ngram_vocab_size_ratio, args.vocab_size
+                )
+            })?;
+        // The largest embedder vocab is cast to INT32 in `forward`.
+        let largest = (num_embedders - 1)
+            .checked_mul(2)
+            .and_then(|extra| m.checked_add(extra))
+            .and_then(|v| v.checked_add(1));
+        if largest.is_none_or(|v| i32::try_from(v).is_err()) {
+            return Err(format!(
+                "config ngram_vocab_size_ratio * vocab_size ({m}) plus the n-gram embedder \
+                 offsets exceeds i32::MAX"
+            ));
+        }
+        Ok((m, num_embedders))
+    }
+
+    pub(super) fn compute_vocab_mods(
         n: usize,
         k: usize,
         m: usize,
@@ -738,7 +1023,7 @@ impl NgramEmbedding {
         vocab_mods
     }
 
-    fn shift_right(x: &MlxArray, n: usize) -> UniquePtr<MlxArray> {
+    pub(super) fn shift_right(x: &MlxArray, n: usize) -> UniquePtr<MlxArray> {
         if n == 0 {
             return mlxcel_core::copy(x);
         }
@@ -753,14 +1038,57 @@ impl NgramEmbedding {
         mlxcel_core::concatenate(&zeros, &kept, -1)
     }
 
-    fn forward(
-        &self,
+    /// The lookup ids of one n-gram embedder for this call's `seq_len`
+    /// tokens: `(context + sum_k shifted_k * vocab_mods[k - 2]) % emb_vocab_dim`
+    /// over the `ngram - 1` preceding tokens, the last `seq_len` positions,
+    /// as INT32.
+    ///
+    /// Used by: LongcatFlashNgram (`NgramEmbedding::forward`) and
+    /// LongcatFlashSparse (`longcat_flash_sparse::SparseNgramEmbedding`).
+    pub(super) fn hashed_ids(
+        cur_context: &MlxArray,
+        shifted_ids: &HashMap<usize, UniquePtr<MlxArray>>,
+        vocab_mods: &[i64],
+        ngram: usize,
+        emb_vocab_dim: i64,
+        seq_len: i32,
+    ) -> UniquePtr<MlxArray> {
+        // Compute ngram_ids = context + sum(shifted * power_mod)
+        let mut ngram_ids = mlxcel_core::copy(cur_context);
+        for k_idx in 2..=ngram {
+            let shifted = &shifted_ids[&k_idx];
+            let mod_val = vocab_mods[k_idx - 2];
+            let mod_arr = mlxcel_core::from_slice_i64(&[mod_val], &[1]);
+            let term = mlxcel_core::multiply(shifted, &mod_arr);
+            ngram_ids = mlxcel_core::add(&ngram_ids, &term);
+        }
+
+        // new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:]
+        let dim_arr = mlxcel_core::from_slice_i64(&[emb_vocab_dim], &[1]);
+        let modded = mlxcel_core::remainder(&ngram_ids, &dim_arr);
+        let modded_shape = mlxcel_core::array_shape(&modded);
+        let modded_len = modded_shape[modded_shape.len() - 1];
+        let new_ids = if modded_len > seq_len {
+            slice_axis(&modded, 1, modded_len - seq_len, modded_len)
+        } else {
+            modded
+        };
+
+        // Cast to int32 for embedding lookup
+        mlxcel_core::astype(&new_ids, dtype::INT32)
+    }
+
+    /// The n-gram context this call hashes over (the carried tail joined with
+    /// the new tokens, as INT64), saving its last `n - 1` tokens back into
+    /// `context` for the next call.
+    ///
+    /// Used by: LongcatFlashNgram and LongcatFlashSparse, as
+    /// [`Self::hashed_ids`].
+    pub(super) fn advance_context(
         input_ids: &MlxArray,
         context: &mut Option<UniquePtr<MlxArray>>,
+        n: usize,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(input_ids);
-        let seq_len = shape[shape.len() - 1];
-
         let input_i64 = mlxcel_core::astype(input_ids, dtype::INT64);
 
         // The hashes of this call's tokens read up to `n - 1` tokens back, so
@@ -775,13 +1103,25 @@ impl NgramEmbedding {
         // Save context for next call
         let ctx_shape = mlxcel_core::array_shape(&cur_context);
         let ctx_len = ctx_shape[ctx_shape.len() - 1];
-        let keep = (self.n as i32 - 1).max(0);
+        let keep = (n as i32 - 1).max(0);
         *context = Some(if ctx_len > keep {
             let start = ctx_len - keep;
             slice_axis(&cur_context, 1, start, ctx_len)
         } else {
             mlxcel_core::copy(&cur_context)
         });
+        cur_context
+    }
+
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        context: &mut Option<UniquePtr<MlxArray>>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let seq_len = shape[shape.len() - 1];
+
+        let cur_context = Self::advance_context(input_ids, context, self.n);
 
         // Word embeddings
         let mut x = self.word_embeddings.forward(input_ids);
@@ -797,31 +1137,14 @@ impl NgramEmbedding {
         for i in 2..=self.n {
             for j in 0..self.k {
                 let emb_vocab_dim = (self.m + emb_idx * 2 + 1) as i64;
-                let vocab_mods = &self.vocab_mods[&(i, j)];
-
-                // Compute ngram_ids = context + sum(shifted * power_mod)
-                let mut ngram_ids = mlxcel_core::copy(&cur_context);
-                for k_idx in 2..=i {
-                    let shifted = &shifted_ids[&k_idx];
-                    let mod_val = vocab_mods[k_idx - 2];
-                    let mod_arr = mlxcel_core::from_slice_i64(&[mod_val], &[1]);
-                    let term = mlxcel_core::multiply(shifted, &mod_arr);
-                    ngram_ids = mlxcel_core::add(&ngram_ids, &term);
-                }
-
-                // new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:]
-                let dim_arr = mlxcel_core::from_slice_i64(&[emb_vocab_dim], &[1]);
-                let modded = mlxcel_core::remainder(&ngram_ids, &dim_arr);
-                let modded_shape = mlxcel_core::array_shape(&modded);
-                let modded_len = modded_shape[modded_shape.len() - 1];
-                let new_ids = if modded_len > seq_len {
-                    slice_axis(&modded, 1, modded_len - seq_len, modded_len)
-                } else {
-                    modded
-                };
-
-                // Cast to int32 for embedding lookup
-                let new_ids_i32 = mlxcel_core::astype(&new_ids, dtype::INT32);
+                let new_ids_i32 = Self::hashed_ids(
+                    &cur_context,
+                    &shifted_ids,
+                    &self.vocab_mods[&(i, j)],
+                    i,
+                    emb_vocab_dim,
+                    seq_len,
+                );
 
                 // Lookup embedding and project
                 let x_ngram = self.embedders[emb_idx].embedding.forward(&new_ids_i32);
@@ -845,21 +1168,49 @@ impl NgramEmbedding {
     ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
-        let m = args.ngram_vocab_size_ratio * args.vocab_size;
+        let (m, num_embedders) = Self::validate_config(args)?;
         let k = args.emb_split_num;
         let n = args.emb_neighbor_num;
-        let num_embedders = k * (n - 1);
-        let _emb_dim = args.hidden_size / num_embedders;
+        let emb_dim = args.hidden_size / num_embedders;
 
-        let word_emb_w = get_weight_copy(weights, &format!("{prefix}.word_embeddings.weight"))?;
-        let word_embeddings = UnifiedEmbedding::Regular(Embedding::new(word_emb_w));
+        // `from_weights` detects a quantized table by its `.scales` key: the
+        // MLX 4-bit checkpoints quantize the word and n-gram tables, whose
+        // packed U32 rows a plain `Embedding` would hand back as 1/8-wide
+        // integers (#3161).
+        let word_embeddings = UnifiedEmbedding::from_weights(
+            weights,
+            &format!("{prefix}.word_embeddings"),
+            gs,
+            bits,
+        )?;
+        // The gathers do not range-check a positive index, so a table shorter
+        // or narrower than the config claims must fail here, not on a prompt.
+        validate_embedding_table(
+            &word_embeddings,
+            &format!("{prefix}.word_embeddings"),
+            args.vocab_size,
+            "vocab_size",
+            args.hidden_size,
+            "hidden_size",
+        )?;
 
         let mut embedders = Vec::with_capacity(num_embedders);
         for i in 0..num_embedders {
             let emb_vocab_size = m + i * 2 + 1;
-            let emb_key = format!("{prefix}.embedders.{i}.weight");
-            let emb_w = get_weight_copy(weights, &emb_key)?;
-            let embedding = UnifiedEmbedding::Regular(Embedding::new(emb_w));
+            let embedding = UnifiedEmbedding::from_weights(
+                weights,
+                &format!("{prefix}.embedders.{i}"),
+                gs,
+                bits,
+            )?;
+            validate_embedding_table(
+                &embedding,
+                &format!("{prefix}.embedders.{i}"),
+                emb_vocab_size,
+                "ngram_vocab_size_ratio * vocab_size + 2 * i + 1",
+                emb_dim,
+                "hidden_size / (emb_split_num * (emb_neighbor_num - 1))",
+            )?;
             let post_proj = UnifiedLinear::from_weights(
                 weights,
                 &format!("{prefix}.post_projs.{i}"),
@@ -896,10 +1247,15 @@ struct LongcatState {
 }
 
 impl LongcatState {
-    fn new(num_layers: usize) -> Self {
+    /// Fresh state whose layer `i` pair is built in `mode_for_layer(i)`; both
+    /// sub-layer attentions of a layer share its mode.
+    fn new(num_layers: usize, mode_for_layer: impl Fn(usize) -> KVCacheMode) -> Self {
         Self {
             caches: (0..num_layers)
-                .map(|_| [KVCache::new(), KVCache::new()])
+                .map(|i| {
+                    let mode = mode_for_layer(i);
+                    [KVCache::new_with_mode(mode), KVCache::new_with_mode(mode)]
+                })
                 .collect(),
             ngram_context: None,
         }
@@ -919,12 +1275,33 @@ pub struct LongcatFlashNgramModel {
     num_layers: usize,
     _is_ngram: bool,
     state: RefCell<LongcatState>,
-    /// Set once the FP16-only warning has been logged, so a client that
+    /// The per-layer KV cache modes the state's caches are built in: the
+    /// injected table with every mode the latent pair cannot hold replaced by
+    /// FP16 (#3161). Unset until a table is injected, which builds FP16.
+    kv_cache_layer_modes: KvCacheLayerModes,
+    /// Set once the refused-mode warning has been logged, so a client that
     /// injects modes per sequence (`DirectEngine`) does not repeat it.
     kv_mode_warned: Cell<bool>,
+    /// Whether an injected `int8` layer keeps the affine int8 latent. Read
+    /// from `mla::stores_quantized_latent_pair` at load, so it follows
+    /// `mla::QUANTIZED_LATENT_FAMILIES`, which lists both LongCat types since
+    /// LongCat-Flash-Lite passed the #3161 quality gate, and the MLA latent
+    /// option in force (`--mla-latent-quant fp16` turns it off, issue #3179).
+    /// Off, `int8` resolves to FP16 like any other refused mode.
+    pub(crate) quantized_latent: Cell<bool>,
 }
 
 impl LongcatFlashNgramModel {
+    /// The `config.json` `model_type` this instance was built from, the key
+    /// the latent-pair mode rules match on.
+    fn model_type(&self) -> &'static str {
+        if self._is_ngram {
+            "longcat_flash_ngram"
+        } else {
+            "longcat_flash"
+        }
+    }
+
     pub fn load(model_path: &str) -> Result<(Self, usize), String> {
         let path = Path::new(model_path);
         let config_path = path.join("config.json");
@@ -953,16 +1330,26 @@ impl LongcatFlashNgramModel {
             let ngram = NgramEmbedding::from_weights(weights, args, "model.ngram_embeddings")?;
             (Some(ngram), None)
         } else {
-            let emb_w = get_weight_copy(weights, "model.embed_tokens.weight")?;
-            (None, Some(UnifiedEmbedding::Regular(Embedding::new(emb_w))))
+            let embed = UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)?;
+            validate_embedding_table(
+                &embed,
+                "model.embed_tokens",
+                args.vocab_size,
+                "vocab_size",
+                args.hidden_size,
+                "hidden_size",
+            )?;
+            (None, Some(embed))
         };
 
         // Layers
+        // One YaRN table for the model, duplicated into every attention.
+        let rope = LongcatFlashMLA::resolve_rope(args);
         let mut layers = Vec::with_capacity(args.num_layers);
         for i in 0..args.num_layers {
             let prefix = format!("model.layers.{i}");
             layers.push(LongcatFlashDecoderLayer::from_weights(
-                weights, args, &prefix,
+                weights, args, &rope, &prefix,
             )?);
         }
 
@@ -981,19 +1368,32 @@ impl LongcatFlashNgramModel {
             lm_head,
             num_layers: args.num_layers,
             _is_ngram: args.is_ngram_model(),
-            state: RefCell::new(LongcatState::new(args.num_layers)),
+            state: RefCell::new(LongcatState::new(args.num_layers, |_| KVCacheMode::Fp16)),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
             kv_mode_warned: Cell::new(false),
+            quantized_latent: Cell::new(mlxcel_core::mla::stores_quantized_latent_pair(
+                if args.is_ngram_model() {
+                    "longcat_flash_ngram"
+                } else {
+                    "longcat_flash"
+                },
+            )),
         })
     }
 }
 
 impl LongcatFlashNgramModel {
-    /// Internal forward pass with proper cache management
+    /// Internal forward pass with proper cache management.
+    ///
+    /// `row == None` projects every position; `Some(row)` projects only that
+    /// position (`[B, 1, vocab]`, the prefill's sampled row, #3070). The
+    /// caches and the n-gram tail advance over every position either way.
     fn internal_forward(
         &self,
         input_ids: &MlxArray,
         caches: &mut [[KVCache; 2]],
         ngram_context: &mut Option<UniquePtr<MlxArray>>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         // Compute embeddings
         let h = if let Some(ref ngram) = self.ngram_embeddings {
@@ -1002,25 +1402,17 @@ impl LongcatFlashNgramModel {
             self.embed_tokens.as_ref().unwrap().forward(input_ids)
         };
 
-        // Causal mask from the first sub-layer cache of the first layer,
-        // sized by its live window rather than the monotonic `offset` so it
-        // matches the K/V `update_and_fetch` returns (#421).
-        let h_shape = mlxcel_core::array_shape(&h);
-        let seq_len = h_shape[h_shape.len() - 2];
-        let live_len = caches.first().map_or(0, |c| c[0].live_len());
-        let mask = if seq_len > 1 {
-            Some(create_causal_mask(seq_len, live_len))
-        } else {
-            None
-        };
-
-        // Forward through layers
-        let mask_ref = mask.as_ref().map(|m| m.as_ref().unwrap());
+        // No mask array: a multi-token step runs MLX's causal mode inside the
+        // rope-folded attention, bottom-right aligned over the live window
+        // `update_and_fetch` returns, which masks the same keys as
+        // the `[seq_len, live_len + seq_len]` additive mask did (#421, #3099).
         let mut hidden = h;
         for (i, layer) in self.layers.iter().enumerate() {
             let [ref mut c0, ref mut c1] = caches[i];
-            hidden = layer.forward(&hidden, mask_ref, &mut [c0, c1]);
+            hidden = layer.forward(&hidden, None, &mut [c0, c1]);
         }
+
+        let hidden = mlxcel_core::generate::select_row(hidden, row);
 
         // Final norm and LM head
         let normed = self.norm.forward(&hidden);
@@ -1044,7 +1436,28 @@ impl LanguageModel for LongcatFlashNgramModel {
             caches,
             ngram_context,
         } = &mut *state;
-        self.internal_forward(input_ids, caches, ngram_context)
+        self.internal_forward(input_ids, caches, ngram_context, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        let mut state = self.state.borrow_mut();
+        let LongcatState {
+            caches,
+            ngram_context,
+        } = &mut *state;
+        Some(self.internal_forward(input_ids, caches, ngram_context, Some(last_pos)))
     }
 
     fn num_layers(&self) -> usize {
@@ -1076,32 +1489,62 @@ impl LanguageModel for LongcatFlashNgramModel {
     }
 
     fn reset_runtime_state(&self) {
-        *self.state.borrow_mut() = LongcatState::new(self.num_layers);
+        *self.state.borrow_mut() = LongcatState::new(self.num_layers, |i| {
+            self.kv_cache_layer_modes.mode_for_layer(i)
+        });
     }
 
-    /// The caches hold FP16 only, so a quantized table is refused with one
-    /// warning and `kv_cache_layer_modes` reports FP16.
+    /// Record the per-layer table the latent pair can hold and rebuild the
+    /// model-owned caches in it.
     ///
     /// Each layer's MLA attention stores the `(kv_latent, k_pe)` pair through
-    /// one `KVCache::update_and_fetch`: the "K" slot is `kv_lora_rank` wide and
-    /// the "V" slot is the RoPE key, so neither is a per-head K/V row. That is
-    /// the latent layout `mlxcel_core::mla::latent_layout_supports_mode`
-    /// restricts to FP16 (a Turbo codebook calibrated from one slot would be
-    /// applied to the other, and an asymmetric mode would quantize the RoPE
-    /// key while leaving the latent exact), and the mode resolver already
-    /// maps both LongCat `model_type`s to FP16 on that rule.
+    /// `mla_batched::store_latent_step`, so an `int8` layer keeps the affine
+    /// group-64 latent with fp16 rope keys when the model opted in
+    /// (`quantized_latent`, #3161). A mode
+    /// `mlxcel_core::mla::latent_pair_supports_mode` refuses (every Turbo
+    /// mode, whose codebook calibrated from one slot would be applied to the
+    /// other, and `int8` while LongCat is not a quantized latent family) is
+    /// replaced by FP16 with one warning; the mode resolver already maps such
+    /// requests to FP16 on that rule, so this is the backstop for a caller
+    /// that injects a table directly.
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
-        if modes.iter().any(|mode| *mode != KVCacheMode::Fp16) && !self.kv_mode_warned.replace(true)
-        {
-            tracing::warn!(
-                "longcat_flash serves FP16 KV only (its MLA caches hold a latent pair); the \
-                 requested per-layer KV cache modes are ignored"
-            );
-        }
+        let model_type = self.model_type();
+        let opted_in = self.quantized_latent.get();
+        let kept: Vec<KVCacheMode> = modes
+            .into_iter()
+            .map(|mode| {
+                let refusal = if opted_in && mode.latent_affine_bits().is_some() {
+                    None
+                } else {
+                    mlxcel_core::mla::latent_pair_supports_mode(model_type, mode).err()
+                };
+                match refusal {
+                    None => mode,
+                    Some(reason) => {
+                        if !self.kv_mode_warned.replace(true) {
+                            tracing::warn!(
+                                %mode,
+                                "{model_type}: {reason}; layers requesting this KV cache mode \
+                                 use fp16"
+                            );
+                        }
+                        KVCacheMode::Fp16
+                    }
+                }
+            })
+            .collect();
+        self.kv_cache_layer_modes.set(kept);
+        self.reset_runtime_state();
     }
 
+    /// The modes the model-owned caches are built in, FP16 for every layer
+    /// until a table is injected.
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
-        Some(vec![KVCacheMode::Fp16; self.num_layers])
+        Some(
+            (0..self.num_layers)
+                .map(|i| self.kv_cache_layer_modes.mode_for_layer(i))
+                .collect(),
+        )
     }
 }
 
@@ -1231,13 +1674,12 @@ pub fn sanitize_weights(
     weights.retain(|k, _| !k.starts_with("model.mtp"));
 
     // For ngram model: rename embed_tokens → ngram_embeddings.word_embeddings
-    if args.is_ngram_model()
-        && let Some(w) = weights.remove("model.embed_tokens.weight")
-    {
-        weights.insert(
-            "model.ngram_embeddings.word_embeddings.weight".to_string(),
-            w,
-        );
+    if args.is_ngram_model() {
+        for part in ["weight", "scales", "biases"] {
+            if let Some(w) = weights.remove(&format!("model.embed_tokens.{part}")) {
+                weights.insert(format!("model.ngram_embeddings.word_embeddings.{part}"), w);
+            }
+        }
     }
 
     Ok(weights)
@@ -1246,6 +1688,10 @@ pub fn sanitize_weights(
 #[cfg(test)]
 #[path = "longcat_flash_ngram_engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "longcat_flash_ngram_latent_tests.rs"]
+mod latent_tests;
 
 #[cfg(test)]
 mod tests {

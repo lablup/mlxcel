@@ -26,6 +26,7 @@ use mlxcel_core::cache::{DetachedCacheSet, DetachedPagedCacheSet};
 use mlxcel_core::generate::ModelStateSnapshot;
 
 use super::block_hash::ApcBlockHash;
+use super::lineage::SnapshotLineage;
 
 /// A detached KV-cache set, one variant per decode-storage backend.
 ///
@@ -402,6 +403,17 @@ pub enum SnapshotOrigin {
     /// Captured mid-prefill at the history boundary: the tokenization of the
     /// conversation re-rendered with `add_generation_prompt = false`.
     Boundary,
+    /// Captured mid-prefill at the end of the system prompt and tool list
+    /// (#2885 Part B, `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT`). Shared by every chat
+    /// that opens with the same system block, so LRU eviction passes over it
+    /// while roots hold at most half of the snapshot budget.
+    SystemRoot,
+    /// Captured mid-prefill at a multiple of the checkpoint interval (#2885
+    /// Part B, `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL`). Exempt from the
+    /// session-chain supersede rule: a conversation keeps several of them so a
+    /// request that edits its history resumes from the last one before the
+    /// edit. LRU eviction treats them like any other entry.
+    Checkpoint,
 }
 
 /// A single exact-prefix recurrent/model-owned state snapshot.
@@ -412,6 +424,10 @@ pub struct ModelSnapshotEntry {
     pub size_bytes: usize,
     /// Which producer stored this entry. See [`SnapshotOrigin`].
     pub origin: SnapshotOrigin,
+    /// Which sequences computed this entry's rows (issue #3047). A
+    /// turn-boundary state checkpoint is rebuilt only over a longer snapshot
+    /// whose lineage agrees with its own over the checkpoint's length.
+    pub lineage: SnapshotLineage,
 }
 
 impl ModelSnapshotEntry {
@@ -423,6 +439,7 @@ impl ModelSnapshotEntry {
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             origin: SnapshotOrigin::Completion,
+            lineage: SnapshotLineage::default(),
         }
     }
 
@@ -434,6 +451,13 @@ impl ModelSnapshotEntry {
     #[must_use]
     pub fn with_origin(mut self, origin: SnapshotOrigin) -> Self {
         self.origin = origin;
+        self
+    }
+
+    /// Record which sequences computed this entry's rows (issue #3047).
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: SnapshotLineage) -> Self {
+        self.lineage = lineage;
         self
     }
 
@@ -476,6 +500,7 @@ impl ModelSnapshotEntry {
             last_used: Mutex::new(Instant::now()),
             size_bytes,
             origin: SnapshotOrigin::Completion,
+            lineage: SnapshotLineage::default(),
         }
     }
 }

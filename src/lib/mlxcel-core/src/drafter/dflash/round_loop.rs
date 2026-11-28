@@ -210,6 +210,18 @@ pub trait SpeculativeTarget {
         self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
     }
 
+    /// Whether a verify block of ANY width from 1 up to the requested one
+    /// reproduces that many single-token decode steps bit for bit, so the
+    /// round loop may narrow the block, or run a one-row classic step with
+    /// no draft, without leaving classic decode's text (issue #3410). The
+    /// exactness probe runs at the requested width only, so a target says
+    /// this only when its forward is row-invariant by construction. `true`
+    /// lets [`super::width_policy::ExpectedThroughputWidth`] pick each
+    /// round's width; the default keeps the requested width.
+    fn exact_at_every_verify_width(&self) -> bool {
+        false
+    }
+
     /// Rewind the target's caches to the accepted-prefix position.
     ///
     /// Called only when `accepted < block_size - 1`. The implementation
@@ -234,24 +246,28 @@ pub trait SpeculativeTarget {
     /// row (B > 1 path).
     ///
     /// Mirrors `rollback_partial` but takes a `&[i32]` of length `B`, one
-    /// accept count per row. **The batched round loop guarantees the slice
-    /// is uniform** (issue #2353): a batched target cache is rectangular,
-    /// so `round_loop_batched::clamp_uniform_acceptance` cuts every
-    /// round back to the shortest live row's accept before any token is
-    /// emitted. Zeroing a shorter row's rejected tail is not a substitute: a
-    /// zero key still scores `q . 0 = 0` and takes `exp(0)` weight in the
-    /// softmax. The implementation MUST:
+    /// accept count per row. **The uniform-clamp arm guarantees the slice is
+    /// uniform** (issue #2353): a rectangular batched cache can keep only one
+    /// number of verify positions per row, so
+    /// `round_loop_batched::clamp_uniform_acceptance` cuts every round back to
+    /// the shortest live row's accept before any token is emitted. Targets
+    /// that support per-row accepts (issue #2442) are driven through
+    /// [`Self::rollback_partial_batched_rows`] instead. Zeroing a shorter
+    /// row's rejected tail is not a substitute for either: a zero key still
+    /// scores `q . 0 = 0` and takes `exp(0)` weight in the softmax. The
+    /// implementation MUST:
     ///
     /// 1. Trim the attention-layer KV caches by
     ///    `block_size - (accepted[0] + 1)`.
     /// 2. Replay each linear-attention layer's GDN state over the first
     ///    `accepted[0] + 1` positions of the verify block.
     ///
-    /// and SHOULD fail loudly on a ragged slice rather than represent it.
+    /// and SHOULD fail loudly on a ragged slice rather than represent it;
+    /// the per-row arm never reaches this hook.
     ///
     /// For Qwen 3.5 this delegates directly to
     /// `Qwen35Model::rollback_speculative_cache(caches, verify_out.gdn_states, accepted, block_size)`,
-    /// which asserts the slice is uniform.
+    /// whose uniform arm handles the slice without an assertion.
     ///
     /// The default implementation delegates to [`Self::rollback_partial`]
     /// when `accepted.len() == 1` so single-row targets don't need a
@@ -275,6 +291,94 @@ pub trait SpeculativeTarget {
                 accepted.len()
             );
         }
+    }
+
+    /// Whether this target can commit a different accept count in every row
+    /// of the batched round loop (issue #2442), instead of the uniform clamp
+    /// of issue #2353.
+    ///
+    /// A target that returns `true` must also implement
+    /// [`Self::verify_forward_with_row_layout`],
+    /// [`Self::rollback_partial_batched_rows`] and
+    /// [`Self::batch_cache_offset`]. The round loop only takes the per-row
+    /// path when this is `true` and the caller has enabled it.
+    fn supports_per_row_accepts(&self) -> bool {
+        false
+    }
+
+    /// Whether this instance's caches can hold the per-row layout for the
+    /// batch (issue #2442).
+    ///
+    /// [`Self::supports_per_row_accepts`] is the family-level answer; this is
+    /// the instance-level one. A quantized or paged attention cache cannot be
+    /// compacted row by row, so such a burst falls back to the uniform clamp
+    /// instead of panicking. Defaults to `false`, matching the family gate.
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        let _ = caches;
+        false
+    }
+
+    /// Physical cache offset (number of positions written) shared by the
+    /// batch after prefill.
+    ///
+    /// The per-row round loop seeds every row's logical valid end from this
+    /// value before round 0; rows then diverge by their own accepts. Only
+    /// called when [`Self::supports_per_row_accepts`] is `true`.
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        let _ = caches;
+        0
+    }
+
+    /// Run one verify forward for a batch whose rows have different logical
+    /// valid ends (issue #2442).
+    ///
+    /// `row_valid_ends[r]` is row `r`'s logical valid end before this round's
+    /// block: the number of positions in the row's contiguous valid prefix.
+    /// The shared physical cache offset is `max(row_valid_ends)`; rows below
+    /// it carry a stale gap `[row_valid_ends[r], offset)` that the forward
+    /// MUST exclude from attention and rotate around (the Gemma 4
+    /// `DivergentVerifyRows` layout). The block's own tokens sit at the
+    /// shared offset and are valid for every row.
+    ///
+    /// The default implementation ignores the layout and delegates to
+    /// [`Self::verify_forward_with_capture_layers`], which is correct only
+    /// when every row's valid end equals the physical offset.
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let _ = row_valid_ends;
+        self.verify_forward_with_capture_layers(verify_input, caches, capture_layer_ids)
+    }
+
+    /// Rewind a ragged batch: row `r` keeps its first `accepted[r] + 1`
+    /// block positions and every row's attention caches are compacted back
+    /// to a contiguous valid prefix (issue #2442).
+    ///
+    /// `row_valid_ends_pre[r]` is row `r`'s logical valid end before the
+    /// verify block, so the new end is `row_valid_ends_pre[r] + accepted[r] + 1`.
+    /// The implementation MUST move each row's accepted block from the shared
+    /// physical offset back to that row's logical end (so the next round sees
+    /// a contiguous `[0, valid_end)` prefix), zero the vacated gaps, and set
+    /// the physical cache offset to the maximum new valid end. Linear-attention
+    /// (GDN) states are replayed per row over that row's own accepted prefix.
+    ///
+    /// The default implementation delegates to
+    /// [`Self::rollback_partial_batched`], which is correct only for a
+    /// uniform accept.
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = row_valid_ends_pre;
+        self.rollback_partial_batched(caches, verify_out, accepted, block_size);
     }
 
     /// Build the drafter's per-round hidden input by concatenating the
@@ -332,6 +436,13 @@ pub struct DFlashGenerator {
     /// first-bonus emission, which has no walk). Used by tests to pin
     /// the upstream `accept_lens` parity.
     accept_lens: Vec<u32>,
+    /// History before the first bonus (the prompt when the sampler reads
+    /// history), for the sampled verify rows (issue #3436).
+    token_history: Vec<i32>,
+    /// Prompt rows before the first hidden's first row, which the target did
+    /// not capture (issue #3436); handed to [`Drafter::skip_context`] after
+    /// the drafter resets.
+    first_context_start: usize,
 }
 
 impl DFlashGenerator {
@@ -358,7 +469,23 @@ impl DFlashGenerator {
             mask_token_id,
             generated_tokens: Vec::new(),
             accept_lens: Vec::new(),
+            token_history: Vec::new(),
+            first_context_start: 0,
         }
+    }
+
+    /// The history plain decode starts from (the prompt when the sampler
+    /// reads history), which a sampled verify row extends with the first
+    /// bonus, the emitted tokens and the accepted drafts (issue #3436).
+    pub fn set_token_history(&mut self, history: Vec<i32>) {
+        self.token_history = history;
+    }
+
+    /// The first hidden starts `rows` prompt rows in: the target captured
+    /// only the newest [`Drafter::context_window`] rows of the prompt
+    /// (issue #3436).
+    pub fn set_first_context_start(&mut self, rows: usize) {
+        self.first_context_start = rows;
     }
 
     /// Convenience constructor that uses the [`DEFAULT_BLOCK_SIZE`] and
@@ -528,6 +655,9 @@ pub struct DFlashDiagnostics {
     pub partial_accept_rounds: usize,
     /// Rounds with every proposal accepted.
     pub full_accept_rounds: usize,
+    /// Rounds the acceptance-aware width policy ran as a one-row classic
+    /// decode step, with no draft (issue #3410). Counted in [`Self::rounds`].
+    pub classic_steps: usize,
     /// Time spent binding/resetting the drafter at the start of the run.
     pub bind_reset_time_ms: f64,
     /// Time spent inside drafter `draft_block`.
@@ -656,6 +786,9 @@ impl DFlashGenerator {
         let bind_reset_start = Instant::now();
         self.drafter.bind(target_lm)?;
         self.drafter.reset(target_lm)?;
+        if self.first_context_start > 0 {
+            self.drafter.skip_context(self.first_context_start);
+        }
         let bind_reset_time = bind_reset_start.elapsed();
 
         let mut diagnostics = DFlashDiagnostics {
@@ -714,8 +847,23 @@ impl DFlashGenerator {
                     BlockThroughputController::new(block_size_cfg, depth)
                 })
         };
+        // Acceptance-aware width (issue #3410): for a target exact at every
+        // width, each round's width maximizes expected tokens per measured
+        // millisecond, down to a one-row classic step when no draft pays.
+        let mut width_policy = (target.exact_at_every_verify_width()
+            && super::width_policy::adaptive_width_enabled()
+            && block_size_cfg > 1)
+            .then(|| {
+                width_controller = None;
+                super::width_policy::ExpectedThroughputWidth::new(block_size_cfg)
+            });
+        let sampled_verify =
+            super::sampled_verify::uses_sampled_verify(self.drafter.as_ref(), &self.sampler);
         let mut bonus = first_bonus;
+        // Committed target hidden rows the drafter has not consumed yet: the
+        // last drafted round's accepted rows, then one row per classic step.
         let mut hidden: UniquePtr<MlxArray> = first_hidden;
+        let mut classic_hidden: Vec<UniquePtr<MlxArray>> = Vec::new();
         // `emitted` counts ALL tokens the caller will see, including
         // `first_bonus`. The round-loop body has already advanced
         // `emitted` from 0 → 1 conceptually (the first bonus is
@@ -742,16 +890,76 @@ impl DFlashGenerator {
             }
             // Upstream: bs = min(block_total, max_tokens - emitted + 1)
             let remaining_plus_one = max_tokens - emitted + 1;
-            let bs = match &width_controller {
-                Some(controller) => controller.decide(remaining_plus_one),
-                None => block_size_cfg.min(remaining_plus_one),
+            let bs = match (&width_policy, &width_controller) {
+                (Some(policy), _) => policy.decide(remaining_plus_one),
+                (None, Some(controller)) => controller.decide(remaining_plus_one),
+                (None, None) => block_size_cfg.min(remaining_plus_one),
             };
-            if bs <= 1 {
+            // A one-row round is a classic decode step, which only the width
+            // policy asks for; otherwise a width of 1 drafts nothing.
+            let classic_step = bs == 1 && width_policy.is_some();
+            if bs <= 1 && !classic_step {
                 break;
             }
+
+            // ---- Classic steps ----
+            // The width policy found no draft width that pays: run classic
+            // decode steps back to back, pipelined, up to its next re-try
+            // of the drafter. Their hidden rows queue for that draft.
+            if classic_step {
+                let steps = width_policy
+                    .as_ref()
+                    .map_or(1, |p| p.classic_run_len())
+                    .min(max_tokens - emitted);
+                let run = super::classic_steps::run_classic_steps(
+                    target,
+                    caches,
+                    &capture_layer_ids,
+                    bonus,
+                    steps,
+                    eos_token_ids,
+                    cancel,
+                    logprobs_config,
+                );
+                diagnostics.verify_time_ms += run.elapsed_ms;
+                let ran = run.tokens.len();
+                diagnostics.rounds += ran;
+                diagnostics.classic_steps += ran;
+                diagnostics.zero_accept_rounds += ran;
+                self.accept_lens.extend(std::iter::repeat_n(0, ran));
+                if let Some(policy) = &mut width_policy {
+                    policy.record_classic_steps(ran, run.step_ms);
+                }
+                classic_hidden.extend(run.hidden);
+                if logprobs_config.enabled {
+                    logprobs.extend(run.logprobs);
+                }
+                self.generated_tokens.extend_from_slice(&run.tokens);
+                emitted += ran;
+                if let Some(last) = run.tokens.last() {
+                    bonus = *last;
+                }
+                if run.hit_eos || ran == 0 || emitted >= max_tokens {
+                    break;
+                }
+                if crate::memory::should_clear_cache_at(
+                    emitted,
+                    crate::memory::cache_clear_interval(),
+                ) {
+                    ffi::clear_memory_cache();
+                }
+                continue;
+            }
+
             let round_started = Instant::now();
 
             // ---- Draft ----
+            if !classic_hidden.is_empty() {
+                let mut rows: Vec<&MlxArray> = vec![&hidden];
+                rows.extend(classic_hidden.iter().map(|row| &**row));
+                hidden = crate::concatenate_many(&rows, 1);
+                classic_hidden.clear();
+            }
             let phase_start = Instant::now();
             let draft_tokens_arr = self.drafter.draft_block_array(
                 bonus,
@@ -816,6 +1024,30 @@ impl DFlashGenerator {
                 bs - 1,
                 bs,
             );
+            // A deterministic draft under sampling: the target tokens are
+            // the sampler's draws, so the walk keeps plain sampling's
+            // distribution (issue #3436).
+            let (target_tokens, sampled_logits) = if sampled_verify {
+                let history: Vec<i32> = if self.sampler.needs_token_history() {
+                    self.token_history
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(first_bonus))
+                        .chain(self.generated_tokens.iter().copied())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let (tokens, adjusted) = super::sampled_verify::sample_verify_rows(
+                    verify_logits,
+                    &draft_tokens,
+                    &self.sampler,
+                    history,
+                );
+                (tokens, Some(adjusted))
+            } else {
+                (target_tokens, None)
+            };
             diagnostics.target_argmax_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // Per-position log-probability data, aligned 1:1 with
@@ -826,8 +1058,13 @@ impl DFlashGenerator {
             // `compute_logprobs`, so these logprobs are byte-identical
             // to the classic path for greedy sampling.
             let phase_start = Instant::now();
-            let target_logprobs =
-                per_position_logprobs(verify_logits, &target_tokens, logprobs_config);
+            // Sampled rows report from the sampler-adjusted logits, as
+            // plain decode does (penalties and bias applied, issue #3436).
+            let target_logprobs = per_position_logprobs(
+                sampled_logits.as_deref().unwrap_or(verify_logits),
+                &target_tokens,
+                logprobs_config,
+            );
             diagnostics.logprobs_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Walk ----
@@ -905,6 +1142,9 @@ impl DFlashGenerator {
                     round_started.elapsed().as_secs_f64() * 1000.0,
                 );
             }
+            if let Some(policy) = &mut width_policy {
+                policy.record_round(bs, accepted, round_started.elapsed().as_secs_f64() * 1000.0);
+            }
             if hit_eos {
                 break;
             }
@@ -932,21 +1172,21 @@ impl DFlashGenerator {
             // Full-accept keeps the already-built [1, bs, dim] tensor;
             // partial-accept slices to [1, accepted+1, dim] so the drafter's
             // cross-attention only sees the validated context.
-            hidden = if (accepted as i32) < (bs as i32) - 1 {
+            if (accepted as i32) < (bs as i32) - 1 {
                 let full_shape = ffi::array_shape(&full_hidden);
                 debug_assert_eq!(
                     full_shape.len(),
                     3,
                     "concat_hidden_for_drafter must return a 3D [1, bs, dim] tensor"
                 );
-                ffi::slice(
+                hidden = ffi::slice(
                     &full_hidden,
                     &[0, 0, 0],
                     &[full_shape[0], accepted as i32 + 1, full_shape[2]],
-                )
+                );
             } else {
-                full_hidden
-            };
+                hidden = full_hidden;
+            }
 
             // ---- Rollback (only on partial acceptance) ----
             //
@@ -975,6 +1215,9 @@ impl DFlashGenerator {
             }
         }
 
+        if let Some(policy) = &width_policy {
+            tracing::debug!(policy = %policy.summary(), "DFlash acceptance-aware verify width");
+        }
         let decode_elapsed = decode_start.elapsed();
         diagnostics.emitted_tokens = self.generated_tokens.len();
         diagnostics.total_decode_time_ms = decode_elapsed.as_secs_f64() * 1000.0;
@@ -1013,7 +1256,7 @@ impl DFlashGenerator {
 /// the Gemma 4 MTP verify forward does before its per-position argmax — so
 /// that suppressed placeholder token ids cannot win a verify position and
 /// reintroduce the #350 leak.
-fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
+pub(super) fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     debug_assert!(shape.len() == 3, "expected [1, seq_len, vocab] logits");
     debug_assert_eq!(shape[1], seq_len, "logits seq dim must match block_size");
@@ -1057,7 +1300,7 @@ fn materialize_draft_and_target_tokens(
 ///
 /// Returns `None` when `logprobs_config.enabled` is false (the
 /// zero-overhead path — no slicing, no log-softmax).
-fn per_position_logprobs(
+pub(super) fn per_position_logprobs(
     logits: &MlxArray,
     target_tokens: &[i32],
     logprobs_config: &crate::sampling::LogprobsConfig,

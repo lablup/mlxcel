@@ -192,6 +192,10 @@ const TEXT_IMAGE_VIDEO_AUDIO: &[Modality] = &[
 ];
 
 const KV_FP16: &[KvMode] = &[KvMode::Fp16];
+/// The quantized-latent families (`DeepSeekV3Attention`, #3160; Kimi Linear and
+/// Kimi K3, #3162; LongCat, #3161): an affine int8 latent with fp16 rope keys,
+/// no Turbo mode (`mla::QUANTIZED_LATENT_FAMILIES`).
+const KV_INT8: &[KvMode] = &[KvMode::Fp16, KvMode::Int8];
 const KV_TURBO: &[KvMode] = &[KvMode::Fp16, KvMode::Int8, KvMode::Turbo4];
 const NO_DRAFTERS: &[Drafter] = &[];
 const MTP: &[Drafter] = &[Drafter::Mtp];
@@ -609,6 +613,27 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] = &[
         drafters: NO_DRAFTERS,
         kv_modes: KV_FP16,
     },
+    // Rendered end to end on Metal (Apple M4) and ROCm (gfx1151), with no
+    // numeric parity against the reference, so every backend is partial.
+    StandaloneArchitectureFamily {
+        id: "moss_image",
+        display_name: "MOSS-Image",
+        category: "image generation",
+        model_types: &["moss_image"],
+        aliases: &["moss-image", "moss-image-sft"],
+        runtimes: IMAGE_GENERATE,
+        modalities_in: TEXT,
+        output: OutputKind::Image,
+        backends: BackendSupport {
+            metal: BackendStatus::Partial,
+            cuda: BackendStatus::Partial,
+            rocm: ROCM_FIRST_PASS,
+        },
+        tensor_parallel: false,
+        pipeline_parallel: false,
+        drafters: NO_DRAFTERS,
+        kv_modes: KV_FP16,
+    },
 ];
 
 const TENSOR_PARALLEL_MODEL_TYPES: &[ModelType] = &[
@@ -746,7 +771,9 @@ impl ModelType {
             ModelType::DeepSeekV2 => "deepseek_v2",
             ModelType::DeepSeekV3 => "deepseek_v3",
             ModelType::DeepSeekV32 => "deepseek_v32",
+            ModelType::HyV4 => "hy_v4",
             ModelType::DeepSeekV4 => "deepseek_v4",
+            ModelType::Xing40 => "xing4_0",
             ModelType::Dots1 => "dots1",
             ModelType::Cohere => "cohere",
             ModelType::Cohere2 => "cohere2",
@@ -764,10 +791,13 @@ impl ModelType {
             ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
             ModelType::MiMo => "mimo",
             ModelType::MiMoV2Flash => "mimo_v2_flash",
+            ModelType::MiMoV2VLM => "mimo_v2_vlm",
             ModelType::BailingMoe => "bailing_moe",
             ModelType::BailingMoeLinear => "bailing_moe_linear",
             ModelType::Afmoe => "afmoe",
+            ModelType::Arcee => "arcee",
             ModelType::Klear => "klear",
+            ModelType::Kolibri1 => "kolibri1",
             ModelType::Apertus => "apertus",
             ModelType::SeedOss => "seed_oss",
             ModelType::Granite => "granite",
@@ -787,7 +817,9 @@ impl ModelType {
             ModelType::StarCoder2 => "starcoder2",
             ModelType::Mellum => "mellum",
             ModelType::Laguna => "laguna",
+            ModelType::Limite => "limite",
             ModelType::Helium => "helium",
+            ModelType::K2Horizon => "k2_horizon",
             ModelType::TeleChat3 => "telechat3",
             ModelType::MiniCPM => "minicpm",
             ModelType::MiniCPM3 => "minicpm3",
@@ -809,19 +841,24 @@ impl ModelType {
             ModelType::Lfm2VL => "lfm2_vl",
             ModelType::Inkling => "inkling",
             ModelType::InklingVLM => "inkling_vlm",
+            ModelType::Inkling2VLM => "inkling2_vlm",
             ModelType::Plamo2 => "plamo2",
+            ModelType::Plamo2VLM => "plamo2_vlm",
             ModelType::GraniteMoeHybrid => "granitemoehybrid",
             ModelType::KimiLinear => "kimi_linear",
             ModelType::KimiK3 => "kimi_k3",
+            ModelType::Raon1Mini => "raon1_mini",
             ModelType::KimiK3VLM => "kimi_k3_vlm",
             ModelType::KimiVL => "kimi_vl",
             ModelType::KimiK25 => "kimi_k25",
             ModelType::LongcatFlash => "longcat_flash",
             ModelType::LongcatFlashNgram => "longcat_flash_ngram",
+            ModelType::LongcatFlashSparse => "longcat_flash_sparse",
             ModelType::Step3p5 => "step3p5",
             ModelType::Step3p7 => "step3p7",
             ModelType::Rwkv7 => "rwkv7",
             ModelType::RecurrentGemma => "recurrent_gemma",
+            ModelType::Z1t => "z1t",
             ModelType::Whisper => "whisper",
             ModelType::Kokoro => "kokoro",
             ModelType::NemotronVoiceChat => "nemotron_voicechat",
@@ -927,6 +964,8 @@ impl ModelType {
             drafters,
             kv_modes: if supports_turbo_kv(self) {
                 KV_TURBO
+            } else if stores_quantized_latent(self) {
+                KV_INT8
             } else {
                 KV_FP16
             },
@@ -958,8 +997,10 @@ impl ModelType {
             | ModelType::KimiLinear
             | ModelType::KimiK3
             | ModelType::KimiK3VLM
+            | ModelType::Raon1Mini
             | ModelType::LongcatFlash
             | ModelType::LongcatFlashNgram
+            | ModelType::LongcatFlashSparse
             | ModelType::Qwen3Next => "linear_attention",
             ModelType::Mamba
             | ModelType::Mamba2
@@ -972,7 +1013,8 @@ impl ModelType {
             | ModelType::Qwen35
             | ModelType::Plamo2
             | ModelType::Rwkv7
-            | ModelType::RecurrentGemma => "hybrid_ssm",
+            | ModelType::RecurrentGemma
+            | ModelType::Z1t => "hybrid_ssm",
             ModelType::Llama4
             | ModelType::Qwen3Moe
             | ModelType::Qwen35Moe
@@ -987,7 +1029,9 @@ impl ModelType {
             | ModelType::DeepSeekV2
             | ModelType::DeepSeekV3
             | ModelType::DeepSeekV32
+            | ModelType::HyV4
             | ModelType::DeepSeekV4
+            | ModelType::Xing40
             | ModelType::Dots1
             | ModelType::Cohere2Moe
             | ModelType::Glm4Moe
@@ -998,6 +1042,7 @@ impl ModelType {
             | ModelType::BailingMoe
             | ModelType::Afmoe
             | ModelType::Klear
+            | ModelType::Kolibri1
             | ModelType::ExaOneMoe
             | ModelType::PhiMoe
             | ModelType::Phixtral
@@ -1090,7 +1135,8 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
     }
 }
 
-fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
+/// The `config.json` `model_type` strings that select `model_type`.
+pub(crate) fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
     match model_type {
         ModelType::Llama => &["llama", "mistral", "xverse"],
         ModelType::IQuestCoder => &["iquestcoder"],
@@ -1133,7 +1179,9 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::DeepSeekV2 => &["deepseek_v2"],
         ModelType::DeepSeekV3 => &["deepseek_v3", "kimi_k2", "joyai_llm_flash"],
         ModelType::DeepSeekV32 => &["deepseek_v32", "deepseek_v3.2"],
+        ModelType::HyV4 => &["hy_v4"],
         ModelType::DeepSeekV4 => &["deepseek_v4"],
+        ModelType::Xing40 => &["xing4_0"],
         ModelType::Dots1 => &["dots1"],
         ModelType::Cohere => &["cohere"],
         ModelType::Cohere2 => &["cohere2"],
@@ -1154,10 +1202,13 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::HunyuanMoe => &["hunyuan"],
         ModelType::MiMo => &["mimo"],
         ModelType::MiMoV2Flash => &["mimo_v2_flash"],
+        ModelType::MiMoV2VLM => &["mimo_v2"],
         ModelType::BailingMoe => &["bailing_moe"],
         ModelType::BailingMoeLinear => &["bailing_moe_linear"],
         ModelType::Afmoe => &["afmoe"],
+        ModelType::Arcee => &["arcee"],
         ModelType::Klear => &["klear"],
+        ModelType::Kolibri1 => &["kolibri1"],
         ModelType::Apertus => &["apertus"],
         ModelType::SeedOss => &["seed_oss"],
         ModelType::Granite => &["granite"],
@@ -1173,10 +1224,12 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::GptNeoX => &["gpt_neox"],
         ModelType::NanoChat => &["nanochat"],
         ModelType::Helium => &["helium"],
+        ModelType::K2Horizon => &["k2_horizon"],
         ModelType::TeleChat3 => &["telechat3"],
         ModelType::StarCoder2 => &["starcoder2"],
         ModelType::Mellum => &["mellum"],
         ModelType::Laguna => &["laguna"],
+        ModelType::Limite => &["limite"],
         ModelType::MiniCPM => &["minicpm"],
         ModelType::MiniCPM3 => &["minicpm3"],
         ModelType::StableLM => &["stablelm"],
@@ -1193,7 +1246,9 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::Lfm2VL => &["lfm2_vl", "lfm2-vl"],
         ModelType::Lfm2Moe => &["lfm2_moe"],
         ModelType::Inkling | ModelType::InklingVLM => &["inkling_mm_model", "inkling"],
+        ModelType::Inkling2VLM => &["inkling2", "inkling2_loop"],
         ModelType::Plamo2 => &["plamo2"],
+        ModelType::Plamo2VLM => &["plamo2vl"],
         ModelType::GraniteMoeHybrid => &["granitemoehybrid"],
         ModelType::NemotronH => &["nemotron_h"],
         ModelType::NemotronHNanoOmniVLM => {
@@ -1201,13 +1256,16 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         }
         ModelType::NemotronNAS => &["nemotron-nas"],
         ModelType::Rwkv7 => &["rwkv7"],
+        ModelType::Z1t => &["z1t"],
         ModelType::KimiLinear => &["kimi_linear"],
         ModelType::KimiK3 | ModelType::KimiK3VLM => &["kimi_k3"],
+        ModelType::Raon1Mini => &["raon1_mini"],
         ModelType::KimiVL => &["kimi_vl"],
         ModelType::KimiK25 => &["kimi_k25"],
         ModelType::LocateAnythingVLM => &["locateanything"],
         ModelType::LongcatFlash => &["longcat_flash"],
         ModelType::LongcatFlashNgram => &["longcat_flash_ngram"],
+        ModelType::LongcatFlashSparse => &["longcat_flash_sparse"],
         ModelType::Step3p5 => &["step3p5"],
         ModelType::Step3p7 => &["step3p7"],
         ModelType::RecurrentGemma => &["recurrent_gemma", "griffin"],
@@ -1227,7 +1285,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::YoutuVLM => &["youtu_vl"],
         ModelType::InternVLChatVLM => &["internvl_chat"],
         ModelType::LlmJpVLM => &["llmjpvl"],
-        ModelType::MageVLM => &["mage_vl"],
+        ModelType::MageVLM => &["mage_vl", "llava_onevision2"],
         ModelType::GotOcrVLM => &["got"],
         ModelType::SmolVLM => &["smolvlm", "smolvlm2", "idefics3"],
         ModelType::Idefics2 => &["idefics2"],
@@ -1296,7 +1354,8 @@ fn modalities_for(model_type: ModelType) -> &'static [Modality] {
         | ModelType::Qwen3VLMoe
         | ModelType::Qwen35VLM
         | ModelType::Qwen35MoeVLM
-        | ModelType::Qwen4ExpVLM => TEXT_IMAGE_VIDEO,
+        | ModelType::Qwen4ExpVLM
+        | ModelType::MiMoV2VLM => TEXT_IMAGE_VIDEO,
         _ if is_vlm_registry_type(model_type) => TEXT_IMAGE,
         _ => TEXT,
     }
@@ -1320,6 +1379,28 @@ fn is_vlm_registry_type(model_type: ModelType) -> bool {
             | "Muse VLM"
             | "Step VLM"
             | "Other VLM"
+    )
+}
+
+/// Families whose runtime accepts `int8` through the quantized MLA latent
+/// (`mlxcel_core::mla::QUANTIZED_LATENT_FAMILIES`), without a Turbo mode.
+/// This is the default gate: the advertised modes do not follow an explicit,
+/// experimental `--mla-latent-quant` (issue #3179), which can store a
+/// quantized latent on a family not listed here.
+fn stores_quantized_latent(model_type: ModelType) -> bool {
+    matches!(
+        model_type,
+        ModelType::DeepSeekV3
+            | ModelType::KimiVL
+            | ModelType::KimiK25
+            | ModelType::YoutuLLM
+            | ModelType::YoutuVLM
+            | ModelType::KimiLinear
+            | ModelType::KimiK3
+            | ModelType::KimiK3VLM
+            | ModelType::LongcatFlash
+            | ModelType::LongcatFlashNgram
+            | ModelType::LongcatFlashSparse
     )
 }
 
@@ -1376,6 +1457,7 @@ fn supports_turbo_kv(model_type: ModelType) -> bool {
             | ModelType::Step3p7
             | ModelType::Mellum
             | ModelType::Laguna
+            | ModelType::Limite
             | ModelType::NemotronNAS
     )
 }
@@ -1385,7 +1467,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use mlxcel_core::cache::KVCacheMode;
-    use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model;
+    use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model_with;
 
     use super::*;
 
@@ -1748,8 +1830,17 @@ mod tests {
         }
     }
 
+    /// `kv_modes` is a host-independent capability table (`mlxcel arch --json`
+    /// and the published registry snapshots), so it is checked against the
+    /// family rules with absorbed MLA decode off. The one conditional rule,
+    /// `deepseek_v2` resolving a quantized request to fp16 while absorbed
+    /// decode is on (#3153), depends on the host and `MLXCEL_MLA_ABSORBED`;
+    /// with `MLXCEL_MLA_ABSORBED=0` the family holds int8 and turbo4, which is
+    /// what it advertises.
     #[test]
     fn kv_modes_do_not_advertise_runtime_fp16_downgrades() {
+        let resolve_kv_cache_mode_for_model =
+            |mode, key: &str| resolve_kv_cache_mode_for_model_with(mode, key, false);
         for model_type in ALL_MODEL_TYPES {
             let family = model_type.capabilities();
             for config_key in family.model_types {
@@ -1778,20 +1869,45 @@ mod tests {
     #[test]
     fn mla_latent_cache_families_report_fp16_only_kv_modes() {
         for model_type in [
-            ModelType::DeepSeekV3,
             ModelType::DeepSeekV32,
+            ModelType::HyV4,
             ModelType::Glm4MoeLite,
             ModelType::GlmMoeDsa,
-            ModelType::KimiLinear,
-            ModelType::KimiK3,
-            ModelType::KimiK3VLM,
-            ModelType::LongcatFlashNgram,
         ] {
             assert_eq!(
                 family(model_type).kv_modes,
                 KV_FP16,
                 "{model_type:?} should not advertise quantized KV cache modes"
             );
+        }
+    }
+
+    /// The `DeepSeekV3Attention` families accept `int8` (the affine latent) and
+    /// no Turbo mode, and every one of their config keys is in
+    /// `mla::QUANTIZED_LATENT_FAMILIES` so the advertised list matches runtime.
+    #[test]
+    fn quantized_latent_families_report_fp16_and_int8_kv_modes() {
+        for model_type in [
+            ModelType::DeepSeekV3,
+            ModelType::KimiVL,
+            ModelType::KimiK25,
+            ModelType::YoutuLLM,
+            ModelType::YoutuVLM,
+            ModelType::KimiLinear,
+            ModelType::KimiK3,
+            ModelType::KimiK3VLM,
+            ModelType::LongcatFlash,
+            ModelType::LongcatFlashNgram,
+            ModelType::LongcatFlashSparse,
+        ] {
+            let family = family(model_type);
+            assert_eq!(family.kv_modes, KV_INT8, "{model_type:?}");
+            for key in family.model_types {
+                assert!(
+                    mlxcel_core::mla::stores_quantized_latent_pair(key),
+                    "{model_type:?} key {key} is not a quantized latent family"
+                );
+            }
         }
     }
 
@@ -1804,6 +1920,7 @@ mod tests {
             ModelType::Step3p7,
             ModelType::Mellum,
             ModelType::Laguna,
+            ModelType::Limite,
             ModelType::NemotronNAS,
         ] {
             assert_eq!(
@@ -1812,11 +1929,17 @@ mod tests {
                 "{model_type:?} honors --kv-cache-mode in its model-owned caches"
             );
         }
-        for model_type in [ModelType::LongcatFlash, ModelType::LongcatFlashNgram] {
+        // LongCat's model-owned caches hold the affine int8 latent and no
+        // Turbo mode (#3161).
+        for model_type in [
+            ModelType::LongcatFlash,
+            ModelType::LongcatFlashNgram,
+            ModelType::LongcatFlashSparse,
+        ] {
             assert_eq!(
                 family(model_type).kv_modes,
-                KV_FP16,
-                "{model_type:?} must stay FP16 only"
+                KV_INT8,
+                "{model_type:?} holds fp16 or the int8 latent only"
             );
         }
     }

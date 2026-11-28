@@ -1,5 +1,7 @@
 # Qwen3.8-27B snapshot capacity default — issue #1167
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 Date: 2026-08-30
 Host for this validation: Linux spark-101, aarch64, kernel 6.17.0-1029-nvidia
 Load sample before local checks: 1.99, 2.48, 2.30

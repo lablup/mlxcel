@@ -176,7 +176,7 @@ pub(crate) fn run_diffusion_generation(
             None => (prompt_tokens, None),
         };
 
-    print_generation_preamble(user_prompt)?;
+    print_generation_preamble(user_prompt, !args.generation.no_chat_template)?;
 
     // Stream through the shared incremental detokenizer (byte-fallback
     // safe); raw ids are collected in parallel so any held-back tail bytes

@@ -25,7 +25,7 @@
 #
 # Four things have to be right or the run is vacuous. Each of them cost a re-run
 # when the Metal gate for #1803 was measured; see
-# `docs/benchmark_results/kernel-backend-kind-metal-m1ultra-2026-09-13.md`.
+# `docs/benchmark_results/versions/v0.8.0.md#kernel-backend-kind-metal-m1ultra-2026-09-13`.
 #
 #   1. The paged backend has to actually be selected. `--decode-storage-backend
 #      paged` does it. `--kv-unified` does NOT: that flag is read by the

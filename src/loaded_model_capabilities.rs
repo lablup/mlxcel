@@ -78,6 +78,8 @@ pub enum VlmRuntimeRef<'a> {
     Idefics2(&'a vision::Idefics2Model),
     /// LFM2-VL (lfm2_vl) runtime.
     Lfm2Vl(&'a vision::Lfm2VlModel),
+    /// PLaMo 2.1 VL (plamo2vl) runtime (SigLIP tiles + MLP adapter + PLaMo 2).
+    Plamo2Vl(&'a vision::Plamo2VlModel),
     GraniteVision(&'a vision::GraniteVisionVLModel),
     Granite4Vision(&'a vision::Granite4VisionVLModel),
     DeepSeekOcr(&'a vision::deepseekocr::DeepSeekOcrVlModel),
@@ -95,6 +97,8 @@ pub enum VlmRuntimeRef<'a> {
     MuseGlimmer(&'a vision::MuseGlimmerVlmModel),
     /// Inkling HMLP image runtime with per-image dynamic tile counts.
     Inkling(&'a vision::InklingVlModel),
+    /// Inkling 2 tile runtime: each image expands to `rows * cols` tokens.
+    Inkling2(&'a vision::Inkling2VlModel),
     /// Pixtral / Mistral3 dynamic aspect-ratio runtime. Shares the generic
     /// `VisionModule` storage but preserves each image's aspect ratio and emits
     /// `[IMG] / [IMG_BREAK] / [IMG_END]` row structure (see `pixtral_layout`).
@@ -232,6 +236,8 @@ impl LoadedModel {
             Self::GlmOcr(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen35VLM(model) | Self::Qwen35MoeVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::Qwen4ExpVLM(model) => Some(VlmRuntimeRef::Qwen(model)),
+            // MiMo-V2 speaks the Qwen2.5-VL image/video protocol.
+            Self::MiMoV2VLM(model) => Some(VlmRuntimeRef::Qwen(model)),
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::Step3p7VL(model) => Some(VlmRuntimeRef::Step3p7(model)),
             Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),
@@ -263,6 +269,7 @@ impl LoadedModel {
             Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),
             Self::Idefics2(model) => Some(VlmRuntimeRef::Idefics2(model)),
             Self::Lfm2VL(model) => Some(VlmRuntimeRef::Lfm2Vl(model)),
+            Self::Plamo2VLM(model) => Some(VlmRuntimeRef::Plamo2Vl(model)),
             Self::Gemma3VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::Llama4VLM(vlm) => Some(VlmRuntimeRef::Standard(&vlm.vision)),
             Self::LlavaVLM(vlm) => Some(if vlm.vision.pixtral_layout.is_some() {
@@ -284,6 +291,9 @@ impl LoadedModel {
             Self::MiniMaxM3VL(model) => Some(VlmRuntimeRef::MiniMaxM3Vl(model)),
             Self::MuseGlimmerVLM(model) => Some(VlmRuntimeRef::MuseGlimmer(model)),
             Self::InklingVLM(model) => Some(VlmRuntimeRef::Inkling(model)),
+            Self::Inkling2VLM(model) if model.supports_images() => {
+                Some(VlmRuntimeRef::Inkling2(model))
+            }
             _ => None,
         }
     }

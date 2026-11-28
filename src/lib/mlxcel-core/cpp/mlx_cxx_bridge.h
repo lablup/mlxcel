@@ -222,6 +222,7 @@ size_t array_size(const MlxArray& arr);
 size_t array_ndim(const MlxArray& arr);
 size_t array_itemsize(const MlxArray& arr);
 size_t array_nbytes(const MlxArray& arr);
+size_t array_data_address(const MlxArray& arr);
 
 // Array data access (scalar extraction).
 float item_f32(const MlxArray& arr);
@@ -578,6 +579,17 @@ std::unique_ptr<MlxArray> qwen4_hyper_gate(const MlxArray& x, int32_t count);
 std::unique_ptr<MlxArray> qwen4_hyper_mix(const MlxArray& projected, const MlxArray& normed);
 std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxArray& weights, const MlxArray& hyper);
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps);
+// Raon_mHC decode-step site graphs (issue #3458): the eager ops of
+// `models/raon_mhc.rs` replayed from one compiled tape each, bit for bit.
+void raon_mhc_route_aggregate(
+    const MlxArray& streams, const MlxArray& proj, const MlxArray& alpha, const MlxArray& bias,
+    const MlxArray& eps, const MlxArray& post_factor, const MlxArray& basis,
+    const MlxArray& basis_t, const MlxArray& chart0, const MlxArray& identity,
+    const MlxArray& gamma, std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_post_out, std::unique_ptr<MlxArray>& h_res_out);
+std::unique_ptr<MlxArray> raon_mhc_mix(
+    const MlxArray& streams, const MlxArray& branch, const MlxArray& h_post,
+    const MlxArray& h_res);
 std::unique_ptr<MlxArray> compiled_silu(const MlxArray& x);
 
 // Compiled gelu_approx: despite the name, exact erf GELU
@@ -590,6 +602,98 @@ std::unique_ptr<MlxArray> compiled_gelu_approx(const MlxArray& x);
 // differ from the eager `gelu_tanh_f32` by f32 rounding (FMA contraction).
 // Used by: Rust `GeluActivation::TanhF32Compiled` (#2423)
 std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x);
+
+// Whether the fused tanh-GELU kernel runs on this backend (Metal #2857,
+// CUDA #2780): a GPU default device with a port for it in the table. False
+// with MLXCEL_DEVICE=cpu and on ROCm, where callers take the compiled chain.
+// Read from the same table the launcher dispatches through.
+bool fused_gelu_tanh_f32_available();
+
+// Whether that kernel returns the bits the eager `gelu_tanh_f32` chain
+// returns on this backend (#2780): true for the CUDA port, whose body rounds
+// each operation on its own, false for the Metal port and wherever
+// `fused_gelu_tanh_f32_available()` is false.
+// Used by: Rust `GeluActivation::TanhF32`, which is pinned to the eager chain
+// and may take the kernel only where this holds.
+bool fused_gelu_tanh_f32_matches_eager_bits();
+
+// Custom kernel for `fused_gelu_tanh_f32` (Metal #2857, CUDA #2780): the
+// tanh-GELU as one 1-D elementwise JIT kernel. Rust-side callers gate on
+// `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
+std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x);
+
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+bool mla_absorbed_decode_fused_available();
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale);
+
+// The fused decode kernel over an affine-quantized latent window (#3156).
+bool mla_absorbed_decode_fused_quantized_available();
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope);
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits);
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv_q,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& kpe,
+    float scale,
+    int32_t group_size,
+    int32_t bits);
+
+// Inkling 2 Mini Metal kernels (#3359), Metal only. Each throws off-Metal or
+// outside its contract; the Rust declarations are `-> Result`.
+bool inkling2_kernels_available();
+void inkling2_short_convolution(
+    const MlxArray& history,
+    const MlxArray& weight,
+    const MlxArray& x,
+    const MlxArray* residual,
+    int32_t output_dtype,
+    int32_t margin,
+    std::unique_ptr<MlxArray>& out,
+    std::unique_ptr<MlxArray>& next_history);
+void inkling2_prepare_attention_heads(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& r,
+    const MlxArray& q_scale,
+    const MlxArray& r_scale,
+    float clip,
+    float rel_clip,
+    float eps,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& r_out);
+std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* global_scale,
+    const MlxArray& experts,
+    const MlxArray& source,
+    const MlxArray& destination,
+    int32_t bits,
+    int32_t group_size);
+bool row_invariant_matvec_available();
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype);
 
 // Compiled gelu_topk: sparse GELU with dynamic threshold — single fused kernel
 // gelu_tanh(max(0, x - (mean + std * multiplier))) in the input dtype (#2548)
@@ -889,6 +993,13 @@ std::unique_ptr<MlxArray> logical_and(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> logical_or(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> all_axis(const MlxArray& a, int32_t axis, bool keepdims);
 std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdims);
+// Test-only: one reduction (0 sum, 1 prod, 2 any, 3 all) over several axes.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+);
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> less_equal(const MlxArray& a, const MlxArray& b);
 std::unique_ptr<MlxArray> not_equal(const MlxArray& a, const MlxArray& b);
@@ -1200,7 +1311,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 );
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -1391,8 +1502,11 @@ void detach_all(rust::Slice<const MlxArray* const> arrays);
 // Synchronize stream
 void synchronize_default();
 
-// Set default device for subsequent operations
+// Set the calling thread's default device for subsequent operations
 void set_default_device(bool gpu);
+
+// Set the default device of every thread that has not set its own
+void set_process_default_device(bool gpu);
 
 // Memory limits
 size_t set_wired_limit(size_t limit);
@@ -2132,9 +2246,9 @@ bool mamba1_scan_kernel_available();
 bool mamba1_scan_float_state_kernel_available();
 // Whether the fused scan can serve these inputs: the kernel is available, the
 // default device is the GPU, the state width fits one warp or simdgroup
-// (n <= 32), and on CUDA all six inputs share one floating dtype (the
-// condition under which the CUDA kernel is bit-identical to the graph scan it
-// replaces).
+// (n <= 32), and on CUDA all six inputs share one floating dtype, or the
+// inputs are f16 with a float32 a (issue #3125): the conditions under which
+// the CUDA kernel is bit-identical to the graph scan it replaces.
 bool mamba1_scan_kernel_accepts(
     const MlxArray& x,
     const MlxArray& delta,
@@ -2142,6 +2256,16 @@ bool mamba1_scan_kernel_accepts(
     const MlxArray& c,
     const MlxArray& a,
     const MlxArray& d
+);
+// The dtype half of the CUDA graph-exact check in mamba1_scan_kernel_accepts,
+// on dtype codes, so the rule is testable on every backend.
+bool mamba1_graph_exact_scan_accepts_dtypes(
+    int32_t x,
+    int32_t delta,
+    int32_t b,
+    int32_t c,
+    int32_t a,
+    int32_t d
 );
 void mamba1_selective_scan(
     const MlxArray& x,
@@ -2568,8 +2692,31 @@ bool sdpa_uses_fused_kernel(
     int32_t v_dtype,
     bool has_arr_mask,
     bool do_causal,
-    int32_t window_size
+    int32_t window_size,
+    bool has_sinks
 );
+
+// Causal SDPA with attention sinks and no mask array (issue #3098):
+// `mask_mode = "causal"` plus `window_size` (positive, or -1 for none).
+// Throws on any other window and on MLX validation errors. Implementation in
+// `cpp/mlx_cxx_window_sdpa.cpp`; the caller is `src/prefill_sdpa.rs`.
+std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks_causal(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    float scale,
+    int32_t window_size,
+    const MlxArray& sinks
+);
+
+// MLX's own `metal::is_nax_available()`: whether this process runs the Neural
+// Accelerator (NAX) kernels, which `ScaledDotProductAttention::use_fallback`
+// and the GEMM dispatch read. It folds in the GPU architecture generation,
+// the running macOS version and the `MLX_METAL_GPU_ARCH` override, so it can
+// disagree with a sysctl brand-string view of the chip. Tests that pin MLX's
+// dispatch rules gate on this rather than on `hardware::get_hardware()`.
+// Metal only; false on every other backend.
+bool metal_nax_available();
 
 // Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it

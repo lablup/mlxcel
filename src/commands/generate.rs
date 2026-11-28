@@ -45,6 +45,7 @@ use mlxcel::{
     server::chat_template::{
         ChatMessage, ChatTemplateProcessor, flatten_template_text, template_rejection_message,
     },
+    server::chat_template_kwargs::ChatTemplateKwargs,
     tokenizer::load_tokenizer,
     vision::merge::InputEmbeddings,
     vlm_runtime::prepared_embedding_refs,
@@ -381,16 +382,19 @@ fn run_memory_preflight(
     // announced by `run_generate`, so resolve quietly here.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model.model);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
     // Size the KV cache for the tokens that can actually enter the cache:
     // rendered prompt tokens plus the requested decode budget. This still runs
     // before model load, but after tokenizer/template processing has made the
     // prompt length knowable.
     let ctx_len = memory_preflight_ctx_len(prompt_token_count, args.generation.max_tokens);
 
-    let estimate =
-        estimate_total_memory(&args.model.model, ctx_len, 1, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(
+        &args.model.model,
+        ctx_len,
+        1,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
 
     let banner = format_estimate(&args.model.model, &estimate);
     println!("{banner}");
@@ -491,21 +495,111 @@ fn resolve_cli_pipeline_num_layers(model_dir: &Path) -> Result<usize> {
     resolve_in_process_pipeline_num_layers(model_dir).map_err(|err| anyhow!("{err}"))
 }
 
+/// What the KV banner counts layers over: the layer count and, for a loaded
+/// model that reports it, what each cache really stores (issue #3378).
+#[derive(Debug, Clone, Copy)]
+struct BannerLayers<'a> {
+    num_layers: usize,
+    storage_modes: Option<&'a [Option<KVCacheMode>]>,
+}
+
+/// Print the `KV cache mode:` line (and its `applied to N of M layers` suffix).
+fn print_kv_cache_mode_banner(
+    args: &GenerateArgs,
+    requested_kv_cache_mode: KVCacheMode,
+    kv_cache_mode: KVCacheMode,
+    layers: BannerLayers<'_>,
+) {
+    let kv_cache_mode_suffix =
+        kv_cache_mode_banner_suffix(requested_kv_cache_mode, kv_cache_mode, layers);
+
+    match kv_cache_mode {
+        KVCacheMode::Int8 => {
+            // The same flag selects two codecs: the affine group-64 latent on
+            // an absorbed MLA cache (issue #3155), per-token absmax elsewhere.
+            let codec = match mlxcel::cli::mla_latent_option::model_latent_bits(
+                kv_cache_mode,
+                std::path::Path::new(&args.model.model),
+            ) {
+                Some(bits) => mlxcel::cli::mla_latent_option::latent_codec_label(bits),
+                None => "per-token absmax quantization".to_string(),
+            };
+            println!("KV cache mode: int8 ({codec}){kv_cache_mode_suffix}");
+        }
+        KVCacheMode::Turbo4Asym => {
+            println!(
+                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4 => {
+            // Reached only when the family is on
+            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
+            // already resolved to Turbo4Asym above, which is why this line no
+            // longer describes a fallback that had never been performed.
+            println!(
+                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
+                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo4Delegated => {
+            println!(
+                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
+                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Turbo3Asym => {
+            println!(
+                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
+                 ~5.1x total KV savings){kv_cache_mode_suffix}"
+            );
+        }
+        KVCacheMode::Fp16 => {
+            // Fp16 is the default and normally announces nothing. When it is
+            // the *result* of a substitution the operator asked for something
+            // else, so name the mode actually in force (issue #1350). The
+            // reason was printed to stderr by
+            // `resolve_and_announce_kv_cache_mode`.
+            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
+        }
+    }
+}
+
 fn kv_cache_mode_banner_suffix(
     requested: KVCacheMode,
     effective: KVCacheMode,
-    num_layers: usize,
+    layers: BannerLayers<'_>,
 ) -> String {
-    let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
-    let modes = mlxcel_core::cache::turbo::resolve_layer_modes(effective, num_layers, boundary);
-    let applied = modes.iter().filter(|mode| **mode == effective).count();
+    // A model that reports what each cache stores is counted by that table, one
+    // entry per cache it keeps (Inkling 2 keeps one per layer visit, 48 for
+    // Mini, not the 24 physical layers in `config.json`), and a cache that
+    // stores FP16 under a quantized request does not count as applied.
+    let (applied, total) = match layers.storage_modes {
+        Some(stored) => (
+            stored
+                .iter()
+                .filter(|mode| **mode == Some(effective))
+                .count(),
+            stored.len(),
+        ),
+        None => {
+            let boundary = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
+            let modes = mlxcel_core::cache::turbo::resolve_layer_modes(
+                effective,
+                layers.num_layers,
+                boundary,
+            );
+            (
+                modes.iter().filter(|mode| **mode == effective).count(),
+                modes.len(),
+            )
+        }
+    };
     if requested != effective {
         format!(
-            " (requested {requested}; effective {effective}; applied to {applied} of {} layers)",
-            modes.len()
+            " (requested {requested}; effective {effective}; applied to {applied} of {total} layers)"
         )
     } else {
-        format!(" (applied to {applied} of {} layers)", modes.len())
+        format!(" (applied to {applied} of {total} layers)")
     }
 }
 
@@ -689,22 +783,40 @@ fn template_rejection_cli_error(err: &anyhow::Error) -> Option<anyhow::Error> {
         .map(|message| anyhow!("Chat template rejected the request: {message}"))
 }
 
+/// The template kwargs the CLI sets for one render: `--reasoning-effort`, run
+/// through the server's own request-to-kwargs resolution (issue #3378). Empty
+/// when the flag is absent, which keeps every render byte-identical.
+fn cli_template_kwargs(
+    processor: &ChatTemplateProcessor,
+    media: &CliPromptMedia,
+) -> Result<ChatTemplateKwargs> {
+    match media.reasoning_effort.as_deref() {
+        Some(level) => {
+            mlxcel::server::in_process::reasoning_effort::cli_template_kwargs(processor, level)
+        }
+        None => Ok(ChatTemplateKwargs::new()),
+    }
+}
+
 fn apply_user_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
+    kwargs: &ChatTemplateKwargs,
 ) -> Result<String> {
     let messages = [ChatMessage {
         role: "user".to_string(),
         content: user_prompt.to_string(),
     }];
 
-    processor.apply(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            Ok(user_prompt.to_string())
-        }
-    })
+    processor
+        .apply_with_kwargs(&messages, None, kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                Ok(user_prompt.to_string())
+            }
+        })
 }
 
 /// Where one clip the video-frames fallback turned into stills sits in the
@@ -739,6 +851,9 @@ pub(crate) struct CliPromptMedia {
     pub(crate) videos: usize,
     /// `--audio` inputs.
     pub(crate) audios: usize,
+    /// `--reasoning-effort`, normalized (issue #3378). Rendered through the
+    /// template's `reasoning_effort` kwarg; `None` keeps the template default.
+    pub(crate) reasoning_effort: Option<String>,
 }
 
 impl CliPromptMedia {
@@ -802,8 +917,9 @@ fn apply_vlm_chat_template(
     let emit_image = processor.supports_image_content();
     let emit_video = media.videos > 0 && processor.supports_video_content();
     let emit_audio = media.audios > 0 && processor.supports_audio_content();
+    let kwargs = cli_template_kwargs(processor, media)?;
     if !(emit_image || processor.supports_video_content() || processor.supports_audio_content()) {
-        return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
+        return apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs);
     }
 
     // Build a multimodal content list:
@@ -865,14 +981,16 @@ fn apply_vlm_chat_template(
         "content": content_parts,
     }]);
 
-    processor.apply_raw(&messages, None).or_else(|err| {
-        if let Some(rejection) = template_rejection_cli_error(&err) {
-            Err(rejection)
-        } else {
-            // Fallback: text-only template
-            apply_user_chat_template(processor, &media.flattened_text(user_prompt))
-        }
-    })
+    processor
+        .apply_raw_with_kwargs(&messages, None, &kwargs)
+        .or_else(|err| {
+            if let Some(rejection) = template_rejection_cli_error(&err) {
+                Err(rejection)
+            } else {
+                // Fallback: text-only template
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
+            }
+        })
 }
 
 fn resolve_cli_prompt(
@@ -888,6 +1006,7 @@ fn resolve_cli_prompt(
     processor.map_or_else(
         || Ok(media.flattened_text(user_prompt)),
         |processor| {
+            let kwargs = cli_template_kwargs(processor, media)?;
             // Route an audio-bearing request through the VLM template only when
             // the template actually renders audio content items. This keeps the
             // prompt byte-identical to the text-only path for every model whose
@@ -899,13 +1018,13 @@ fn resolve_cli_prompt(
             if media.image_placeholders() > 0 || media.videos > 0 || emit_audio {
                 apply_vlm_chat_template(processor, user_prompt, media)
             } else {
-                apply_user_chat_template(processor, &media.flattened_text(user_prompt))
+                apply_user_chat_template(processor, &media.flattened_text(user_prompt), &kwargs)
             }
         },
     )
 }
 
-fn load_cli_prompt(
+pub(super) fn load_cli_prompt(
     model_path: &Path,
     tokenizer: &crate::MlxcelTokenizer,
     user_prompt: &str,
@@ -1047,6 +1166,8 @@ pub(crate) fn expand_cli_videos_to_frames(
     video_paths: &[std::path::PathBuf],
     target_fps: f64,
     max_frames: usize,
+    target_nframes: Option<usize>,
+    min_frames: Option<usize>,
 ) -> Result<Option<CliVideoFrames>> {
     if video_paths.is_empty() {
         return Ok(None);
@@ -1074,9 +1195,14 @@ pub(crate) fn expand_cli_videos_to_frames(
         // frames to keep `max_frames` of them. Sharing the helper also keeps
         // the two fronts choosing the same frames out of the same clip.
         let source = mlxcel::video::VideoSource::from_path(path.clone());
-        let (frames, sampled) =
-            mlxcel::video::load_video_source_frames_fallback(&source, target_fps, max_frames)
-                .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
+        let (frames, sampled) = mlxcel::video::load_video_source_frames_fallback(
+            &source,
+            target_fps,
+            max_frames,
+            target_nframes,
+            min_frames,
+        )
+        .map_err(|err| anyhow!("Failed to load video {}: {err}", path.display()))?;
         let kept = mlxcel::video::subsample_evenly(frames, max_frames);
         let encoded = mlxcel::video::frames_to_png(&kept)
             .map_err(|err| anyhow!("Failed to encode frames of {}: {err}", path.display()))?;
@@ -1270,11 +1396,29 @@ fn build_cli_sampling_config_with_flags(
     build_sampling_config(resolved_cli_sampling_params(args, stop_token_ids, flags))
 }
 
-pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
+/// Echo the prompt before the reply streams in.
+///
+/// With a chat template the reply is a new assistant turn, so the echoed prompt
+/// ends with a newline and the reply starts on its own line. Without one (raw
+/// completion, `--no-chat-template`, or a checkpoint without a template) the
+/// reply continues the prompt text, so no newline is added and the prompt and
+/// completion read as one passage.
+pub(super) fn print_generation_preamble(user_prompt: &str, reply_is_new_turn: bool) -> Result<()> {
     println!("Generating...");
-    print!("{}", user_prompt);
+    print!(
+        "{}",
+        generation_preamble_echo(user_prompt, reply_is_new_turn)
+    );
     io::stdout().flush()?;
     Ok(())
+}
+
+fn generation_preamble_echo(user_prompt: &str, reply_is_new_turn: bool) -> String {
+    if reply_is_new_turn && !user_prompt.ends_with('\n') {
+        format!("{user_prompt}\n")
+    } else {
+        user_prompt.to_string()
+    }
 }
 
 fn generated_suffix<'a>(full_text: &'a str, prompt_text: &str) -> &'a str {
@@ -1317,6 +1461,7 @@ pub(super) fn decode_generated_text(
 /// thinking marker the filter starts inside the channel so the primed reasoning
 /// is suppressed too.
 fn filter_reasoning_for_display(
+    model_path: &Path,
     tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
     prompt: &str,
     generated_text: &str,
@@ -1331,7 +1476,7 @@ fn filter_reasoning_for_display(
         return rendered;
     }
 
-    let markers = tokenizer.infer_thinking_markers();
+    let markers = mlxcel::server::chat_front::thinking_markers_for_model(model_path, tokenizer);
     // When the rendered prompt primed an open thinking marker (`<think>\n` for
     // Qwen-style, `<|channel>thought\n` for a thinking-on Gemma-4 channel) the
     // generated text starts already inside the channel with no open marker, so
@@ -1376,6 +1521,12 @@ fn print_generation_result(
             "[Generated {} tokens in {:.2}s = {:.2} tok/s]",
             stats.generated_tokens, total_time_sec, stats.decode_tok_per_sec
         );
+    }
+    if let Some(line) = mlxcel::models::qwen4_exp::ple_stats::ple_stats_line() {
+        println!("{line}");
+    }
+    if let Some(line) = mlxcel::models::qwen4_exp::stream::expert_stream_stats_line() {
+        println!("{line}");
     }
 
     Ok(())
@@ -1502,14 +1653,36 @@ fn generate_with_embeddings<M: LanguageModel>(
     ))
 }
 
+/// Whether the OpenXLA backend runs this model without a KV cache. Only
+/// `mamba2` qualifies today (attention-free, state threaded instead); a hybrid
+/// would need its own check. Always false off the XLA backend.
+#[cfg(feature = "xla-backend")]
+fn xla_model_has_no_kv_cache(model_dir: &Path) -> bool {
+    select_backend().name() == "xla"
+        && std::fs::read_to_string(model_dir.join("config.json"))
+            .ok()
+            .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
+            .is_some_and(|v| {
+                v.get("model_type").and_then(serde_json::Value::as_str) == Some("mamba2")
+            })
+}
+
+#[cfg(not(feature = "xla-backend"))]
+fn xla_model_has_no_kv_cache(_model_dir: &Path) -> bool {
+    false
+}
+
 /// Read `num_hidden_layers` from a model directory's `config.json` (0 if absent
 /// or unparsable). The OpenXLA session stores it as metadata; the bundled graph
-/// fixes the architecture, so a best-effort value is sufficient.
+/// fixes the architecture, so a best-effort value is sufficient. The parse
+/// accepts HF's bare `Infinity` (a Mamba2 `time_step_limit`), and the count
+/// needs no attention-head fields, so an attention-free model reads its layer
+/// count like any other (issue #3339).
 #[cfg(feature = "xla-backend")]
 fn xla_num_layers(model_dir: &Path) -> usize {
     std::fs::read_to_string(model_dir.join("config.json"))
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|s| mlxcel_xla::parse_hf_config_json(&s).ok())
         .and_then(|v| {
             v.get("num_hidden_layers")
                 .and_then(serde_json::Value::as_u64)
@@ -1588,7 +1761,48 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
 /// as serving. Gemma3n audio uses the same bounded host front-end and split
 /// IREE prepared-prefill contract as serving; mixed image+audio remains
 /// fail-closed until a joint runtime is qualified.
+/// The budget an OpenXLA session should size its static shape against.
+///
+/// The unlimited `-n` default resolves to the whole checkpoint window, which no
+/// static graph can compile; [`mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET`]
+/// bounds it. An explicit `-n N` sizes with `N` (issue #2855).
 #[cfg(feature = "xla-backend")]
+fn xla_sizing_budget(max_tokens: usize, budget_was_unlimited: bool) -> usize {
+    if budget_was_unlimited && max_tokens > mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET {
+        mlxcel_xla::DEFAULT_XLA_GENERATION_BUDGET
+    } else {
+        max_tokens
+    }
+}
+
+/// One `MLXCEL_PRINT_TOKEN_IDS` line: `[<label> (<count>): <id> <id> ...]`.
+fn token_ids_line(label: &str, ids: &[i32]) -> String {
+    format!(
+        "[{label} ({}): {}]",
+        ids.len(),
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+/// `MLXCEL_PRINT_TOKEN_IDS`: dump the prompt and generated ids to stderr so two
+/// runs (classic versus `--draft-model`, fused MoE on versus off, one OpenXLA
+/// weight path versus another) can be compared on ids rather than on decoded
+/// text, which can round-trip two different id sequences to the same string.
+///
+/// Used by: the MLX tail of `run_generate` and its OpenXLA branch, which
+/// returns before that tail.
+fn print_token_ids_if_requested(prompt_tokens: &[i32], generated_tokens: &[i32]) {
+    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
+        eprintln!("{}", token_ids_line("prompt ids", prompt_tokens));
+        eprintln!("{}", token_ids_line("token ids", generated_tokens));
+    }
+}
+
+#[cfg(feature = "xla-backend")]
+#[allow(clippy::too_many_arguments)]
 fn generate_xla(
     model_path: &Path,
     num_layers: usize,
@@ -1599,6 +1813,7 @@ fn generate_xla(
     audio_path: Option<&Path>,
     has_video: bool,
     max_tokens: usize,
+    sizing_budget: usize,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
@@ -1606,158 +1821,142 @@ fn generate_xla(
         !has_video,
         "the OpenXLA backend does not support video input yet"
     );
-    let mut session =
-        select_backend().create_session(model_path, num_layers, kv_cache_mode, token_bias)?;
+    // Media is prepared before the shape is compiled, so the shape and the
+    // admission check use the prompt the preprocessor actually produced rather
+    // than a per-family worst case (issue #3361). The serve worker routes on
+    // the same length. Its time still counts toward the run.
+    let preparation_start = Instant::now();
+    let images = decode_xla_cli_images(image_paths)?;
+    let mut media = super::generate_xla_media::prepare_xla_cli_media(
+        model_path,
+        prompt,
+        prompt_tokens,
+        tokenizer,
+        &images,
+        audio_path,
+    )?;
+    // The vision weight load and compile used to sit in untimed session
+    // creation, so keep them out of the reported preparation time.
+    let preparation_time = preparation_start
+        .elapsed()
+        .saturating_sub(media.untimed_load());
+    let effective_prompt_len = media.effective_prompt_len(prompt_tokens.len());
+    let required_positions = mlxcel::xla_request_positions(effective_prompt_len, sizing_budget);
+    let mut session = match media.take_preprocessor() {
+        Some(preprocessor) => mlxcel::backend::xla::create_prepared_xla_session(
+            model_path,
+            num_layers,
+            required_positions,
+            Some(preprocessor),
+        )?,
+        None => select_backend().create_session_for_request(
+            model_path,
+            num_layers,
+            kv_cache_mode,
+            token_bias,
+            Some(required_positions),
+        )?,
+    };
     let start_time = Instant::now();
+    // The plain text path reports its two phases from the session's own
+    // windows. Every other XLA path keeps the whole-run accounting, which
+    // folds prefill into decode, so this stays optional.
+    let mut xla_timing: Option<mlxcel_xla::GreedyTiming> = None;
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
+            let capacity = s.context_capacity();
+            let requested_budget = max_tokens;
+            // The shape is static, so an unlimited (or over-wide) budget has to
+            // be clamped to the room it leaves after the expanded prompt. The
+            // work the request asks for is unchanged: generation still stops at
+            // EOS.
+            let admitted = requested_budget.min(capacity.saturating_sub(effective_prompt_len));
+            if std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_none() {
+                println!(
+                    "OpenXLA context capacity: {capacity} for {effective_prompt_len} prompt + up to \
+                     {admitted} generated tokens (request-sized; MLXCEL_XLA_CONTEXT_CAPACITY pins \
+                     one shape)"
+                );
+            }
+            let max_tokens = admitted;
+            if max_tokens == 0 {
+                anyhow::bail!(
+                    "{}",
+                    mlxcel_xla::ContextCapacityError {
+                        effective_prompt_len,
+                        max_new_tokens: requested_budget,
+                        context_capacity: capacity,
+                    }
+                );
+            }
             let eos = s.eos_token_ids().to_vec();
-            let phi4mm_media = mlxcel::models::get_model_type(model_path)?
-                == mlxcel::models::ModelType::Phi4MMVLM
-                && (audio_path.is_some() || !image_paths.is_empty());
-            if phi4mm_media {
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, prompt, tokenizer, image_paths);
-                    anyhow::bail!(
-                        "OpenXLA Phi4MM media input requires a build with the xla-iree feature"
-                    );
-                }
+            match &media {
                 #[cfg(feature = "xla-iree")]
-                {
-                    let mut tokenization_error = None;
-                    let normalized = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
-                        prompt,
-                        image_paths.len(),
-                        usize::from(audio_path.is_some()),
-                        |text, add_special| match tokenizer.encode(text, add_special) {
-                            Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
-                            Err(error) => {
-                                tokenization_error = Some(error.to_string());
-                                Vec::new()
-                            }
-                        },
-                    )
-                    .map_err(|error| anyhow!("Phi4MM prompt normalization failed: {error}"))?;
-                    if let Some(error) = tokenization_error {
-                        return Err(anyhow!("Phi4MM tokenization failed: {error}"));
-                    }
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let images = decode_xla_cli_images(image_paths)?;
-                    let device = std::env::var("MLXCEL_XLA_DEVICE")
-                        .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-                    let mut producer = if images.is_empty() {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    } else {
-                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
-                            model_path,
-                            &device,
-                            s.context_capacity(),
-                        )
-                    }
-                    .map_err(anyhow::Error::msg)?;
-                    let prepared = if let Some(audio_path) = audio_path {
-                        let policy =
-                            mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(
-                                model_path,
-                            )
-                            .map_err(anyhow::Error::msg)?;
-                        let waveforms =
-                            mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
-                                .map_err(|error| {
-                                    anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
-                                })?;
-                        producer.prepare_media(waveforms, normalized.tokens, &images, &cancelled)
-                    } else {
-                        producer.prepare_images(normalized.tokens, &images, &cancelled)
-                    }
-                    .map_err(|error| {
-                        anyhow!("OpenXLA Phi4MM media preprocessing failed: {error}")
-                    })?;
-                    s.generate_prepared_greedy(&prepared, max_tokens, &eos)
-                        .map_err(|error| {
-                            anyhow!("OpenXLA Phi4MM media generation failed: {error}")
-                        })?
-                }
-            } else if let Some(audio_path) = audio_path {
-                ensure!(
-                    image_paths.is_empty(),
-                    "the loaded OpenXLA Gemma3n runtime has not qualified mixed image+audio requests"
-                );
-                #[cfg(feature = "xla-iree")]
-                {
-                    let preparer = mlxcel::audio::gemma3n::Gemma3nXlaAudioPreparer::from_model(
+                super::generate_xla_media::XlaCliMedia::Phi4mm(prepared) => s
+                    .generate_prepared_greedy(prepared, max_tokens, &eos)
+                    .map_err(|error| anyhow!("OpenXLA Phi4MM media generation failed: {error}"))?,
+                super::generate_xla_media::XlaCliMedia::Gemma3nAudio => {
+                    let audio_path = audio_path
+                        .ok_or_else(|| anyhow!("OpenXLA audio request lost its audio path"))?;
+                    super::generate_xla_media::generate_xla_gemma3n_audio(
+                        s,
                         model_path,
-                        s.context_capacity(),
+                        prompt_tokens,
                         tokenizer,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio configuration failed: {error}"))?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "the loaded OpenXLA model/runtime bundle does not support audio input"
-                        )
-                    })?;
-                    let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let waveforms = mlxcel::audio::preprocess_wav_file(
                         audio_path,
-                        preparer.policy(),
-                        &cancelled,
-                    )
-                    .map_err(|error| anyhow!("OpenXLA audio preprocessing failed: {error}"))?;
-                    let prepared_input = preparer
-                        .prepare(
-                            &mlxcel::audio::gemma3n::Gemma3nAudioFeatureExtractor::new(),
-                            waveforms,
-                            prompt_tokens.to_vec(),
-                            &cancelled,
-                        )
-                        .map_err(|error| {
-                            anyhow!("OpenXLA audio feature preparation failed: {error}")
-                        })?;
-                    let mut runtime = s
-                        .load_gemma3n_audio(
-                            prepared_input.input.frame_bucket(),
-                            prepared_input.clips,
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio runtime load failed: {error}"))?;
-                    let prepared = runtime
-                        .invoke_prepared(
-                            &prepared_input.input,
-                            prepared_input.token_ids,
-                            preparer.audio_token_id(),
-                        )
-                        .map_err(|error| anyhow!("OpenXLA audio execution failed: {error}"))?;
-                    s.generate_gemma3n_prepared_greedy(prepared.request(), max_tokens, &eos)
-                        .map_err(|error| anyhow!("OpenXLA audio generation failed: {error}"))?
+                        max_tokens,
+                        &eos,
+                    )?
                 }
-                #[cfg(not(feature = "xla-iree"))]
-                {
-                    let _ = (audio_path, tokenizer);
-                    anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
+                super::generate_xla_media::XlaCliMedia::Text => {
+                    let (tokens, timing) = s
+                        .generate_streaming_greedy_timed(prompt_tokens, max_tokens, &eos, |_| true)
+                        .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?;
+                    xla_timing = Some(timing);
+                    tokens
                 }
-            } else if image_paths.is_empty() {
-                s.generate_greedy(prompt_tokens, max_tokens, &eos)
-                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
-            } else {
-                ensure!(
-                    s.supports_images(),
-                    "the loaded OpenXLA model/runtime bundle does not support image input"
-                );
-                let images = decode_xla_cli_images(image_paths)?;
-                s.generate_images_greedy(prompt_tokens, &images, max_tokens)
-                    .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                super::generate_xla_media::XlaCliMedia::Image { request, .. } => {
+                    ensure!(
+                        s.supports_images(),
+                        "the loaded OpenXLA model/runtime bundle does not support image input"
+                    );
+                    s.generate_prepared_image_greedy(request, max_tokens)
+                        .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+                }
             }
         }
         // `select_backend()` returned the XLA backend, so its `create_session`
         // yields an XLA session; any other variant would be a wiring bug.
         _ => anyhow::bail!("the OpenXLA backend did not produce an XLA session"),
     };
-    let total_time = start_time.elapsed();
+    let total_time = start_time.elapsed() + preparation_time;
     let generated_len = tokens.len();
+    if let Some(timing) = xla_timing {
+        // The OpenXLA session's decode window already contains the first
+        // generated token (it comes out of `decode_step` on the last prompt
+        // token), so all generated tokens belong to the decode numerator. Its
+        // prefill window seeds the prompt prefix, one token short of the
+        // prompt.
+        let prefill_tokens = prompt_tokens.len().saturating_sub(1);
+        return Ok((
+            tokens,
+            GenerationStats {
+                prompt_tokens: prompt_tokens.len(),
+                generated_tokens: generated_len,
+                prefill_time_ms: timing.prefill_ms,
+                decode_time_ms: timing.decode_ms,
+                prefill_tok_per_sec: if timing.prefill_ms > 0.0 {
+                    prefill_tokens as f64 / (timing.prefill_ms / 1000.0)
+                } else {
+                    0.0
+                },
+                decode_tok_per_sec: mlxcel_core::generate::decode_tok_per_sec(
+                    generated_len,
+                    timing.decode_ms,
+                ),
+            },
+        ));
+    }
     Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
@@ -1775,6 +1974,7 @@ pub(super) fn run_generation_mode(
     model: &mlxcel::LoadedModel,
     args: &GenerateArgs,
     prompt_tokens: &[i32],
+    max_tokens: usize,
     sampling_config: &SamplingConfig,
     vlm_embeddings: Option<&InputEmbeddings>,
     kv_cache_mode: KVCacheMode,
@@ -1864,7 +2064,7 @@ pub(super) fn run_generation_mode(
                     model,
                     draft_model_path,
                     prompt_tokens,
-                    args.generation.max_tokens,
+                    max_tokens,
                     sampling_config,
                     block_size as usize,
                     kv_cache_mode,
@@ -1872,23 +2072,20 @@ pub(super) fn run_generation_mode(
                 );
             }
             // issue #1351: a DFlash drafter paired with a target that has an
-            // offline DFlash arm (Laguna), explicit or auto-detected alike.
+            // offline DFlash arm (Laguna, Inkling 2), explicit or auto-detected
+            // alike.
+            // The multimodal refusal is per target there: Inkling 2 (#3374)
+            // prefills an image prompt from its merged embeddings.
             OfflineDraftRoute::Dflash => {
-                if vlm_embeddings.is_some() {
-                    return Err(anyhow!(
-                        "--draft-kind dflash does not support multimodal input in the offline \
-                         `mlxcel generate` path; rerun with a text-only prompt, or omit \
-                         --draft-model"
-                    ));
-                }
                 return super::generate_dflash::run_offline_dflash(
                     model,
                     draft_model_path,
                     prompt_tokens,
-                    args.generation.max_tokens,
+                    max_tokens,
                     sampling_config,
                     block_size as usize,
                     token_bias,
+                    vlm_embeddings,
                 );
             }
             // #2757: an ordinary full model drafting on the engine's
@@ -1910,7 +2107,7 @@ pub(super) fn run_generation_mode(
             model,
             prompt_tokens,
             embeddings,
-            args.generation.max_tokens,
+            max_tokens,
             sampling_config,
             args.generation.profile,
             kv_cache_mode,
@@ -1920,7 +2117,7 @@ pub(super) fn run_generation_mode(
         generate_standard(
             model,
             prompt_tokens,
-            args.generation.max_tokens,
+            max_tokens,
             sampling_config,
             args.generation.profile,
             kv_cache_mode,
@@ -1983,6 +2180,30 @@ fn run_prompt_lookup(
     config
         .validate()
         .map_err(|err| anyhow!("--prompt-lookup: {err}"))?;
+    // Qwen3.8-Flash-Next (#2880) rewinds its own state, so a verify block
+    // has to be byte-identical to the chain for the same reason an MTP block
+    // does, and the same gate decides it (the widest block a round can run):
+    // on GPU generation 15+ the probe fails under `qmv_wide` and passes once
+    // the gate switches it off for the process.
+    if matches!(model, mlxcel::LoadedModel::Qwen4ExpVLM(_)) && !mlxcel_core::metal_is_available() {
+        anyhow::bail!(
+            "--prompt-lookup requires the Metal backend on Qwen4-Exp: its temperature-0 \
+             exactness rests on the Metal precise gated-delta kernel, whose block and chain \
+             arithmetic agree; the ops fallback's does not."
+        );
+    }
+    if let mlxcel::LoadedModel::Qwen4ExpVLM(vlm) = model
+        && !vlm.text_model.mtp_exactness_allows(config.max_draft + 1)
+    {
+        anyhow::bail!(
+            "--prompt-lookup declined on Qwen4-Exp: a {}-wide verify block is not \
+             byte-identical to the single-token decode chain on this GPU, so temperature-0 \
+             output would silently differ from classic decode. Lower \
+             --prompt-lookup-max-draft, or set MLXCEL_MTP_ALLOW_INEXACT=1 to run anyway and \
+             forfeit the byte-identity contract.",
+            config.max_draft + 1
+        );
+    }
 
     // The engine's token-only speculative loop driving the prompt-lookup
     // drafter (#2176): the same client plain `generate` runs, with the
@@ -2290,6 +2511,23 @@ fn gemma4_mtp_declined(block_size: usize) -> anyhow::Error {
     )
 }
 
+/// Decline an empty prompt before any drafter IO. Every MTP target adapter
+/// prefills the whole prompt and samples the first bonus token from the last
+/// position's logits, so a prompt with no tokens has no position to read
+/// (the qwen4_exp prefill would hit its "a prefill has at least one piece"
+/// expectation, #2880). Classic decode never reaches this path.
+fn ensure_mtp_prompt_not_empty(prompt_tokens: &[i32]) -> Result<()> {
+    if prompt_tokens.is_empty() {
+        return Err(anyhow!(
+            "--draft-model (MTP speculative decoding) needs a non-empty prompt: \
+             the first token is sampled from the last prompt position, and an \
+             empty prompt has none. Pass a non-empty -p/--prompt, or omit \
+             --draft-model to run classic decode."
+        ));
+    }
+    Ok(())
+}
+
 fn run_offline_mtp(
     model: &mlxcel::LoadedModel,
     draft_model_path: &Path,
@@ -2311,6 +2549,7 @@ fn run_offline_mtp(
              proposals (need >= 2); pass --draft-block-size with a value >= 2"
         ));
     }
+    ensure_mtp_prompt_not_empty(prompt_tokens)?;
 
     // Qwen 3.5 exactness gate: the same single call the server's
     // `mtp_capable_target` makes, so the two paths cannot drift on the
@@ -2337,6 +2576,24 @@ fn run_offline_mtp(
     {
         return Err(anyhow!(
             "Qwen 3.5 MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
+
+    // Qwen3.8-Flash-Next (`qwen4_exp`, #2880): the same single call the
+    // server's `mtp_capable_target` makes. Metal is a precondition of its
+    // exactness too (the float32-state gated-delta kernel), and the measured
+    // block-vs-chain probe decides the rest.
+    if let LoadedModel::Qwen4ExpVLM(vlm) = model
+        && mlxcel_core::metal_is_available()
+        && !vlm.text_model.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "Qwen4-Exp MTP speculative decoding declined: at --draft-block-size \
              {block_size} this GPU's multi-token verify block is not byte-identical \
              to the single-token decode chain, so temperature-0 output would \
              silently differ from `mlxcel generate` without --draft-model. Try a \
@@ -2383,6 +2640,29 @@ fn run_offline_mtp(
         ));
     }
 
+    // Inkling exactness gate (#1549): the same single call the server's
+    // `mtp_capable_target` makes. No static kernel prerequisite; the measured
+    // block-vs-chain probe is the whole condition. Before #3409 it declined
+    // on an M3 Ultra even after the `qmv_wide` retry; with the row-invariant
+    // verify block it passes on the bf16 0.6B checkpoint there.
+    let inkling_text = match model {
+        LoadedModel::Inkling(inkling) => Some(inkling),
+        LoadedModel::InklingVLM(vlm) => Some(&vlm.text),
+        _ => None,
+    };
+    if let Some(inkling) = inkling_text
+        && !inkling.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "Inkling MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
+
     // Resolve the concrete target reference the drafter binds to, and reject any
     // non-MTP-capable target. Mirrors the server burst dispatch
     // (`run_mtp_burst`): bind to the same concrete Gemma 4 model the adapter
@@ -2412,16 +2692,28 @@ fn run_offline_mtp(
         }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
+        // Qwen3.8-Flash-Next (#2880): Metal-only for the same kind of reason
+        // as Qwen 3.5, the float32-state gated-delta kernel that makes a
+        // verify block agree with the single-token chain.
+        LoadedModel::Qwen4ExpVLM(_) if !mlxcel_core::metal_is_available() => {
+            return Err(anyhow!(
+                "Qwen4-Exp MTP speculative decoding requires the Metal backend: its \
+                 temperature-0 exactness rests on the Metal precise gated-delta kernel, \
+                 whose block and chain arithmetic agree; the ops fallback's does not. Omit \
+                 --draft-model to run classic decode."
+            ));
+        }
+        LoadedModel::Qwen4ExpVLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Inkling(inkling) => inkling as &dyn LanguageModel,
         LoadedModel::InklingVLM(vlm) => &vlm.text as &dyn LanguageModel,
         LoadedModel::Glm4MoeLite(glm) => glm as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified), Qwen 3.5 (text or VLM), Inkling (text or VLM), and \
-                 GLM-4.7-Flash (glm4_moe_lite) targets; the loaded target \
-                 is not MTP-capable. Use --prompt-lookup for speculation without a \
-                 drafter checkpoint, or omit --draft-model."
+                 Unified), Qwen 3.5 (text or VLM), Qwen3.8-Flash-Next (qwen4_exp), \
+                 Inkling (text or VLM), and GLM-4.7-Flash (glm4_moe_lite) targets; the \
+                 loaded target is not MTP-capable. Use --prompt-lookup for speculation \
+                 without a drafter checkpoint, or omit --draft-model."
             ));
         }
     };
@@ -2512,7 +2804,7 @@ fn run_offline_mtp(
         // internal fallback cache slot, the documented offline / single-row
         // CLI shape.
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(qwen, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::fallback(qwen),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2521,7 +2813,21 @@ fn run_offline_mtp(
             block_size,
         ),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
-            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
+            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::fallback(vlm),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        // Qwen3.8-Flash-Next (#2880): the adapter runs on the text backbone's
+        // internal fallback slot, the offline / single-row CLI shape.
+        LoadedModel::Qwen4ExpVLM(vlm) => drive_offline_mtp(
+            mlxcel::models::qwen4_exp_mtp_target::Qwen4ExpMtpTargetAdapter::new(
+                &vlm.text_model,
+                None,
+            ),
             drafter,
             prompt_tokens,
             max_tokens,
@@ -2580,11 +2886,11 @@ fn run_offline_mtp(
     // "[Generated N tokens ...]" line and tok/s match the non-speculative path,
     // which counts EOS-excluded tokens.
     stats.generated_tokens = tokens.len();
-    stats.decode_tok_per_sec = if stats.decode_time_ms > 0.0 {
-        tokens.len() as f64 / (stats.decode_time_ms / 1000.0)
-    } else {
-        0.0
-    };
+    // The first bonus came out of prefill, outside the decode window.
+    stats.decode_tok_per_sec = mlxcel_core::generate::decode_tok_per_sec(
+        tokens.len().saturating_sub(1),
+        stats.decode_time_ms,
+    );
 
     Ok((tokens, stats))
 }
@@ -2655,6 +2961,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         &super::cli_server::cli_flag_was_set,
     );
     server.adapter = args.model.adapter.clone();
+    server.reasoning_effort = args.generation.reasoning_effort.clone();
     if let Some((draft_model, draft_kind)) = repl_drafter(args) {
         server.draft_model = Some(draft_model);
         server.draft_kind = draft_kind;
@@ -2683,6 +2990,27 @@ fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, Option<Strin
     Some((draft_model, args.speculative.draft_kind.clone()))
 }
 
+/// Refuse `--audio` for a checkpoint that has no audio encoder (Inkling 2),
+/// before its weights load.
+///
+/// Without this the run rendered the chat template, which raises its own
+/// `Inkling 2 does not accept audio input`, and surfaced that as a template
+/// error. The text is the one the server answers with
+/// ([`mlxcel::server::INKLING2_AUDIO_REFUSAL`]), so both fronts agree.
+/// `model_path` is a resolved local directory; a path whose type cannot be
+/// read is left to the later load to report (issue #3376).
+fn refuse_audio_without_encoder(model_path: &Path, has_audio: bool) -> Result<()> {
+    if has_audio
+        && matches!(
+            mlxcel::models::get_model_type(model_path),
+            Ok(mlxcel::models::ModelType::Inkling2VLM)
+        )
+    {
+        anyhow::bail!("{}", mlxcel::server::INKLING2_AUDIO_REFUSAL);
+    }
+    Ok(())
+}
+
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // Epic #92 / issue #96: no `-p/--prompt` means "interactive chat". Route to
     // the reusable REPL entry point before any one-shot-only setup. The REPL
@@ -2703,6 +3031,7 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
             args.model.models_dir.as_deref(),
             args.model.revision.as_deref(),
         )?;
+        refuse_audio_without_encoder(&resolved, args.generation.audio.is_some())?;
         if super::generate_voicechat::is_voicechat_checkpoint(&resolved) {
             ensure!(
                 args.generation.audio.is_some(),
@@ -2710,6 +3039,12 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
                  generate -m <model> --audio question.wav --output-audio answer.wav \
                  [-p '<system prompt>']"
             );
+            args.model.model = resolved;
+            args.generation.prompt = Some(String::new());
+        } else if super::generate_indic_ocr::is_indic_ocr_root(&resolved) {
+            // The page pipeline needs no `-p`; every region's instruction comes
+            // from its layout class, so an absent prompt is a one-shot run, not
+            // the interactive REPL.
             args.model.model = resolved;
             args.generation.prompt = Some(String::new());
         }
@@ -2735,10 +3070,33 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
         }
     }
 
-    run_generate_once(args)
+    let result = run_generate_once(args);
+    // `MLXCEL_TRACE_MLA_STATS=1`: which MLA attention path each step took.
+    mlxcel_core::mla::stats::report_if_requested();
+    result
 }
 
 /// One-shot (`-p`-supplied) text generation: the historical `generate` flow.
+/// Refuse a `--reasoning-effort` level that the checkpoint's
+/// `reasoning_effort_steering` block does not accept, before the model loads.
+/// A model without that block (its template decides) and an absent flag pass.
+fn validate_cli_reasoning_effort(model_path: &Path, level: Option<&str>) -> Result<()> {
+    let Some(level) = level else {
+        return Ok(());
+    };
+    let steering =
+        mlxcel::models::reasoning_effort_steering::ReasoningEffortSteering::from_model_dir(
+            model_path,
+        )
+        .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
+    if let Some(steering) = steering {
+        steering
+            .normalize_level(level)
+            .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
+    }
+    Ok(())
+}
+
 fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Safe: the only caller (`run_generate`) guarantees `prompt` is `Some`.
     let user_prompt = args
@@ -2805,12 +3163,29 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         );
     }
 
+    // `--audio` for a family with no audio encoder is refused before anything
+    // loads, with the message the server gives (issue #3376).
+    refuse_audio_without_encoder(&args.model.model, args.generation.audio.is_some())?;
+
+    // A level the model's steering block does not accept is refused here,
+    // from `config.json`, rather than after the weights load (#3435).
+    validate_cli_reasoning_effort(
+        &args.model.model,
+        args.generation.reasoning_effort.as_deref(),
+    )?;
+
     // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
     // its own timeline loop: `-p` is its system prompt and the output length
     // follows the `--audio` input, so none of the text-generation setup below
     // applies. Route it before any of that runs.
     if super::generate_voicechat::is_voicechat_checkpoint(&args.model.model) {
         return super::generate_voicechat::run_voicechat_generation(&args);
+    }
+    // IndicOCR is a two-stage page pipeline whose root config is not a loadable
+    // VLM. Route it before any text-generation setup, including the layout
+    // validation below (the pipeline parses `--layout-detections` itself).
+    if super::generate_indic_ocr::is_indic_ocr_root(&args.model.model) {
+        return super::generate_indic_ocr::run_indic_ocr_pipeline(&args);
     }
 
     validate_tensor_parallel_args(&args)?;
@@ -2846,14 +3221,14 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // Quantization recommendation and BF16 warning (before loading the model).
     let hw = mlxcel_core::hardware::get_hardware();
     if args.generation.recommend_quant {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         print_quant_advice(&advice, hw);
         return Ok(());
     }
 
     // BF16 warning on M5 hardware (even without --recommend-quant).
     if hw.has_neural_accelerator {
-        let advice = advise_quantization(&args.model.model, hw, None);
+        let advice = advise_quantization(&args.model.model, hw, None, kv_cache_mode);
         if advice.model_uses_bfloat16 {
             eprintln!(
                 "WARNING: This model uses BFloat16 weights, which are not supported by \
@@ -2943,6 +3318,8 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &args.generation.video,
         args.generation.fps,
         args.generation.video_max_frames,
+        args.generation.video_num_frames,
+        args.generation.video_min_frames,
     )? {
         Some(expansion) => {
             let (groups, dir) =
@@ -2963,9 +3340,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             video_frame_groups,
             videos: cli_video_content_part_count(&args.model.model, args.generation.video.len()),
             audios: usize::from(args.generation.audio.is_some()),
+            reasoning_effort: args.generation.reasoning_effort.clone(),
         },
     )?;
     let mut prompt_tokens = tokenize_prompt(&tokenizer, &prompt)?;
+
+    // The OpenXLA static shape has to be sized before the graph compiles, and
+    // the unlimited sentinel would otherwise size it against the whole window
+    // (issue #2855). Capture the sentinel before `resolve_cli_max_tokens`
+    // rewrites it; the XLA branch uses it to pick a bounded sizing budget.
+    #[cfg(feature = "xla-backend")]
+    let budget_was_unlimited =
+        args.generation.max_tokens == mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS;
 
     // llama.cpp parity (issue #476): resolve an unlimited `-n -1` into a
     // concrete budget (model context window minus the rendered prompt) now, so
@@ -3054,51 +3440,23 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     {
         println!("Boundary-V: protecting {boundary} layer(s) on each end at Fp16");
     }
-    let kv_cache_mode_suffix = kv_cache_mode_banner_suffix(
-        requested_kv_cache_mode,
-        kv_cache_mode,
-        resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
-    );
-
-    match kv_cache_mode {
-        KVCacheMode::Int8 => {
-            println!("KV cache mode: int8 (per-token absmax quantization){kv_cache_mode_suffix}");
-        }
-        KVCacheMode::Turbo4Asym => {
-            println!(
-                "KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4 => {
-            // Reached only when the family is on
-            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
-            // already resolved to Turbo4Asym above, which is why this line no
-            // longer describes a fallback that had never been performed.
-            println!(
-                "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                 this family is on the symmetric-Turbo4 allowlist){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo4Delegated => {
-            println!(
-                "KV cache mode: turbo4-delegated (Fp16-K + Turbo4-V with hot/cold split, \
-                 ~26% KV savings + 97-100% FP16 decode speed at long context){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Turbo3Asym => {
-            println!(
-                "KV cache mode: fp16+turbo3 (asymmetric Fp16-K + Turbo3-V, \
-                 ~5.1x total KV savings){kv_cache_mode_suffix}"
-            );
-        }
-        KVCacheMode::Fp16 => {
-            // Fp16 is the default and normally announces nothing. When it is
-            // the *result* of a substitution the operator asked for something
-            // else, so name the mode actually in force (issue #1350). The
-            // reason was printed to stderr by
-            // `resolve_and_announce_kv_cache_mode`.
-            println!("KV cache mode: fp16{kv_cache_mode_suffix}");
-        }
+    // An attention-free model on the OpenXLA backend has no KV cache, so the
+    // banner would claim a mode for layers that do not exist (issue #3339).
+    // The pipeline and OpenXLA paths load no `LoadedModel`, so they print now
+    // with the config's layer count; every other path prints after the load,
+    // from the model's own per-cache storage (issue #3378).
+    let banner_before_load = pipeline_requested || select_backend().name() == "xla";
+    let print_banner = !xla_model_has_no_kv_cache(&args.model.model);
+    if print_banner && banner_before_load {
+        print_kv_cache_mode_banner(
+            &args,
+            requested_kv_cache_mode,
+            kv_cache_mode,
+            BannerLayers {
+                num_layers: resolve_cli_pipeline_num_layers(&args.model.model).unwrap_or(0),
+                storage_modes: None,
+            },
+        );
     }
 
     // OpenXLA backend (issue #449): the engine drives generation from its own
@@ -3112,7 +3470,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     if select_backend().name() == "xla" {
         validate_xla_output_audio(args.generation.output_audio.as_deref())?;
         let num_layers = xla_num_layers(&args.model.model);
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         let (generated_tokens, stats) = generate_xla(
             &args.model.model,
             num_layers,
@@ -3123,11 +3481,17 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.audio.as_deref(),
             !args.generation.video.is_empty(),
             args.generation.max_tokens,
+            xla_sizing_budget(args.generation.max_tokens, budget_was_unlimited),
             kv_cache_mode,
             token_bias,
         )?;
+        // This branch returns before the shared tail below, so it prints the
+        // ids itself; without this the diagnostic was silently ignored on the
+        // OpenXLA backend.
+        print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
+            Path::new(&args.model.model),
             &tokenizer,
             &prompt,
             &generated_text,
@@ -3158,7 +3522,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &[],
         );
         let num_layers = resolve_cli_pipeline_num_layers(&args.model.model)?;
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         generate_pipeline_text(
             &args.model.model,
             num_layers,
@@ -3169,6 +3533,27 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         )?
     } else {
         let (model, _loaded_tokenizer) = load_generation_model(&args, preflight_estimate.as_ref())?;
+        // A model that steers by reasoning effort (Raon-1 mini, #3435) takes
+        // the level in its forward as well as in the rendered prompt; every
+        // other model ignores it here.
+        LanguageModel::set_sequence_reasoning_effort(
+            &model,
+            None,
+            args.generation.reasoning_effort.as_deref(),
+        )
+        .map_err(|err| anyhow!("--reasoning-effort: {err}"))?;
+        if print_banner && !banner_before_load {
+            let storage_modes = LanguageModel::kv_cache_storage_modes(&model);
+            print_kv_cache_mode_banner(
+                &args,
+                requested_kv_cache_mode,
+                kv_cache_mode,
+                BannerLayers {
+                    num_layers: LanguageModel::num_layers(&model),
+                    storage_modes: storage_modes.as_deref(),
+                },
+            );
+        }
         // --output-audio (issue #665): fail before generation when the loaded
         // model carries no talker/code2wav speech stack.
         if args.generation.output_audio.is_some()
@@ -3263,15 +3648,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 audio: args.generation.audio.as_deref(),
                 videos: &args.generation.video,
                 fps: args.generation.fps,
+                video_num_frames: args.generation.video_num_frames,
+                video_min_frames: args.generation.video_min_frames,
                 image_soft_tokens,
                 no_chat_template: args.generation.no_chat_template,
             },
         )?;
-        print_generation_preamble(&user_prompt)?;
+        print_generation_preamble(&user_prompt, prompt != user_prompt)?;
         let generation = run_generation_mode(
             &model,
             &args,
             &prompt_tokens,
+            args.generation.max_tokens,
             &sampling_config,
             vlm_embeddings.as_ref(),
             kv_cache_mode,
@@ -3291,32 +3679,10 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         }
         generation
     };
-    // `MLXCEL_PRINT_TOKEN_IDS`: dump the generated ids to stderr so two runs
-    // (classic versus `--draft-model`, fused MoE on versus off) can be
-    // compared on ids rather than on decoded text, which can round-trip two
-    // different id sequences to the same string.
-    if std::env::var_os("MLXCEL_PRINT_TOKEN_IDS").is_some() {
-        eprintln!(
-            "[prompt ids ({}): {}]",
-            prompt_tokens.len(),
-            prompt_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        eprintln!(
-            "[token ids ({}): {}]",
-            generated_tokens.len(),
-            generated_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
+    print_token_ids_if_requested(&prompt_tokens, &generated_tokens);
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
     let visible = filter_reasoning_for_display(
+        Path::new(&args.model.model),
         &tokenizer,
         &prompt,
         &generated_text,

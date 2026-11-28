@@ -658,8 +658,14 @@ def validate_capture(root: Path, role: str) -> tuple[dict[str, Any], dict[str, A
         "lifecycle",
         "case",
     }
-    if set(manifest) != required_top:
+    # The mlxcel capture also records the MLX_ENABLE_TF32 it ran with (#3212);
+    # the HF reference has no MLX and must not carry it.
+    allowed_top = required_top | ({"mlx_enable_tf32"} if role != "reference" else set())
+    if not required_top <= set(manifest) <= allowed_top:
         raise ContractError(f"{role} manifest has an invalid top-level schema")
+    if role != "reference" and "mlx_enable_tf32" in manifest:
+        if manifest["mlx_enable_tf32"] != "0":
+            raise ContractError(f"{role} ran with MLX_ENABLE_TF32 other than 0")
     if manifest["schema"] != SCHEMA_VERSION or manifest["contract"] != CONTRACT:
         raise ContractError(f"{role} schema or contract differs")
     expected_producer = (

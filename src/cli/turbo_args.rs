@@ -52,6 +52,9 @@ pub struct TurboKvCacheArgs {
     ///   fp16 / f16         Standard half-precision storage (default, no overhead).
     ///   int8               Per-token INT8 absmax quantization. ~50% KV memory
     ///                      savings with small per-token quantization error.
+    ///                      On DeepSeek V2 under absorbed MLA decode it stores
+    ///                      the latent as affine group-64 8-bit instead (672
+    ///                      against 1152 bytes per token per layer on V2-Lite).
     ///   fp16+turbo4        Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
     ///                      K side stays FP16; V side uses 4-bit PolarQuant
     ///                      with Walsh-Hadamard rotation. ~26% net KV savings
@@ -108,6 +111,34 @@ pub struct TurboKvCacheArgs {
     /// flags win and this flag is ignored (with a warning).
     #[arg(long = "kv-cache-mode", value_name = "MODE")]
     pub kv_cache_mode: Option<String>,
+
+    /// Experimental: precision of the MLA latent cache (DeepSeek V2/V3/V3.2,
+    /// Kimi, Youtu, GLM-4.7-Flash, GLM-5, LongCat).
+    ///
+    /// Accepted values:
+    ///   auto   Default. int8 stores the affine 8-bit latent on the families
+    ///          that passed the quality gate; the others keep fp16.
+    ///   fp16   Keep the latent fp16 even under --kv-cache-mode int8.
+    ///   int8   Store the latent as affine group-64 8-bit on every MLA family,
+    ///          including the ones the gate keeps at fp16 (GLM-4.7-Flash,
+    ///          DeepSeek V3.2, GLM-5).
+    ///   int4   Store the latent as affine group-64 4-bit (416 against 672
+    ///          int8 and 1152 fp16 bytes per token per layer at rank 512). It
+    ///          always decodes on the composed path, never the fused Metal
+    ///          kernel. A DSA indexer key stays int8.
+    ///
+    /// An explicit value wins over the latent precision --kv-cache-mode or
+    /// --kv-bits implies and prints the measured quality result at startup.
+    /// It is ignored, with a warning, on a model with no MLA latent cache.
+    ///
+    /// Also read from MLXCEL_MLA_LATENT_QUANT; the CLI flag wins.
+    #[arg(
+        long = "mla-latent-quant",
+        value_name = "PRECISION",
+        value_parser = crate::cli::mla_latent_option::parse_mla_latent_quant_arg,
+        verbatim_doc_comment
+    )]
+    pub mla_latent_quant: Option<mlxcel_core::mla::MlaLatentQuant>,
 
     /// Number of boundary transformer layers to keep at higher precision when
     /// a Turbo4* KV cache mode is active.
@@ -438,12 +469,15 @@ fn apply_optional_string_env_fallback(
 /// which model is being loaded. Two rules need the model, and both were
 /// documented long before anything performed them (issue #1350):
 ///
-/// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_linear`,
-///   `kimi_k3`, `longcat_flash_ngram`) pack a `(kv_latent, k_pe)` pair into one
-///   cache, so
-///   no quantized mode is calibrated for what they store. Symmetric `turbo4`
-///   made the K quantizer read past its sign vectors and every generated token
-///   came out `!`; the asymmetric modes quietly compressed the RoPE key stream
+/// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_k2`,
+///   `joyai_llm_flash`, `kimi_vl`, `kimi_k25`, `youtu`, `youtu_llm`,
+///   `youtu_vl`, `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa`, `hy_v4`,
+///   `kimi_linear`, `kimi_k3`, `longcat_flash`, `longcat_flash_ngram`,
+///   `longcat_flash_sparse`) pack a
+///   `(kv_latent, k_pe)` pair into one cache, so no quantized mode is
+///   calibrated for what they store. Symmetric `turbo4` made the K quantizer
+///   read past its sign vectors and every generated token came out `!`; the
+///   asymmetric modes quietly compressed the RoPE key stream
 ///   instead of a value. They resolve to `fp16`.
 /// * `turbo4` on a family outside `ALLOWED_SYMMETRIC_TURBO_FAMILIES` resolves
 ///   to `fp16+turbo4`, which is the fallback the CLI banner has always
@@ -466,10 +500,84 @@ pub fn resolve_effective_kv_cache_mode(
     requested: KVCacheMode,
     model_path: &Path,
 ) -> (KVCacheMode, Option<String>) {
-    let Some(model_type) = read_config_model_type(model_path) else {
+    let Some(config) = read_config(model_path) else {
         return (requested, None);
     };
-    resolve_kv_cache_mode_for_model(requested, &model_type)
+    let Some(model_type) = kv_rules_model_type(&config) else {
+        return (requested, None);
+    };
+    let (effective, warning) = resolve_kv_cache_mode_for_model(requested, &model_type);
+    if let Some(reason) = dsa_key_slot_refusal(&config, &model_type, effective) {
+        // Name the flag that asked for the quantized latent: an explicit
+        // `--mla-latent-quant` does, whatever `--kv-cache-mode` says (#3179).
+        let option = mlxcel_core::mla::mla_latent_quant();
+        let asked = if option.is_explicit() {
+            format!("{} {option}", mlxcel_core::mla::MLA_LATENT_QUANT_FLAG)
+        } else {
+            format!("--kv-cache-mode {requested}")
+        };
+        return (
+            KVCacheMode::Fp16,
+            Some(format!(
+                "warning: {asked} is not supported on this model \
+                 (model_type=\"{model_type}\"): {reason}.\n\tUsing fp16 for this model's KV caches."
+            )),
+        );
+    }
+    (effective, warning)
+}
+
+/// Why a model cannot store its latent key slot at `mode`, or `None` when it
+/// can or the rule does not apply.
+///
+/// Under `auto` this is the DSA rule below and nothing else. An explicit
+/// `--mla-latent-quant` (issue #3179) applies the same whole-groups check to
+/// every latent-pair family and to an absorbing DeepSeek V2, so a forced
+/// latent on a `kv_lora_rank` that is not a multiple of 64 keeps fp16 from
+/// startup instead of reaching the per-token (or, on V2, decompressed)
+/// fallback at the first cache write.
+///
+/// `deepseek_v32`, `deepseek_v3.2`, `glm_moe_dsa` and `hy_v4` (on its `full`
+/// indexer layers) cache the
+/// `index_head_dim`-wide indexer key beside the latent, and the affine `int8`
+/// latent stores that whole slot in groups of 64 (issue #3163). A config whose
+/// `kv_lora_rank` or `kv_lora_rank + index_head_dim` is not a multiple of 64
+/// keeps fp16 from startup; the shipping geometry (512 + 128) passes. The DSA
+/// types are not quantized-latent families today (the #3163 overlap gate), so
+/// the resolver already returns fp16 for them and this rule only takes effect
+/// once they are listed.
+fn dsa_key_slot_refusal(
+    config: &serde_json::Value,
+    model_type: &str,
+    mode: KVCacheMode,
+) -> Option<String> {
+    let dsa = mlxcel_core::mla::caches_dsa_indexer_key(model_type);
+    let forced_pair = mlxcel_core::mla::option_decides_latent(
+        model_type,
+        mlxcel_core::mla::absorbed_enabled(),
+        mlxcel_core::mla::mla_latent_quant(),
+    );
+    if mode.latent_affine_bits().is_none() || !(dsa || forced_pair) {
+        return None;
+    }
+    let dim = |key: &str, default: usize| {
+        config
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map_or(default, |value| {
+                usize::try_from(value).unwrap_or(usize::MAX)
+            })
+    };
+    let rank = dim("kv_lora_rank", 512);
+    let index_key = if dsa {
+        dim(
+            "index_head_dim",
+            crate::models::deepseek_v32::default_index_head_dim(),
+        )
+    } else {
+        0
+    };
+    mlxcel_core::mla::check_stored_key_width(rank, rank.saturating_add(index_key), mode).err()
 }
 
 /// Apply [`resolve_effective_kv_cache_mode`] and report the substitution once
@@ -487,6 +595,7 @@ pub fn resolve_and_announce_kv_cache_mode(
     model_path: &Path,
 ) -> KVCacheMode {
     let (effective, warning) = resolve_effective_kv_cache_mode(requested, model_path);
+    crate::cli::mla_latent_option::announce_mla_latent_option(requested, model_path);
     if let Some(warning) = warning {
         eprintln!("{warning}");
         tracing::warn!(
@@ -498,19 +607,66 @@ pub fn resolve_and_announce_kv_cache_mode(
     effective
 }
 
-/// Read the raw `model_type` string from a model directory's `config.json`.
+/// Whether a cache built in `mode` for the model at `model_path` stores an
+/// affine-quantized MLA latent: `int8` on DeepSeek V2 (or a wrapper around
+/// it) with absorbed decode on (issue #3155), or `int8` on a latent-pair
+/// family that stores its latent through the quantizing view
+/// (`mla::stores_quantized_latent_pair`: `mla::QUANTIZED_LATENT_FAMILIES`
+/// under the default gate, every latent-pair family under an explicit
+/// `--mla-latent-quant int8` / `int4`), which caches the latent in every
+/// absorption state (issue #3160). The width is
+/// `cli::mla_latent_option::model_latent_bits`.
+///
+/// Used by: `server::cli_input` (the `--kv-group-size` check) and the
+/// `generate` KV cache banner.
+#[must_use]
+pub fn model_stores_quantized_latent(mode: KVCacheMode, model_path: &Path) -> bool {
+    mode.latent_affine_bits().is_some()
+        && read_config_model_type(model_path).is_some_and(|model_type| {
+            mlxcel_core::mla::stores_quantized_latent_pair(&model_type)
+                || (mlxcel_core::mla::absorbed_enabled()
+                    && mlxcel_core::mla::stores_latent_through_view(&model_type))
+        })
+}
+
+/// Read the `model_type` the KV cache mode rules key on from a model
+/// directory's `config.json`.
 ///
 /// Deliberately the raw string rather than `models::detection::get_model_type`:
 /// the allowlist and the latent-family list are both keyed on the `config.json`
 /// value, and detection maps several distinct `model_type` values onto one
 /// enum variant.
+///
+/// The top-level value, except when the decoder
+/// (`execution::config_fields::kv_decoder_model_type`) stores its latent
+/// through `mla::MlaLatentCache`: that decision is made by the decoder at
+/// runtime, so a wrapper around it (DeepSeek-VL2 around `deepseek_v2`) is
+/// resolved as the decoder (issue #3155).
 fn read_config_model_type(model_path: &Path) -> Option<String> {
+    kv_rules_model_type(&read_config(model_path)?)
+}
+
+/// A model directory's parsed `config.json`, or `None` when it is missing or
+/// unparsable.
+fn read_config(model_path: &Path) -> Option<serde_json::Value> {
     let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
-    let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// [`read_config_model_type`] on a parsed config.
+pub(crate) fn kv_rules_model_type(config: &serde_json::Value) -> Option<String> {
+    if let Some(decoder) = crate::execution::config_fields::kv_decoder_model_type(config)
+        && mlxcel_core::mla::stores_latent_through_view(&decoder)
+    {
+        return Some(decoder);
+    }
+    // A config without a top-level `model_type` (the original
+    // LongCat-Flash-Lite-Sparse one, #2362) keys on the decoder's fallback.
     config
         .get("model_type")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
+        .or_else(|| crate::execution::config_fields::kv_decoder_model_type(config))
 }
 
 #[cfg(test)]

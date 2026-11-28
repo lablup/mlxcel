@@ -4,19 +4,19 @@
 [![Latest Release](https://img.shields.io/github/v/release/lablup/mlxcel)](https://github.com/lablup/mlxcel/releases/latest)
 [![CI](https://github.com/lablup/mlxcel/actions/workflows/ci.yml/badge.svg)](https://github.com/lablup/mlxcel/actions/workflows/ci.yml)
 
-High-performance LLM, VLM, embedding, reranking, and audio inference for Apple Silicon and NVIDIA CUDA systems, with experimental AMD ROCm support on Linux. The CLI and server are implemented in Rust and execute MLX SafeTensors checkpoints through native MLX C++ bindings, without Python in the request path or a checkpoint-conversion step.
+High-performance LLM, VLM, embedding, reranking, image generation, and audio inference for Apple Silicon and NVIDIA CUDA systems, with AMD ROCm support on Linux and Windows. The CLI and server are implemented in Rust and execute MLX SafeTensors checkpoints through native MLX C++ bindings, without Python in the request path or a checkpoint-conversion step.
 
 ## Overview
 
-`mlxcel` is both a local inference CLI and a production-oriented model server. It runs text generation, multimodal input, embeddings, reranking, speech workloads, continuous batching, prompt caching, speculative decoding, and distributed inference in one native runtime.
+`mlxcel` is both a local inference CLI and a production-oriented model server. It runs text generation, multimodal input, embeddings, reranking, token classification, image generation and editing, speech transcription and synthesis, continuous batching, prompt caching, speculative decoding, and distributed inference in one native runtime.
 
-Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target. AMD GPUs on Linux (ROCm) and native Windows with NVIDIA CUDA are experimental, source-build-only targets, and an opt-in OpenXLA/IREE backend is available as an alpha development path.
+Apple Silicon is the primary target. Linux/CUDA is supported as a secondary target. AMD GPUs on Linux and Windows (ROCm) are supported, source-build-only targets; native Windows with NVIDIA CUDA is experimental; and an opt-in OpenXLA/IREE backend is available as an alpha development path.
 
 ## Current main highlights
 
-The current `main` branch is v0.8.0 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
+The current `main` branch is v0.9.0-beta.2 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
 
-- **Experimental AMD GPU (ROCm) support.** `--features rocm` builds mlxcel on Linux against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); the fused kernels with a HIP port (BitLinear, the samplers, the SSM update step, the Mamba1 scan, the decode-MoE kernels, xIELU, the add3 LayerNorm, and the fused add-RMSNorm and RoPE + append, which are on by default on ROCm) run natively and the rest fall back to MLX graphs. See [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the build and the open gaps.
+- **AMD GPU (ROCm) support, official since 0.8.** `--features rocm` builds mlxcel on Linux and on Windows x86_64 against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); the fused kernels with a HIP port (BitLinear, the samplers, the SSM update step, the Mamba1 scan, the decode-MoE kernels, xIELU, the add3 LayerNorm, and the fused add-RMSNorm and RoPE + append, which are on by default on ROCm) run natively and the rest fall back to MLX graphs. The backend is a source build; see [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm) and [Windows with AMD ROCm](docs/installation.md#windows-with-amd-rocm) for the validated configurations and the open gaps.
 - **Bundled WebUI.** `--webui` serves a browser interface from `mlxcel serve` or `mlxcel-server`: a model library with download, load, unload, and delete; local streaming chat; runtime activity; and scoped settings with next-load profiles. See the [WebUI guide](docs/webui/README.md).
 - **Verified `llama-server` compatibility.** A frozen b10621 manifest classifies all 376 pinned options, routes, and native request fields, with no deferred entries. Native completion, embedding, tokenization, template, infill, props, slots, metrics, resumable-stream, router, and LoRA surfaces are implemented or explicitly classified instead of being silently ignored.
 - **OpenAI, Anthropic, and Vertex-compatible serving.** Chat Completions, Completions, Responses, Embeddings, Reranking, Audio, and Anthropic Messages are available alongside the native `llama-server` routes. Optional Vertex AI custom-container routing is supported through the standard `AIP_*` variables.
@@ -29,6 +29,13 @@ The current `main` branch is v0.8.0 plus unreleased work. Install from source to
 - **Inkling across four modalities.** The text backbone runs hybrid sliding/global NoPE attention with per-layer short-convolution state and logsigmoid-normalized experts, and carries HMLP image tiling, adjacent-frame video, dMel audio, and a native MTP drafter.
 - **Half-precision paths keep their dtype.** Activation helpers, the multimodal rotary, the Gemma3n load policy, and the GraniteMoeHybrid gated norm no longer widen a half-precision hidden state to f32, which had made every later matmul promote its own weight. The affected checkpoints move by up to 3.26x, and the bridge's reductions accumulate in f32 to close a bfloat16 `max` that returned NaN for a finite input.
 - **Native batched decode across most families.** Dense, MoE, MLA, VLM text, recurrent and tensor-parallel models run one batched forward under `--parallel` instead of one forward per row. On M1 Ultra, Llama 3.1 8B 4-bit reaches 1.99x aggregate at 8 concurrent requests over 1.
+- **Image-only serving.** `--image-model` with no chat model source starts either server binary in an image-only mode: the image worker is the primary model, chat and tokenizer routes answer a structured 501 naming the mode, and `/v1/models`, `/health` and the image routes serve normally.
+- **Xiaomi MiMo v2 Flash support.** The `mimo_v2_flash` architecture is a 48-layer hybrid sliding/full attention sparse decoder with 256 routed experts, selective head widths (192 for Q/K, 128 for V), per-layer partial RoPE bases, and a `noaux_tc` sigmoid router with a selection-only correction bias. `mlx-community/MiMo-V2-Flash-4bit` loads directly.
+- **Xiaomi MiMo-V2 / V2.6 multimodal support.** `mimo_v2` keeps the MiMo v2 Flash decoder unchanged and adds the `mimovl` vision tower for image and video input through the Qwen2.5-VL processor protocol. The loader unfuses the checkpoint's tensor-parallel `qkv_proj` (per-shard FP8 grids, including the padded 108-row degree-4 case) and repacks MXFP4 routed experts, covering both the native `XiaomiMiMo/MiMo-V2.6-Flash-RL` release and the converted `nativ-community/MiMo-V2.6-Flash-RL-MLX-4bit` one. Audio is not supported yet.
+- **DeepSeek V2 caches the MLA latent by default.** With `MLXCEL_MLA_ABSORBED` unset, `deepseek_v2` checkpoints and DeepSeek-VL2's decoder run absorbed decode over the `(ckv, kpe)` latent on CUDA, ROCm and the Metal chips where the fused decode kernel runs, which stores 8.9x less KV per token on DeepSeek-V2-Lite. Chips that cap that kernel below its 1024 threads (an M1 Ultra) keep the decompressed cache. Decode is within a few percent of the decompressed layout at a 512-token prompt and faster behind long prompts. `MLXCEL_MLA_ABSORBED=0` restores the decompressed cache. See [MLA absorbed decode](docs/mla-absorbed-decode.md).
+- **Background Responses.** `POST /v1/responses` with `background: true` returns a queued response at once; the job can be polled, streamed and resumed from an event offset, or cancelled, on a single model server and on the multi-model router.
+- **Typed decision models.** `mlxcel decide` and `mlxcel-server --decision-model` (`POST /v1/decisions`) answer `choice`, `score` and `bool` questions about a text, image or video state, with Clef, Decider-2b and LiquidAI d1-3B ported from mlx-vlm.
+- **Server-side MCP tools on Responses.** With the `--mcp-tools` opt-in, `mlxcel-server` starts the stdio MCP servers of a Cursor-compatible `mcpServers` file and runs the tool loop for the built-in `mcp` tool of `POST /v1/responses`, with approval requests, per-call timeouts, output caps and a round limit. It is off by default and refused on a non-loopback listener without API keys. See [MCP tools](docs/responses-api.md#mcp-tools-server-side-tool-loop).
 
 See [Server features](docs/server-features.md) for the route and deployment map and [llama-server compatibility](docs/llama-server-compat.md) for the exact b10621 boundary.
 
@@ -155,7 +162,7 @@ The [WebUI guide](docs/webui/README.md) ([한국어](docs/webui/user-guide.ko.md
 
 ### Embed and rerank
 
-The offline commands use the same loaders and batching paths as the HTTP endpoints.
+The offline commands use the same loaders and batching paths as `POST /v1/embeddings` and `POST /v1/rerank`.
 
 ```bash
 # Embed two texts and print vectors plus cosine similarity.
@@ -166,13 +173,15 @@ mlxcel embed -m sentence-transformers/all-MiniLM-L6-v2 \
 mlxcel rerank -m BAAI/bge-reranker-v2-m3 \
   -q "what is panda?" -d "hi" -d "The giant panda is a bear species."
 
-# Serve embeddings alone, or a reranker beside a chat model.
+# Serve an embedding model alone, or a reranker beside a chat model.
 mlxcel-server -m sentence-transformers/all-MiniLM-L6-v2 --port 8080
 mlxcel-server -m Qwen3.5-0.8B-4bit \
   --reranker-model mlx-community/Qwen3-Reranker-0.6B-4bit --port 8080
 ```
 
 See [Embeddings and reranking](docs/embeddings.md) for multimodal inputs, supported families, pooling, request schemas, and side-model serving.
+
+Typed decision models (named `choice`, `score`, `bool` and `multi_label` questions answered with calibrated probabilities) are served with `--decision-model` on `POST /v1/decisions` and run offline with `mlxcel decide`; see [Typed decisions](docs/decisions.md). Ported families: LiquidAI d1-3B, Decider-2b (`decider2`) and Clef / Clef-Flash (`clef`).
 
 ### Tag and redact entities
 
@@ -188,7 +197,7 @@ See [Token classification and span extraction](docs/token-classification.md) for
 
 ### Transcribe and synthesize audio
 
-An audio-capable chat checkpoint serves transcription. Phi-4 Multimodal and Gemma 3n accept WAV, MP3, and FLAC detected from their bytes; other current audio families accept WAV. A dedicated Whisper checkpoint also provides a WAV-only transcription server.
+An audio-capable chat checkpoint serves transcription, a Whisper checkpoint serves transcription and translation, and a Kokoro checkpoint serves text-to-speech.
 
 ```bash
 mlxcel-server -m models/whisper-base --port 8080
@@ -197,16 +206,22 @@ curl http://localhost:8080/v1/audio/transcriptions \
   -F file=@recording.wav -F model=whisper-base
 ```
 
-Kokoro-82M checkpoints serve `POST /v1/audio/speech`. See [Audio API](docs/audio-api.md) for model layout, request formats, limits, streaming, and current backend constraints.
+A Nemotron VoiceChat checkpoint adds the full-duplex `/v1/realtime` WebSocket. See [Audio API](docs/audio-api.md) for accepted containers, model layout, request formats, streaming, and limits, and [Nemotron VoiceChat](docs/nemotron-voicechat.md#realtime-websocket-v1realtime) for the realtime protocol and its example clients.
 
-A Nemotron VoiceChat checkpoint serves the full-duplex `/v1/realtime` WebSocket (base64 PCM16 in at 16 kHz, text, transcript and 22.05 kHz speech events out, one session at a time). `examples/voicechat_file_client.rs` drives a WAV file through it and `examples/voicechat_microphone.rs` (feature `voicechat-mic`, headphones recommended) holds a live microphone/speaker exchange; the protocol is in [Nemotron VoiceChat](docs/nemotron-voicechat.md#realtime-websocket-v1realtime).
+### Generate and edit images
+
+`mlxcel generate-image` runs a Diffusers-layout checkpoint for text-to-image generation and editing, and both server entry points serve the same models at `POST /v1/images/generations` and `POST /v1/images/edits` behind `--image-model`.
 
 ```bash
-mlxcel-server -m models/NemotronLabs-VoiceChat-11B-4bit --port 8080
-cargo run --release --example voicechat_file_client -- \
-  ws://127.0.0.1:8080/v1/realtime question.wav answer.wav \
-  --system-prompt "Be concise and answer in one sentence."
+# Generate, or edit a reference image.
+mlxcel generate-image -m models/flux2-klein -p "a watercolor fox" -o fox.png
+mlxcel generate-image -m models/flux2-klein --task edit --image fox.png -p "make it night"
+
+# Image-only serving, with no chat model loaded.
+mlxcel-server --image-model models/flux2-klein --port 8080
 ```
+
+See [Image generation](docs/image-generation.md) for the registered families, per-family step and guidance defaults, the request schema, and the image-only mode.
 
 ### Manage downloaded models
 
@@ -229,10 +244,6 @@ mlxcel rm mlx-community/Qwen3.5-0.8B-4bit --yes
 # Object or document-layout detection.
 mlxcel detect -m models/rt-detr-v2 -i image.jpg --format json
 mlxcel detect -m models/PP-DocLayoutV3 -i page.png --format json
-
-# Text-to-image and image editing with a Diffusers-style checkpoint (no model
-# family is registered yet; see docs/image-generation.md).
-mlxcel generate-image -m models/flux2-klein -p "a watercolor fox" -o fox.png
 
 # Inspect the hardware-specific kernel tuning matrix without profiling it.
 mlxcel tune --dry-run
@@ -262,7 +273,7 @@ Linux/NVIDIA builds require the CUDA toolkit and MLX's CUDA system dependencies:
 cargo build --release --features cuda
 ```
 
-Linux/AMD builds are experimental and need a ROCm installation with its HIP, rocBLAS, rocWMMA, hipBLASLt, and hipRTC CMake packages:
+Linux/AMD builds are supported and need a ROCm installation with its HIP, rocBLAS, rocWMMA, hipBLASLt, and hipRTC CMake packages:
 
 ```bash
 cargo build --release --features rocm
@@ -270,7 +281,9 @@ cargo build --release --features rocm
 
 Native Windows builds with NVIDIA CUDA are experimental and single-node: run `cargo build --release --features cuda` from a Visual Studio developer prompt with `CUDA_PATH` pointing at a CUDA 13 toolkit that has cuDNN 9. See [Windows with NVIDIA CUDA](docs/installation.md#windows-with-nvidia-cuda-experimental).
 
-A plain Linux build has no GPU feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA and ROCm architecture, runtime-header, and packaging matrix, and [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the current ROCm status.
+Native Windows builds with AMD ROCm are supported since 0.8 and single-node: run `cargo build --release --features rocm` from the x64 Visual Studio developer prompt with `ROCM_PATH` pointing at a ROCm 10.x SDK. See [Windows with AMD ROCm](docs/installation.md#windows-with-amd-rocm) for the SDK layout and the validated configuration.
+
+A plain Linux build has no GPU feature and runs on the CPU, which is not a validated release target and is much slower. See [Installation](docs/installation.md) for the complete prerequisite, CUDA and ROCm architecture, runtime-header, and packaging matrix, and [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm) for the ROCm build and validated configuration.
 
 ## Performance
 
@@ -310,7 +323,9 @@ The split in that table is architectural rather than arbitrary. Across the whole
 
 The VLM figures also moved between mlxcel releases, and unevenly. Re-sweeping that table at one commit left the median row unchanged at 1.00x against its previous reading, with 9 of 71 rows moving more than 10%: `mistral-small-4-119b-2603-4bit` 5.30x, `moondream2` 4.19x, `qwen3-vl-30b-a3b` 2.61x, `qwen3-omni-30b-a3b` 2.57x, then five between 1.16x and 1.46x. The gains come from dtype fixes that reach specific paths, so the aggregate moved from 98% to 105% while most individual rows stayed where they were. Read the per-model tables rather than the median if a particular checkpoint matters.
 
-Per-host sweeps are more current than the combined report. M5 Max and M1 Ultra are both measured on the v0.7.0 commits (2026-09-06 through 2026-09-09) at the same MLX pin and the same pp512/tg128 shape, so cross-host ratios between those two are taken on one version. The per-host records label those runs `0.7.0-beta.1`, which is the crate version string the tree carried until the release commit. Coverage differs by host rather than version: M5 Max carries text, VLM, speculative decoding, batched serving and the embedding and rerank ladder, while M1 Ultra carries text, VLM, speculative decoding and embeddings. GB10 is still on v0.4.0-rc.1 and the older measurement shape, so any ratio involving it mixes versions. Focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
+GB10 has no same-host `mlx-lm` reference, so its record is version-over-version. The 0.8.1 sweep (text on 2026-11-03, VLM on 2026-11-04, pp512/tg128) paired 111 text checkpoints with the 0.4.0-rc.1 record at a **1.026 median decode ratio**, with the 10th percentile at 0.928 and the 90th at 1.364. The 52 VLM pairs read **1.081 median** and 1.012 at the 10th percentile, with no row below the previous record. Prefill is not comparable across those two sweeps because the harness moved to the 512-token synthetic prompt. The same pass fixed and re-measured the three checkpoints that had started failing: the BitNet pair now reads 845.05 and 843.60 tok/s prefill at 140.08 and 191.67 tok/s decode, and DiffusionGemma runs its model-owned diffusion loop at 797.61 prefill and 6.86 decode tok/s. It also added the first embedding and rerank ladder on this host (102 cells, no failures; 9 of 11 text embedders faster than their 2026-08-26 cells) and the image generation ladder (21 text-to-image checkpoints plus 3 edit-only; 4.61 s/image median for generation at 512x512 and 8 steps, 1.83 s fastest).
+
+Per-host sweeps are more current than the combined report. M5 Max and M1 Ultra are both measured on the v0.7.0 commits (2026-09-06 through 2026-09-09) at the same MLX pin and the same pp512/tg128 shape, so cross-host ratios between those two are taken on one version. The per-host records label those runs `0.7.0-beta.1`, which is the crate version string the tree carried until the release commit. GB10 is measured at 0.8.1 on the same pp512/tg128 shape, so a ratio between GB10 and either Apple Silicon host still mixes versions; within GB10, the decode deltas above are version-over-version. Coverage differs by host rather than version: M5 Max carries text, VLM, speculative decoding, batched serving and the embedding and rerank ladder, M1 Ultra carries text, VLM, speculative decoding and embeddings, and GB10 carries text, VLM, embeddings and rerank, and image generation and editing. Focused reports cover paged attention, MoE, KV compression, embeddings, and speculative decoding. Read [Benchmark results](docs/benchmark_results/model_tests.md), the [benchmark report](docs/benchmark_results/benchmark-report.md), and the [methodology](docs/benchmarks.md) before comparing hosts or planning capacity.
 
 MTP performance depends on the target/drafter pair, prompt, verify width, and hardware generation. With the v0.6.0 exactness policy, Gemma 4 12B plus its 4-bit assistant measured 93.2 tok/s against 43.8 tok/s classic decode on M5 Max (**2.13x**, greedy output byte-identical). The faster inexact kernel measured 120.4 tok/s but is not the default. How much that is worth depends heavily on the prompt: on the same host and release, the `speculative_bench --sweep` default 14-token prompt measures the same pairing at 70.9 tok/s against a 45.3 tok/s baseline (**1.57x** at K=4, 35.0% acceptance), against the 2.13x above on a code prompt. The runtime measures exactness and profitability instead of treating either speedup as universal; see [Speculative-decoding acceptance](docs/speculative-acceptance.md), [MTP policy API](docs/mtp-policy-api.md), and the benchmark records under `docs/benchmark_results/`.
 

@@ -9,7 +9,7 @@
 #
 # A benchmark that shares the GPU with another process, or the UMA memory bus
 # with a compiler, is not a measurement. This is the guard the gfx1151 baseline
-# (docs/benchmark_results/rocm-baseline-gfx1151-2026-09-30.md, #2056) describes,
+# (docs/benchmark_results/versions/v0.8.0.md#rocm-baseline-gfx1151-2026-09-30, #2056) describes,
 # as a script so every ROCm measurement can use the same one (#2061):
 #
 #   1. wait until the host has gone --idle-secs (default 90) consecutive seconds

@@ -721,6 +721,73 @@ fn snapshot_lru_cap_is_independent_from_kv_entries() {
     );
 }
 
+#[test]
+fn peek_snapshot_prefix_touches_and_records_restore_source_without_counting() {
+    let metrics = AtomicPromptCacheMetrics::shared();
+    let store = PromptCacheStore::with_metrics(
+        cfg(1 << 20, 64, 4)
+            .with_snapshot_limits(1 << 20, 2, Duration::from_secs(3600))
+            .with_keep_previous_turn(true),
+        metrics.clone(),
+    );
+    let a = tokens(0, 16);
+    let b = tokens(100, 16);
+    let c = tokens(200, 16);
+    for toks in [&a, &b] {
+        store
+            .insert_snapshot(
+                &key_for_session("m", Some(&format!("chat-{}", toks[0])), toks),
+                snapshot_entry_for_test(toks.clone(), "mamba"),
+            )
+            .unwrap();
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // A peek of the oldest entry selects it like a counted lookup would.
+    let (entry, matched) = store
+        .peek_snapshot_prefix(&key_for_session("m", Some("chat-0"), &a), &a)
+        .expect("peek finds the stored snapshot");
+    assert_eq!(matched, a.len());
+    assert_eq!(entry.tokens, a);
+    thread::sleep(Duration::from_millis(5));
+
+    // It recorded the session's restore source ...
+    assert_eq!(
+        store.inner.read().unwrap().restore_sources.len(),
+        1,
+        "peek must record the restore source"
+    );
+
+    // ... and counted nothing, on the store or on the metrics sink.
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_lookups, 0);
+    assert_eq!(stats.snapshot_hits, 0);
+    assert_eq!(metrics.snapshot_lookups.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.snapshot_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.snapshot_hit_tokens_total.load(Ordering::Relaxed), 0);
+
+    // The touch moved `a` to the front of the LRU order: the third insert
+    // evicts `b`, not the older-but-just-peeked `a`.
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-200"), &c),
+            snapshot_entry_for_test(c.clone(), "mamba"),
+        )
+        .unwrap();
+    assert!(
+        store
+            .peek_snapshot_prefix(&key_for_session("m", Some("chat-0"), &a), &a)
+            .is_some(),
+        "the peeked snapshot is the most recently used and must survive"
+    );
+    assert!(
+        store
+            .peek_snapshot_prefix(&key_for_session("m", Some("chat-100"), &b), &b)
+            .is_none(),
+        "the untouched snapshot is the LRU victim"
+    );
+}
+
 // ── session-chain supersede (issue #1146) ───────────────────────────────────
 //
 // A conversation stores one snapshot per turn and every turn's token vector
@@ -1212,4 +1279,283 @@ fn paged_set_without_handles_is_empty() {
     // The two pre-existing terms are unchanged.
     assert!(paged_set_is_empty(0, 4, 2));
     assert!(paged_set_is_empty(64, 0, 2));
+}
+
+/// The growth an insert would add is the room left under the budget, and a
+/// store at its budget replaces entries without growing (issue #2885, #2883
+/// step 4).
+#[test]
+fn snapshot_growth_bytes_counts_only_what_the_budget_has_left() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(10_000));
+    assert_eq!(store.snapshot_growth_bytes(4_096), 4_096);
+    let tokens: Vec<i32> = (0..40).collect();
+    let key = key_for("model", &tokens);
+    store
+        .insert_snapshot(
+            &key,
+            ModelSnapshotEntry::new_for_test(tokens.clone(), "mamba", 8_192),
+        )
+        .expect("insert");
+    assert_eq!(store.snapshot_growth_bytes(4_096), 10_000 - 8_192);
+    assert_eq!(store.snapshot_growth_bytes(100), 100);
+    assert_eq!(store.snapshot_capacity_bytes(), 10_000);
+}
+
+/// #2885 Part B: a system-prompt root survives LRU pressure while roots hold
+/// at most half of the snapshot budget, even when it is the oldest entry.
+#[test]
+fn system_root_is_passed_over_by_lru_while_roots_fit_half_the_budget() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(10_000));
+    let root = tokens(0, 16);
+    let chat_b = tokens(100, 24);
+    let chat_c = tokens(200, 24);
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("s"), &root),
+            ModelSnapshotEntry::new_for_test(root.clone(), "qwen4_exp", 3_000)
+                .with_origin(SnapshotOrigin::SystemRoot),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("s"), &chat_b),
+            ModelSnapshotEntry::new_for_test(chat_b.clone(), "qwen4_exp", 4_000),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("s"), &chat_c),
+            ModelSnapshotEntry::new_for_test(chat_c.clone(), "qwen4_exp", 4_000),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.snapshot_evictions_lru, 1);
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("s"), &root), &root)
+            .is_some(),
+        "the oldest entry was the root, and it was kept"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("s"), &chat_b), &chat_b)
+            .is_none(),
+        "the oldest non-root entry was evicted instead"
+    );
+}
+
+/// Past half of the budget, roots compete under plain LRU, so a churn of
+/// distinct system prompts cannot pin the store.
+#[test]
+fn system_roots_over_half_the_budget_fall_back_to_plain_lru() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(10_000));
+    let root_a = tokens(0, 16);
+    let root_b = tokens(300, 16);
+    let chat = tokens(100, 24);
+    for root in [&root_a, &root_b] {
+        store
+            .insert_snapshot(
+                &key_for_session("m", Some("s"), root),
+                ModelSnapshotEntry::new_for_test(root.clone(), "qwen4_exp", 3_000)
+                    .with_origin(SnapshotOrigin::SystemRoot),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("s"), &chat),
+            ModelSnapshotEntry::new_for_test(chat.clone(), "qwen4_exp", 5_000),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("s"), &root_a), &root_a)
+            .is_none(),
+        "6,000 bytes of roots exceed half of 10,000, so the oldest root goes"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("s"), &chat), &chat)
+            .is_some()
+    );
+}
+
+/// #2885 Part B: periodic checkpoints of one conversation are not collapsed by
+/// the session-chain supersede rule, so the shallower one stays available to a
+/// request that edits history between the two. A boundary chain still
+/// collapses as before.
+#[test]
+fn checkpoints_of_one_conversation_are_not_superseded() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    let first = tokens(0, 16);
+    let second = tokens(0, 32);
+    for ids in [&first, &second] {
+        store
+            .insert_snapshot(
+                &key_for_session("m", Some("chat-a"), ids),
+                ModelSnapshotEntry::new_for_test(ids.clone(), "qwen4_exp", 4_096)
+                    .with_origin(SnapshotOrigin::Checkpoint),
+            )
+            .unwrap();
+    }
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.snapshot_supersedes, 0);
+
+    // A request that diverges after token 20 matches the first checkpoint.
+    let mut edited = tokens(0, 20);
+    edited.extend(tokens(900, 12));
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &edited), &edited)
+        .expect("the shallower checkpoint is still stored");
+    assert_eq!(matched, first.len());
+    assert_eq!(entry.tokens, first);
+}
+
+// ── previous-turn restore source (#3035) ─────────────────────────────────────
+
+/// One chat turn as the scheduler drives it: restore the longest snapshot
+/// that prefixes `prompt`, then store the turn's own snapshot.
+fn run_turn(store: &PromptCacheStore, prompt: &[i32]) -> Option<usize> {
+    let hit = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), prompt), prompt)
+        .map(|(_, matched)| matched);
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), prompt),
+            ModelSnapshotEntry::new_for_test(prompt.to_vec(), "mamba", prompt.len() * 16),
+        )
+        .unwrap();
+    hit
+}
+
+#[test]
+fn keep_previous_turn_serves_an_edit_of_the_last_turn() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20).with_keep_previous_turn(true));
+    let turn1 = tokens(0, 16);
+    let turn2 = tokens(0, 24);
+    let turn3 = tokens(0, 32);
+    let turn4 = tokens(0, 40);
+    assert_eq!(run_turn(&store, &turn1), None);
+    assert_eq!(run_turn(&store, &turn2), Some(16));
+    assert_eq!(run_turn(&store, &turn3), Some(24));
+
+    // Turn 3 restored from turn 2, so turn 2 survives turn 3's insert while
+    // turn 1, the source of an older turn, is superseded.
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.snapshot_supersedes, 1);
+
+    // Replace turn 3's new tokens: the request still shares turn 2's prefix.
+    let mut edited = tokens(0, 24);
+    edited.extend(tokens(1000, 12));
+    let (_, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &edited), &edited)
+        .expect("the previous turn's restore source serves the edit");
+    assert_eq!(matched, 24);
+
+    // The exemption moves with the next restore: turn 4 restores from turn 3
+    // and its insert supersedes turn 2, keeping the chain at two entries.
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20).with_keep_previous_turn(true));
+    for prompt in [&turn1, &turn2, &turn3, &turn4] {
+        run_turn(&store, prompt);
+    }
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.snapshot_supersedes, 2);
+    let mut edited4 = turn3.clone();
+    edited4.extend(tokens(2000, 12));
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &edited4), &edited4)
+        .expect("turn 3 is now the kept restore source");
+    assert_eq!(matched, 32);
+    assert_eq!(entry.tokens, turn3);
+}
+
+#[test]
+fn keep_previous_turn_off_keeps_one_snapshot_per_chain() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    for end in [16, 24, 32] {
+        run_turn(&store, &tokens(0, end));
+    }
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 1);
+    assert_eq!(stats.snapshot_supersedes, 2);
+    let mut edited = tokens(0, 24);
+    edited.extend(tokens(1000, 12));
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &edited), &edited)
+            .is_none(),
+        "without the switch the previous turn is superseded"
+    );
+}
+
+#[test]
+fn keep_previous_turn_forgets_an_evicted_restore_source() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20).with_keep_previous_turn(true));
+    run_turn(&store, &tokens(0, 16));
+    run_turn(&store, &tokens(0, 24));
+    store.clear();
+    // Turn 2 restored from turn 1. A cleared store must not carry that
+    // exemption over: the same tokens stored again have the same digest, so
+    // a stale entry would keep turn 1 alive below turn 2 without any restore.
+    for end in [16, 24] {
+        let prompt = tokens(0, end);
+        store
+            .insert_snapshot(
+                &key_for_session("m", Some("chat-a"), &prompt),
+                ModelSnapshotEntry::new_for_test(prompt.clone(), "mamba", end * 16),
+            )
+            .unwrap();
+    }
+    assert_eq!(store.stats().snapshot_entries, 1);
+}
+
+/// A prefix cached at one reasoning effort of a steering model is never
+/// reused at another (#3435): the effort is folded into `template_sig`, so
+/// each level has its own bucket and cross-session trie.
+#[test]
+fn a_prefix_cached_at_one_reasoning_effort_is_not_reused_at_another() {
+    use super::super::key::fold_model_reasoning_effort;
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+    let toks = tokens(0, 16);
+    let sig = |level: &str| fold_model_reasoning_effort("tpl".to_string(), Some(level));
+    let (high, low) = (sig("high"), sig("low"));
+    store
+        .insert(
+            &key_sig(&high, &toks),
+            CacheEntry::new_for_test(toks.clone(), 1024),
+        )
+        .expect("insert succeeds");
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig(&high, &toks), &toks)
+            .is_some()
+    );
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig(&low, &toks), &toks)
+            .is_none(),
+        "a low-effort request must not adopt a high-effort prefix"
+    );
+    assert!(
+        store
+            .lookup_longest_prefix(&key_sig("tpl", &toks), &toks)
+            .is_none()
+    );
+    assert_ne!(
+        key_sig(&high, &toks).digest(),
+        key_sig(&low, &toks).digest()
+    );
+}
+
+fn key_sig<'a>(sig: &'a str, tokens: &'a [i32]) -> PromptCacheKey<'a> {
+    PromptCacheKey::new_full("m", None, sig, None, MultimodalDigest::empty(), tokens)
 }

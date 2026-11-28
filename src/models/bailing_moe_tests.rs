@@ -2194,3 +2194,15 @@ impl<T, E> UnwrapErrOrPanic<E> for Result<T, E> {
         }
     }
 }
+
+#[test]
+fn bailing_moe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    crate::models::last_row_logits_harness::assert_last_row_logits(
+        || {
+            let args = tiny_args();
+            BailingMoeModel::from_weights(&tiny_weights(&args), &args).unwrap()
+        },
+        crate::models::last_row_logits_harness::TOKENS,
+    );
+}

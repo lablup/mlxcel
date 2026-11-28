@@ -132,6 +132,18 @@ impl AudioModelProvider for SideAudioProvider {
     }
 }
 
+struct TtsAudioProvider;
+
+impl AudioModelProvider for TtsAudioProvider {
+    fn supports(&self, kind: AudioModelKind) -> bool {
+        kind == AudioModelKind::Tts
+    }
+
+    fn shutdown_and_wait(&self, _timeout: std::time::Duration) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 /// A stub image provider whose id is the one an image-only server reports.
 ///
 /// `generate` answers a terminal error so a request that passed `check_model`
@@ -318,6 +330,45 @@ async fn audio_only_server_reports_healthy_after_its_worker_is_ready() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn kokoro_server_refuses_generation_and_tokenizer_routes() {
+    // A Kokoro server starts with the empty tokenizer, so the routes that
+    // read it must refuse rather than answer from a vocabulary with no tokens.
+    for (path, body) in [
+        (
+            "/v1/chat/completions",
+            json!({"model": "route-test-model", "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        (
+            "/v1/completions",
+            json!({"model": "route-test-model", "prompt": "hi"}),
+        ),
+        ("/tokenize", json!({"content": "hi"})),
+        ("/detokenize", json!({"tokens": [1]})),
+        (
+            "/apply-template",
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    ] {
+        let state = state_with(ModelProvider::chat_unavailable_for_route_tests())
+            .with_audio_model(Some(Arc::new(TtsAudioProvider)));
+        let (status, response) = post(create_app(state), path, body).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {response}");
+        assert_eq!(response["error"]["type"], "not_implemented", "{path}");
+        let message = response["error"]["message"].as_str().expect("message");
+        assert!(message.contains("/v1/audio/speech"), "{path}: {message}");
+    }
+}
+
+#[tokio::test]
+async fn whisper_server_keeps_the_tokenizer_routes() {
+    // Whisper checkpoints ship a real tokenizer, loaded by the chat front.
+    let state = state_with(ModelProvider::chat_unavailable_for_route_tests())
+        .with_audio_model(Some(Arc::new(SideAudioProvider)));
+    let (status, response) = post(create_app(state), "/tokenize", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
 }
 
 #[tokio::test]

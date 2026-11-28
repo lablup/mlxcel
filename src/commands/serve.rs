@@ -51,7 +51,6 @@ use mlxcel::server::{
     env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_was_set,
     resolve_parallel_context_size, start_server,
 };
-use mlxcel_core::cache::KVCacheMode;
 
 /// Run the `mlxcel serve` subcommand.
 ///
@@ -72,7 +71,7 @@ pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
 async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
     // Native Windows is single-node only (#58): refuse distributed flags
     // before the model reference is resolved (and possibly downloaded).
-    mlxcel::server::ServerDistributedFlags {
+    let distributed_flags = mlxcel::server::ServerDistributedFlags {
         pp_auto: args.pp_auto.is_some(),
         pp_peer: args.pp_peer,
         distributed_config: args.distributed_config.is_some(),
@@ -83,8 +82,8 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         serving_bind: args.serving_bind.is_some(),
         pp_layers: args.pp_layers.is_some(),
         tp_size: args.tp_size,
-    }
-    .ensure_supported()?;
+    };
+    distributed_flags.ensure_supported()?;
     env_fallback_settings_endpoint(
         &mut args.settings,
         long_cli_flag_was_set("settings"),
@@ -248,6 +247,14 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    if mcp.is_some() {
+        mlxcel::server::mcp::validate_mcp_single_node(distributed_flags.first_requested())
+            .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    }
     let image_token_bounds = args
         .multimodal_compat
         .image_token_bounds()
@@ -323,6 +330,13 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         && !has_model_source;
     if webui_enabled && router_mode {
         args.models_autoload = false;
+    }
+    if mcp.is_some() && router_mode {
+        anyhow::bail!(
+            "--mcp-tools is served by a single-model server only: the server-side MCP tool loop \
+             runs beside one loaded chat model. Start mlxcel-server with a model argument, or \
+             remove --mcp-tools and the MCP server configuration"
+        );
     }
     // #2825: `--image-model` with no model source serves image generation
     // alone. `build_startup_input` names any conflicting flag after folding in
@@ -410,34 +424,54 @@ fn run_serve_memory_preflight(
         return Ok(());
     }
 
+    // Estimate against the mode the caches will really be built with (issue
+    // #1350, #3153), not the one requested. See `serve_preflight_kv_mode`.
+    let kv_cache_mode = serve_preflight_kv_mode(args, model_path)?;
+    let ctx_len = serve_preflight_ctx_len(args);
+    let batch = serve_preflight_batch(args);
+
+    let estimate = estimate_total_memory(
+        model_path,
+        ctx_len,
+        batch,
+        QuantHint::Default,
+        kv_cache_mode,
+    );
+
+    let banner = format_estimate(model_path, &estimate);
+    println!("{banner}");
+
+    enforce_preflight(&estimate, args.force_memory, SERVE_PREFLIGHT_REMEDIATION)
+}
+
+/// The KV cache mode the server will build for this run, for sizing.
+///
+/// `--kv-bits` / `--kv-quant-scheme` are a second route to a quantized cache
+/// and the scheduler prefers that table over `--kv-cache-mode`, so it is
+/// resolved here too, with the startup family rules (`run_serve` resolved
+/// `-m` to a concrete directory, so the `model_type` lookup is a file read).
+/// Resolving quietly: `into_startup_config` reports substitutions once
+/// logging exists.
+fn serve_preflight_kv_mode(
+    args: &crate::ServeArgs,
+    model_path: &std::path::Path,
+) -> anyhow::Result<mlxcel::execution::kv_arch::KvSizing> {
     let requested = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
-    // Estimate against the mode the caches will really be built with (issue
-    // #1350), not the one requested. `--estimate-memory --kv-cache-mode int8`
-    // on an MLA latent family resolves back to fp16 at startup, so sizing an
-    // int8 cache here under-counts the KV budget, and this preflight can abort
-    // the server outright when the total exceeds the available memory.
-    // `run_serve` resolved `-m` to a concrete directory before calling us, so
-    // the `model_type` lookup is a plain file read. Resolving quietly:
-    // `into_startup_config` performs the same substitution and reports it once
-    // logging exists.
-    let (kv_cache_mode, _) =
-        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
-    let ctx_len = serve_preflight_ctx_len(args);
-    let batch = serve_preflight_batch(args);
-
-    let estimate = estimate_total_memory(model_path, ctx_len, batch, QuantHint::Default, kv_int8);
-
-    let banner = format_estimate(model_path, &estimate);
-    println!("{banner}");
-
-    enforce_preflight(&estimate, args.force_memory, SERVE_PREFLIGHT_REMEDIATION)
+    let batch = mlxcel::server::cli_input::resolve_batch_kv_quant_config(
+        args.batch_quant.kv_bits,
+        args.batch_quant.kv_group_size,
+        args.batch_quant.kv_quant_scheme.as_deref(),
+        args.batch_quant.kv_skip_last_layer,
+    )
+    .map_err(|e| anyhow::anyhow!("batch KV cache quant error: {e}"))?;
+    Ok(mlxcel::server::effective_serve_kv_cache_mode(
+        requested, batch, model_path,
+    ))
 }
 
 fn serve_preflight_ctx_len(args: &crate::ServeArgs) -> u64 {
@@ -612,6 +646,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .ui_compat
         .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+    // Server-side MCP tool loop (#1457): the server set parses here, before
+    // the model reference resolves, so a bad document fails in milliseconds.
+    let mcp = mlxcel::server::mcp::resolve_mcp_startup(&args.ui_compat)
+        .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
     // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
@@ -659,6 +697,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
                 ("--webui", webui_enabled),
                 ("--embedding-model", args.embedding_model.is_some()),
                 ("--reranker-model", args.reranker_model.is_some()),
+                ("--decision-model", args.decision_model.is_some()),
                 ("--embeddings", embeddings),
                 ("--reranking", reranking),
             ],
@@ -702,6 +741,24 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
 
     let reranker_model_path = args
         .reranker_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_options(
+                std::path::Path::new(value),
+                ModelSourceOptions {
+                    models_dir: args.model_store_root.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                    cwd_models_dir: None,
+                },
+            )
+        })
+        .transpose()?;
+
+    // `--decision-model` accepts the same path-or-repo-id shapes as `-m`.
+    let decision_model_path = args
+        .decision_model
         .as_deref()
         .map(|value| {
             resolve_model_source_with_options(
@@ -790,6 +847,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
         webui_enabled,
+        mcp,
         sse_ping_interval: args.sse_ping_interval,
         threads_http: args.threads_http,
         reuse_port: args.reuse_port,
@@ -822,6 +880,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         embedding_request_timeout_secs: args.embedding_request_timeout_secs,
         reranker_model_path,
         rerank_batch_size: args.rerank_batch_size,
+        decision_model_path,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,
@@ -870,6 +929,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         repeat_last_n: args.repeat_last_n,
         repeat_penalty: args.repeat_penalty,
         presence_penalty: args.presence_penalty,
+        presence_penalty_was_set: long_cli_flag_was_set("presence-penalty"),
         frequency_penalty: args.frequency_penalty,
         dry_multiplier: args.dry_multiplier,
         dry_base: args.dry_base,
@@ -933,6 +993,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         vision_cache_size: args.vision_cache_size,
         video_max_frames: args.video_max_frames,
         video_fps: args.video_fps,
+        video_num_frames: args.video_num_frames,
+        video_min_frames: args.video_min_frames,
         max_image_payload_size: args.max_image_payload_size,
         max_images_per_request: args.max_images_per_request,
         max_image_width: args.max_image_width,
@@ -968,6 +1030,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         cache_type_k: args.turbo.cache_type_k,
         cache_type_v: args.turbo.cache_type_v,
         kv_cache_mode_legacy: args.turbo.kv_cache_mode,
+        mla_latent_quant: args.turbo.mla_latent_quant,
         // continuous-batching KV quantization knobs (flattened
         // from `BatchKvQuantArgs`).
         kv_bits: args.batch_quant.kv_bits,
@@ -993,6 +1056,9 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         responses_store_max_entries: args.responses_store_max_entries,
         responses_store_max_bytes: args.responses_store_max_bytes,
         responses_store_ttl_secs: args.responses_store_ttl_secs,
+        responses_background_max_jobs: args.responses_background_max_jobs,
+        responses_background_ephemeral_ttl_secs: args.responses_background_ephemeral_ttl_secs,
+        responses_background_event_log_bytes: args.responses_background_event_log_bytes,
         conversation_store_max_entries: args.conversation_store_max_entries,
         conversation_store_max_bytes: args.conversation_store_max_bytes,
         conversation_store_ttl_secs: args.conversation_store_ttl_secs,

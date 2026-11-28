@@ -82,6 +82,7 @@ The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairin
 | `reason` | Meaning |
 |----------|---------|
 | `no_mtp_dispatch` | The server has no MTP speculative dispatch: no drafter was supplied, or the drafter resolved to a different speculative kind. The B=1 MTP burst never runs, so `mtp_enabled` is `false`. |
+| `dflash_dispatch` | The server serves a DFlash-kind pairing (for example Inkling 2 with its bundled DSpark drafter, `--draft-model` set to the target directory). The adaptive policy manages only the MTP burst, so nothing is profiled and `mtp_enabled` is `false`, but `target`, `drafter`, `hardware` and `block_size` name the DFlash pairing, and its block-versus-chain exactness probe passed. A DFlash pairing whose probe declined reports `exactness_declined` instead. |
 | `adaptive_disabled` | `MLXCEL_MTP_ADAPTIVE` is off, so nothing is measured or persisted. What decides the B=1 burst instead is `MLXCEL_ENABLE_MTP_B1` when it is also set (an operator pin), or the static per-hardware gate when it is not. `mtp_enabled` reports whichever of the two decided. |
 | `worker_not_ready` | No batch worker has published a policy state yet: the model is still loading. This is transient. Every worker variant publishes at startup, including the legacy single-sequence (`--no-batch`) worker and the OpenXLA worker, which have no MTP path at all and publish `no_mtp_dispatch` immediately rather than leaving `worker_not_ready` as their steady state. `mtp_enabled` is `null`. |
 
@@ -159,7 +160,7 @@ On a server with no drafter:
 }
 ```
 
-The pairings the policy can report on are the singleton MTP families: Gemma 4 with its assistant drafter, Qwen 3.5 / 3.6 / 3.8 with the `qwen3_5_mtp` head, Inkling with its in-checkpoint `mtp.safetensors`, and GLM-4.7-Flash (`glm4_moe_lite`) with the `glm4_moe_lite_mtp` block that `mlxcel split-mtp` extracts (issue #1326). Every one of them passes through the same exactness probe before the policy sees a sample, so `exactness_declined` can appear for any of them.
+The pairings the policy can report on are the singleton MTP families: Gemma 4 with its assistant drafter, Qwen 3.5 / 3.6 / 3.8 with the `qwen3_5_mtp` head, Qwen3.8-Flash-Next (`qwen4_exp`) with its native head, either embedded in a target conversion that keeps the `mtp.*` tensors and passed again as the drafter (issue #2917) or as the split-out `qwen4_exp_mtp` directory (issue #2880; obtain it with mlx-vlm's `split_qwen4_exp_mtp` or as `sh0wie/Qwen3.8-Flash-Next-MTP-Drafter-MLX-bf16` at revision `be6e2bc325d41ac7858b99269a96c495349b494d`, the drafter this port was validated against; it keeps one pending rollback block and refuses a target with a different `hc_count` before bind), Inkling with its in-checkpoint `mtp.safetensors`, and GLM-4.7-Flash (`glm4_moe_lite`) with the `glm4_moe_lite_mtp` block that `mlxcel split-mtp` extracts (issue #1326). Every one of them passes through the same exactness probe before the policy sees a sample, so `exactness_declined` can appear for any of them.
 
 On a generation 15+ host whose pairing fails the exactness probe under both kernel selections (measured on the Gemma 4 31B + bf16 assistant pairing on M3 Ultra and M5 Max, issue #1279):
 

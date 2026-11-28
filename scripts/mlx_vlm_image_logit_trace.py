@@ -26,7 +26,10 @@ runtime imports this file.
 Usage:
     mlx_vlm_image_logit_trace.py MODEL_DIR IMAGE MLXCEL_TRACE.tsv
         [--prompt "Describe the image."] [--topk 8] [--float32]
-        [--mlxcel-prompt] [--enable-thinking {true,false}] > reference.tsv
+        [--mlxcel-prompt] [--enable-thinking {true,false}]
+        [--inkling2-mlx-community [--inkling2-native-dir DIR]] [--bounded-load]
+        [--video --video-fps FPS]
+        > reference.tsv
 
 Needs `mlx`, `mlx-vlm`, `mlx-lm` and `numpy`. By default mlx-vlm runs in the
 checkpoint's own activation dtype, a same-precision reference. With
@@ -43,6 +46,28 @@ mlx-vlm's render, so the arms differ only in the forward pass: mlx-vlm still
 preprocesses the image, its image-token count must equal the trace's, and
 MiniCPM-V's `image_bound` is recomputed from the substituted ids. mlx-vlm's
 own prompt length is then printed as `# mlx_vlm_prompt_tokens`.
+
+`--inkling2-mlx-community` loads the mlx-community Inkling 2 4-bit export, which
+mlx-vlm cannot read as shipped, through `scripts/inkling2_mlx_community_remap.py`
+(#3378). The remapped directory is built once into a temporary directory; the
+export has no `processor_config.json`, so the missing processor files come from
+`--inkling2-native-dir` (default: a sibling `inkling-2-mini`).
+
+`--bounded-load` loads the checkpoint lazily with MLX's allocation cache
+disabled and evaluates the vision tower, then each decoder layer, then the
+rest, the procedure mlx-vlm's Inkling 2 README gives for Small (about 390 GB of
+target weights on a 512 GB host, #3373). One `mx.eval` over every parameter
+holds the transient copies of all layers at once and does not fit.
+
+`--video` is the reference arm of the video arm (`MLXCEL_TRACE_VIDEO`, #3234).
+IMAGE is then the directory of sampled frames the mlxcel arm wrote with
+`MLXCEL_TRACE_VIDEO_FRAMES_DIR` (`frame_0000.png`, ...), so both arms encode the
+same frames and nothing is sampled twice. `--video-fps` is required with it and
+must be the `sampled_fps` of the mlxcel trace's `# video_timing` line: the
+processor turns it into `second_per_grid_ts = temporal_patch_size / fps`, which
+Qwen2.5-VL scales its video's temporal positions by. Handing it any other rate
+makes the arms disagree about the positions, not about the forward pass. The
+value used is printed as `# video_timing`, with the grid as `# video_grid_thw`.
 
 `--enable-thinking` passes `enable_thinking` to the chat template. Unset, mlx-vlm
 renders with it off, while mlxcel turns it on for a tokenizer with think markers
@@ -62,6 +87,23 @@ import numpy as np
 from mlx_vlm import load
 from mlx_vlm.prompt_utils import apply_chat_template
 from mlx_vlm.utils import prepare_inputs
+
+
+def bounded_load(load_dir: str):
+    """Load the way mlx-vlm's Inkling 2 README loads Small: lazily, with the
+    allocation cache off, one layer's parameters evaluated at a time."""
+    cache_limit = mx.set_cache_limit(0)
+    try:
+        model, processor = load(load_dir, lazy=True)
+        vision = getattr(model, "vision_tower", None)
+        if vision is not None:
+            mx.eval(vision.parameters())
+        for layer in getattr(model, "layers", []):
+            mx.eval(layer.parameters())
+        mx.eval(model.parameters())
+    finally:
+        mx.set_cache_limit(cache_limit)
+    return model, processor
 
 
 def read_targets(path: str) -> list[int]:
@@ -112,10 +154,50 @@ def substitute_prompt(input_ids, inputs, ids: list[int], config, processor):
             f"image-token count differs: mlx-vlm {own.count(image_token)}, "
             f"mlxcel {ids.count(image_token)}; the prompts cannot share pixel features"
         )
+    video_token = getattr(config, "video_token_id", None)
+    if video_token is not None and own.count(video_token) != ids.count(video_token):
+        raise SystemExit(
+            f"video-token count differs: mlx-vlm {own.count(video_token)}, "
+            f"mlxcel {ids.count(video_token)}; the prompts cannot share pixel features"
+        )
     if "image_bound" in inputs:
         tokenizer = getattr(processor, "tokenizer", processor)
         inputs["image_bound"] = [image_bounds(ids, tokenizer)]
     return mx.array([ids], dtype=input_ids.dtype)
+
+
+def video_inputs(processor, frames_dir: str, user_prompt: str, fps: float, template_kwargs):
+    """mlx-vlm's inputs for one video given as a directory of sampled frames.
+
+    The frames are passed to the processor as they are, so it resizes and
+    patchifies them without sampling, and `fps` becomes `second_per_grid_ts`.
+    """
+    from pathlib import Path
+
+    from PIL import Image
+
+    paths = sorted(Path(frames_dir).glob("*.png"))
+    if not paths:
+        raise SystemExit(
+            f"{frames_dir}: no *.png frames; write them with MLXCEL_TRACE_VIDEO_FRAMES_DIR"
+        )
+    frames = [np.array(Image.open(path).convert("RGB")) for path in paths]
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "video"}, {"type": "text", "text": user_prompt}],
+        }
+    ]
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, **template_kwargs
+    )
+    inputs = dict(processor(text=[text], videos=[frames], fps=fps))
+    if "second_per_grid_ts" not in inputs:
+        raise SystemExit(
+            "this mlx-vlm processor emits no second_per_grid_ts; --video needs a family "
+            "whose processor times its videos (Qwen2.5-VL on mlx-vlm main)"
+        )
+    return inputs, len(frames)
 
 
 def gemma3_prefill_mask(full_ids, config) -> mx.array:
@@ -167,12 +249,49 @@ def main() -> None:
         default=None,
         help="pass enable_thinking to the chat template (unset: mlx-vlm's default, off)",
     )
+    ap.add_argument(
+        "--inkling2-mlx-community",
+        action="store_true",
+        help="load the mlx-community Inkling 2 4-bit export through the committed remap",
+    )
+    ap.add_argument(
+        "--inkling2-native-dir",
+        help="native Inkling 2 checkpoint that supplies the processor files the export lacks",
+    )
+    ap.add_argument(
+        "--bounded-load",
+        action="store_true",
+        help="load lazily and evaluate the vision tower and each layer in turn with the MLX "
+        "cache disabled (Inkling 2 Small on a 512 GB host)",
+    )
+    ap.add_argument(
+        "--video",
+        action="store_true",
+        help="IMAGE is a directory of sampled video frames (MLXCEL_TRACE_VIDEO_FRAMES_DIR)",
+    )
+    ap.add_argument(
+        "--video-fps",
+        type=float,
+        help="with --video: the `sampled_fps` of the mlxcel trace's `# video_timing` line",
+    )
     args = ap.parse_args()
+    if args.video and (args.video_fps is None or not args.video_fps > 0):
+        ap.error("--video needs --video-fps, the sampled fps the mlxcel arm used")
+    if args.video_fps is not None and not args.video:
+        ap.error("--video-fps applies to --video only")
     template_kwargs = {}
     if args.enable_thinking is not None:
         template_kwargs["enable_thinking"] = args.enable_thinking == "true"
 
-    model, processor = load(args.model_dir)
+    load_dir = args.model_dir
+    if args.inkling2_mlx_community:
+        from inkling2_mlx_community_remap import prepare_model_dir
+
+        load_dir = str(prepare_model_dir(args.model_dir, native_dir=args.inkling2_native_dir))
+    if args.bounded_load:
+        model, processor = bounded_load(load_dir)
+    else:
+        model, processor = load(load_dir)
     if args.float32:
         from mlx.utils import tree_map
         from mlx_lm.utils import dequantize_model
@@ -184,17 +303,27 @@ def main() -> None:
                 model.parameters(),
             )
         )
-    prompt = apply_chat_template(
-        processor, model.config, args.prompt, num_images=1, **template_kwargs
-    )
-    inputs = prepare_inputs(
-        processor,
-        images=[args.image],
-        prompts=[prompt],
-        image_token_index=getattr(model.config, "image_token_index", None),
-    )
-    input_ids = inputs.pop("input_ids")
-    pixel_values = inputs.pop("pixel_values", None)
+    video_frames = None
+    if args.video:
+        inputs, video_frames = video_inputs(
+            processor, args.image, args.prompt, args.video_fps, template_kwargs
+        )
+        input_ids = inputs.pop("input_ids")
+        pixel_values = inputs.pop("pixel_values_videos")
+        video_grid_thw = np.array(inputs["video_grid_thw"]).tolist()
+        second_per_grid_ts = np.array(inputs["second_per_grid_ts"]).tolist()
+    else:
+        prompt = apply_chat_template(
+            processor, model.config, args.prompt, num_images=1, **template_kwargs
+        )
+        inputs = prepare_inputs(
+            processor,
+            images=[args.image],
+            prompts=[prompt],
+            image_token_index=getattr(model.config, "image_token_index", None),
+        )
+        input_ids = inputs.pop("input_ids")
+        pixel_values = inputs.pop("pixel_values", None)
     inputs.pop("attention_mask", None)
     mlx_vlm_prompt_len = input_ids.shape[1]
     if args.mlxcel_prompt:
@@ -230,7 +359,16 @@ def main() -> None:
 
     print(f"# model\t{args.model_dir}")
     print(f"# device\tmlx-vlm {mx.default_device()}{' float32' if args.float32 else ''}")
-    print(f"# image\t{args.image}\tprompt\t{args.prompt}")
+    if args.video:
+        print(f"# video\t{args.image}\tprompt\t{args.prompt}")
+        print(
+            f"# video_timing\tframes\t{video_frames}\tsampled_fps\t{args.video_fps}"
+            f"\tsecond_per_grid\t{','.join(repr(float(s)) for s in second_per_grid_ts)}"
+        )
+        grids = ";".join(",".join(str(int(v)) for v in grid) for grid in video_grid_thw)
+        print(f"# video_grid_thw\t{grids}")
+    else:
+        print(f"# image\t{args.image}\tprompt\t{args.prompt}")
     print(f"# prompt_tokens\t{prompt_len}")
     print("# prompt_ids\t" + ",".join(str(int(i)) for i in np.array(input_ids[0]).tolist()))
     if args.mlxcel_prompt:

@@ -135,9 +135,7 @@ fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
 pub fn run_auxiliary_abi_smoke(device: &str) -> Result<AuxiliaryAbiSmokeReport, String> {
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
-    let cache = std::env::temp_dir().join("mlxcel-xla-aux-smoke");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::AuxSmoke)?;
     let vmfb = compile_one(&compiler, SMOKE_MLIR, &flags, &cache, "aux-smoke", 0)?;
     let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         "aux_smoke.main",

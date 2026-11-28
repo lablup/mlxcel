@@ -851,6 +851,18 @@ impl SolarOpenModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let eval_layer_outputs = should_eval_layer_outputs(input_ids);
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -864,6 +876,8 @@ impl SolarOpenModel {
                 unsafe { mlxcel_core::eval_all(&ptrs) };
             }
         }
+
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
         self.lm_head.forward(&h)
@@ -999,6 +1013,22 @@ impl LanguageModel for SolarOpenModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         SolarOpenModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -1251,4 +1281,10 @@ mod tests {
         );
         crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(&model);
     }
+
+    // The prefill projects only the sampled row (#3070).
+    crate::models::last_row_logits_harness::last_row_case!(solar_open_last_row_logits, || {
+        let args = tiny_routed_args();
+        SolarOpenModel::from_weights(&routed_weights(&args), &args).unwrap()
+    });
 }

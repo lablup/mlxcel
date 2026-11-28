@@ -155,6 +155,32 @@ pub trait ComputeBackend {
         token_bias: TokenBiasMap,
     ) -> Result<Session>;
 
+    /// Produce a single-sequence [`Session`] sized for a known request.
+    ///
+    /// `required_positions` is the prompt length plus the generation budget,
+    /// including any multimodal expansion the caller can predict. Backends with
+    /// dynamic shapes ignore it and fall through to [`Self::create_session`];
+    /// the OpenXLA backend compiles a static graph, so it uses the hint to pick
+    /// the smallest shape that admits the request instead of a fixed default
+    /// (issue #2855). The default body keeps every existing implementation and
+    /// caller unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot construct a session, including
+    /// when the request cannot fit any shape the backend may compile.
+    fn create_session_for_request(
+        &self,
+        model_path: &Path,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+        required_positions: Option<usize>,
+    ) -> Result<Session> {
+        let _ = required_positions;
+        self.create_session(model_path, num_layers, kv_cache_mode, token_bias)
+    }
+
     /// Whether this backend supports cross-sequence batched serving (the server
     /// `BatchScheduler` path). The single-sequence [`Session`] never batches;
     /// this advertises the backend-level capability the extended load-boundary
@@ -295,6 +321,46 @@ impl Backend {
             }
             #[cfg(feature = "xla-backend")]
             Backend::Xla(b) => b.create_session(model_path, num_layers, kv_cache_mode, token_bias),
+        }
+    }
+
+    /// Produce a single-sequence [`Session`] sized for a known request.
+    ///
+    /// See [`ComputeBackend::create_session_for_request`]; the dispatch folds
+    /// to the MLX backend under default features, where the hint is ignored.
+    #[inline]
+    pub fn create_session_for_request(
+        &self,
+        model_path: &Path,
+        num_layers: usize,
+        kv_cache_mode: KVCacheMode,
+        token_bias: TokenBiasMap,
+        required_positions: Option<usize>,
+    ) -> Result<Session> {
+        match self {
+            Backend::Mlx(b) => b.create_session_for_request(
+                model_path,
+                num_layers,
+                kv_cache_mode,
+                token_bias,
+                required_positions,
+            ),
+            #[cfg(feature = "experimental-backend")]
+            Backend::Experimental(b) => b.create_session_for_request(
+                model_path,
+                num_layers,
+                kv_cache_mode,
+                token_bias,
+                required_positions,
+            ),
+            #[cfg(feature = "xla-backend")]
+            Backend::Xla(b) => b.create_session_for_request(
+                model_path,
+                num_layers,
+                kv_cache_mode,
+                token_bias,
+                required_positions,
+            ),
         }
     }
 

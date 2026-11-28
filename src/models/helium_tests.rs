@@ -898,3 +898,12 @@ fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
 fn max_abs(a: &MlxArray) -> f32 {
     mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(a)))
 }
+
+crate::models::last_row_logits_harness::last_row_case!(
+    helium_last_row_logits,
+    || {
+        let args = tiny_args();
+        HeliumModel::from_weights(&tiny_weights(&args), &args).expect("model builds")
+    },
+    embeddings
+);

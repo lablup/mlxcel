@@ -97,11 +97,15 @@ fn parse_enable_thinking(value: Option<&str>) -> Result<Option<bool>> {
 ///
 /// `enable_thinking` replaces the server default the template was loaded with
 /// (`MLXCEL_TRACE_ENABLE_THINKING`).
-fn render_prompt(
+///
+/// `media_type` is the content-part type of the one media item, `"image"` or
+/// `"video"` (the video arm, `logit_trace/video.rs`).
+pub fn render_prompt(
     model_dir: &str,
     tokenizer: &MlxcelTokenizer,
     user_prompt: &str,
     enable_thinking: Option<bool>,
+    media_type: &str,
 ) -> String {
     let Some(mut processor) = load_model_chat_template(std::path::Path::new(model_dir), tokenizer)
     else {
@@ -119,13 +123,17 @@ fn render_prompt(
             .apply(&messages, None)
             .unwrap_or_else(|_| user_prompt.to_string())
     };
-    if !processor.supports_image_content() {
+    let supported = match media_type {
+        "video" => processor.supports_video_content(),
+        _ => processor.supports_image_content(),
+    };
+    if !supported {
         return text_only();
     }
     let messages = serde_json::json!([{
         "role": "user",
         "content": [
-            {"type": "image"},
+            {"type": media_type},
             {"type": "text", "text": user_prompt},
         ],
     }]);
@@ -134,7 +142,7 @@ fn render_prompt(
         .unwrap_or_else(|_| text_only())
 }
 
-fn encode(tokenizer: &MlxcelTokenizer, text: &str, add_special: bool) -> Vec<i32> {
+pub fn encode(tokenizer: &MlxcelTokenizer, text: &str, add_special: bool) -> Vec<i32> {
     tokenizer
         .encode(text, add_special)
         .unwrap_or_default()
@@ -162,9 +170,17 @@ pub fn trace(
     max_tokens: usize,
     batch_rows: Option<usize>,
 ) -> Result<ImageTrace> {
+    // By-id forwards of a scheduler-owned family go through a pool (#3254).
+    let model = &mlxcel::models::pooled_model::Pooled::new(model);
     let image = image::open(&arm.image_path)
         .with_context(|| format!("loading image {}", arm.image_path))?;
-    let prompt = render_prompt(model_dir, tokenizer, &arm.prompt, arm.enable_thinking);
+    let prompt = render_prompt(
+        model_dir,
+        tokenizer,
+        &arm.prompt,
+        arm.enable_thinking,
+        "image",
+    );
     let add_special = !tokenizer.prompt_carries_bos(&prompt);
     let mut prompt_ids = encode(tokenizer, &prompt, add_special);
     let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
@@ -175,7 +191,30 @@ pub fn trace(
         |text, add_special| encode(tokenizer, text, add_special),
     )?
     .context("the model prepared no image embeddings; is it a VLM?")?;
-    let (embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(&prepared.embeddings)?;
+    trace_prepared(
+        model,
+        tokenizer,
+        prompt_ids,
+        &prepared.embeddings,
+        text,
+        max_tokens,
+        batch_rows,
+    )
+}
+
+/// Teacher-force the first `max_tokens` tokens of `text` behind a prompt whose
+/// media embeddings are already prepared (and whose media state is still in
+/// the model's pending slots). Shared with the video arm.
+pub fn trace_prepared(
+    model: &mlxcel::models::pooled_model::Pooled<&mlxcel::LoadedModel>,
+    tokenizer: &MlxcelTokenizer,
+    prompt_ids: Vec<i32>,
+    embeddings: &mlxcel::vision::merge::InputEmbeddings,
+    text: &str,
+    max_tokens: usize,
+    batch_rows: Option<usize>,
+) -> Result<ImageTrace> {
+    let (embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(embeddings)?;
 
     let mut targets = encode(tokenizer, text, false);
     targets.truncate(max_tokens);
@@ -235,12 +274,14 @@ pub fn trace(
 }
 
 fn trace_batched_continuation(
-    model: &mlxcel::LoadedModel,
+    model: &mlxcel::models::pooled_model::Pooled<&mlxcel::LoadedModel>,
     targets: &[i32],
     first: &MlxArray,
     image_caches: Vec<mlxcel_core::layers::KVCache>,
     seq_ids: &[SequenceId],
 ) -> Result<UniquePtr<MlxArray>> {
+    // `model` is the caller's pooled driver: row 0 continues the sequence
+    // the image prefill wrote.
     let mut caches = vec![image_caches];
     // Text-only companions have distinct prompt lengths and explicit fresh
     // identities. Binding after the image row drains no image state: that was

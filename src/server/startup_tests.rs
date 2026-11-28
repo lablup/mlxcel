@@ -688,6 +688,54 @@ fn explicit_server_sampling_knobs_override_generation_config() {
     assert_eq!(defaults.top_k, 11);
 }
 
+/// Raon-1's `generation_config.json` sets `presence_penalty` 1.5, which
+/// Transformers applies on every step; the server takes it as its default
+/// unless `--presence-penalty` was passed (issue #3457).
+#[test]
+fn generation_config_presence_penalty_is_the_server_default_unless_the_flag_is_set() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("generation_config.json"),
+        r#"{"temperature": 0.6, "top_p": 0.95, "presence_penalty": 1.5}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: model_dir.path().to_path_buf(),
+        ..ServerStartupConfig::default()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&startup).presence_penalty,
+        1.5
+    );
+    let config = build_server_config(&startup, crate::server::ApiKeys::default());
+    assert_eq!(config.default_presence_penalty, 1.5);
+
+    let explicit_zero = ServerStartupConfig {
+        presence_penalty: 0.0,
+        presence_penalty_was_set: true,
+        ..startup.clone()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&explicit_zero).presence_penalty,
+        0.0
+    );
+
+    let no_field = tempfile::tempdir().unwrap();
+    std::fs::write(
+        no_field.path().join("generation_config.json"),
+        r#"{"temperature": 0.6}"#,
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: no_field.path().to_path_buf(),
+        ..ServerStartupConfig::default()
+    };
+    assert_eq!(
+        resolve_generation_sampling_defaults(&startup).presence_penalty,
+        0.0
+    );
+}
+
 #[test]
 fn build_server_config_max_batch_size_is_at_least_one() {
     // n_parallel=0 is nonsensical but must not produce a zero batch size
@@ -1756,6 +1804,17 @@ fn detect_model_media_support_recognises_inkling_video() {
         !support.video_with_audio,
         "Inkling VLM must keep the combined video+audio refusal, got {support:?}"
     );
+    // Issue #2399: Inkling pairs adjacent frames into its own prompt, so the
+    // `--video-num-frames` / `--video-min-frames` knobs are documented as
+    // ignored. That promise is structural, not a flag check inside the family:
+    // the fallback is the only consumer of the knobs and a native-video family
+    // never enters it, so refusing the fallback here is what makes the flags
+    // inert for Inkling.
+    assert!(
+        !support.video_frames_fallback,
+        "Inkling must never enter the frames fallback that honours the frame-count knobs, \
+         got {support:?}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2420,6 +2479,54 @@ fn server_distributed_request_names_each_distributed_flag() {
     }
 }
 
+#[test]
+fn mcp_startup_refuses_tensor_parallel_stage_and_router_roles() {
+    let mcp = crate::server::mcp::McpStartupConfig {
+        servers: Vec::new(),
+        limits: crate::server::mcp::McpLimits::default(),
+    };
+    let keys = crate::server::ApiKeys::default();
+    let launches = [
+        (
+            ServerStartupConfig {
+                tp_size: 2,
+                ..ServerStartupConfig::default()
+            },
+            "--tp-size",
+        ),
+        (
+            ServerStartupConfig {
+                pp_peer: true,
+                ..ServerStartupConfig::default()
+            },
+            "--pp-peer",
+        ),
+        (
+            ServerStartupConfig {
+                node_role: Some("router".to_string()),
+                ..ServerStartupConfig::default()
+            },
+            "--node-role",
+        ),
+    ];
+    for (mut startup, flag) in launches {
+        startup.mcp = Some(mcp.clone());
+        let message = super::validate_mcp_startup(&startup, &keys, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains(flag) && message.contains("--mcp-tools"),
+            "{message}"
+        );
+    }
+    // Without the feature the same launches are not this check's business.
+    let plain = ServerStartupConfig {
+        tp_size: 2,
+        ..ServerStartupConfig::default()
+    };
+    assert!(super::validate_mcp_startup(&plain, &keys, false).is_ok());
+}
+
 /// #2664, #2697, #2722: lines raised before `initialize_server_logging`
 /// installs a subscriber (a CORS origin variable that a command-line flag
 /// overrode, or the INFO line an `env_fallback_*` helper raises when a flag
@@ -2696,4 +2803,220 @@ async fn stage_shutdown_runs_when_the_signal_handler_fails() {
         shutdown_called.load(Ordering::SeqCst),
         "the stage shutdown must run even when the signal handler failed"
     );
+}
+
+// `chat_front_unused` decides whether `start_server` may skip
+// `load_chat_front`, whose missing-tokenizer error is the only startup check
+// that stops a checkpoint without a tokenizer. A case listed there must be
+// one that never reads the chat tokenizer.
+
+fn single_node() -> crate::distributed::disaggregated::ServingMode {
+    crate::distributed::disaggregated::ServingMode::Hybrid
+}
+
+#[test]
+fn chat_front_is_unused_by_an_image_only_server() {
+    // Image-only serving has no chat checkpoint, so its model path is empty.
+    assert!(super::chat_front_unused(
+        std::path::Path::new(""),
+        true,
+        single_node()
+    ));
+}
+
+#[test]
+fn chat_front_is_used_by_a_chat_checkpoint() {
+    let dir = temp_path("chat-front-llama");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_whisper_checkpoint() {
+    // A side-model load failure only logs, so a Whisper checkpoint without
+    // tokenizer.json must keep failing at startup through `load_chat_front`.
+    let dir = temp_path("chat-front-whisper");
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "whisper"}"#).unwrap();
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_when_the_model_type_cannot_be_detected() {
+    let dir = temp_path("chat-front-undetected");
+    assert!(!super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_unused_by_a_kokoro_checkpoint() {
+    // Kokoro checkpoints ship no tokenizer file: the model reads phonemes
+    // from its own `config.json` vocab and serves /v1/audio/speech only.
+    // Loading the chat front stopped the server with "No tokenizer found"
+    // before the Kokoro TTS wiring ran.
+    let dir = temp_path("chat-front-kokoro");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    assert!(super::chat_front_unused(&dir, false, single_node()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_kokoro_checkpoint_in_a_disaggregated_role() {
+    // The disaggregated roles front a chat model and have no TTS wiring, so
+    // an empty tokenizer would start a router that serves nothing.
+    use crate::distributed::disaggregated::ServingMode;
+    let dir = temp_path("chat-front-kokoro-role");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    for mode in [
+        ServingMode::Router,
+        ServingMode::PrefillOnly,
+        ServingMode::DecodeOnly,
+    ] {
+        assert!(!super::chat_front_unused(&dir, false, mode), "{mode}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn chat_front_is_used_by_a_chat_checkpoint_detected_as_kokoro() {
+    // Kokoro detection runs before the `model_type` dispatch, so both of its
+    // signals can claim a chat checkpoint. That checkpoint must still stop at
+    // the missing-tokenizer error.
+    let stray_weight = temp_path("chat-front-stray-weight");
+    std::fs::write(
+        stray_weight.join("config.json"),
+        r#"{"model_type": "llama"}"#,
+    )
+    .unwrap();
+    std::fs::write(stray_weight.join("kokoro-v1_0.safetensors"), b"").unwrap();
+    assert_eq!(
+        crate::models::get_model_type(&stray_weight).unwrap(),
+        crate::models::ModelType::Kokoro,
+        "the fixture must exercise the misdetection"
+    );
+    assert!(!super::chat_front_unused(
+        &stray_weight,
+        false,
+        single_node()
+    ));
+    std::fs::remove_dir_all(stray_weight).unwrap();
+
+    let stray_block = temp_path("chat-front-stray-block");
+    std::fs::write(
+        stray_block.join("config.json"),
+        r#"{"model_type": "llama", "istftnet": {}}"#,
+    )
+    .unwrap();
+    assert!(!super::chat_front_unused(
+        &stray_block,
+        false,
+        single_node()
+    ));
+    std::fs::remove_dir_all(stray_block).unwrap();
+}
+
+#[test]
+fn a_kokoro_checkpoint_that_cannot_load_is_a_startup_error() {
+    // The chat front is skipped for this checkpoint, so a swallowed TTS load
+    // failure would leave a server that answers 501 forever. The config has
+    // no `vocab`, which the Kokoro loader requires.
+    let dir = temp_path("kokoro-load-failure");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    let error = match super::load_primary_kokoro_tts(&dir, 1, std::time::Duration::from_secs(1)) {
+        Ok(_) => panic!("an incomplete Kokoro checkpoint must not load"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("Kokoro text-to-speech"), "{error}");
+    assert!(error.contains("vocab"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_text_loader_points_a_kokoro_checkpoint_at_the_speech_route() {
+    let dir = temp_path("kokoro-text-loader");
+    std::fs::write(dir.join("config.json"), r#"{"istftnet": {}}"#).unwrap();
+    let error = match crate::loading::load_model(&dir) {
+        Ok(_) => panic!("Kokoro has no text-generation loader"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("/v1/audio/speech"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The prompt-cache stores are sized for the mode the scheduler really builds
+/// (#3153): the batch KV-quant base mode when `--kv-bits` is on, the
+/// `--kv-cache-mode` / `--cache-type-*` mode otherwise.
+#[test]
+fn prompt_cache_sizing_uses_the_mode_the_scheduler_builds() {
+    use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
+    let mut config = crate::server::ServerConfig::default();
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config).mode,
+        KVCacheMode::Fp16
+    );
+
+    config.kv_cache_mode = KVCacheMode::Turbo4Asym;
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config).mode,
+        KVCacheMode::Turbo4Asym
+    );
+
+    config.kv_cache_mode = KVCacheMode::Fp16;
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, false).expect("valid config");
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config).mode,
+        KVCacheMode::Turbo4Asym
+    );
+
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, false).expect("valid config");
+    assert_eq!(
+        super::prompt_cache_sizing_kv_mode(&config).mode,
+        KVCacheMode::Int8
+    );
+    // The default keeps the last layer FP16, which the sizing carries.
+    config.batch_kv_quant =
+        BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true).expect("valid config");
+    let sizing = super::prompt_cache_sizing_kv_mode(&config);
+    assert_eq!(sizing.mode, KVCacheMode::Int8);
+    assert!(sizing.fp16_last_layer);
+}
+
+#[test]
+fn media_support_refuses_audio_for_inkling2_with_its_reason() {
+    // Inkling 2 is multimodal (vision tower) with no audio encoder, so the
+    // boundary keeps image and video and refuses audio with the family's own
+    // sentence (issue #3376).
+    let support = media_support_for_config(
+        "media-inkling2-no-audio",
+        serde_json::json!({
+            "model_type": "inkling2",
+            "architectures": ["Inkling2ForCausalLM"],
+            "vision_config": { "model_type": "inkling2_vision" }
+        }),
+    );
+    assert!(support.image, "{support:?}");
+    assert!(support.video(), "{support:?}");
+    assert!(!support.audio, "{support:?}");
+    assert_eq!(
+        support.audio_refusal,
+        Some(crate::server::media::INKLING2_AUDIO_REFUSAL)
+    );
+
+    // An audio-capable multimodal family is unchanged.
+    let gemma = media_support_for_config(
+        "media-gemma3n-audio",
+        serde_json::json!({
+            "model_type": "gemma3n",
+            "architectures": ["Gemma3nForConditionalGeneration"],
+            "text_config": { "model_type": "gemma3n_text" },
+            "vision_config": { "model_type": "gemma3n_vision" },
+            "audio_config": { "model_type": "gemma3n_audio" }
+        }),
+    );
+    assert!(gemma.audio, "{gemma:?}");
+    assert_eq!(gemma.audio_refusal, None);
 }

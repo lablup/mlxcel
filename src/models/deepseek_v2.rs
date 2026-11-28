@@ -27,6 +27,7 @@ use mlxcel_core::cache::attend_batched;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::mla::{self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache};
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -383,7 +384,7 @@ struct MLAAttention {
 
     /// `kv_b_proj` folded into the query and output paths (issue #907).
     ///
-    /// `Some` only when `MLXCEL_MLA_ABSORBED` is on and the fold succeeded. The
+    /// `Some` when [`mla::absorbed_enabled`] holds and the fold succeeded. The
     /// original `kv_b_proj` above stays loaded either way: prefill up-projects
     /// through it so the absorbed prefill is the same arithmetic on the same
     /// quantized weight the decompressed path uses, which keeps prefill parity
@@ -419,11 +420,11 @@ impl MLAAttention {
 
         // Compute Q (direct or LoRA-style)
         let q = if let Some(ref q_proj) = self.q_proj {
-            q_proj.forward(x)
+            row_linear(q_proj, x)
         } else {
-            let q_a = self.q_a_proj.as_ref().unwrap().forward(x);
+            let q_a = row_linear(self.q_a_proj.as_ref().unwrap(), x);
             let q_a_norm = self.q_a_layernorm.as_ref().unwrap().forward(&q_a);
-            self.q_b_proj.as_ref().unwrap().forward(&q_a_norm)
+            row_linear(self.q_b_proj.as_ref().unwrap(), &q_a_norm)
         };
 
         let q = mlxcel_core::reshape(&q, &[b, l, self.num_heads as i32, self.q_head_dim as i32]);
@@ -434,7 +435,7 @@ impl MLAAttention {
         let q_pe = slice_axis(&q, -1, self.qk_nope_head_dim as i32, -1);
 
         // Compute KV with compression
-        let compressed_kv = self.kv_a_proj_with_mqa.forward(x);
+        let compressed_kv = row_linear(&self.kv_a_proj_with_mqa, x);
         let compressed = slice_axis(&compressed_kv, -1, 0, self.kv_lora_rank as i32);
         let k_pe = slice_axis(&compressed_kv, -1, self.kv_lora_rank as i32, -1);
 
@@ -460,7 +461,7 @@ impl MLAAttention {
         mla::stats::record(MlaDecodePath::Decompressed);
 
         // Decompress KV
-        let kv = self.kv_b_proj.forward(&ckv);
+        let kv = row_linear(&self.kv_b_proj, &ckv);
         let kv = mlxcel_core::reshape(&kv, &[b, l, self.num_heads as i32, -1]);
         let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
 
@@ -479,7 +480,29 @@ impl MLAAttention {
         let queries = concatenate(&q_nope, &q_pe, -1);
         let keys = concatenate(&k_nope, &k_pe, -1);
 
-        // Update cache
+        // Update cache. A multi-token step that outgrows the buffer releases
+        // the superseded per-head K/V buffer inside the shared FP16 growth
+        // rather than parking it in MLX's allocator cache for the rest of the
+        // prefill piece (issues #3084, #3092).
+        // A verify block in the row-invariant scope (#3421) appends and
+        // attends one row at a time, as the decode steps it stands for do.
+        if b == 1 && mask.is_none() && l > 1 && mlxcel_core::row_invariant::in_verify_block() {
+            let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+                .map(|r| {
+                    let (keys, values) = cache.update_and_fetch(
+                        slice_axis(&keys, 2, r, r + 1),
+                        slice_axis(&values, 2, r, r + 1),
+                    );
+                    let query = slice_axis(&queries, 2, r, r + 1);
+                    mlxcel_core::causal_attention(&query, &keys, &values, self.scale, 0.0, 0)
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let output = mlxcel_core::concatenate_many(&refs, 2);
+            let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+            let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+            return row_linear(&self.o_proj, &output);
+        }
         let (keys, values) = cache.update_and_fetch(keys, values);
 
         // Scaled dot product attention.
@@ -511,18 +534,20 @@ impl MLAAttention {
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
 
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     /// Attention over the compressed-latent cache (issue #907).
     ///
-    /// Decode runs absorbed, directly against the latent. Prefill up-projects
-    /// the whole live latent window through the still-loaded `kv_b_proj` and
-    /// runs the same dense SDPA the decompressed path runs, which is what keeps
-    /// prefill numerically identical to the baseline. The cost of that choice
-    /// is that a chunked prefill re-up-projects the rows it already
-    /// up-projected on the previous chunk; absorption is scoped as a decode win
-    /// and this is where the scope is paid for.
+    /// A single query always runs absorbed, directly against the latent.
+    /// Multi-token steps consult the cost model in
+    /// [`mla::use_absorbed_mla`]: behind a long enough cache they run the same
+    /// absorbed attention with a causal mask, and on a cold prefill they
+    /// up-project the whole live latent window through the still-loaded
+    /// `kv_b_proj` and run the same dense SDPA the decompressed path runs,
+    /// which is what keeps a fresh prefill numerically identical to the
+    /// baseline. The cost of the materializing side is that a chunked prefill
+    /// re-up-projects the rows it already up-projected on the previous chunk.
     #[allow(clippy::too_many_arguments)]
     fn forward_absorbed(
         &self,
@@ -548,17 +573,77 @@ impl MLAAttention {
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");
 
-        let output = if l == 1 {
+        // A verify block in the row-invariant scope (#3421) runs every row as
+        // its decode step does: append that row's latent, attend with the one
+        // query over everything stored so far. The rows count as one MLA call
+        // in the path stats.
+        if b == 1 && mask.is_none() && l > 1 && mlxcel_core::row_invariant::in_verify_block() {
+            let rows: Vec<UniquePtr<MlxArray>> = mla::stats::as_one_call(|| {
+                (0..l)
+                    .map(|r| {
+                        view.attend(
+                            &slice_axis(q_nope, 2, r, r + 1),
+                            &slice_axis(&q_pe, 2, r, r + 1),
+                            slice_axis(&ckv, 2, r, r + 1),
+                            slice_axis(&k_pe, 2, r, r + 1),
+                            proj,
+                            self.scale,
+                            None,
+                        )
+                    })
+                    .collect()
+            });
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let output = mlxcel_core::concatenate_many(&refs, 2);
+            let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+            let output = mlxcel_core::reshape(&output, &[b, l, -1]);
+            return row_linear(&self.o_proj, &output);
+        }
+
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let live_before = view.seq_len();
+        let absorbed = mla::use_absorbed_mla(
+            l as usize,
+            live_before as usize + l as usize,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.v_head_dim,
+        );
+
+        let output = if absorbed {
             // The latent cache's own attention entry (#2171, ADR 0008): it
             // appends this step's rows and runs Stage 2 split-KV when asked
-            // for, Stage 1 otherwise. Decode sees the whole cache, so no mask,
-            // matching the `causal_attention` call the decompressed path makes
-            // here.
-            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, None)
+            // for, Stage 1 otherwise. A single query sees the whole cache with
+            // no mask, matching the `causal_attention` call the decompressed
+            // path makes here. A multi-token step needs the same causal mask
+            // the decompressed path gets, with the caller's padded mask
+            // winning when it supplied one.
+            let causal_storage;
+            let mask = if l == 1 {
+                None
+            } else if let Some(m) = mask {
+                Some(m)
+            } else {
+                causal_storage = mlxcel_core::utils::create_causal_mask(l, live_before);
+                Some(causal_storage.as_ref().unwrap())
+            };
+            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, mask)
         } else {
-            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
+            // A quantized latent (`int8`, issue #3155) is dequantized
+            // once here, after the fresh chunk was stored quantized, so this
+            // prefill reads the same values the decode steps will.
+            // The dequantized window is FP16; cast it to the query dtype so a
+            // bf16 checkpoint's step is not promoted to float32 (#3177).
+            let window = view.update_and_fetch(ckv, k_pe);
+            let (ckv_all, kpe_all) =
+                super::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe));
             let kv_len = view.seq_len();
-            mla::stats::record(MlaDecodePath::AbsorbedPrefill);
+            // The cost model declined absorption for this step, so the
+            // per-head K/V are materialized and the dense SDPA below runs.
+            mla::stats::record(MlaDecodePath::Decompressed);
             // Up-project the live latent window back into per-head K and V.
             // `kv_b_proj` wants `[B, S, kv_lora_rank]`, the shape before the
             // latent head axis was added.
@@ -590,7 +675,7 @@ impl MLAAttention {
 
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
-        self.o_proj.forward(&output)
+        row_linear(&self.o_proj, &output)
     }
 
     fn forward_batched_decode(
@@ -767,10 +852,10 @@ struct DenseMLP {
 
 impl DenseMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gate = silu(&self.gate_proj.forward(x));
-        let up = self.up_proj.forward(x);
+        let gate = silu(&row_linear(&self.gate_proj, x));
+        let up = row_linear(&self.up_proj, x);
         let h = mlxcel_core::multiply(&gate, &up);
-        self.down_proj.forward(&h)
+        row_linear(&self.down_proj, &h)
     }
 }
 
@@ -782,9 +867,8 @@ struct MoEGate {
 
 impl MoEGate {
     fn forward(&self, x: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        // gates = x @ weight.T
-        let weight_t = mlxcel_core::transpose(&self.weight);
-        let gates = mlxcel_core::matmul(x, &weight_t);
+        // gates = x @ weight.T (row-invariant inside the model's scope, #3421)
+        let gates = mlxcel_core::row_invariant::dense(x, &self.weight);
         let scores = mlxcel_core::softmax(&gates, -1);
 
         // Top-k selection
@@ -885,7 +969,28 @@ struct MoEBlock {
 impl MoEBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let (indices, scores) = self.gate.forward(x);
-        let y = self.experts.forward(x, &indices);
+        // Float experts multiply through `gather_mm`, which picks its kernel
+        // by the token count, so a verify block runs them one position at a
+        // time (#3421). The quantized gather is left whole.
+        let shape = mlxcel_core::array_shape(x);
+        let per_position = matches!(self.experts.gate_proj, SwitchLinear::Regular { .. })
+            && shape.len() == 3
+            && shape[1] > 1
+            && mlxcel_core::row_invariant::in_verify_block();
+        let y = if per_position {
+            let parts: Vec<UniquePtr<MlxArray>> = (0..shape[1])
+                .map(|i| {
+                    self.experts.forward(
+                        &slice_axis(x, 1, i, i + 1),
+                        &slice_axis(&indices, 1, i, i + 1),
+                    )
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = parts.iter().map(|part| &**part).collect();
+            mlxcel_core::concatenate_many(&refs, 1)
+        } else {
+            self.experts.forward(x, &indices)
+        };
 
         // Weighted sum over experts: [B, L, k, D] * [B, L, k, 1] -> sum over k -> [B, L, D]
         let scores_expanded = mlxcel_core::expand_dims(&scores, -1);
@@ -969,18 +1074,45 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = self.embed_tokens.forward(input_ids);
+        self.forward_rows(input_ids, None, caches, mask, None)
+    }
+
+    /// The single-sequence forward, from token ids or from precomputed
+    /// embeddings, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = match inputs_embeds {
+            Some(embeds) => mlxcel_core::copy(embeds),
+            None => self.embed_tokens.forward(input_ids),
+        };
 
         let mask = mask.map(mlxcel_core::copy);
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        // Row-invariant products for this forward when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (#3421), as in the DeepSeek V3
+        // decoder: a verify block of the token-only round then equals the
+        // decode steps it stands for.
+        let _row_invariant =
+            super::mla_batched::row_invariant_scope(&mlxcel_core::array_shape(&h), mask.is_some());
+
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             h = layer.forward(&h, mask.as_deref(), cache);
+            // Recorded only under the block-versus-chain diagnostic (#3421).
+            super::speculative_exactness_diag::capture(i, "mla", "layer output", &h);
         }
+        let h = mlxcel_core::generate::select_row(h, row);
 
         let h = self.norm.forward(&h);
 
         if let Some(ref head) = self.lm_head {
-            head.forward(&h)
+            row_linear(head, &h)
         } else {
             self.embed_tokens.as_linear(&h)
         }
@@ -1028,17 +1160,24 @@ impl DeepSeekV2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = mlxcel_core::copy(inputs_embeds);
-        let mask = mask.map(mlxcel_core::copy);
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
-            h = layer.forward(&h, mask.as_deref(), cache);
-        }
-        let h = self.norm.forward(&h);
-        if let Some(ref head) = self.lm_head {
-            head.forward(&h)
-        } else {
-            self.embed_tokens.as_linear(&h)
-        }
+        // `input_ids` is unused when embeddings are given.
+        self.forward_rows(inputs_embeds, Some(inputs_embeds), caches, mask, None)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only, from token ids or
+    /// from precomputed embeddings.
+    ///
+    /// Used by: `LanguageModel::last_row_logits` for `DeepSeekV2Model` and
+    /// `vision::deepseek_vl2::DeepSeekVl2VlModel`
+    pub fn last_row_logits_impl(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, inputs_embeds, caches, mask, Some(last_pos))
     }
 
     /// Raw token-embedding lookup, exposed for VLM feature splicing.
@@ -1096,19 +1235,20 @@ impl DeepSeekV2Model {
     }
 }
 
-/// State the absorbed-decode decision on stderr, once per load.
+/// State the absorbed-decode decision, once per load.
 ///
-/// Silent unless `MLXCEL_MLA_ABSORBED` is set, so the default path prints
-/// nothing. When it is set, this is the only place that says whether the fold
-/// actually took, so it uses `eprintln!` rather than `tracing`: the report must
-/// show without `RUST_LOG`, and stderr keeps it out of the generated text on
-/// stdout. A run whose flag is on but whose output says `0/27 layers` is
-/// visibly running the fallback, which is how issue #899's silent null is
-/// avoided here.
+/// Absorbed decode is the default where the fused kernel runs (issue #3131), so the success line only goes
+/// to stderr when `MLXCEL_MLA_ABSORBED` explicitly asks for it; under the
+/// default it is a `tracing` info line and a plain run prints nothing extra.
+/// A decline always goes to stderr: a run that wanted the latent cache and did
+/// not get it is visibly running the fallback, which is how issue #899's silent
+/// null is avoided here. `eprintln!` rather than `tracing` for those, so the
+/// report shows without `RUST_LOG` and stays out of the generated text.
 fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     if !mla::absorbed_enabled() {
         return;
     }
+    let mode = mla::absorbed_mode();
     let total = layers.len();
     let folded = layers
         .iter()
@@ -1123,12 +1263,26 @@ fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     };
     let before = mla::decompressed_bytes_per_token(&geometry, 2);
     let after = mla::latent_bytes_per_token(&geometry, 2);
-    eprintln!(
-        "mla: absorbed decode folded {folded}/{total} layers; KV cache {before} -> {after} \
-         bytes/token/layer ({:.1}x), split-kv={}",
+    // The fold's form and size, so a run can tell the packed fold (issue
+    // #3121) from the dense one without reading the code.
+    let folds: Vec<&MlaAbsorbedProjections> = layers
+        .iter()
+        .filter_map(|l| l.self_attn.absorbed.as_ref())
+        .collect();
+    let quantized = folds.iter().filter(|p| p.is_quantized()).count();
+    let fold_mib = folds.iter().map(|p| p.weight_bytes()).sum::<usize>() as f64 / (1024.0 * 1024.0);
+    let line = format!(
+        "mla: absorbed decode folded {folded}/{total} layers ({quantized} quantized, \
+         {fold_mib:.1} MiB); KV cache {before} -> {after} bytes/token/layer ({:.1}x), \
+         split-kv={}",
         before as f64 / after.max(1) as f64,
         mla::split_kv_enabled()
     );
+    if mode == mla::AbsorbedMode::On || folded != total {
+        eprintln!("{line}");
+    } else {
+        tracing::info!("{line}");
+    }
     if folded != total {
         let reason = layers
             .iter()
@@ -1237,8 +1391,11 @@ fn load_mla_attention(
     let kv_b_proj =
         UnifiedLinear::from_weights(weights, &format!("{}.kv_b_proj", prefix), group_size, bits)?;
 
-    // Fold `kv_b_proj` for absorbed decode (issue #907). Only under the flag,
-    // so an unset environment does no dequantization and allocates nothing.
+    // Fold `kv_b_proj` for absorbed decode (issue #907), the default wherever
+    // the fused kernel runs since issue #3131. `MLXCEL_MLA_ABSORBED=0` skips the fold, so the decompressed
+    // layout allocates nothing extra. A quantized `kv_b_proj` keeps
+    // its packed rows (issue #3121); only an unquantized or tensor-scaled one
+    // is held dense.
     let geometry = MlaGeometry {
         num_heads: args.num_attention_heads,
         kv_lora_rank: args.kv_lora_rank,
@@ -1439,6 +1596,22 @@ impl LanguageModel for DeepSeekV2Model {
         DeepSeekV2Model::forward(self, input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.last_row_logits_impl(input_ids, None, caches, mask, last_pos))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         DeepSeekV2Model::make_caches(self)
     }
@@ -1466,3 +1639,7 @@ impl LanguageModel for DeepSeekV2Model {
 #[cfg(test)]
 #[path = "deepseek_v2_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deepseek_v2_verify_tests.rs"]
+mod verify_tests;

@@ -83,7 +83,7 @@ impl BatchScheduler {
         PrefillPlan::resume_at(
             seq.prompt_tokens.len(),
             seq.prefill_start_offset,
-            self.history_boundary_split(seq),
+            self.snapshot_splits(seq),
             seq.prefill_offset,
             self.prefill_chunk_for_tick(),
             caps,
@@ -117,7 +117,7 @@ impl BatchScheduler {
         PrefillPlan::with_prefix(
             seq.prompt_tokens.len(),
             seq.prefill_start_offset,
-            self.history_boundary_split(seq),
+            self.snapshot_splits(seq),
             chunk,
             caps,
         )
@@ -163,6 +163,11 @@ impl BatchScheduler {
     ) -> Result<UniquePtr<mlxcel_core::MlxArray>, PieceFailure> {
         let _span = self.announce_prefill_span(seq);
         let tokens = &seq.prompt_tokens[piece.range.clone()];
+        let upcoming = plan
+            .piece_starting_at(piece.range.end)
+            .and_then(|next| seq.prompt_tokens.get(next.range.clone()))
+            .unwrap_or(&[]);
+        let _lookahead = mlxcel_core::prefill_lookahead::announce(upcoming);
         // The mask anchors to the positions already in the KV cache. For a
         // model-owned family the pool entry holds no `KVCache` to read; its
         // own offset equals the cursor, since every earlier padded piece was
@@ -239,14 +244,6 @@ impl BatchScheduler {
         let mut logits = None;
         while let Some(piece) = plan.piece_starting_at(seq.prefill_offset).cloned() {
             logits = Some(self.run_prefill_piece(seq, plan, &piece, continuation)?);
-            if plan.ends_at_boundary(&piece) {
-                self.insert_history_boundary_snapshot(seq, piece.range.end);
-                // Return the segment's intermediates to the allocator before
-                // the next piece runs; without this they stay resident through
-                // the rest of the prefill.
-                mlxcel_core::clear_memory_cache();
-                continue;
-            }
             // A chunked prefill reports one `prompt_progress` frame per
             // evaluated chunk, b10621's per-batch-iteration cadence (#1477),
             // and counts each chunk: the counter is the dispatch proof for the
@@ -254,11 +251,21 @@ impl BatchScheduler {
             // into chunks (a prompt that fits one chunk, `--prefill-chunk-size
             // 0`, a model that cannot chunk, the segment-plus-suffix shape of a
             // history boundary) is one unchunked prefill, which neither counts
-            // nor emits a progress frame, as before the plan existed. The
-            // boundary segment is not a chunk the tick policy scheduled either.
+            // nor emits a progress frame, as before the plan existed. In a
+            // chunked plan the piece that ends on a snapshot boundary is a
+            // chunk like the others, since the segment before it is chunked
+            // too (#3045).
             if plan.chunk().is_some() {
                 self.batch_observability.record_prefill_chunk();
                 seq.report_prefill_progress(piece.range.end);
+            }
+            if plan.ends_at_boundary(&piece) {
+                self.insert_boundary_snapshot(seq, piece.range.end);
+                // Return the segment's intermediates to the allocator before
+                // the next piece runs; without this they stay resident through
+                // the rest of the prefill.
+                mlxcel_core::clear_memory_cache();
+                continue;
             }
             if !all {
                 break;

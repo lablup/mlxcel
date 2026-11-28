@@ -3,6 +3,10 @@
 // Modified by mlxcel (lablup/mlxcel#1566): serialize the per-kernel lazy
 // configuration in JitModule::get_kernel_and_dims.
 //
+// Modified by mlxcel (lablup/mlxcel#2833): a trailing DiskCache parameter on
+// JitModule and get_jit_module lets one module skip the PTX disk cache (see
+// jit_module.cpp).
+//
 // Modified from upstream MLX 9a795735 mlx/backend/cuda/jit_module.h
 //
 // Upstream stores each kernel as (CUfunction, configured_flag, max_block_dim)
@@ -102,13 +106,23 @@ struct KernelArgs {
   std::deque<Arg> storage_;
 };
 
+// [mlxcel #2833] Whether a module goes through the PTX disk cache. Use is the
+// default and what every MLX caller gets. Bypass neither reads nor writes the
+// cache for the module; it is meant for a precompiled payload the caller has
+// already validated, where a cache hit would load bytes nobody compared to
+// that payload. This is separate from upstream's `use_disk_cache` flag, which
+// this overlay ignores since #2492 (every module is cached) and keeps only for
+// signature parity with upstream.
+enum class DiskCache { Use, Bypass };
+
 class JitModule {
  public:
   JitModule(
       Device& device,
       const std::string& module_name,
       const KernelBuilder& builder,
-      bool use_disk_cache);
+      bool use_disk_cache,
+      DiskCache disk_cache = DiskCache::Use);
   ~JitModule();
 
   JitModule(const JitModule&) = delete;
@@ -135,6 +149,8 @@ JitModule& get_jit_module(
     Device& device,
     const std::string& name,
     const KernelBuilder& builder,
-    bool use_disk_cache = true);
+    // Upstream's flag; ignored by this overlay since #2492 (see DiskCache).
+    bool use_disk_cache = true,
+    DiskCache disk_cache = DiskCache::Use);
 
 } // namespace mlx::core::cu

@@ -304,6 +304,37 @@ fn a_vae_without_batch_norm_cannot_decode_packed_latents_but_can_decode() {
     assert!(err.contains("bn.*"), "{err}");
 }
 
+/// `moss-image-mlx` exports the decoder alone with the batch-norm statistics as
+/// top-level `running_mean` / `running_var`. They must be read as `bn.*`, so the
+/// packed decode still denormalizes and matches upstream.
+#[test]
+fn bare_batch_norm_statistics_are_read_as_bn() {
+    let (mut weights, refs) = load_fixture("vae_tiny.safetensors");
+    weights.retain(|k, _| !k.starts_with("encoder.") && !k.starts_with("quant_conv."));
+    for name in ["running_mean", "running_var"] {
+        let value = weights.remove(&format!("bn.{name}")).unwrap();
+        weights.insert(name.to_string(), value);
+    }
+    let vae = tiny_vae(weights, false, dtype::FLOAT32).unwrap();
+    let out = vae.decode_packed_latents(&refs["packed"]).unwrap();
+    let err = rel_rms(&out, &refs["decode_packed"]);
+    assert!(err < F32_TOL, "decode_packed_latents rel-RMS {err}");
+}
+
+/// A checkpoint that carries both spellings keeps its `bn.*` copy.
+#[test]
+fn prefixed_batch_norm_statistics_win_over_bare_ones() {
+    let (mut weights, refs) = load_fixture("vae_tiny.safetensors");
+    weights.insert(
+        "running_mean".to_string(),
+        mlxcel_core::full_f32(&[16], 100.0, dtype::FLOAT32),
+    );
+    let vae = tiny_vae(weights, false, dtype::FLOAT32).unwrap();
+    let out = vae.decode_packed_latents(&refs["packed"]).unwrap();
+    let err = rel_rms(&out, &refs["decode_packed"]);
+    assert!(err < F32_TOL, "decode_packed_latents rel-RMS {err}");
+}
+
 #[test]
 fn a_vae_without_post_quant_conv_skips_that_stage() {
     // Z-Image's FLUX.1 AutoencoderKL layout: no post_quant_conv, no bn.
@@ -454,4 +485,87 @@ fn ernie_image_turbo_vae_matches_upstream() {
     let err = rel_rms(&out, &refs["f32.decode"]);
     eprintln!("default dtype {dt}: decode rel-RMS vs upstream f32 = {err}");
     assert!(err < 5e-3, "default dtype decode rel-RMS {err}");
+}
+
+/// A decoder narrower than the encoder must be probed with its own widths.
+///
+/// MOSS-Image ships 96/192/384/384 over the 128/256/512/512 encoder; probing
+/// with the encoder's numbers rejects a perfectly good MLX-layout checkpoint.
+#[test]
+fn the_conv_layout_probe_uses_the_decoder_widths() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let config = Flux2VaeConfig {
+        latent_channels: 4,
+        out_channels: 3,
+        block_out_channels: vec![8, 16, 32, 32],
+        decoder_block_out_channels: Some(vec![4, 8, 12, 16]),
+        norm_num_groups: 2,
+        ..tiny_config()
+    };
+    config.validate().unwrap();
+    // Torch `(out, in, k, k)`: decoder top = 16, decoder first = 4.
+    let mut torch = WeightMap::new();
+    torch.insert(
+        "decoder.conv_in.weight".to_string(),
+        mlxcel_core::zeros(&[16, 4, 3, 3], dtype::FLOAT32),
+    );
+    torch.insert(
+        "decoder.conv_out.weight".to_string(),
+        mlxcel_core::zeros(&[3, 4, 3, 3], dtype::FLOAT32),
+    );
+    assert_eq!(
+        detect_conv_layout(&torch, &config).unwrap(),
+        ConvLayout::Torch
+    );
+    // MLX `(out, k, k, in)`.
+    let mut mlx = WeightMap::new();
+    mlx.insert(
+        "decoder.conv_in.weight".to_string(),
+        mlxcel_core::zeros(&[16, 3, 3, 4], dtype::FLOAT32),
+    );
+    mlx.insert(
+        "decoder.conv_out.weight".to_string(),
+        mlxcel_core::zeros(&[3, 3, 3, 4], dtype::FLOAT32),
+    );
+    assert_eq!(detect_conv_layout(&mlx, &config).unwrap(), ConvLayout::Mlx);
+}
+
+/// `Flux2Vae::load` takes the MODEL root and appends `vae/` itself.
+///
+/// Passing the vae directory used to double it (`vae/vae`) and the failure
+/// surfaced only after the conditioner and transformer had already run.
+#[test]
+fn flux2_vae_load_takes_the_model_root_and_appends_vae() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let vae_dir = root.join("vae");
+    std::fs::create_dir_all(&vae_dir).unwrap();
+    std::fs::copy(
+        fixture("vae_tiny.safetensors"),
+        vae_dir.join("vae_tiny.safetensors"),
+    )
+    .unwrap();
+    std::fs::write(
+        vae_dir.join("config.json"),
+        r#"{
+            "in_channels": 3,
+            "out_channels": 3,
+            "latent_channels": 4,
+            "block_out_channels": [4, 4, 8, 8],
+            "layers_per_block": 2,
+            "norm_num_groups": 2,
+            "mid_block_add_attention": true,
+            "scaling_factor": 1.0,
+            "shift_factor": 0.0
+        }"#,
+    )
+    .unwrap();
+    let (_, refs) = load_fixture("vae_tiny.safetensors");
+    let vae = Flux2Vae::load(root, false).expect("load takes the model root");
+    assert!(vae.decode_packed_latents(&refs["packed"]).is_ok());
+    assert!(
+        Flux2Vae::load(&vae_dir, false).is_err(),
+        "passing the vae directory must not silently double it"
+    );
 }

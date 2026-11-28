@@ -185,7 +185,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         if self.engine().can_unwind_lookahead(id) {
             return Some(Teardown::Unwind);
         }
-        let model_owned = |backend| backend == SequenceStateBackend::ModelOwned;
+        let model_owned = SequenceStateBackend::keeps_state_outside_kv_slice;
         let discards = model_owned(self.model().sequence_state_layout().backend)
             && self
                 .engine()
@@ -424,7 +424,11 @@ impl<M: LanguageModel> DirectEngine<M> {
         teardown: Teardown,
     ) -> Result<(), DirectEngineError> {
         if let Some(next) = next
-            && self.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+            && self
+                .model()
+                .sequence_state_layout()
+                .backend
+                .keeps_state_outside_kv_slice()
             && let Err(err) = crate::try_eval(next)
         {
             tracing::debug!(seq_id = %id, error = %err, "decode lookahead: discarded step failed to evaluate");

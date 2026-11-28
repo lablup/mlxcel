@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::prompt_cache_adopt::PrefixAdoptOutcome;
 use super::*;
 use crate::server::batch::generation_bounds::GenerationBounds;
 
@@ -181,11 +182,9 @@ impl BatchScheduler {
             && videos.is_empty()
             && prompt_tokens.len() >= max
         {
-            let _ = response_tx.send(GenerateEvent::Error(format!(
-                "request ({} tokens) exceeds the available context size ({max} tokens), try \
-                 increasing it",
-                prompt_tokens.len()
-            )));
+            let _ = response_tx.send(GenerateEvent::Error(
+                crate::server::model_provider::context_exceeded_message(prompt_tokens.len(), max),
+            ));
             return;
         }
         if images.is_empty()
@@ -349,6 +348,10 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                crate::multimodal::video::VideoFrameKnobs {
+                    num_frames: options.video_num_frames,
+                    min_frames: options.video_min_frames,
+                },
                 cancelled.as_ref(),
                 self.batch_observability.as_ref(),
             ) {
@@ -389,16 +392,20 @@ impl BatchScheduler {
         } else {
             options.prompt_cache_ctx.as_ref()
         };
-        let (seq_id, prefill_start_offset, already_cached_tokens) = match ctx_ref
-            .and_then(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
-        {
+        let outcome = ctx_ref
+            .map(|ctx| self.try_adopt_cached_prefix(ctx, &prompt_tokens, is_multimodal))
+            .unwrap_or(PrefixAdoptOutcome::NoDenseLookup);
+        let (seq_id, prefill_start_offset, already_cached_tokens) = match outcome.adopted() {
             Some((adopted_id, adopted_len)) => (adopted_id, adopted_len, adopted_len),
             None => {
                 // Miss or feature disabled → regular allocate.
-                // count misses only when the cache is actually
-                // active (ctx_ref is Some) to avoid inflating the miss
-                // counter for multimodal or cache-disabled requests.
-                if ctx_ref.is_some() {
+                // A dense miss is recorded only when a dense KV lookup ran
+                // and adopted nothing (issue #3294). A request without a
+                // cache context, a snapshot-branch decline, and a family that
+                // never looks up a dense entry are not dense misses, so the
+                // counter stays equal to `/v1/cache/stats` `lookups - hits`
+                // plus the dense hits the scheduler declined.
+                if outcome == PrefixAdoptOutcome::DenseMiss {
                     self.batch_metrics.record_prompt_cache_miss();
                 }
                 let seq_id = match self.allocate_sequence_state() {
@@ -420,6 +427,23 @@ impl BatchScheduler {
                 (seq_id, 0, 0)
             }
         };
+
+        // The model-side reasoning effort (#3435), set on every admitted
+        // sequence (`None` is the model default) so a reused or adopted id
+        // never runs at another request's level. Models that do not steer
+        // ignore it. The route already validated the level; a refusal here
+        // still fails only this request, before prefill.
+        if let Err(err) = self
+            .engine
+            .model()
+            .set_sequence_reasoning_effort(Some(seq_id), options.model_reasoning_effort.as_deref())
+        {
+            self.prompt_cache_seq_ctx.remove(&seq_id);
+            self.release_sequence_caches(seq_id);
+            self.engine.model().clear_vlm_fallback_state();
+            let _ = response_tx.send(GenerateEvent::Error(err));
+            return;
+        }
 
         // Resolve the per-sequence input embeddings. On the VLM-sharing path
         // the tokens were already expanded above; if a prefix was adopted
@@ -447,6 +471,10 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                crate::multimodal::video::VideoFrameKnobs {
+                    num_frames: options.video_num_frames,
+                    min_frames: options.video_min_frames,
+                },
                 cancelled.as_ref(),
                 self.batch_observability.as_ref(),
             ) {
@@ -550,6 +578,7 @@ impl BatchScheduler {
         let thinking = self.build_thinking_state(
             options.reasoning_budget,
             options.thinking_enter_block_on_start,
+            options.thinking_primed_close.as_deref(),
             options.reasoning_control.clone(),
             // b10621 `--reasoning-budget-message` (#1470): tokenized here,
             // where the model's vocabulary lives, and memoised so a configured
@@ -571,6 +600,10 @@ impl BatchScheduler {
             && let Some(mut ctx) = options.prompt_cache_ctx.clone()
         {
             self.resolve_history_boundary(&mut ctx, &prompt_tokens, is_multimodal);
+            ctx.snapshot_lineage = self
+                .prompt_cache_adopted_lineage
+                .remove(&seq_id)
+                .unwrap_or_default();
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);
         }
 

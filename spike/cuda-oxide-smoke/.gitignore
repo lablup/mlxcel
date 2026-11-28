@@ -1,0 +1,14 @@
+# Compiler side outputs. The committed contract lives in artifacts/.
+/target/
+/build/
+/__pycache__/
+/cuda_oxide_smoke.ptx
+/cuda_oxide_smoke.opt.ll
+/cuda_oxide_smoke.ll
+/cuda_oxide_smoke.ltoir
+/cuda_oxide_smoke.cubin
+/cuda_oxide_smoke.ptx.identity
+/cuda_oxide_smoke.cubin.identity
+/cuda_oxide_smoke.cubin.target
+/cuda_oxide_smoke.target
+/cuda_oxide_smoke.options

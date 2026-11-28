@@ -423,6 +423,22 @@ pub(crate) fn checkpoint_weight_prefix_scan(model_path: &Path, prefixes: &[&str]
     )
 }
 
+/// An Inkling 2 directory whose only tensors are the MTP head
+/// (`mtp.safetensors`, `layers.*` / `fuse_weight` keys): no decoder layer under
+/// any published layout. An unreadable directory is not MTP-only, so the
+/// loader reports the real problem.
+pub(crate) fn inkling2_dir_is_mtp_only(model_path: &Path) -> bool {
+    if !model_path.join("mtp.safetensors").is_file() {
+        return false;
+    }
+    let has_target = mlxcel_core::weights::dir_has_tensor_name(model_path, |key| {
+        key.starts_with("model.llm.layers.")
+            || key.starts_with("model.language_model.layers.")
+            || key.starts_with("language_model.model.layers.")
+    });
+    matches!(has_target, Ok(false))
+}
+
 pub(crate) fn inkling_has_vision_weights(model_path: &Path) -> bool {
     checkpoint_has_weight_prefix(model_path, "model.visual.")
 }
@@ -516,6 +532,7 @@ const EMBEDDING_ARCHITECTURES: &[&str] = &[
     "LlamaBidirectionalModel",
     "LlamaNemotronVLModel",
     "Lfm2BidirectionalModel",
+    "Lfm2BidirectionalForMaskedLM",
     "ColIdefics3",
     "ColQwen2_5",
     "ColQwen2ForRetrieval",
@@ -713,6 +730,7 @@ pub fn model_type_has_native_video(model_type: ModelType) -> bool {
             | ModelType::Qwen35VLM
             | ModelType::Qwen35MoeVLM
             | ModelType::Qwen4ExpVLM
+            | ModelType::MiMoV2VLM
     )
 }
 
@@ -780,6 +798,18 @@ impl ModelDetectionProbes for FullFilesystemDetectionProbes {
     }
 }
 
+/// Whether `architectures[0]` is LongCat-Flash-Lite-Sparse's `LongcatCausalLM`.
+/// Whether a config names the LongCat-Flash-Lite-Sparse architecture
+/// (`LongcatCausalLM`), which the original checkpoint declares without a
+/// `model_type`.
+pub(crate) fn is_longcat_sparse_architecture(v: &Value) -> bool {
+    v["architectures"]
+        .as_array()
+        .and_then(|archs| archs.first())
+        .and_then(Value::as_str)
+        == Some("LongcatCausalLM")
+}
+
 /// Detect a model type from an already parsed config using caller-supplied filesystem probes.
 ///
 /// The loader passes probes that may inspect SafeTensors indexes or headers, while metadata-only callers can pass bounded probes that fail closed when a decision would require reading weight headers. Keeping the dispatch here prevents UI catalog support from drifting into a second handwritten model list.
@@ -830,6 +860,14 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         && let Some(redirect) = crate::imagegen::image_checkpoint_redirect_error(model_path)
     {
         return Err(redirect);
+    }
+
+    // The original `meituan-longcat/LongCat-Flash-Lite-Sparse` config carries
+    // no `model_type`; its architecture names the variant (#2362). The
+    // mlx-community conversions declare `longcat_flash_sparse` and take the
+    // arm below.
+    if v["model_type"].is_null() && is_longcat_sparse_architecture(v) {
+        return Ok(ModelType::LongcatFlashSparse);
     }
 
     let model_type_raw = v["model_type"]
@@ -984,7 +1022,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // `deepseek_v3` (#2384).
         "deepseek_v3" | "kimi_k2" | "joyai_llm_flash" => Ok(ModelType::DeepSeekV3),
         "deepseek_v32" | "deepseek_v3.2" => Ok(ModelType::DeepSeekV32),
+        "hy_v4" => Ok(ModelType::HyV4),
         "deepseek_v4" => Ok(ModelType::DeepSeekV4),
+        "xing4_0" => Ok(ModelType::Xing40),
         "dots1" => Ok(ModelType::Dots1),
         "cohere" => Ok(ModelType::Cohere),
         "cohere2" => Ok(ModelType::Cohere2),
@@ -1014,9 +1054,14 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // sliding/full attention, a sparse MoE decoder, and its own
         // `mimo_v2_flash` model type.
         "mimo_v2_flash" => Ok(ModelType::MiMoV2Flash),
+        // MiMo-V2 / V2.5 / V2.6. Only the omni (vision + text) model exists;
+        // `skip_vision: true` is handled inside the loader, not here, because
+        // the wrapper and its Qwen-VL prompt path stay the same.
+        "mimo_v2" => Ok(ModelType::MiMoV2VLM),
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),
+        "arcee" => Ok(ModelType::Arcee),
         // `Kwai-Klear/Klear-46B-A2.5B-Instruct` declares the CAPITALIZED
         // `"Klear"`. It matches this lowercase arm only because
         // `model_type_raw` is lowercased above; mlx-lm, which does not
@@ -1024,6 +1069,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // cover both spellings. Without that normalization this arm would miss
         // every published checkpoint.
         "klear" => Ok(ModelType::Klear),
+        "kolibri1" => Ok(ModelType::Kolibri1),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),
@@ -1039,10 +1085,12 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "gpt_bigcode" => Ok(ModelType::GptBigCode),
         "gpt_neox" => Ok(ModelType::GptNeoX),
         "helium" => Ok(ModelType::Helium),
+        "k2_horizon" => Ok(ModelType::K2Horizon),
         "telechat3" => Ok(ModelType::TeleChat3),
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
         "laguna" => Ok(ModelType::Laguna),
+        "limite" => Ok(ModelType::Limite),
         "minicpm" => Ok(ModelType::MiniCPM),
         "minicpm3" => Ok(ModelType::MiniCPM3),
         "stablelm" => Ok(ModelType::StableLM),
@@ -1062,6 +1110,18 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "lfm2" => Ok(ModelType::Lfm2),
         "lfm2_vl" | "lfm2-vl" => Ok(ModelType::Lfm2VL),
         "lfm2_moe" => Ok(ModelType::Lfm2Moe),
+        // A directory holding only the native `mtp.safetensors` head (no
+        // decoder shards) is a drafter, which Inkling 2 does not support.
+        "inkling2" | "inkling2_loop" => {
+            if inkling2_dir_is_mtp_only(model_path) {
+                return Err(anyhow::anyhow!(
+                    "{} holds only an Inkling 2 MTP head (mtp.safetensors), not a target model; \
+                     Inkling 2 speculative decoding is not supported",
+                    model_path.display()
+                ));
+            }
+            Ok(ModelType::Inkling2VLM)
+        }
         "inkling_mm_model" | "inkling" => {
             if has_vision_config(v) && probes.inkling_has_vision_weights(model_path, v)? {
                 Ok(ModelType::InklingVLM)
@@ -1070,6 +1130,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             }
         }
         "plamo2" => Ok(ModelType::Plamo2),
+        "plamo2vl" => Ok(ModelType::Plamo2VLM),
         "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
         // Nemotron VoiceChat nests a `nemotron_h` text_config; the top-level
         // type must win before any text_config fallback routes it to NemotronH.
@@ -1080,6 +1141,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         }
         "nemotron-nas" => Ok(ModelType::NemotronNAS),
         "rwkv7" => Ok(ModelType::Rwkv7),
+        "z1t" => Ok(ModelType::Z1t),
         "kimi_linear" => Ok(ModelType::KimiLinear),
         // Kimi K3 loads as the VLM when `config.json` carries `vision_config`
         // and the checkpoint ships `vision_tower.*` tensors (#1342); a copy
@@ -1092,6 +1154,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
                 Ok(ModelType::KimiK3)
             }
         }
+        // The vendor MLX export shares this model_type; `Raon1MiniConfig`
+        // rejects it by name at load (#3437).
+        "raon1_mini" => Ok(ModelType::Raon1Mini),
         "kimi_vl" => Ok(ModelType::KimiVL),
         "kimi_k25" => Ok(ModelType::KimiK25),
         // LocateAnything: MoonViT tower + MLP connector + Qwen2 text decoder.
@@ -1100,6 +1165,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "locateanything" => Ok(ModelType::LocateAnythingVLM),
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
+        "longcat_flash_sparse" => Ok(ModelType::LongcatFlashSparse),
         "step3p5" => Ok(ModelType::Step3p5),
         "step3p7" => Ok(ModelType::Step3p7),
         "recurrent_gemma" | "griffin" => Ok(ModelType::RecurrentGemma),
@@ -1111,6 +1177,29 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "paddleocr_vl" => Ok(ModelType::PaddleOcrVL),
         "dots_ocr" => Ok(ModelType::DotsOcrVL),
         "falcon_ocr" => Ok(ModelType::FalconOcrVL),
+        // IndicOCR ships as a two-stage repository (layout + Qwen3.5 OCR) whose
+        // root config carries `stages`, and as a flat OCR-stage config with
+        // `text_config`. Only the OCR stage is a loadable VLM; the root is
+        // driven by the page pipeline in `mlxcel generate`, so reject it here
+        // with the command to use rather than misloading it as Qwen3.5.
+        "indic_ocr" => {
+            if v.get("text_config").is_some() {
+                Ok(ModelType::Qwen35VLM)
+            } else if v.get("stages").is_some() {
+                Err(anyhow::anyhow!(
+                    "{} is a two-stage IndicOCR repository; run the page pipeline with \
+                     `mlxcel generate -m <dir> --image page.png`, or point -m at the OCR \
+                     stage (weights/ocr) for single-crop transcription",
+                    model_path.display()
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "{} declares model_type \"indic_ocr\" but has neither a `text_config` \
+                     (OCR stage) nor a `stages` block (two-stage repository)",
+                    model_path.display()
+                ))
+            }
+        }
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "glm_ocr" => Ok(ModelType::GlmOcr),
@@ -1129,8 +1218,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // the loader drops the tower via `vlm_has_vision` (the Qwen2-VL-family
         // convention of #1367): the decoder config is nested under
         // `text_config` with `language_model.*` keys, which the flat `qwen3`
-        // text route cannot read.
-        "mage_vl" => Ok(ModelType::MageVLM),
+        // text route cannot read. Mage-VL-Cowork, the computer-use release
+        // with the same tower and decoder, declares `llava_onevision2`.
+        "mage_vl" | "llava_onevision2" => Ok(ModelType::MageVLM),
         // GOT-OCR 2.0 declares `model_type: "GOT"` in upper case; the
         // normalization above lowercases it before this match.
         "got" => Ok(ModelType::GotOcrVLM),
@@ -1197,11 +1287,55 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
             "GLiNER2.5 is a span extractor; use `mlxcel extract` (checkpoint {})",
             model_path.display()
         )),
+        // Decider-2b answers typed questions from label-token logits and never
+        // generates: `decision::loader` serves it through `mlxcel decide` and
+        // `--decision-model` (#2359).
+        "decider2" => Err(anyhow::anyhow!(
+            "decider2 is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
+            model_path.display()
+        )),
+        // Clef scores every option with a joint schema head over a Qwen3.5
+        // VLM and never generates: `decision::loader` serves it (#2365).
+        "clef" => Err(anyhow::anyhow!(
+            "clef is a decision model; use `mlxcel decide` or `mlxcel-server --decision-model` (checkpoint {})",
+            model_path.display()
+        )),
+        // A split-out MTP drafter (`gemma4_assistant`, `gemma4_unified_assistant`,
+        // `qwen3_5_mtp`, ...) only runs bound to its target, through
+        // `--draft-model`. Name that instead of "Unsupported model type".
+        // Checked in the fall-through arm so it never changes how a config
+        // that loads today is routed.
+        _ if is_mtp_drafter_model_type(&model_type) => {
+            Err(mtp_drafter_not_standalone_error(model_path, model_type_raw))
+        }
         _ => Err(anyhow::anyhow!(
             "Unsupported model type: {}",
             model_type_raw
         )),
     }
+}
+
+/// Whether `model_type` is a speculative MTP drafter registered in
+/// [`mlxcel_core::drafter::drafter_kind_by_model_type`].
+fn is_mtp_drafter_model_type(model_type: &str) -> bool {
+    matches!(
+        mlxcel_core::drafter::drafter_kind_by_model_type().get(model_type),
+        Some(mlxcel_core::drafter::DrafterKind::Mtp)
+    )
+}
+
+/// Canonical error for "this directory is an MTP speculative drafter, not a
+/// model you can load standalone". The MTP counterpart of
+/// [`dflash_drafter_not_standalone_error`].
+fn mtp_drafter_not_standalone_error(model_path: &Path, model_type_raw: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{path} is an MTP speculative drafter checkpoint (model_type `{model_type_raw}`), \
+         not a standalone model. It predicts draft tokens from the hidden states of its \
+         target model and cannot generate on its own. Pass the target model to -m \
+         (for a Gemma 4 assistant, the matching Gemma 4 checkpoint) and pass this \
+         directory to --draft-model to use it for speculative decoding.",
+        path = model_path.display(),
+    )
 }
 
 /// Detect model type from config.json

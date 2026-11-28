@@ -261,10 +261,10 @@ impl PpDocLayoutV3Model {
                 "PP-DocLayoutV3 input must have shape [1,H,W,3], got {shape:?}"
             ));
         }
-        if shape[1] != self.config.image_size as i32 || shape[2] != self.config.image_size as i32 {
+        if shape[1] != shape[2] || shape[1] < 32 {
             return Err(format!(
-                "PP-DocLayoutV3 input must be {}x{}, got {}x{}",
-                self.config.image_size, self.config.image_size, shape[1], shape[2]
+                "PP-DocLayoutV3 input must be a square of at least 32 pixels, got {}x{}",
+                shape[1], shape[2]
             ));
         }
         let pixels = (shape[0] as usize)

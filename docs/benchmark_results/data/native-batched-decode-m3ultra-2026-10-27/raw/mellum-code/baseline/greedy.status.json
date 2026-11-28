@@ -1,1 +1,0 @@
-{"returncode": 0, "seconds": 11.104466125, "command": ["/tmp/epic-2574-baseline-bin/mlxcel", "generate", "-m", "/Users/devops/.cache/mlxcel/models/JetBrains/Mellum2-12B-A2.5B-Base", "-p", "Hello", "-n", "128", "--temp", "0", "--show-reasoning"]}

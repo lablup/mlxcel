@@ -36,7 +36,6 @@ use mlxcel::memory_estimate::{
     InspectReport, QuantHint, estimate_total_memory, format_estimate, inspect_family_slug,
     inspect_per_slot_overhead_bytes, raw_model_type_from_config,
 };
-use mlxcel_core::cache::KVCacheMode;
 
 use crate::InspectArgs;
 
@@ -95,9 +94,18 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     // the command it is predicting. `-m` is already a concrete directory here.
     let (kv_cache_mode, _) =
         mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model);
-    let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
-
-    let estimate = estimate_total_memory(&args.model, args.max_tokens, args.batch, quant, kv_int8);
+    // An explicit `--mla-latent-quant` changes what is sized below, so say so
+    // (stderr; `--json` output stays clean).
+    mlxcel::cli::mla_latent_option::announce_mla_latent_option(requested, &args.model);
+    // The mode itself, not an int8 flag: it also decides whether DeepSeek V2
+    // caches the absorbed latent (FP16 only) or decompressed K/V (#3153).
+    let estimate = estimate_total_memory(
+        &args.model,
+        args.max_tokens,
+        args.batch,
+        quant,
+        kv_cache_mode,
+    );
 
     if args.json {
         let report = InspectReport::from_estimate(
@@ -114,6 +122,15 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
 
     let banner = format_estimate(&args.model, &estimate);
     println!("{banner}");
+    if let Some(external) =
+        mlxcel::models::qwen4_exp::ple_footprint::external_ple_footprint(&args.model)
+    {
+        println!(
+            "External PLE table ({}): counted {:.2} GiB of row memory (included in Weights), table stays on disk",
+            external.io_mode.label(),
+            external.row_memory_bytes as f64 / (1u64 << 30) as f64
+        );
+    }
 
     if !estimate.fits {
         // Exit successfully: `inspect` is read-only and informational.

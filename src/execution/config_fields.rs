@@ -31,6 +31,8 @@
 //! the modern spellings lead and the legacy ones trail. Appending an alias
 //! therefore cannot change what an already-resolving config resolves to.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 /// Transformer layer count.
@@ -81,6 +83,57 @@ pub(crate) const MULTI_QUERY_KEY: &str = "multi_query";
 /// models. VLMs nest the language model under `text_config`.
 pub(crate) fn text_config(config: &Value) -> &Value {
     config.get("text_config").unwrap_or(config)
+}
+
+/// The decoder section the KV cache rules and the KV sizing read.
+///
+/// [`text_config`] for a VLM that nests its decoder there. DeepSeek-VL2 nests
+/// it under `language_config` without a `model_type` instead, so it gets the
+/// section its loader builds the `deepseek_v2` decoder from
+/// (`loading::deepseek_vl2_language_config`). Every other config is its own
+/// decoder.
+///
+/// Used by: [`kv_decoder_model_type`], `execution::kv_arch` (sizing).
+pub(crate) fn kv_decoder_config(config: &Value) -> Cow<'_, Value> {
+    if let Some(text) = config.get("text_config") {
+        return Cow::Borrowed(text);
+    }
+    let is_vl2 = config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .is_some_and(|mt| {
+            crate::models::registry::model_type_keys(crate::models::ModelType::DeepSeekVL2)
+                .contains(&mt.trim().to_ascii_lowercase().as_str())
+        });
+    if is_vl2 && let Some(language) = crate::loading::deepseek_vl2_language_config(config) {
+        return Cow::Owned(language);
+    }
+    Cow::Borrowed(config)
+}
+
+/// The decoder `model_type` of [`kv_decoder_config`], falling back to the
+/// top-level `model_type` when the decoder section names none. Not lowercased.
+///
+/// This is the family the decoder's own KV cache decisions belong to: on
+/// DeepSeek-VL2 it is `deepseek_v2`, the model whose `MlaLatentCache::supports`
+/// picks the latent or the decompressed layout at runtime.
+///
+/// Used by: `cli::turbo_args` (mode resolution), `execution::kv_arch` and
+/// `execution::kv_cache_advisor`.
+///
+/// The original LongCat-Flash-Lite-Sparse config names no `model_type`, only
+/// its `LongcatCausalLM` architecture, which detection maps to
+/// `longcat_flash_sparse` (#2362); this falls back the same way.
+pub(crate) fn kv_decoder_model_type(config: &Value) -> Option<String> {
+    kv_decoder_config(config)
+        .get("model_type")
+        .and_then(Value::as_str)
+        .or_else(|| config.get("model_type").and_then(Value::as_str))
+        .or_else(|| {
+            crate::models::is_longcat_sparse_architecture(config)
+                .then_some(crate::models::longcat_flash_sparse::MODEL_TYPE)
+        })
+        .map(str::to_string)
 }
 
 /// First present `u64` among `keys` in `obj`.

@@ -1,6 +1,8 @@
 # Embedding and rerank throughput on M5 Max (2026-09-09)
 
-Third pass on this host, and the first whose CSV columns are aligned. Companion to [`embeddings-rerank-m1ultra-2026-09-09.md`](embeddings-rerank-m1ultra-2026-09-09.md) and successor to [`embeddings-rerank-m5max-2026-09-04.md`](embeddings-rerank-m5max-2026-09-04.md). Covers `POST /v1/embeddings` and `POST /v1/rerank` over the 20-checkpoint roster in `scripts/bench_embeddings.py`.
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
+Third pass on this host, and the first whose CSV columns are aligned. Companion to [`embeddings-rerank-m1ultra-2026-09-09.md`](embeddings-rerank-m1ultra-2026-09-09.md) and successor to [`versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04`](versions/v0.7.0.md#embeddings-rerank-m5max-2026-09-04). Covers `POST /v1/embeddings` and `POST /v1/rerank` over the 20-checkpoint roster in `scripts/bench_embeddings.py`.
 
 Raw rows: `benchmarks/metal_m5max_embeddings_2026-09-09.csv` (102 rows, one per model, input kind and batch size; no skips, no failures).
 

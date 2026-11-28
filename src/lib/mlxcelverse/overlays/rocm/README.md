@@ -1,6 +1,6 @@
 # overlays/rocm: the ROCm part of mlxcelverse
 
-mlxcelverse is the name for everything mlxcel builds on top of upstream MLX: per-backend source overlays and mlxcel's own kernels. This directory is its ROCm overlay. It gives MLX an AMD GPU (ROCm/HIP) backend so that `cargo build --features rocm` produces a GPU build on Linux AMD hosts, and on Windows x86_64 with a ROCm 10 SDK and the MSVC toolchain (experimental, lablup/mlxcel#2601).
+mlxcelverse is the name for everything mlxcel builds on top of upstream MLX: per-backend source overlays and mlxcel's own kernels. This directory is its ROCm overlay. It gives MLX an AMD GPU (ROCm/HIP) backend so that `cargo build --features rocm` produces a GPU build on Linux AMD hosts, and on Windows x86_64 with a ROCm 10 SDK and the MSVC toolchain (supported since 0.8; lablup/mlxcel#2601).
 
 ## What is in here
 

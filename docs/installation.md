@@ -14,10 +14,10 @@ static binaries: platform GPU/runtime libraries are still required.
 |----------|--------|-----------------------|-------|
 | macOS on Apple Silicon | primary | `metal,accelerate` | Main development and validation target. |
 | Linux with NVIDIA CUDA | secondary | `cuda` | Release builds currently target CUDA 13-era systems; other versions depend on MLX/CUDA compatibility. |
-| Linux with AMD ROCm | experimental | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
+| Linux with AMD ROCm | supported (since 0.8) | `rocm` | Source build only. Validated on RDNA 3.5 (`gfx1151`, Strix Halo) with ROCm 10.0 / HIP 7.15; tracked in lablup/mlxcel#1801. See [Linux with AMD ROCm](#linux-with-amd-rocm). |
 | Linux CPU-only | not a release target | none | May compile in limited configurations, but it is not a useful or validated inference target for this project. |
 | Windows with NVIDIA CUDA | experimental | `cuda` | Source build only, single node (no tensor or pipeline parallelism). Validated natively on `aarch64-pc-windows-msvc` (NVIDIA RTX Spark N1X); the build glue also covers `x86_64-pc-windows-msvc`. See [Windows with NVIDIA CUDA](#windows-with-nvidia-cuda-experimental). |
-| Windows with AMD ROCm | experimental | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; runs without the ROCm `bin` directory on `PATH` or `ROCM_PATH` set. See [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Windows with AMD ROCm | supported (since 0.8) | `rocm` | Source build only, single node. Validated natively on `x86_64-pc-windows-msvc` with a Radeon 8060S (`gfx1151`) and ROCm 10.1.0; runs without the ROCm `bin` directory on `PATH` or `ROCM_PATH` set. See [Windows with AMD ROCm](#windows-with-amd-rocm). |
 
 ## Cargo feature flags
 
@@ -33,7 +33,7 @@ opt-in seams, diagnostics harnesses, or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
-| `rocm` | off | AMD GPU backend on Linux and on Windows x86_64 MSVC (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental) and [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| `rocm` | off | AMD GPU backend on Linux and on Windows x86_64 MSVC (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Supported since 0.8; see [Linux with AMD ROCm](#linux-with-amd-rocm) and [Windows with AMD ROCm](#windows-with-amd-rocm). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -41,7 +41,7 @@ opt-in seams, diagnostics harnesses, or test scaffolding.
 | `xla-diagnostics` | off | Test-only forwarding for Gemma3n intermediate oracle validation. Its pinned reference is the production CUDA runtime, so it enables `cuda` on top of `xla-diagnostics-cpu`. Gates the `xla_llava_reference_check` and `xla_vision_reference_check` examples. Not part of `xla-iree`; production bundles are unchanged. |
 | `xla-diagnostics-cpu` | off | `xla-iree` plus `mlxcel-xla/diagnostics`: the CPU-only companion for bounded host-reference checks on machines without a CUDA driver. Gates the `xla_qwen25_vl_window_check`, `xla_qwen3_vl_deepstack_check`, `xla_youtu_vl_reference_check`, `xla_gemma3n_audio_reference_check`, and `xla_gemma3n_sscp_conv_oracle` examples. Deliberately does not replace the qualified `xla-diagnostics` production-target gate. |
 | `xla-diagnostics-rocm` | off | `rocm` plus `xla-diagnostics-cpu`: the ROCm-backed companion for production AMD GPU intermediate oracle validation. |
-| `xla-micro-oracle` | off | `xla-iree` plus `mlxcel-xla/micro-oracle`: the CPU-capable bounded MLX/IREE operator-oracle harness. Gates the `xla_numeric_probe` example. CUDA-specific production probes may add `cuda`, but the shared report and comparison layer does not require it. |
+| `xla-micro-oracle` | off | `xla-iree` plus `mlxcel-xla/micro-oracle`: the CPU-capable bounded MLX/IREE operator-oracle harness. Gates the `xla_numeric_probe` example (canonical Rust references, local CPU). With `cuda` added it also gates `xla_mlx_micro_oracle`, which runs each operator's operands through the production MLX CUDA operation and the emitted IREE operation on the IREE `cuda` target and prints `production-mlx` reports carrying the MLX revision and overlay digest, `MLX_ENABLE_TF32`, the compiled CUDA architectures, the IREE compiler and runtime identity, and the first divergent coordinate (#3212). The shared report and comparison layer does not require `cuda`. |
 | `test-utils` | off | Test-only helpers. Required to build the `distributed_integration`, `pipeline_e2e`, and `paged_handoff_parity` integration tests (`cargo test --features test-utils`). Not needed for the binaries. |
 | `voicechat-mic` | off | Live microphone and speaker client for the Nemotron VoiceChat `/v1/realtime` endpoint (issue #1376). Compiles the `cpal` audio-device crate for `cargo run --example voicechat_microphone --features voicechat-mic` only, never for the library, the server, or CI; see [Nemotron VoiceChat](nemotron-voicechat.md). |
 
@@ -88,6 +88,45 @@ At runtime, select the backend with `MLXCEL_BACKEND=xla` and tune it with the
 for the full list and [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)
 for the design.
 
+Compiled artifacts (IREE VMFBs for the text bundles and the vision and audio
+towers, the ROCm tuning spec, and the native GEMV code objects) are cached
+per user under `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla/<cache>`
+(`vmfb`, `vision`, `qwen2-vl`, `qwen3-vl`, `molmo-vision`, `molmo2-vision`,
+`youtu-vl`, `gemma3n-audio`, `qmv4`), so a second load of the same graph skips
+the compile. Earlier releases kept them under the shared temp directory
+(`/tmp/mlxcel-xla-*`), where another local user could plant a VMFB, which is
+native code on a CPU target (#3248). A cached artifact is loaded only when the
+cache root, `xla`, and the cache directory are real directories owned by the
+current user without group or other write access, the artifact is a regular
+file with the same properties, and every directory above the cache root up to
+`/` is a real directory owned by the current user or root that no other user
+can write. A root-owned sticky directory such as `/tmp` passes. A
+group-writable directory above the root (for example `~/.cache` created under
+a `umask` of `002`) passes only on Linux and only when all of these hold: its
+group is the process's effective group and it is not other-writable;
+`/etc/nsswitch.conf` lists only `files`, `systemd` or `compat` for `passwd`
+and `group`, and for `initgroups` if it is present (a missing or unreadable
+file, or any other source such as `sss`, `ldap`, `nis` or `winbind`, fails
+the check). The file is read as glibc reads it: the colon after the database
+name is optional, and because a later line overrides an earlier one, every
+line naming one of these databases must be local, and a line that cannot be
+parsed refuses. A `+` or `-` compat line in `/etc/passwd` or `/etc/group`,
+with or without leading white space, also refuses. Every `/etc/group`
+entry for that gid has no member besides the current user; and no other
+`/etc/passwd` account has that gid as its primary group. These files are read
+once per process. Otherwise that directory is refused with a message naming
+it and the fix: `chmod g-w <path>`, or set `MLXCEL_CACHE_DIR` to a private
+directory. mlxcel creates its cache directories with mode `0700` and its files
+with mode `0600`, removes group write from the directories it manages (and
+from the cache root when `MLXCEL_CACHE_DIR` is unset), and never changes
+anything above the root. When a check fails, stderr gets one `[mlxcel-xla]
+refusing the compiled-artifact cache at <path>: <reason>` line and the graph
+is compiled into a fresh private `mlxcel-xla-XXXXXX` directory under the temp
+directory instead, so the load still works but pays the compile (that
+directory is not removed at exit). To clear the cache, delete
+`${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/xla`; the old `/tmp/mlxcel-xla-*`
+directories are no longer read and can be deleted.
+
 ## macOS on Apple Silicon
 
 Prerequisites:
@@ -123,6 +162,8 @@ The build outputs:
 target/release/mlxcel
 target/release/mlxcel-server
 ```
+
+For a model that takes most of unified memory, see [macOS memory guardrails](macos-memory.md) for the available-now figure, the reserve left for macOS, and `MLXCEL_WIRE_WEIGHTS`.
 
 The macOS release workflow also packages a `mlx.metallib` artifact when needed.
 If you distribute binaries manually, verify the runtime package layout against the
@@ -650,7 +691,7 @@ Notes:
   DLLs run in the mlxcel process, and the headers are compiled into GPU
   kernels. `C:\Program Files` has that protection; for a folder created
   directly under `C:\`, remove the inherited access as described for the
-  [ROCm SDK](#windows-with-amd-rocm-experimental).
+  [ROCm SDK](#windows-with-amd-rocm).
 - The bundle does not carry the Visual C++ runtime. `MSVCP140.dll` and
   `VCRUNTIME140.dll` loaded from System32 on the validated host, which also has
   Visual Studio, so a machine without them needs the Visual C++ Redistributable.
@@ -681,12 +722,12 @@ reports a path it cannot open, enable Win32 long paths or set a short
 | Prebuilt release archives | None yet. |
 | CI | Compile-only, no GPU. The hosted `Windows build (compile-only)` job in `ci.yml` runs on `windows-latest` when the Windows build scripts, `build_support/`, the overlays' runtime-directory sources, the bundle packagers or the MLX pin change (or the PR carries `ci:full`, a label the repository does not define yet): the `mlxcel-mlx-pin` unit tests, the `tests/` Python suites, and `cargo check -p mlxcel-core --features rocm` against the ROCm 10.1.0 `gfx1151` TheRock SDK, which builds MLX and its HIP kernels. No CI job builds the `cuda` feature on Windows. The host tests of both overlays' runtime-directory choice run on Linux in `overlay-host-tests`. |
 
-## Windows with AMD ROCm (experimental)
+## Windows with AMD ROCm
 
 A native `mlxcel.exe` / `mlxcel-server.exe` with the `rocm` feature, built with
-MSVC (lablup/mlxcel#2601). It uses the same ROCm overlay as the
-[Linux build](#linux-with-amd-rocm-experimental) and the same single-node
-limits as the [Windows CUDA build](#current-limits-on-windows).
+MSVC (lablup/mlxcel#2601) and supported since 0.8. It uses the same ROCm overlay
+as the [Linux build](#linux-with-amd-rocm) and the same single-node limits as
+the [Windows CUDA build](#current-limits-on-windows).
 
 Validated configuration: `x86_64-pc-windows-msvc` on an AMD Ryzen AI MAX+ 395
 (Radeon 8060S, `gfx1151`, with a BIOS UMA carve-out), Windows 11, Adrenalin
@@ -1019,11 +1060,9 @@ that would fail at the first matrix multiply on that GPU.
   feature on Windows without a GPU and runs nothing on AMD hardware; see the
   CI row in [Current limits on Windows](#current-limits-on-windows).
 
-## Linux with AMD ROCm (experimental)
+## Linux with AMD ROCm
 
-**Experimental.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and
-is tracked by lablup/mlxcel#1801. It is a source build only: there is no
-release artifact and no ROCm CI job running yet, and the gaps listed below are open.
+**Supported since 0.8.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and is tracked by lablup/mlxcel#1801. It is a source build only: there is no release artifact, and the optional ROCm CI job is disabled unless the repository sets `ROCM_CI_ENABLED`. The gaps listed below are open.
 
 The backend is not part of upstream MLX. mlxcel vendors the ROCm backend from
 the `rocm-support` branch of
@@ -1152,10 +1191,10 @@ loading a large model.
 To check the HTTP server rather than the CLI, start it and run the chat smoke
 script against it. Both a dense and an affine MoE checkpoint pass on `gfx1151`;
 the results are in
-[`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-12.md).
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-12`](benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-12).
 A sliding-window model, two SSM hybrids and a VLM were added, and compared
 against an Apple M5 Max Metal reference, in
-[`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-30.md).
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30`](benchmark_results/versions/v0.8.0.md#rocm-correctness-gfx1151-2026-09-30).
 
 ```bash
 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
@@ -1176,21 +1215,21 @@ standard f32 dot-product bound `K u sum_k |a_k b_k|` and no hipBLASLt solution
 avoids the instruction, so the backend leaves it alone; tests that compare
 bf16 GEMMs on ROCm do so within that bound rather than exactly. The
 measurements, kernels and probes are in
-[`docs/benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md`](benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md)
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-gemm-residue-gfx1151-2026-10-08`](benchmark_results/versions/v0.8.0.md#rocm-bf16-gemm-residue-gfx1151-2026-10-08)
 (lablup/mlxcel#2206).
 
 Decode and prefill throughput on `gfx1151`, against mlx-lm on the same host, is
 in
-[`docs/benchmark_results/rocm-baseline-gfx1151-2026-09-30.md`](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md);
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-baseline-gfx1151-2026-09-30`](benchmark_results/versions/v0.8.0.md#rocm-baseline-gfx1151-2026-09-30);
 `scripts/bench_decode.sh` recognises a ROCm host on its own (see
 [Benchmarks](benchmarks.md#rocm-hosts-issue-1810)).
 Where that decode time goes, per kernel, and the order the #1814 kernel ports
 should land in, is in
-[`docs/benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md`](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-decode-profile-gfx1151-2026-09-30`](benchmark_results/versions/v0.8.0.md#rocm-decode-profile-gfx1151-2026-09-30).
 The unified decode engine (epic #2166) was verified on `gfx1151` after it
 merged: the ROCm gate, every ROCm-only test, CLI-vs-server parity (dense and
 paged) and decode throughput against the pre-epic loop, in
-[`docs/benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md`](benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md).
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-unified-engine-gfx1151-2026-10-08`](benchmark_results/versions/v0.8.0.md#rocm-unified-engine-gfx1151-2026-10-08).
 
 #### Kernel disk cache
 
@@ -1242,7 +1281,7 @@ Two defaults keep the allocator's footprint close to the weights
 Meta-Llama-3.1-8B-Instruct-4bit went from 20.60 GB to 6.14 GB and for
 Qwen3-30B-A3B-4bit from 23.56 GB to 18.58 GB, with decode throughput
 unchanged and prefill within 2%; the breakdown and every knob compared are in
-[`docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`](benchmark_results/rocm-memory-gfx1151-2026-09-30.md).
+[`docs/benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30`](benchmark_results/versions/v0.8.0.md#rocm-memory-gfx1151-2026-09-30).
 
 - **In-flight bound, `MLX_ROCM_MAX_INFLIGHT_MB` (default 1024).** Most of
   the old peak was not cache: a prefill allocates a transient for every
@@ -1282,12 +1321,12 @@ the 1.20 headroom factor alone fell short for the dense models.
 | Affine 4-bit / 8-bit checkpoints | Run natively. |
 | mxfp8 and mxfp4 checkpoints | Run natively, including MoE experts through `gather_qmm` (for example gpt-oss-20b-MXFP4-Q4). mxfp4 `quantize`, `quantized_matmul` and `gather_qmm` are checked against CPU references by `tests/rocm_mxfp4_quant.rs` (lablup/mlxcel#1808). Vendor FP8 block checkpoints (`quant_method: fp8`, 128x128 blocks) are requantized to mxfp8 at load and run natively; verified end to end on a dense 0.8B Qwen3.5 FP8 checkpoint, with mxfp8 `gather_qmm` and `quantized_matmul` checked by `models::switch_layers::mxfp_tests`. The official Qwen3.5 FP8 MoE releases have not been run on ROCm (lablup/mlxcel#1807). |
 | NVFP4 checkpoints | Run natively (lablup/mlxcel#2617), dense layers and MoE experts alike, with the per-expert global scale applied inside `gather_qmm`. ModelOpt NVFP4 checkpoints are transcoded to MLX-native NVFP4 at load, as on Metal and CUDA, and MLX-native NVFP4 exports (`"mode": "nvfp4"`, such as `mlx-community/*-nvfp4`) load as-is. Decode and short row counts run a dedicated NVFP4 matrix-vector kernel (eight rows share each weight load); prefill-sized dense GEMMs dequantize the weight and run hipBLASLt or rocBLAS; a sorted MoE prefill takes an expert-batched kernel that walks each expert's run (lablup/mlxcel#2665). `quantized_matmul` and `gather_qmm` are checked against CPU references by `tests/rocm_nvfp4_quant.rs`. Validated on a real checkpoint, `mlx-community/Nemotron-Cascade-2-30B-A3B-nvfp4` (`nemotron_h`, 128 experts, top-6) on `gfx1151`: coherent greedy output, 512-token prefill 269 to 328 tok/s and 2048-token prefill 237 to 330 tok/s with the expert-batched kernel (medians of three), decode about 44 to 48 tok/s, greedy output byte-identical with `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0`. Since lablup/mlxcel#2698 an NVFP4 `dequantize` (the embedding lookup) runs on the GPU instead of the CPU stream, which had read the gathered rows from fine-grained memory for about two thirds of a 512-token prefill, and the sorted MoE prefill takes a rocWMMA tile variant on wave32 devices once experts average 16 rows: 512-token prefill 329 to 1008 tok/s, 2048-token prefill 331 to 1106 tok/s, decode 45 to 60 tok/s (medians of three); greedy output is identical with the GPU `dequantize` and changes with the WMMA variant, whose f32 accumulation order differs (`MLX_ROCM_NVFP4_GATHER_WMMA=0` restores the scalar kernel). Nemotron-H loaded no NVFP4 export before #2665; its fused Mamba2 decode step (`fused_mamba2_forward`) multiplies affine projections only, so NVFP4 projections take the unfused step. NVFP4 support for that step and for `fused_moe_forward` was built in #2698 and measured no faster (decode 61.0 against 61.9 tok/s after 512 prompt tokens), so it was not kept. Until #2617, ModelOpt NVFP4 was converted to affine 4-bit at load and MLX-native NVFP4 was refused (lablup/mlxcel#1806). |
-| Affine MoE models (for example Qwen3-30B-A3B) | Run natively. Single-token decode takes the fused two-kernel MoE path (gate-up, then down) through its HIP port (lablup/mlxcel#2065), as on Metal and CUDA: Qwen3-30B-A3B-4bit decode on `gfx1151` went from 61.3 to 62.5 tok/s, with logits matching Metal's fused kernel at every decided position ([results](benchmark_results/rocm-fused-moe-gfx1151-2026-10-05.md)); `MLXCEL_FUSED_MOE=0` selects the `gather_qmm` graph path instead. Experts wider than `MLXCEL_FUSED_MOE_MAX_DFF` (8192 by default, as on CUDA; Mixtral-8x7B's 14336) stay on `gather_qmm`. |
-| Model-specific fused kernels (Apertus xIELU, Cohere2 add3 + LayerNorm, Mamba1 selective scan, Nemotron-H's opt-in `MLXCEL_FUSED_MOE_RELU2`) | Run as HIP ports (lablup/mlxcel#2069). xIELU and the add3 LayerNorm are byte-identical to ROCm's own unfused graph; the Mamba1 scan keeps its state in f32 as on Metal; the relu2 path is performance-neutral on Nemotron-H and stays opt-in. Apertus, Cohere2 and the Mamba1 families have no checkpoint on the tested host, so they are covered by kernel tests only ([results](benchmark_results/rocm-metal-only-ports-gfx1151-2026-10-05.md)). |
-| Fused residual-add RMSNorm and RoPE + KV append (`MLXCEL_FUSED_ADD_RMSNORM`, `MLXCEL_FUSED_ROPE_APPEND`) | On by default on ROCm (lablup/mlxcel#2145), off on Metal and CUDA. Both run as HIP ports (lablup/mlxcel#2063) whose output is byte-identical to the graph they replace, so they change no logits; decode on `gfx1151` was never slower with them (+0.3% on Llama 3.1 8B, +1.7% on Qwen2.5 7B, inside run-to-run drift). Set either variable to `0` to fall back to the graph. Llama 3.1 keeps the graph RoPE because of its `rope_scaling` table; Gemma and IQuest Loop Coder also take the norm port but have no checkpoint measured on ROCm ([results](benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md)). |
-| Paged attention (the server's batched paged decode, MLA split-KV, sparse paged decode) | The v1 decode, v2 partial and merge kernels run as HIP ports (lablup/mlxcel#2068), so these paths take the fused kernels instead of gather-then-SDPA, as on Metal and CUDA; the kernels' tests match the gather and host references on `gfx1151`. Server decode on `gfx1151` with Meta-Llama-3.1-8B-Instruct-4bit, against the gather path on the same binary: 1.28x per-request decode at batch 4 and ~16K tokens, 1.40x and 1.77x for one sequence at ~16K and ~32K, no measurable change at batch 4 and ~4K ([results](benchmark_results/rocm-paged-attention-gfx1151-2026-10-05.md)). `MLXCEL_PAGED_ATTENTION_NATIVE=0` forces the gather path. |
-| Sampled decode (`temperature > 0`) | The fused Gumbel-max sampler (no filter) and the dual-pivot rejection sampler (top-p, and the other filter combinations its routing admits) run as HIP kernels, as on Metal and CUDA (lablup/mlxcel#2064). On `gfx1151` with Meta-Llama-3.1-8B-Instruct-4bit, decode at `--temperature 0.8 --top-p 0.95` went from 33.98 to 37.56 tok/s (medians of three; the before runs drifted from 36.26 down to 32.81, the after runs held 37.06 to 37.82); at `--temperature 0.8` alone the change is inside the noise ([results](benchmark_results/rocm-samplers-gfx1151-2026-10-05.md)). At the Llama 3 vocabulary (128256) and at Qwen's 151936 and 152064, top-p alone, top-p with min-p, and top-k with top-p (for example `--top-k 40 --top-p 0.95`) take the rejection kernel; top-k alone, min-p alone, and top-k with min-p take the stock chain. A ROCm build routes top-k with top-p up to vocab 152064 (32768 on Metal and CUDA): with it, `--temperature 0.8 --top-k 40 --top-p 0.95` decode went from 33.15 to 37.73 tok/s on Meta-Llama-3.1-8B-Instruct-4bit and from 41.91 to 46.92 tok/s on Qwen2.5-7B-Instruct-4bit (medians of three interleaved pairs, [joint-cap results](benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md), lablup/mlxcel#2157). `MLXCEL_SAMPLING_GUMBEL=0` and `MLXCEL_SAMPLING_REJECTION=0` force the graph. |
-| Hybrid SSM decode (granite-4.0-h, falcon-h1, plamo-2, Nemotron-H) | The single-token Mamba2 SSM update runs the fused HIP kernel instead of the ~55-op SSD graph (lablup/mlxcel#2067): decode on `gfx1151` went from 60.4 to 88.4 tok/s on granite-4.0-h-tiny-4bit and from 51.4 to 74.4 tok/s on Nemotron-3-Nano-30B-A3B-4bit, with model logits matching the graph and Metal's kernel at every decided position ([results](benchmark_results/rocm-ssm-update-kernel-gfx1151-2026-10-04.md)). Measured on granite and Nemotron-H; falcon-h1 and plamo-2 take the same gate but have not been run on ROCm. `MLXCEL_SSM_KERNEL=0` forces the graph. |
+| Affine MoE models (for example Qwen3-30B-A3B) | Run natively. Single-token decode takes the fused two-kernel MoE path (gate-up, then down) through its HIP port (lablup/mlxcel#2065), as on Metal and CUDA: Qwen3-30B-A3B-4bit decode on `gfx1151` went from 61.3 to 62.5 tok/s, with logits matching Metal's fused kernel at every decided position ([results](benchmark_results/versions/v0.8.0.md#rocm-fused-moe-gfx1151-2026-10-05)); `MLXCEL_FUSED_MOE=0` selects the `gather_qmm` graph path instead. Experts wider than `MLXCEL_FUSED_MOE_MAX_DFF` (8192 by default, as on CUDA; Mixtral-8x7B's 14336) stay on `gather_qmm`. |
+| Model-specific fused kernels (Apertus xIELU, Cohere2 add3 + LayerNorm, Mamba1 selective scan, Nemotron-H's opt-in `MLXCEL_FUSED_MOE_RELU2`) | Run as HIP ports (lablup/mlxcel#2069). xIELU and the add3 LayerNorm are byte-identical to ROCm's own unfused graph; the Mamba1 scan keeps its state in f32 as on Metal; the relu2 path is performance-neutral on Nemotron-H and stays opt-in. Apertus, Cohere2 and the Mamba1 families have no checkpoint on the tested host, so they are covered by kernel tests only ([results](benchmark_results/versions/v0.8.0.md#rocm-metal-only-ports-gfx1151-2026-10-05)). |
+| Fused residual-add RMSNorm and RoPE + KV append (`MLXCEL_FUSED_ADD_RMSNORM`, `MLXCEL_FUSED_ROPE_APPEND`) | On by default on ROCm (lablup/mlxcel#2145), off on Metal and CUDA. Both run as HIP ports (lablup/mlxcel#2063) whose output is byte-identical to the graph they replace, so they change no logits; decode on `gfx1151` was never slower with them (+0.3% on Llama 3.1 8B, +1.7% on Qwen2.5 7B, inside run-to-run drift). Set either variable to `0` to fall back to the graph. Llama 3.1 keeps the graph RoPE because of its `rope_scaling` table; Gemma and IQuest Loop Coder also take the norm port but have no checkpoint measured on ROCm ([results](benchmark_results/versions/v0.8.0.md#rocm-fused-norm-rope-gfx1151-2026-10-05)). |
+| Paged attention (the server's batched paged decode, MLA split-KV, sparse paged decode) | The v1 decode, v2 partial and merge kernels run as HIP ports (lablup/mlxcel#2068), so these paths take the fused kernels instead of gather-then-SDPA, as on Metal and CUDA; the kernels' tests match the gather and host references on `gfx1151`. Server decode on `gfx1151` with Meta-Llama-3.1-8B-Instruct-4bit, against the gather path on the same binary: 1.28x per-request decode at batch 4 and ~16K tokens, 1.40x and 1.77x for one sequence at ~16K and ~32K, no measurable change at batch 4 and ~4K ([results](benchmark_results/versions/v0.8.0.md#rocm-paged-attention-gfx1151-2026-10-05)). `MLXCEL_PAGED_ATTENTION_NATIVE=0` forces the gather path. |
+| Sampled decode (`temperature > 0`) | The fused Gumbel-max sampler (no filter) and the dual-pivot rejection sampler (top-p, and the other filter combinations its routing admits) run as HIP kernels, as on Metal and CUDA (lablup/mlxcel#2064). On `gfx1151` with Meta-Llama-3.1-8B-Instruct-4bit, decode at `--temperature 0.8 --top-p 0.95` went from 33.98 to 37.56 tok/s (medians of three; the before runs drifted from 36.26 down to 32.81, the after runs held 37.06 to 37.82); at `--temperature 0.8` alone the change is inside the noise ([results](benchmark_results/versions/v0.8.0.md#rocm-samplers-gfx1151-2026-10-05)). At the Llama 3 vocabulary (128256) and at Qwen's 151936 and 152064, top-p alone, top-p with min-p, and top-k with top-p (for example `--top-k 40 --top-p 0.95`) take the rejection kernel; top-k alone, min-p alone, and top-k with min-p take the stock chain. A ROCm build routes top-k with top-p up to vocab 152064 (32768 on Metal and CUDA): with it, `--temperature 0.8 --top-k 40 --top-p 0.95` decode went from 33.15 to 37.73 tok/s on Meta-Llama-3.1-8B-Instruct-4bit and from 41.91 to 46.92 tok/s on Qwen2.5-7B-Instruct-4bit (medians of three interleaved pairs, [joint-cap results](benchmark_results/versions/v0.8.0.md#rocm-rejection-joint-cap-gfx1151-2026-10-07), lablup/mlxcel#2157). `MLXCEL_SAMPLING_GUMBEL=0` and `MLXCEL_SAMPLING_REJECTION=0` force the graph. |
+| Hybrid SSM decode (granite-4.0-h, falcon-h1, plamo-2, Nemotron-H) | The single-token Mamba2 SSM update runs the fused HIP kernel instead of the ~55-op SSD graph (lablup/mlxcel#2067): decode on `gfx1151` went from 60.4 to 88.4 tok/s on granite-4.0-h-tiny-4bit and from 51.4 to 74.4 tok/s on Nemotron-3-Nano-30B-A3B-4bit, with model logits matching the graph and Metal's kernel at every decided position ([results](benchmark_results/versions/v0.8.0.md#rocm-ssm-update-kernel-gfx1151-2026-10-04)). Measured on granite and Nemotron-H; falcon-h1 and plamo-2 take the same gate but have not been run on ROCm. `MLXCEL_SSM_KERNEL=0` forces the graph. |
 | GPU faults | Reported as errors (lablup/mlxcel#1804). A launch HIP rejects (an oversized block, no code object for the device) fails the evaluation that issued it and the device stays usable. An asynchronous fault (an out-of-bounds access) fails the evaluation waiting on it within about a second instead of hanging or returning NaN; the server fails that request and answers later ones with the same error, because after a queue fault the HIP runtime rejects every call for the rest of the process, so the process has to restart, and its shutdown may need a SIGKILL (HIP's teardown waits on callbacks the faulted queue never runs). A kernel that never finishes is not detected; `MLX_ROCM_GPU_WATCHDOG_SECS` (default off) fails any single host wait that outlives it. |
 | Memory estimation on UMA hosts | Correct. Measured on the tested configuration: the ROCm allocator reports a nonzero cap (76.80 GiB of the 96 GiB carve-out), which the estimator reads before it would ever reach host RAM, so nothing that fits the carve-out is refused for that reason (lablup/mlxcel#1805). |
 | Diagnostics | Report the AMD vendor, device name, `gfx` target and device memory, and no longer print a CUDA compute capability for it (lablup/mlxcel#1805). A binary whose compiled `gfx` list does not cover the device refuses to start rather than failing at the first kernel launch. |
@@ -1295,17 +1334,17 @@ the 1.20 headroom factor alone fell short for the dense models.
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876); a value that is not a positive integer is ignored with a warning (#2051). |
 | Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not validated; the only wave64 run so far was one MI300X bring-up (`overlays/rocm/LOCAL_FIXES.md` item 52), and lablup/mlxcel#2699 tracks validation. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. The rocWMMA quantized GEMMs (`qmm_wmma_dense_kernel` and the grouped-prefill gather) assume 32-lane warps too and are likewise held to wave32 devices; before that, every bf16 quantized prefill on gfx942 produced garbage (`!!!!`) unless `MLX_ROCM_WMMA_QMM=0` was set (`overlays/rocm/LOCAL_FIXES.md` item 52). |
-| Windows | Experimental; see [Windows with AMD ROCm](#windows-with-amd-rocm-experimental). |
+| Windows | Supported since 0.8; see [Windows with AMD ROCm](#windows-with-amd-rocm). |
 | Multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only:
 Qwen3-0.6B-4bit about 250 tok/s (greedy, short prompt), Qwen3-30B-A3B-4bit
 about 62 tok/s with the fused MoE kernels
-([results](benchmark_results/rocm-fused-moe-gfx1151-2026-10-05.md)),
+([results](benchmark_results/versions/v0.8.0.md#rocm-fused-moe-gfx1151-2026-10-05)),
 gpt-oss-20b-MXFP4-Q4 about 64 tok/s after a 512-token prompt, through the mxfp4
 warp-shared gather kernel (`overlays/rocm/LOCAL_FIXES.md` item 41; 8.3 tok/s
 before it, 8.07 tok/s in the baseline page linked above;
-[results](benchmark_results/rocm-moe-decode-mxfp4-gfx1151-2026-10-08.md)).
+[results](benchmark_results/versions/v0.8.0.md#rocm-moe-decode-mxfp4-gfx1151-2026-10-08)).
 
 ## Runtime environment variables
 
@@ -1320,6 +1359,7 @@ before it, 8.07 tok/s in the baseline page linked above;
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
+| `MLXCEL_WIRE_WEIGHTS` | macOS: `1` wires evaluated weights with `mlock`, capped to leave the [reserve](macos-memory.md) | unset (off) |
 | `MLXCEL_REQUEST_MEMORY_BUDGET` | Lower-only positive byte/size ceiling for [Nemotron-H request admission](request-memory-admission.md), e.g. `24GB`; invalid explicit values stop startup | runtime device/wired/allocator minimum |
 | `MLX_ROCM_*` and other ROCm backend variables | ROCm backend tuning, A/B and diagnostics, for example `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED`, `MLX_ROCM_MAX_INFLIGHT_MB`, `MLX_NO_HIPBLASLT`; see [ROCm backend variables](environment-variables.md#rocm-backend-variables) | see that section |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
@@ -1450,7 +1490,7 @@ make test-fast
 # Linux / CUDA
 make test-fast-cuda
 
-# Linux / ROCm (experimental): no make target yet
+# Linux / ROCm (supported since 0.8): no make target yet
 cargo test --profile test-fast --features rocm -- --test-threads=1
 
 # Narrow to a subset while iterating

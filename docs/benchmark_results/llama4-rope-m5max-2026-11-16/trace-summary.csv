@@ -1,0 +1,11 @@
+cell,arm,trace_args,shape,positions,top1_disagree,top1_rate_pct,decided_positions,decided_disagree,decided_rate_pct,ppl_mlxlm,ppl_mlxcel
+prefill_width_1280_ctx_le_2304,main,1280 4 8 1024,"full forward, width 1280",5120,4531,88.496,1965,1647,83.817,14.2133,1868.2262
+prefill_width_1280_ctx_le_2304,branch,1280 4 8 1024,"full forward, width 1280",5120,28,0.547,1965,1,0.051,14.2133,14.2166
+prefill_width_4608_ctx_le_9216,main,4608 2 8 4608,"full forward, width 4608 (chunk 1 crosses the 8192 chunk boundary)",9216,8353,90.636,3643,3202,87.895,11.8026,2392.8820
+prefill_width_4608_ctx_le_9216,branch,4608 2 8 4608,"full forward, width 4608 (chunk 1 crosses the 8192 chunk boundary)",9216,51,0.553,3643,0,0.000,11.8026,11.7995
+decode_width_1_ctx_512_2560,main,512 4 8 512 BATCH_ROWS=1 SCALAR_REFERENCE=1,"width-one decode, forward_with_sequence_id",2048,1818,88.770,750,625,83.333,16.3510,1819.5757
+decode_width_1_ctx_512_2560,branch,512 4 8 512 BATCH_ROWS=1 SCALAR_REFERENCE=1,"width-one decode, forward_with_sequence_id",2048,12,0.586,750,0,0.000,16.3510,16.3491
+decode_width_1_batched_b2_ctx_512_2560,main,512 4 8 512 BATCH_ROWS=2,"width-one batched decode over 2 rows, row 0 emitted",2048,1819,88.818,750,626,83.467,16.3510,1815.6558
+decode_width_1_batched_b2_ctx_512_2560,branch,512 4 8 512 BATCH_ROWS=2,"width-one batched decode over 2 rows, row 0 emitted",2048,15,0.732,750,0,0.000,16.3510,16.3672
+decode_width_1_ctx_4608_9216,main,4608 1 8 4608 BATCH_ROWS=1 SCALAR_REFERENCE=1,"width-one decode across the 8192 chunk boundary",4608,4286,93.012,1886,1743,92.418,10.2684,3059.5077
+decode_width_1_ctx_4608_9216,branch,4608 1 8 4608 BATCH_ROWS=1 SCALAR_REFERENCE=1,"width-one decode across the 8192 chunk boundary",4608,24,0.521,1886,0,0.000,10.2684,10.2600

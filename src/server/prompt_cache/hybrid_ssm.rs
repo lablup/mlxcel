@@ -47,10 +47,25 @@
 //! | `falcon_mamba`         | Falcon Mamba (HF `model_type` alias)      |
 //! | `longcat_flash`        | LongCat-Flash linear hybrid               |
 //! | `longcat_flash_ngram`  | LongCat-Flash with n-gram speculation     |
+//! | `longcat_flash_sparse` | LongCat-Flash-Lite-Sparse (LSA, n-gram)   |
 //! | `rwkv7`                | RWKV-7 recurrent                          |
 //! | `recurrent_gemma`      | Griffin (RecurrentGemma) local+recurrent  |
+//! | `z1t`                  | Z1T AFT-conv pool sums + conv window      |
 //! | `baichuan_m1`          | Dense attention with a per-token K/V       |
 //! |                        | convolution carrying recurrent state      |
+//! | `falcon_h1`            | Parallel Mamba2 + Attention (Falcon-H1)   |
+//! | `plamo2`, `plamo2vl`   | Mamba + Attention (PLaMo 2, and its VLM)  |
+//! | `qwen3_5`, `_text`     | Gated DeltaNet + Attention (Qwen3.5)      |
+//! | `qwen3_5_moe`, `_text` | Qwen3.5 MoE, same recurrent layers        |
+//! | `granitemoehybrid`     | Mamba2 + Attention + MoE (Granite 4.0-H)  |
+//!
+//! The last five rows were added by #3341 (epic #564). On the MLX path the
+//! only effect of membership is the APC opt-out at startup: these families
+//! already keep their state outside the `KVCache` slice (model-owned for
+//! Falcon-H1, PLaMo 2 and Granite 4.0-H, scheduler-owned `LayerState` for
+//! Qwen3.5), so they never reached the block-hash store, and their whole
+//! snapshots and turn-boundary state checkpoints (#3047) never consult the
+//! APC flag.
 //!
 //! ## Why this is safe under the unified paged cache (#124)
 //!
@@ -60,18 +75,17 @@
 //! 1. **APC opt-out (this module).** [`detect_hybrid_ssm`] runs at startup and
 //!    force-disables Automatic Prefix Caching, so no block-hash chain is ever
 //!    computed for a recurrent prompt.
-//! 2. **`ModelOwned` backend (the load-bearing guarantee).** Every family here
-//!    except Baichuan-M1 overrides `LanguageModel::supports_batching()` to
-//!    `false`, which routes the default `sequence_state_layout()` to
-//!    `SequenceStateBackend::ModelOwned`. A `ModelOwned` sequence is rejected by
-//!    both `CachePool::detach` and `CachePool::detach_paged` (they return
-//!    `None`), so the scheduler's donate-back path can never hand a recurrent
-//!    sequence to the prompt-cache store, so its store stays empty and every
-//!    adopt attempt misses. The same `supports_batching() == false` also forces
-//!    `effective_decode_storage_backend` to `Dense`, so `--decode-storage-backend
-//!    paged` is silently ignored for these models rather than corrupting their
-//!    recurrent state. The net effect is bit-identical output to the pre-epic
-//!    dense path regardless of the requested decode backend.
+//! 2. **State outside the `KVCache` slice (the load-bearing guarantee).** Every
+//!    family here except Baichuan-M1 reports a `sequence_state_layout()` whose
+//!    backend is `ModelOwned` or `SchedulerOwned`
+//!    (`SequenceStateBackend::keeps_state_outside_kv_slice`). That holds whether
+//!    the family batches or not: Mamba2, Nemotron-H, Falcon-H1, PLaMo 2,
+//!    Granite 4.0-H and Qwen3.5 return `supports_batching() == true` and still
+//!    keep that layout. The scheduler's dense adopt and donate paths both
+//!    decline such a sequence, so a recurrent sequence never reaches the
+//!    block-hash store; it is restored only from whole-state snapshots and
+//!    turn-boundary checkpoints, which never truncate a recurrent state to a
+//!    shorter prefix.
 //!
 //!    Baichuan-M1 is the one dense exception (#2567): its KV caches live in the
 //!    scheduler slice and it batches per row, while the K/V convolution state
@@ -95,6 +109,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::policy::PromptCacheConfig;
+
 /// Authoritative list of hybrid SSM / linear-attention `model_type` strings
 /// that must opt out of APC.
 pub const HYBRID_SSM_MODEL_TYPES: &[&str] = &[
@@ -110,12 +126,26 @@ pub const HYBRID_SSM_MODEL_TYPES: &[&str] = &[
     "falcon_mamba",
     "longcat_flash",
     "longcat_flash_ngram",
+    // Model-owned caches and n-gram tail, like the other LongCat types (#2362).
+    "longcat_flash_sparse",
     "rwkv7",
     "recurrent_gemma",
+    // AFT-conv running pool sums and conv window (Z1T, #2364).
+    "z1t",
     // Dense attention, but every layer convolves K/V with the previous token's
     // pre-convolution K/V, which is recurrent state the KV cache does not hold
     // (#2567).
     "baichuan_m1",
+    // Hybrids whose MLX state already lives outside the KV slice; listed so
+    // APC is off for every recurrent family on both backends (#3341).
+    "falcon_h1",
+    "plamo2",
+    "plamo2vl",
+    "qwen3_5",
+    "qwen3_5_text",
+    "qwen3_5_moe",
+    "qwen3_5_moe_text",
+    "granitemoehybrid",
 ];
 
 /// Architecture-name fragments (matched case-insensitively against entries in
@@ -131,9 +161,17 @@ const HYBRID_SSM_ARCH_FRAGMENTS: &[&str] = &[
     "qwen3next",
     "falconmamba",
     "longcatflash",
+    // LongCat-Flash-Lite-Sparse's original config has no `model_type` (#2362).
+    "longcatcausallm",
     "rwkv7",
     "recurrentgemma",
+    "z1t",
     "baichuanm1",
+    "falconh1",
+    "plamo2",
+    // `Qwen3_5ForConditionalGeneration`, `Qwen3_5MoeForCausalLM`, ...
+    "qwen35",
+    "granitemoehybrid",
 ];
 
 /// Return `true` when `model_type` (a value from `config.json`) corresponds to
@@ -210,9 +248,61 @@ pub fn detect_hybrid_ssm(config: &Value) -> Option<String> {
 pub fn detect_hybrid_ssm_from_path(model_path: &Path) -> std::io::Result<Option<String>> {
     let config_path = model_path.join("config.json");
     let config_str = std::fs::read_to_string(&config_path)?;
-    let config: Value = serde_json::from_str(&config_str)
+    // HF writes Python's bare `Infinity` into Mamba2 and Nemotron-H configs
+    // (`time_step_limit`); a strict parse would fail and leave APC on for
+    // exactly the families this check exists for.
+    let config: Value = serde_json::from_str(&crate::models::sanitize_config_json(&config_str))
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(detect_hybrid_ssm(&config))
+}
+
+/// Startup's APC opt-out: when the operator requested APC and `model_path`
+/// is a [`HYBRID_SSM_MODEL_TYPES`] family, turn APC off and log one warning.
+/// Returns the detected family. The whole-prefix store, its snapshots and the
+/// turn-boundary state checkpoints (#3047) stay as configured.
+///
+/// Used by: `startup::resolve_prompt_cache_store`.
+pub fn disable_apc_for_hybrid_ssm(
+    prompt_cache: &mut PromptCacheConfig,
+    model_path: &Path,
+) -> Option<String> {
+    if !prompt_cache.apc.enabled {
+        return None;
+    }
+    let family = detect_hybrid_ssm_from_path(model_path).ok().flatten()?;
+    tracing::warn!(
+        model_type = %family,
+        "Detected hybrid SSM / linear-attention model family ({family}); \
+         auto-disabling APC because recurrent state cannot decompose \
+         into hashable blocks. Whole-prefix prompt cache is unaffected."
+    );
+    prompt_cache.apc.enabled = false;
+    Some(family)
+}
+
+/// Decide whether a model must stay out of prefix-hash sharing entirely on a
+/// backend that reports its own recurrent state (#3341).
+///
+/// `backend_threads_recurrent_state` is the backend's answer for this
+/// checkpoint (for OpenXLA, `Config::has_recurrent_state()`). The shared
+/// [`detect_hybrid_ssm`] list is consulted as well, so a recurrent family the
+/// backend cannot load yet is still refused. Returns the family name to log,
+/// or `None` when the model may share prefixes.
+#[must_use]
+pub fn recurrent_prefix_sharing_family(
+    config: &Value,
+    backend_threads_recurrent_state: bool,
+) -> Option<String> {
+    if let Some(family) = detect_hybrid_ssm(config) {
+        return Some(family);
+    }
+    backend_threads_recurrent_state.then(|| {
+        config
+            .get("model_type")
+            .and_then(Value::as_str)
+            .unwrap_or("recurrent")
+            .to_string()
+    })
 }
 
 #[cfg(test)]

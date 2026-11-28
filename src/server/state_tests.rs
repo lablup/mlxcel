@@ -302,8 +302,11 @@ fn batch_metrics_prompt_cache_gauges_update() {
     );
 }
 
+/// The scheduler is the only writer of the dense hit, miss, and reused-token
+/// counters (#3246), so store lookups forwarded through the adapter must not
+/// move them; otherwise every lookup is counted twice.
 #[test]
-fn batch_metrics_cache_adapter_routes_lookups_to_hit_and_miss_counters() {
+fn batch_metrics_cache_adapter_leaves_dense_lookup_counters_to_the_scheduler() {
     use super::super::prompt_cache::metrics::PromptCacheMetrics;
     use super::BatchMetricsCacheAdapter;
     use std::sync::Arc;
@@ -311,20 +314,46 @@ fn batch_metrics_cache_adapter_routes_lookups_to_hit_and_miss_counters() {
     let m = Arc::new(BatchMetrics::new());
     let adapter = BatchMetricsCacheAdapter::new(m.clone());
 
-    // Hit
     adapter.record_lookup(true, 40);
-    // Miss
     adapter.record_lookup(false, 0);
-    // Another hit
     adapter.record_lookup(true, 20);
 
-    assert_eq!(m.prompt_cache_hits_total.load(Ordering::Relaxed), 2);
+    assert_eq!(m.prompt_cache_hits_total.load(Ordering::Relaxed), 0);
     assert_eq!(
         m.prompt_cache_prefix_tokens_reused_total
             .load(Ordering::Relaxed),
-        60
+        0
     );
-    assert_eq!(m.prompt_cache_misses_total.load(Ordering::Relaxed), 1);
+    assert_eq!(m.prompt_cache_misses_total.load(Ordering::Relaxed), 0);
+}
+
+/// Snapshot hits and their tokens come from the scheduler's restore sites;
+/// the adapter keeps only the snapshot miss, which only the store observes.
+#[test]
+fn batch_metrics_cache_adapter_forwards_only_snapshot_misses() {
+    use super::super::prompt_cache::metrics::PromptCacheMetrics;
+    use super::BatchMetricsCacheAdapter;
+    use std::sync::Arc;
+
+    let m = Arc::new(BatchMetrics::new());
+    let adapter = BatchMetricsCacheAdapter::new(m.clone());
+
+    adapter.record_snapshot_lookup(true, 40);
+    adapter.record_snapshot_lookup(false, 0);
+
+    assert_eq!(
+        m.prompt_cache_snapshot_hits_total.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        m.prompt_cache_snapshot_tokens_reused_total
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        m.prompt_cache_snapshot_misses_total.load(Ordering::Relaxed),
+        1
+    );
 }
 
 #[test]

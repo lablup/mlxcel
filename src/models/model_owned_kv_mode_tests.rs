@@ -193,6 +193,37 @@ fn laguna_int8_greedy_run_matches_fp16_first_token() {
     assert_int8_greedy_matches_fp16_first_token(laguna);
 }
 
+#[test]
+fn limite_sequence_caches_take_the_injected_kv_mode() {
+    let model = super::limite_tests::tiny_wrapper();
+    let modes = int8_sequence_modes(&model, |m, id| m.sequence_kv_modes(id));
+    assert!(all_int8(&modes, model.num_layers()), "got {modes:?}");
+}
+
+#[test]
+fn limite_int8_greedy_run_matches_fp16_first_token() {
+    assert_int8_greedy_matches_fp16_first_token(super::limite_tests::tiny_wrapper);
+}
+
+/// Limite's sliding layers keep `sliding_window + 1` keys, so their
+/// `RotatingKVCache` stores FP16 under `int8` and only the global layer
+/// reports the quantized mode.
+#[test]
+fn limite_sliding_layers_report_fp16_storage_under_int8() {
+    let model = super::limite_tests::tiny_wrapper();
+    model.set_kv_cache_layer_modes(vec![KVCacheMode::Int8; model.num_layers()]);
+    let storage = model.kv_cache_storage_modes().expect("storage modes");
+    assert_eq!(
+        storage,
+        vec![
+            Some(KVCacheMode::Fp16),
+            Some(KVCacheMode::Fp16),
+            Some(KVCacheMode::Fp16),
+            Some(KVCacheMode::Int8)
+        ]
+    );
+}
+
 /// The table is per layer: a sequence opened after injection takes each
 /// layer's own entry, and the fallback slot rebuilt by the injection does
 /// too (the single-sequence `forward` the CLI warmup used to take).
@@ -208,7 +239,7 @@ fn exaone4_mixed_table_is_applied_per_layer() {
     model.release_sequence_state_by_id(id);
 }
 
-fn gemma3(sliding_window: i32) -> super::gemma3::Gemma3Wrapper {
+fn gemma3(sliding_window: i32) -> super::pooled_model::Pooled<super::gemma3::Gemma3Wrapper> {
     super::gemma3::gemma3_tests::snapshot_prompt_cache::build_wrapper_with_window(sliding_window)
 }
 

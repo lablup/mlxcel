@@ -1,0 +1,11 @@
+/target/
+/build/
+/run/
+*.ll
+*.opt.ll
+*.ltoir
+*.oxart
+*.target
+*.options
+*.cubin.target
+cuda_oxide_fused_norm.ptx

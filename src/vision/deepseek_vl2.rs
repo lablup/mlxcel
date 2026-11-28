@@ -162,6 +162,24 @@ impl LanguageModel for DeepSeekVl2VlModel {
         }
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.text_model.last_row_logits_impl(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            last_pos,
+        ))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()
     }
@@ -289,5 +307,32 @@ mod tests {
         assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
             &got, &want, 0.0, 0.0
         )));
+    }
+
+    /// Text and embeddings prefill reach the text model's last-row projection
+    /// (#3070). The fixture's vocabulary holds eight ids.
+    #[test]
+    fn deepseek_vl2_last_row_logits_match_the_full_forward() {
+        use crate::models::last_row_logits_harness::{
+            assert_embedded_rows, assert_last_row_logits,
+        };
+
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let tokens = &[3, 1, 4, 1, 5, 6, 2, 6, 5, 3, 0];
+        assert_last_row_logits(tiny_wrapper, tokens);
+
+        let input = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let reference = tiny_wrapper();
+        let embeds = reference.text_model.embed_tokens_forward(&input);
+        let mut caches = reference.make_caches();
+        let full = reference.forward_with_embeddings_and_sequence_id(
+            &input,
+            Some(&embeds),
+            None,
+            &mut caches,
+            None,
+        );
+        mlxcel_core::eval(&full);
+        assert_embedded_rows(&tiny_wrapper, &input, &embeds, &full, tokens.len() - 1);
     }
 }

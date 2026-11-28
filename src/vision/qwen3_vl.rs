@@ -61,8 +61,9 @@ impl Qwen3VLModel {
     ///
     /// Caches both the post-merger hidden states and the DeepStack side-branch
     /// features, since Qwen3-VL injects DeepStack outputs at selected language
-    /// model layers. The cache key covers the concatenated pixel tensor for
-    /// all images in the request (see [`Qwen25VLModel::get_input_embeddings_with_cache`]).
+    /// model layers. One entry holds the output for all images in the request,
+    /// so `cache_key` must cover every one of them in order (see
+    /// [`Qwen25VLModel::get_input_embeddings_with_cache`]).
     ///
     /// MRoPE state and the visual position mask are recomputed on every call
     /// because they depend on the current `input_ids`.
@@ -120,11 +121,59 @@ impl Qwen3VLModel {
                 )
             };
 
+        self.merge_vision_features(
+            input_ids,
+            &inputs_embeds,
+            &image_features,
+            deepstack_features,
+            grid_thw,
+        )
+    }
+
+    /// Build input embeddings from vision features computed elsewhere.
+    ///
+    /// Runs exactly the merge, DeepStack-state, and MRoPE-state steps of
+    /// [`Self::get_input_embeddings`], but takes the main merger output and the
+    /// ordered DeepStack branches as arguments instead of running the eager
+    /// vision tower. A cross-backend oracle uses it to feed one backend's vision
+    /// features to the eager language model, so language-model parity is
+    /// measured on the same input instead of through accumulated vision drift.
+    pub fn get_input_embeddings_from_features(
+        &self,
+        input_ids: &MlxArray,
+        image_features: &MlxArray,
+        deepstack_features: Vec<UniquePtr<MlxArray>>,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> merge::InputEmbeddings {
+        let inputs_embeds = self.text_model.get_embed_tokens(input_ids);
+        let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
+        let image_features = mlxcel_core::astype(image_features, embed_dtype);
+        let deepstack_features = deepstack_features
+            .iter()
+            .map(|feature| mlxcel_core::astype(feature, embed_dtype))
+            .collect();
+        self.merge_vision_features(
+            input_ids,
+            &inputs_embeds,
+            &image_features,
+            deepstack_features,
+            grid_thw,
+        )
+    }
+
+    fn merge_vision_features(
+        &self,
+        input_ids: &MlxArray,
+        inputs_embeds: &MlxArray,
+        image_features: &MlxArray,
+        deepstack_features: Vec<UniquePtr<MlxArray>>,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> merge::InputEmbeddings {
         // Merge vision features at image token positions (LLaVA-style)
         let merged = merge::merge_llava_any(
             &[self.image_token_id, self.video_token_id],
-            image_features.as_ref().unwrap(),
-            &inputs_embeds,
+            image_features,
+            inputs_embeds,
             input_ids,
         );
 
@@ -237,6 +286,22 @@ impl LanguageModel for Qwen3VLModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    // The text model's last-row forward is its `forward_for_sequence` with
+    // only the sampled row projected, so text and embedding prefills both
+    // skip the `[B, L, vocab]` logits (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.text_model
+            .last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

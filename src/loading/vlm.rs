@@ -70,6 +70,8 @@ mod hunyuan_vl;
 mod idefics2;
 #[path = "vlm_inkling.rs"]
 mod inkling;
+#[path = "vlm_inkling2.rs"]
+mod inkling2;
 #[path = "vlm_internvl.rs"]
 mod internvl;
 #[path = "vlm_jina_vlm.rs"]
@@ -88,6 +90,8 @@ mod llmjp_vl;
 mod locateanything;
 #[path = "vlm_mage_vl.rs"]
 mod mage_vl;
+#[path = "vlm_mimo_v2.rs"]
+mod mimo_v2;
 #[path = "vlm_minimax_m3_vl.rs"]
 mod minimax_m3_vl;
 #[path = "vlm_mllama.rs"]
@@ -105,12 +109,16 @@ mod nemotron_parse;
 mod paddleocr;
 #[path = "vlm_pixtral.rs"]
 mod pixtral;
+#[path = "vlm_plamo2_vl.rs"]
+mod plamo2_vl;
 #[path = "vlm_qwen.rs"]
 mod qwen;
 #[path = "vlm_qwen3_vision.rs"]
 mod qwen3_vision;
 #[path = "vlm_qwen4_exp.rs"]
 mod qwen4_exp;
+#[path = "vlm_qwen_image_policy.rs"]
+pub(crate) mod qwen_image_policy;
 #[path = "vlm_siglip.rs"]
 mod siglip;
 #[path = "vlm_smolvlm.rs"]
@@ -123,7 +131,7 @@ mod step3p7;
 mod youtu_vl_loader;
 
 pub(crate) use cohere_compass::load_cohere_compass_vlm;
-pub(crate) use deepseek_vl2::load_deepseek_vl2_vlm;
+pub(crate) use deepseek_vl2::{deepseek_vl2_language_config, load_deepseek_vl2_vlm};
 pub(crate) use deepseekocr::{
     load_deepseekocr_2_vlm, load_deepseekocr_vlm, load_unlimited_ocr_vlm,
 };
@@ -144,6 +152,7 @@ pub(crate) use granite4_vision::load_granite4_vision_vlm;
 pub(crate) use hunyuan_vl::load_hunyuan_vlm;
 pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use inkling::load_inkling_vlm;
+pub(crate) use inkling2::load_inkling2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use jina_vlm::load_jina_vlm;
 pub(crate) use kimi_k3_loader::load_kimi_k3_vlm;
@@ -155,6 +164,7 @@ pub(crate) use llava::{load_llava_bunny_vlm, load_llava_host_preprocessor, load_
 pub(crate) use llmjp_vl::load_llmjp_vl;
 pub(crate) use locateanything::load_locateanything_vlm;
 pub(crate) use mage_vl::load_mage_vl;
+pub(crate) use mimo_v2::load_mimo_v2_vlm;
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
 #[cfg(feature = "xla-backend")]
@@ -169,6 +179,7 @@ pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use nemotron_parse::load_nemotron_parse_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
+pub(crate) use plamo2_vl::load_plamo2_vl;
 pub(crate) use qwen::{
     load_glm_ocr, load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
     load_qwen3_5_vlm, load_qwen3_omni_moe, load_qwen3_vl, load_qwen3_vl_moe,
@@ -894,16 +905,20 @@ fn qwen_vl_processor_with_norm<T: QwenVisionConfigExt>(
     std: [f32; 3],
 ) -> anyhow::Result<vision::processors::qwen2_vl::Qwen2VLProcessor> {
     let video_config = qwen_video_processor_config(model_path)?;
-    Ok(
-        vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
-            vision_config.patch_size(),
-            vision_config.temporal_patch_size(),
-            vision_config.spatial_merge_size(),
-            mean,
-            std,
-        )
-        .with_video_config(video_config),
+    let processor = vision::processors::qwen2_vl::Qwen2VLProcessor::new_with_norm(
+        vision_config.patch_size(),
+        vision_config.temporal_patch_size(),
+        vision_config.spatial_merge_size(),
+        mean,
+        std,
     )
+    .with_video_config(video_config);
+    // Every caller here is a Qwen3-VL-generation checkpoint whose sidecars
+    // state their own pixel bounds and resampler; HF resizes against those,
+    // and so does the XLA host preprocessor (#3290).
+    qwen_image_policy::QwenImageResizePolicy::read(model_path)
+        .and_then(|policy| policy.apply(processor))
+        .map_err(anyhow::Error::msg)
 }
 
 fn qwen_video_processor_config(
@@ -960,3 +975,7 @@ mod tests;
 #[cfg(test)]
 #[path = "vlm_qwen_text_only_tests.rs"]
 mod qwen_text_only_tests;
+
+#[cfg(test)]
+#[path = "vlm_qwen35_modelopt_tests.rs"]
+mod qwen35_modelopt_tests;

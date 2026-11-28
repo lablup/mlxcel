@@ -76,13 +76,41 @@ Past roughly a dozen callers, a hand-written roster is wrong by the next release
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
 ```
 
-`create_causal_mask` in `utils.rs` is the worked example. The "not used by" half carries as much weight as the list: it is what stops a contributor from assuming a shared helper still covers a family that moved off it several releases ago. Derive every list by running the grep at the current commit, never from memory, and prefer `///` doc comments over `//` on public items so the annotation survives into rustdoc.
+`create_causal_mask` in `utils.rs` is the worked example. The "not used by" half carries as much weight as the list: it is what stops a contributor from assuming a shared helper still covers a family that moved off it several releases ago. Derive every list by running the grep at the current commit, never from memory, and use `///` doc comments rather than `//` on public items so the annotation survives into rustdoc. The check described under Enforcement below re-runs that grep, so keep the one-liner in the shape shown.
 
 **Key shared components to track:**
 - `src/lib/mlxcel-core/src/layers.rs` - KVCache, Attention, Normalization
 - `src/lib/mlxcel-core/src/batched_decode.rs` - shared native batched split attention
 - `src/lib/mlxcel-core/src/utils.rs` - create_causal_mask, softcap, repeat_kv
 - Model-specific attention variants in `src/models/*.rs`
+
+**Enforcement:**
+
+`make verify-used-by` (part of `make verify` and `make verify-rocm`, and the `used-by annotations` CI job) runs [`scripts/ci/check_used_by.py`](../scripts/ci/check_used_by.py) over every top-level `pub fn` in `src/lib/mlxcel-core/src/utils.rs` and `src/lib/mlxcel-core/src/layers.rs`. The functions are read from those two files rather than kept in a list, so a new helper is covered when it is added. Methods, `pub(crate)` functions and the other files above are not checked yet. An unannotated function with at most five external caller files also passes rule 1. Once it has an annotation, rule 3 covers every caller.
+
+The check works from the call sites, not from the prose. A file is a caller when, outside test code, it imports the function by name or alias, names it by a path that resolves to it through the file's own `use` declarations (`utils::softcap(..)` after `use mlxcel_core::utils;`), or uses its bare name under a glob import of its module. Passing the function as a value counts. A file that only contains the identifier is not a caller: 74 files contain the string `softcap`, and exactly one of them calls `utils.rs::softcap`. The others have a `softcap: f32` parameter, define an unrelated `softcap_logits`, or, in `src/lib/mlxcel-xla/src/emitter/model.rs`, have a private `fn softcap` of their own. For the same reason `mlxcel_core::silu(..)` is not a call to `utils.rs::silu`: the crate root re-exports the raw FFI function of that name. Test code is not counted, and a file is test code when a `#[cfg(test)] mod` declares it, not when its name says so.
+
+Five rules are enforced:
+
+1. **Absence.** A function with more than 5 caller files outside its own module needs a `Used by:` annotation. There are no grandfathered exceptions.
+2. **Form.** The annotation is a line of the function's doc block that starts with `Used by:`, in a `///` doc comment, and it runs to the end of that doc block. A `//` comment on a public item fails.
+3. **Every caller of an annotated function is accounted for**, including a helper with just one caller. Each one must be named by the annotation or listed by its regenerating command:
+   - *Named* means a path (`recurrent_gemma.rs`, or `src/vision/dense` for everything under a directory) or a family name. A family name matches a file when, with case and `_`, `-`, `.` ignored and a space before a digit closed up, it equals the file stem or the stem up to one of its underscores: `Qwen 3.5` names `qwen3_5.rs`, `MiMoV2` names `mimo_v2_flash.rs`, `DeepSeek` names every `deepseek_*.rs`, and `Gemma` does not name `gemma3.rs`. The name of the directory a file sits in works the same way (`Inkling` for `inkling_layer/attention.rs`). A lower-case dictionary word is never a name.
+   - *Listed* means the annotation closes with the one-liner from the section above, in exactly this shape, and the check re-runs it: `grep -rln '\bNAME(' DIR --include='*.rs'`, optionally followed by `| grep -v 'PATTERN'` stages. `DIR` is `src` or a directory below it, and the pattern has to contain the function's name.
+4. **A recorded count is true.** If an annotation with a `grep -rln` command states the size of the set as `N files` or `N non-test files`, N must be the number of files that command lists at this commit. The count is optional. Leave it out if you would rather not update it with every new caller.
+5. **"Not used by" is true.** A paragraph that starts with `Not used by` must not name a file that calls the function.
+
+So a roster is allowed at any length as long as it is complete, and an annotation that stops enumerating has to carry the command. Either way a new call to a shared helper fails CI until the annotation records it, which is the first item under "When to update" above. When the check fails, run `python3 scripts/ci/check_used_by.py --report`: it prints every function with its caller files and says how each one is accounted for.
+
+Rule 3 is the one that would have caught the annotation behind issue #1110. Run against the tree before PR #1121, the check reports 41 of `create_causal_mask`'s 48 caller files as unaccounted for. A check for absence passes that file, because the annotation was there. When the check landed it failed seven annotations on `main` for the same reason, and they were fixed in that change: `array_to_vec_f32` named none of its 32 callers, and `layers.rs::attention` named Llama3, Qwen3, Gemma2 and Gemma3, none of which calls it directly.
+
+What it does not catch, so that nobody reads a green check as more than it is:
+
+- A roster that still names a family which has stopped calling the function passes, unless the name sits in a `Not used by` paragraph. Prose does not say which of its names are claims: the `softplus` annotation names eight families in order to say they call the raw FFI function instead. Only additions are caught mechanically, so removals still depend on review.
+- Re-exporting a scoped function with `pub use` (including restricted visibility) fails at the re-export, and so does re-exporting its module (`pub use mlxcel_core::utils;`, or a glob of it) or an ancestor of that module (`pub use mlxcel_core::*;`). Import the function at the caller so the checker can resolve its path.
+- Under a glob import, a local that shadows a scoped function through a `for`, `match`, closure or tuple pattern and is then used as a value counts as a use of the function. This fails closed: rename the binding.
+
+[`scripts/ci/check_used_by_test.sh`](../scripts/ci/check_used_by_test.sh), run by the same target and CI job, builds a small synthetic workspace and asserts the checker's verdict on each case: an absent annotation above the threshold, the pre-#1121 roster verbatim, a correct roster that then loses a caller, a drifted count, a contradicted "not used by", and the `softcap` look-alikes. The script's module docstring records why this design was chosen over the alternatives issue #1141 listed. Read the script rather than trusting this section.
 
 ## Bridge Helpers Return the Input Dtype
 

@@ -1,0 +1,31 @@
+running 10 tests
+test validation::tests::precision_default_detection ... ok
+test validation::tests::freeze_moe_goldens ... ok
+test validation::tests::freeze_mamba1_goldens ... ok
+test validation::tests::freeze_goldens ... ok
+test validation::tests::check_arch_detects_drift ... ok
+test validation::tests::structural_families_emit_expected_signature ... ok
+test validation::tests::dense_pack_families_reuse_proven_graphs ... ok
+test validation::tests::emit_graphs_drives_a_golden_less_arch ... ok
+test validation::tests::registered_fixtures_are_byte_exact ... ok
+test validation::tests::emit_all_reproduces_registered_goldens ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 586 filtered out; finished in 0.16s
+[structural] PASS
+model = /tmp/epic564-models/plamo-2-1b
+device = cuda, prompt = 5 tokens, reference = 40 tokens
+RESULT: TOKEN-EXACT PASS (OpenXLA greedy == HF oracle)
+model = /tmp/epic564-models/plamo-2-1b
+device = cuda, slots B_max = 4, requests N = 8, full prompt = 5, buckets = None, eos = [2]
+  req 0: len 5 cap 12  req 1: len 5 cap 23  req 2: len 5 cap 24  req 3: len 5 cap 17
+  req 4: len 5 cap 24  req 5: len 5 cap 24  req 6: len 5 cap 22  req 7: len 5 cap 24
+phase 1 load: reference engine (B_max=4, capacity 256) 5.06 s
+phase 1: captured 8 single-seq references (170 tokens, 19.31 tok/s sequential baseline, generation only)
+phase 2 load: batch engine (B_max=4, capacity 256) 16.76 s
+phase 2: 46 pump steps, 8 requests served, 170 tokens
+throughput: 15.70 tok/s batched (vs 19.31 tok/s sequential baseline, 0.8x)
+RESULT: REFERENCE-EXACT PASS (every request matches its single-seq reference)
+BENCH	device=cuda	B=4	N=8	tok_s=15.697	pass=true
+structural (byte-exact) : PASS
+token-exact single-seq  : PASS
+serve reference-exact   : PASS
+RESULT: PASS (both execution gates)

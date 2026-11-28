@@ -313,6 +313,40 @@ async fn predict_accepts_direct_paths_and_forces_stream_off() {
 }
 
 #[tokio::test]
+async fn predict_slot_for_a_schema_error_is_the_routes_json_error() {
+    // An instance missing `messages` is rejected by the route's body
+    // extractor. The slot carries that route's JSON error object, in its own
+    // envelope; before the routes answered these in JSON it was the plain-text
+    // rejection as a string.
+    let app = app_with(gcp_config(None, "/predict"));
+    let body = serde_json::json!({
+        "instances": [
+            {"@requestFormat": "chatCompletions", "model": "route-test-model"},
+            {"@requestFormat": "messages", "model": "route-test-model"},
+        ]
+    });
+    let response = app
+        .oneshot(predict_request("/predict", body, None))
+        .await
+        .expect("request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let parsed = body_json(response).await;
+    let chat = &parsed["predictions"][0];
+    assert_eq!(chat["error"]["type"], "invalid_request_error", "{parsed}");
+    assert!(chat.get("type").is_none(), "{parsed}");
+    let messages = &parsed["predictions"][1];
+    assert_eq!(messages["type"], "error", "{parsed}");
+    assert_eq!(
+        messages["error"]["type"], "invalid_request_error",
+        "{parsed}"
+    );
+    for slot in [chat, messages] {
+        let message = slot["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("messages"), "{parsed}");
+    }
+}
+
+#[tokio::test]
 async fn predict_envelope_validation_matches_upstream() {
     let app = app_with(gcp_config(None, "/predict"));
 

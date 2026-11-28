@@ -262,6 +262,8 @@ pub(crate) async fn count_prompt_tokens(
         RequestOptionOverrides::default(),
     );
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids;
     let provider = Arc::clone(&state.model_provider);
     let live = Arc::clone(live);
@@ -294,7 +296,7 @@ pub async fn apply_template(
 ) -> Response {
     // Image-only serving has no chat template or tokenizer (#2825); every
     // other mode keeps this route.
-    if let Some(response) = super::chat_not_available_image_only(&state) {
+    if let Some(response) = super::chat_not_available_without_tokenizer(&state) {
         return response.into_response();
     }
     let live = state.live();
@@ -403,3 +405,7 @@ mod prompt_inspection_tests;
 #[cfg(test)]
 #[path = "prompt_count_route_tests.rs"]
 mod prompt_count_route_tests;
+
+#[cfg(test)]
+#[path = "inkling2_audio_route_tests.rs"]
+mod inkling2_audio_route_tests;

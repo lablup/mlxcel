@@ -567,9 +567,10 @@ frame protection suite and the derived per-frame keys in #2656, 4 added the
 at-capacity verdict in #2692, 5 added the verdict authenticator in #2714); a
 pair of processes built from different versions fails with an explicit
 version message rather than a confusing I/O error. Mixed versions in one
-cluster are not supported: every node must be upgraded together. Every
-version bump so far landed after v0.8.0-beta.1, so v0.8.0 and that beta cannot
-share a cluster.
+cluster are not supported: every node must be upgraded together. Discovery
+beacons and stage assignments both pin `CARGO_PKG_VERSION`, so the rule
+applies to release versions as well as to protocol versions, and v0.9.0-beta.1
+and v0.9.0-beta.2 cannot share a cluster.
 
 Residual risks:
 
@@ -800,6 +801,10 @@ that finishes starting after a probe cycle is not refused until the next one
 itself. `GET /router/stats` reports the per-node load spread and node health.
 See [continuous batching and disaggregated serving](CONTINUOUS_BATCHING.md#multi-node-routing-load-balancing-and-failover)
 for the flags and behavior.
+
+The front serves chat and text completions only. `POST /v1/responses` returns
+a 400 that says to send Responses API requests, background mode included, to a
+serving node; see [`responses-api.md`](responses-api.md#serving-roles).
 
 ### Security and trust model
 

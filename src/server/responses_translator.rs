@@ -59,13 +59,14 @@ use super::responses_store::{ResponsesStore, StoredResponse};
 use super::tool_calls::types::ToolCallParseResult;
 
 /// Maximum unsupported-tool-types catch-all label seen in error messages.
+/// `mcp` is not listed: it is a parsed tool type with its own refusal when
+/// the MCP tool loop is off (issue #1457).
 const UNSUPPORTED_TOOL_TYPES: &[&str] = &[
     "web_search",
     "file_search",
     "computer_use_preview",
     "code_interpreter",
     "image_generation",
-    "mcp",
     "custom",
     "apply_patch",
     "function_shell",
@@ -84,18 +85,32 @@ pub enum ResponsesTranslateError {
     ConversationStoreDisabled(String),
     #[error("tool type '{0}' is not supported by mlxcel; Phase 1 supports only 'function' tools")]
     UnsupportedToolType(String),
-    #[error("background=true is not supported in Phase 1; omit the field or set background=false")]
-    BackgroundUnsupported,
+    /// `previous_response_id` names a background response that is still
+    /// `queued` or `in_progress`.
+    #[error("previous response '{id}' has not finished (status: {status})")]
+    PreviousNotFinished { id: String, status: &'static str },
     #[error("metadata is limited to 16 entries; received {0}")]
     MetadataTooLarge(usize),
+    #[error("metadata keys are limited to 64 characters")]
+    MetadataKeyTooLong,
+    #[error("metadata values are limited to 512 characters")]
+    MetadataValueTooLong,
     #[error("truncation='{0}' is not supported in Phase 1; only 'disabled' is accepted")]
     TruncationUnsupported(String),
     #[error("max_output_tokens must be > 0")]
     MaxOutputTokensInvalid,
+    #[error("top_logprobs must be between 0 and 20")]
+    TopLogprobsOutOfRange,
     #[error("{0}")]
     InvalidInputPart(String),
     #[error("invalid compaction item: {0}")]
     InvalidCompaction(String),
+    /// An `mcp` tool or an `mcp_approval_response` item reached a server, or
+    /// an endpoint, that does not run the MCP tool loop (issue #1457).
+    #[error(
+        "{0} needs the server-side MCP tool loop, which is disabled on this server or not served by this endpoint. It runs on POST /v1/responses when mlxcel-server starts with --mcp-tools and --mcp-servers-config <PATH> (or --mcp-servers-json <JSON>)"
+    )]
+    McpUnavailable(&'static str),
 }
 
 /// Inbound translation result. Carries the synthetic
@@ -111,6 +126,9 @@ pub struct TranslatedRequest {
     /// `input`, capsule expanded). Kept only for a request that carries
     /// `context_management`, which automatic compaction reads (issue #2397).
     pub resolved_items: Option<Vec<ResponseInputItem>>,
+    /// Server labels whose `mcp_list_tools` item the chained history already
+    /// holds, so the tool loop does not list them again (issue #1457).
+    pub mcp_listed_servers: Vec<String>,
 }
 
 /// Flatten a Responses-API request into the chat-completions shape.
@@ -125,16 +143,39 @@ pub fn responses_request_to_chat(
     responses_store: Option<&Arc<ResponsesStore>>,
     conversation_store: Option<&Arc<ConversationStore>>,
 ) -> Result<TranslatedRequest, ResponsesTranslateError> {
+    responses_request_to_chat_with_mcp(request, responses_store, conversation_store, false)
+}
+
+/// [`responses_request_to_chat`] for a caller that may run the server-side
+/// MCP tool loop (issue #1457). With `mcp_enabled` an `mcp` tool declaration
+/// and an `mcp_approval_response` item are accepted; the MCP tools themselves
+/// are added to the chat request by the route, which knows the servers.
+/// Without it both are refused with a message naming the opt-in.
+///
+/// Used by: `POST /v1/responses`.
+pub fn responses_request_to_chat_with_mcp(
+    request: &CreateResponseRequest,
+    responses_store: Option<&Arc<ResponsesStore>>,
+    conversation_store: Option<&Arc<ConversationStore>>,
+    mcp_enabled: bool,
+) -> Result<TranslatedRequest, ResponsesTranslateError> {
     if request.previous_response_id.is_some() && request.conversation.is_some() {
         return Err(ResponsesTranslateError::PreviousAndConversation);
-    }
-    if request.background == Some(true) {
-        return Err(ResponsesTranslateError::BackgroundUnsupported);
     }
     if let Some(meta) = request.metadata.as_ref()
         && meta.len() > 16
     {
         return Err(ResponsesTranslateError::MetadataTooLarge(meta.len()));
+    }
+    if let Some(meta) = request.metadata.as_ref() {
+        for (key, value) in meta {
+            if key.chars().count() > 64 {
+                return Err(ResponsesTranslateError::MetadataKeyTooLong);
+            }
+            if value.chars().count() > 512 {
+                return Err(ResponsesTranslateError::MetadataValueTooLong);
+            }
+        }
     }
     if let Some(trunc) = request.truncation.as_deref()
         && !trunc.is_empty()
@@ -149,13 +190,38 @@ pub fn responses_request_to_chat(
     {
         return Err(ResponsesTranslateError::MaxOutputTokensInvalid);
     }
-    reject_unsupported_tools(request.tools.as_deref())?;
+    if let Some(top) = request.top_logprobs
+        && top > 20
+    {
+        return Err(ResponsesTranslateError::TopLogprobsOutOfRange);
+    }
+    reject_unsupported_tools(request.tools.as_deref(), mcp_enabled)?;
+    // Refused before the chained response is looked up, so the caller reads
+    // why the item is not served rather than a lookup failure.
+    if !mcp_enabled
+        && let crate::server::types::responses_request::ResponseInput::Items(items) = &request.input
+        && items
+            .iter()
+            .any(|item| matches!(item, ResponseInputItem::McpApprovalResponse { .. }))
+    {
+        return Err(ResponsesTranslateError::McpUnavailable(
+            "input item type 'mcp_approval_response'",
+        ));
+    }
 
     // Resolve prior items (history) from the chained reference.
     let mut prior_items: Vec<ResponseInputItem> = Vec::new();
     if let Some(prev_id) = request.previous_response_id.as_deref() {
         let store = responses_store
             .ok_or_else(|| ResponsesTranslateError::PreviousNotFound(prev_id.to_string()))?;
+        // An active background job has no output to chain from yet. Checked
+        // before the lookup: a job that finishes in between is then found.
+        if let Some(status) = store.background_status(prev_id) {
+            return Err(ResponsesTranslateError::PreviousNotFinished {
+                id: prev_id.to_string(),
+                status: status.as_str(),
+            });
+        }
         let stored = store
             .get(prev_id)
             .ok_or_else(|| ResponsesTranslateError::PreviousNotFound(prev_id.to_string()))?;
@@ -182,6 +248,8 @@ pub fn responses_request_to_chat(
 
     // Append the current request's input items.
     let current_items = request.input.clone().into_items();
+    let mcp_listed_servers =
+        crate::server::responses_mcp_lowering::listed_mcp_servers(&prior_items);
     let mut canonical_input_items = current_items.clone();
     let mut all_items = prior_items;
     all_items.extend(current_items);
@@ -264,7 +332,8 @@ pub fn responses_request_to_chat(
         cache_prompt: None,
         user,
         reasoning_effort: request.reasoning.as_ref().and_then(|r| r.effort.clone()),
-        extra_body_fields: serde_json::Map::new(),
+        // Carried so the shared image-geometry refusal sees them (#3265).
+        extra_body_fields: crate::server::types::request::image_geometry_fields(&request.extra),
         response_format,
         params: sampling,
     };
@@ -279,14 +348,21 @@ pub fn responses_request_to_chat(
         effective_store,
         conversation_id,
         resolved_items,
+        mcp_listed_servers,
     })
 }
 
-fn reject_unsupported_tools(tools: Option<&[ResponseTool]>) -> Result<(), ResponsesTranslateError> {
+fn reject_unsupported_tools(
+    tools: Option<&[ResponseTool]>,
+    mcp_enabled: bool,
+) -> Result<(), ResponsesTranslateError> {
     let Some(tools) = tools else {
         return Ok(());
     };
     for tool in tools {
+        if !mcp_enabled && matches!(tool, ResponseTool::Mcp(_)) {
+            return Err(ResponsesTranslateError::McpUnavailable("tool type 'mcp'"));
+        }
         if let ResponseTool::Unsupported = tool {
             // Pick the most informative label we know about; the
             // deserialiser stripped the type tag so we surface the
@@ -309,7 +385,8 @@ fn function_tools(tools: Option<&[ResponseTool]>) -> Option<Vec<Tool>> {
                 tool_type: "function".to_string(),
                 function: f.to_function_definition(),
             }),
-            ResponseTool::Unsupported => None,
+            // The route adds an MCP server's tools once it has listed them.
+            ResponseTool::Mcp(_) | ResponseTool::Unsupported => None,
         })
         .collect();
     if out.is_empty() { None } else { Some(out) }
@@ -402,6 +479,14 @@ fn image_followup_message(images: Vec<ImageUrl>) -> Message {
 /// `message.get('reasoning')` see prior thinking. A reasoning item that is not
 /// followed by an assistant turn before the next turn boundary is dropped.
 fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, String> {
+    // MCP history renders as function calls and their outputs (issue #1457).
+    let lowered;
+    let items = if crate::server::responses_mcp_lowering::has_mcp_items(items) {
+        lowered = crate::server::responses_mcp_lowering::lower_mcp_items(items.to_vec());
+        lowered.as_slice()
+    } else {
+        items
+    };
     let mut out: Vec<Message> = Vec::new();
     let mut pending_tool_calls: Vec<ToolCallInMessage> = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -544,6 +629,12 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, 
                 // lowering; one reaching here would silently lose context.
                 return Err("compaction item was not expanded before rendering".to_string());
             }
+            ResponseInputItem::McpListTools { .. }
+            | ResponseInputItem::McpCall { .. }
+            | ResponseInputItem::McpApprovalRequest { .. }
+            | ResponseInputItem::McpApprovalResponse { .. } => {
+                return Err("MCP item was not lowered before rendering".to_string());
+            }
             ResponseInputItem::Reasoning { content } => {
                 // Buffer the reasoning text and attach it to the following
                 // assistant turn (issue #362) so templates that render
@@ -631,6 +722,28 @@ fn output_to_input_items(output: &ResponseOutputItem) -> Vec<ResponseInputItem> 
         ResponseOutputItem::Compaction(c) => vec![ResponseInputItem::Compaction {
             encrypted_content: c.encrypted_content.clone(),
         }],
+        // MCP items replay as themselves; the lowering pass renders them as
+        // function calls and outputs (issue #1457).
+        ResponseOutputItem::McpListTools(list) => vec![ResponseInputItem::McpListTools {
+            server_label: list.server_label.clone(),
+        }],
+        ResponseOutputItem::McpCall(call) => vec![ResponseInputItem::McpCall {
+            id: call.id.clone(),
+            server_label: call.server_label.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            output: call.output.clone(),
+            error: call.error.clone(),
+            approval_request_id: call.approval_request_id.clone(),
+        }],
+        ResponseOutputItem::McpApprovalRequest(request) => {
+            vec![ResponseInputItem::McpApprovalRequest {
+                id: request.id.clone(),
+                server_label: request.server_label.clone(),
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+            }]
+        }
     }
 }
 
@@ -723,6 +836,7 @@ pub fn build_response_object(ctx: OutboundContext<'_>) -> ResponseObject {
         output_tokens_details: Some(ResponseOutputTokensDetails {
             reasoning_tokens: ctx.reasoning_tokens,
         }),
+        mcp: None,
     };
 
     let metadata = ctx.request.metadata.clone();
@@ -781,6 +895,7 @@ pub fn build_response_object(ctx: OutboundContext<'_>) -> ResponseObject {
             .clone()
             .or_else(|| ctx.request.safety_identifier.clone()),
         store: ctx.request.store,
+        background: ctx.request.background.filter(|background| *background),
     }
 }
 
@@ -795,6 +910,7 @@ fn echo_tools(tools: &[ResponseTool]) -> Vec<serde_json::Value> {
                 "parameters": f.parameters,
                 "strict": f.strict,
             })),
+            ResponseTool::Mcp(mcp) => Some(mcp.echo()),
             ResponseTool::Unsupported => None,
         })
         .collect()
@@ -847,6 +963,7 @@ mod tests {
             service_tier: None,
             context_management: None,
             sampling: SamplingParams::default(),
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -856,15 +973,18 @@ mod tests {
         req.previous_response_id = Some("resp_x".to_string());
         req.conversation = Some(ConversationRef::Id("conv_y".to_string()));
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::PreviousAndConversation);
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::PreviousAndConversation
+        ));
     }
 
     #[test]
-    fn rejects_background_true() {
+    fn background_true_translates_like_a_foreground_request() {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.background = Some(true);
-        let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::BackgroundUnsupported);
+        let translated = responses_request_to_chat(&req, None, None).expect("translates");
+        assert_eq!(translated.chat_request.messages.len(), 1);
     }
 
     #[test]
@@ -872,7 +992,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.truncation = Some("auto".to_string());
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::TruncationUnsupported(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::TruncationUnsupported(_)
+        ));
     }
 
     #[test]
@@ -884,7 +1007,29 @@ mod tests {
         }
         req.metadata = Some(m);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::MetadataTooLarge(17));
+        assert!(matches!(err, ResponsesTranslateError::MetadataTooLarge(17)));
+    }
+
+    #[test]
+    fn metadata_key_over_64_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".repeat(65), "v".to_string())]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataKeyTooLong));
+
+        req.metadata = Some(HashMap::from([("k".repeat(64), "v".to_string())]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
+    }
+
+    #[test]
+    fn metadata_value_over_512_chars_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(513))]));
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(err, ResponsesTranslateError::MetadataValueTooLong));
+
+        req.metadata = Some(HashMap::from([("k".to_string(), "v".repeat(512))]));
+        assert!(responses_request_to_chat(&req, None, None).is_ok());
     }
 
     #[test]
@@ -892,7 +1037,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.tools = Some(vec![ResponseTool::Unsupported]);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::UnsupportedToolType(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::UnsupportedToolType(_)
+        ));
     }
 
     #[test]
@@ -1206,7 +1354,7 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("turn 2".to_string()));
         req.previous_response_id = Some("resp_doesnt_exist".to_string());
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::PreviousNotFound(_));
+        assert!(matches!(err, ResponsesTranslateError::PreviousNotFound(_)));
     }
 
     #[test]
@@ -1228,7 +1376,10 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.conversation = Some(ConversationRef::Id("conv_99".to_string()));
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::ConversationStoreDisabled(_));
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::ConversationStoreDisabled(_)
+        ));
     }
 
     #[test]
@@ -1262,7 +1413,25 @@ mod tests {
         let mut req = make_request(ResponseInput::Text("hi".to_string()));
         req.max_output_tokens = Some(0);
         let err = responses_request_to_chat(&req, None, None).unwrap_err();
-        matches!(err, ResponsesTranslateError::MaxOutputTokensInvalid);
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::MaxOutputTokensInvalid
+        ));
+    }
+
+    #[test]
+    fn top_logprobs_above_twenty_is_rejected() {
+        let mut req = make_request(ResponseInput::Text("hi".to_string()));
+        req.top_logprobs = Some(21);
+        let err = responses_request_to_chat(&req, None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ResponsesTranslateError::TopLogprobsOutOfRange
+        ));
+
+        req.top_logprobs = Some(20);
+        let translated = responses_request_to_chat(&req, None, None).unwrap();
+        assert_eq!(translated.chat_request.top_logprobs, Some(20));
     }
 
     #[test]

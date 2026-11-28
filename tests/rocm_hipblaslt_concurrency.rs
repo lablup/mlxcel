@@ -50,7 +50,7 @@
 //! (a cancelling term of opposite sign leaves a residue of about one unit in
 //! the 24th bit, for example `1 + -1` gives `-2^-24`), so exact-zero outputs
 //! come back as `+-2^-23` or `-2^-22` (#2206; measured in
-//! `docs/benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md`).
+//! `docs/benchmark_results/versions/v0.8.0.md#rocm-bf16-gemm-residue-gfx1151-2026-10-08`).
 //! `bf16_gemm_error_is_within_the_accumulation_bound` pins that bound on
 //! inputs that provoke the residue in every output. The parent also requires the
 //! `[hipBLASLt caps] device` line exactly once in each child's stderr, which

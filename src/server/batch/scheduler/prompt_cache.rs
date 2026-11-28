@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::prompt_cache_adopt::PrefixAdoptOutcome;
 use super::*;
 
 impl BatchScheduler {
@@ -118,38 +119,73 @@ impl BatchScheduler {
     /// [`CachePool::adopt`], paged via [`CachePool::adopt_paged`] (which shares
     /// the cached prefix's refcounted pool blocks so the prefix is never
     /// re-prefilled — #121 sub-step b).
+    ///
+    /// Every return before the dense store lookup is
+    /// [`PrefixAdoptOutcome::NoDenseLookup`]; every unadopted return from
+    /// [`Self::adopt_dense_prefix`], which starts with that lookup, is
+    /// [`PrefixAdoptOutcome::DenseMiss`] (issue #3294).
     pub(super) fn try_adopt_cached_prefix(
         &mut self,
         ctx: &PromptCacheRequestContext,
         tokens: &[i32],
         require_whole_entry: bool,
-    ) -> Option<(SequenceId, usize)> {
+    ) -> PrefixAdoptOutcome {
+        use PrefixAdoptOutcome::NoDenseLookup;
         if !self.prompt_cache_active() {
-            return None;
+            return NoDenseLookup;
         }
         // Return to the pool any paged pins a prior store op queued (an insert
         // eviction, or a previous lookup's TTL / drained-shell sweep). The
         // lookup below may sweep more; those drain on the next store touch.
         self.drain_store_paged_releases();
 
-        let store = self.prompt_cache.as_ref()?.clone();
+        let Some(store) = self.prompt_cache.clone() else {
+            return NoDenseLookup;
+        };
         // The request's own prompt length picks its table, so it may only match
         // entries stored by a request on the same side of the boundary (#1358).
         let key = Self::compose_prompt_cache_key(ctx, tokens, self.rope_regime_for(tokens.len()));
-        let snapshot_outcome = if self.engine.model().supports_snapshot_reuse() {
+        let mut snapshot_outcome = if self.engine.model().supports_snapshot_reuse() {
             // The truncation capability is the model's own answer (#1145):
             // rotating-attention families can restore to the longest common
             // prefix while their sliding layers are unwrapped, and every
             // family whose recurrent state cannot be rewound returns false
             // here and keeps exact-prefix semantics.
             store.lookup_snapshot_outcome(&key, tokens, |snapshot, target_len| {
-                self.engine
-                    .model()
-                    .snapshot_truncatable_to(snapshot, target_len)
+                state_snapshot::snapshot_truncatable_to(self.engine.model(), snapshot, target_len)
             })
         } else {
             SnapshotLookupOutcome::NoCandidate
         };
+        // A turn-boundary checkpoint that the model fails to rebuild is not a
+        // reason to start cold (issue #3058): look again with checkpoints
+        // excluded, so the best shorter whole snapshot is adopted instead.
+        if let SnapshotLookupOutcome::CheckpointHit {
+            checkpoint,
+            donor,
+            matched_len,
+        } = &snapshot_outcome
+        {
+            if let Some((seq_id, adopted_len)) =
+                self.adopt_state_checkpoint(checkpoint, donor, *matched_len, tokens.len())
+            {
+                return PrefixAdoptOutcome::Adopted {
+                    seq_id,
+                    adopted_len,
+                };
+            }
+            snapshot_outcome = store.lookup_snapshot_outcome_without_checkpoints(
+                &key,
+                tokens,
+                |snapshot, target_len| {
+                    state_snapshot::snapshot_truncatable_to(
+                        self.engine.model(),
+                        snapshot,
+                        target_len,
+                    )
+                },
+            );
+        }
         // A snapshot candidate that sits in this request's own session bucket
         // but is not a prefix of it is a structural miss, not an empty store
         // (issue #1147). Classify it so `/v1/cache/stats` can tell the two
@@ -188,9 +224,11 @@ impl BatchScheduler {
             if matched_len < store_matched_len {
                 let truncatable = matched_len >= store.min_prefix_tokens().max(1)
                     && snapshot_entry.with_snapshot(|snapshot| {
-                        self.engine
-                            .model()
-                            .snapshot_truncatable_to(snapshot, matched_len)
+                        state_snapshot::snapshot_truncatable_to(
+                            self.engine.model(),
+                            snapshot,
+                            matched_len,
+                        )
                     });
                 if !truncatable {
                     // Recurrent families, and rotating families whose ring
@@ -212,7 +250,7 @@ impl BatchScheduler {
                             matched_len,
                             Some(snapshot_entry.tokens.len()),
                         );
-                    return None;
+                    return NoDenseLookup;
                 }
                 tracing::debug!(
                     matched = store_matched_len,
@@ -249,7 +287,7 @@ impl BatchScheduler {
                     None,
                     matched_len,
                 );
-                return None;
+                return NoDenseLookup;
             }
             let seq_id = match self.allocate_sequence_state() {
                 Ok(id) => id,
@@ -257,18 +295,21 @@ impl BatchScheduler {
                     // Intentionally not a `record_prompt_cache_reject` site: slot
                     // exhaustion is a scheduler-capacity failure, not a cache-specific decline.
                     tracing::warn!("Cache pool allocation failed during snapshot restore: {err}");
-                    return None;
+                    return NoDenseLookup;
                 }
             };
+            let (model, pool) = self.engine.parts_mut();
             let restore = snapshot_entry.with_snapshot(|snapshot| {
                 if partial {
-                    self.engine.model().restore_sequence_state_truncated(
+                    state_snapshot::restore_sequence_state_truncated(
+                        model,
+                        pool,
                         seq_id,
                         snapshot,
                         matched_len,
                     )
                 } else {
-                    self.engine.model().restore_sequence_state(seq_id, snapshot)
+                    state_snapshot::restore_sequence_state(model, pool, seq_id, snapshot)
                 }
             });
             match restore {
@@ -282,6 +323,8 @@ impl BatchScheduler {
                         "prompt-cache snapshot hit: restored {matched_len}/{} tokens",
                         tokens.len()
                     );
+                    self.prompt_cache_adopted_lineage
+                        .insert(seq_id, snapshot_entry.lineage.clipped(matched_len));
                     self.batch_observability
                         .record_prompt_cache_hit(matched_len);
                     self.batch_metrics
@@ -299,7 +342,10 @@ impl BatchScheduler {
                             "prompt-cache adopt (snapshot)"
                         );
                     }
-                    return Some((seq_id, matched_len));
+                    return PrefixAdoptOutcome::Adopted {
+                        seq_id,
+                        adopted_len: matched_len,
+                    };
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -312,7 +358,7 @@ impl BatchScheduler {
                         matched_len,
                     );
                     self.release_sequence_caches(seq_id);
-                    return None;
+                    return NoDenseLookup;
                 }
             }
         }
@@ -331,274 +377,26 @@ impl BatchScheduler {
         // The same bail covers a dense family whose KV cache does not hold the
         // whole per-token state (Baichuan-M1's K/V convolution state, #2567):
         // its donate path below never stores an entry either.
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+        //
+        // Because no dense lookup runs, admission records no dense miss
+        // either (issue #3294): `mlxcel_prompt_cache_misses_total` and
+        // `/v1/cache/stats` `lookups` both stay at zero for these families.
+        if self
+            .engine
+            .model()
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice()
             || !self.engine.model().kv_cache_captures_sequence_state()
         {
-            return None;
+            return NoDenseLookup;
         }
-        let (entry, store_matched_len) = store.lookup_longest_prefix(&key, tokens)?;
-        // #124 step c: multimodal sharing requires the matched prefix to cover
-        // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
-        // could leave image/audio placeholder tokens in the suffix, which the
-        // token-path suffix prefill would mis-handle. Decline here (falling
-        // back to a cold prefill) before consuming anything; the entry stays
-        // available for a later exact match.
-        if require_whole_entry && store_matched_len < entry.tokens.len() {
-            self.batch_observability.record_prompt_cache_reject(
-                PromptCacheRejectReason::ModeMismatch,
-                None,
-                store_matched_len,
-            );
-            return None;
-        }
-        // Whole-prompt hit (#1760), same rule as the snapshot branch: adopt
-        // at most `len - 1` tokens so the prefill's forward over the last
-        // prompt token lands on a cache that does not already hold it. The
-        // dense truncate and the paged block floors below then install
-        // exactly this many (or fewer) tokens.
-        let matched_len = whole_prompt_reuse_cap(store_matched_len, tokens.len());
-        if matched_len < store.min_prefix_tokens().max(1) {
-            self.batch_observability.record_prompt_cache_reject(
-                PromptCacheRejectReason::PrefixTooShort,
-                None,
-                matched_len,
-            );
-            return None;
-        }
-        if matched_len < store_matched_len {
-            tracing::debug!(
-                matched = store_matched_len,
-                adopted = matched_len,
-                "prompt-cache hit covered the entire prompt; adopting all but the last token \
-                 so prefill re-runs it to produce a sampling logit"
-            );
-        }
-        // Length the adopted cache actually covers. The dense path truncates
-        // to exactly `matched_len`; the paged paths floor to the pool block
-        // boundary (#225), so they report their own value.
-        let mut adopted_len = matched_len;
-
-        // #227: pool-backed paged entries adopt by CLONE, leaving the stored
-        // entry intact for concurrent same-prefix siblings and deeper future
-        // matches. The one-shot take below destroyed the entry on first use;
-        // combined with the #225 trim, a short partial match (even the
-        // chat-template preamble) could gut a multi-thousand-token entry.
-        enum PagedCloneOutcome {
-            /// Adoptable clone built; the source entry stays in the store.
-            Cloned(Box<DetachedPagedCacheSet>, usize),
-            /// Cold prefill, entry untouched (below minimum, pin failure,
-            /// or cross-backend). Carries the classified reject reason
-            /// (issue #774) alongside the human-readable message.
-            Decline(PromptCacheRejectReason, String),
-            /// Dense entry, or a clone-ineligible paged shape (dense-compat
-            /// handles, Turbo4, sliding-window): the consuming take path
-            /// below can still adopt those.
-            TakePath,
-        }
-        let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
-        let min_prefix = store.min_prefix_tokens().max(1);
-        let cache_pool = self.engine.pool_mut();
-        // `with_detached` itself returns `None` for a drained shell; the take
-        // below then also yields `None` (cold prefill).
-        let clone_attempt: Option<PagedCloneOutcome> = entry.with_detached(|set| match set {
-            DetachedKvSet::Paged(paged) if backend_is_paged && paged.clone_eligible() => {
-                let block_size = paged.layout().block_size.max(1);
-                // Floor BOTH the partial and the whole-entry match to the
-                // pool block boundary: a donated entry's length
-                // (prompt + generated tokens) is almost never block-aligned,
-                // and the clone shares whole blocks only. The caller
-                // re-prefills everything past the adopted length, which
-                // re-covers the dropped partial tail.
-                let adoptable = (matched_len.min(paged.seq_len()) / block_size) * block_size;
-                if adoptable < min_prefix {
-                    return PagedCloneOutcome::Decline(
-                        PromptCacheRejectReason::BlockBoundaryFloor,
-                        format!(
-                            "block-floored match {adoptable} below the minimum prefix {min_prefix}"
-                        ),
-                    );
-                }
-                match cache_pool.clone_detached_paged_prefix(paged, adoptable) {
-                    Ok(clone) => PagedCloneOutcome::Cloned(Box::new(clone), adoptable),
-                    Err(err) => {
-                        PagedCloneOutcome::Decline(PromptCacheRejectReason::LayoutConstraints, err)
-                    }
-                }
-            }
-            // Paged entry under a dense decode backend: cross-backend
-            // adoption is invalid; decline without touching the entry
-            // (the old path took the set just to release it).
-            DetachedKvSet::Paged(_) if !backend_is_paged => PagedCloneOutcome::Decline(
-                PromptCacheRejectReason::ModeMismatch,
-                "paged entry under a dense decode backend".into(),
-            ),
-            // Clone-ineligible paged shapes and dense entries.
-            DetachedKvSet::Paged(_) | DetachedKvSet::Dense(_) => PagedCloneOutcome::TakePath,
-        });
-        match clone_attempt {
-            Some(PagedCloneOutcome::Cloned(clone, adoptable)) => {
-                adopted_len = adoptable;
-                let adopt_result = self
-                    .engine
-                    .adopt_paged(*clone)
-                    .map_err(|err| err.to_string());
-                return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
-            }
-            Some(PagedCloneOutcome::Decline(reject_reason, reason)) => {
-                tracing::debug!(
-                    "prompt-cache adopt: paged clone declined ({reason}); falling back to cold prefill (entry preserved)"
-                );
-                self.batch_observability.record_prompt_cache_reject(
-                    reject_reason,
-                    None,
-                    matched_len,
-                );
-                return None;
-            }
-            Some(PagedCloneOutcome::TakePath) | None => {}
-        }
-
-        // Dense entries (and clone-ineligible paged shapes) keep the legacy
-        // one-shot consume: their adoption genuinely moves buffers.
-        // `take_detached` returns `None` if a racing lookup already consumed
-        // this entry; the miss path is safe (fresh prefill).
-        let detached = entry.take_detached()?;
-        if detached.is_empty() {
-            // A paged set drained on this path would leak its block pins via
-            // `Drop`; release them explicitly so the pool budget stays honest.
-            self.release_unused_detached(detached);
-            self.batch_observability.record_prompt_cache_reject(
-                PromptCacheRejectReason::EmptySet,
-                None,
-                matched_len,
-            );
-            return None;
-        }
-
-        // Reject cross-backend adoption: the active decode backend determines
-        // the KV shape the model worker can install. Adopting the wrong variant
-        // would corrupt the sequence, so fall through to a cold prefill (and
-        // release any paged pins we took).
-        let backend_mismatch = matches!(
-            (&detached, self.decode_storage_backend),
-            (DetachedKvSet::Dense(_), DecodeStorageBackend::Paged)
-                | (DetachedKvSet::Paged(_), DecodeStorageBackend::Dense)
-        );
-        if backend_mismatch {
-            self.release_unused_detached(detached);
-            self.batch_observability.record_prompt_cache_reject(
-                PromptCacheRejectReason::ModeMismatch,
-                None,
-                matched_len,
-            );
-            return None;
-        }
-
-        let adopt_result = match detached {
-            DetachedKvSet::Dense(mut dense) => {
-                // APC block-level partial adoption. When APC clamps
-                // `matched_len` to a block boundary shorter than the cached
-                // entry's full token length, the request diverged from the
-                // cached prefix at the next block. Truncate the detached KV
-                // state to exactly `matched_len` so the adopted cache covers
-                // only the consistent prefix; the prefill loop then re-prefills
-                // the divergent tail. When `matched_len == seq_len` this branch
-                // is skipped, preserving the bit-exact full-prefix path.
-                let detached_seq_len = dense.seq_len();
-                if matched_len < detached_seq_len as usize {
-                    let target = matched_len as i32;
-                    if let Err(err) = dense.truncate_to(target) {
-                        tracing::warn!(
-                            "prompt-cache adopt: APC partial truncate to {target} failed ({err}); falling back to cold prefill"
-                        );
-                        self.batch_observability.record_prompt_cache_reject(
-                            PromptCacheRejectReason::LayoutConstraints,
-                            None,
-                            matched_len,
-                        );
-                        return None;
-                    }
-                    tracing::debug!(
-                        from = detached_seq_len,
-                        to = target,
-                        "prompt-cache adopt: APC partial adoption truncated detached cache to block boundary"
-                    );
-                }
-                if let Err(reason) = self.validate_dense_detached_kv_modes(&dense) {
-                    tracing::debug!(
-                        "prompt-cache adopt: dense KV mode mismatch ({reason}); falling back to cold prefill"
-                    );
-                    self.batch_observability.record_prompt_cache_reject(
-                        PromptCacheRejectReason::KvModeMismatch,
-                        None,
-                        matched_len,
-                    );
-                    return None;
-                }
-                self.engine.adopt(dense).map_err(|err| err.to_string())
-            }
-            DetachedKvSet::Paged(mut paged) => {
-                // Paged partial prefix adoption (#225). An APC block-clamped
-                // lookup (or a request that diverges inside the stored entry)
-                // matches only `matched_len` of the set. Floor that to the
-                // POOL block boundary: no partially filled tail block survives
-                // the trim, so the suffix re-prefill starts on a fresh block
-                // and never needs copy-on-write against a shared tail. A
-                // whole-entry match skips the trim and stays bit-exact with
-                // the pre-#225 path.
-                let paged_seq_len = paged.seq_len();
-                let block_size = paged.layout().block_size.max(1);
-                let adoptable = if matched_len < paged_seq_len {
-                    (matched_len / block_size) * block_size
-                } else {
-                    paged_seq_len
-                };
-                let min_prefix = store.min_prefix_tokens().max(1);
-                if adoptable < min_prefix {
-                    tracing::debug!(
-                        from = paged_seq_len,
-                        to = adoptable,
-                        "prompt-cache adopt: block-floored paged match below the minimum prefix; releasing and falling back to cold prefill"
-                    );
-                    self.engine.pool_mut().release_detached_paged(paged);
-                    self.batch_observability.record_prompt_cache_reject(
-                        PromptCacheRejectReason::BlockBoundaryFloor,
-                        None,
-                        matched_len,
-                    );
-                    return None;
-                }
-                if adoptable < paged_seq_len {
-                    if let Err(err) = self
-                        .engine
-                        .pool_mut()
-                        .trim_detached_paged_to(&mut paged, adoptable)
-                    {
-                        tracing::warn!(
-                            "prompt-cache adopt: paged partial trim to {adoptable} failed ({err}); falling back to cold prefill"
-                        );
-                        self.engine.pool_mut().release_detached_paged(paged);
-                        self.batch_observability.record_prompt_cache_reject(
-                            PromptCacheRejectReason::LayoutConstraints,
-                            None,
-                            matched_len,
-                        );
-                        return None;
-                    }
-                    tracing::debug!(
-                        from = paged_seq_len,
-                        to = adoptable,
-                        "prompt-cache adopt: paged partial adoption trimmed detached set to the pool block boundary"
-                    );
-                    adopted_len = adoptable;
-                }
-                self.engine
-                    .adopt_paged(paged)
-                    .map_err(|err| err.to_string())
-            }
-        };
-
-        self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len())
+        PrefixAdoptOutcome::from_dense_lookup(self.adopt_dense_prefix(
+            &store,
+            &key,
+            tokens,
+            require_whole_entry,
+        ))
     }
 
     /// Shared tail of [`Self::try_adopt_cached_prefix`]: record hit metrics
@@ -619,7 +417,6 @@ impl BatchScheduler {
                 );
                 self.batch_observability
                     .record_prompt_cache_hit(adopted_len);
-                // also increment BatchMetrics Prometheus counters.
                 self.batch_metrics.record_prompt_cache_hit(adopted_len);
                 // Update byte/entry gauges so /metrics reflects current state.
                 if let Some(ref store) = self.prompt_cache {
@@ -710,6 +507,8 @@ impl BatchScheduler {
         is_multimodal: bool,
     ) {
         let history_prompt = ctx.history_prompt.take();
+        let root_prompt = ctx.root_prompt.take();
+        let root_tokens = ctx.root_prefix_tokens.take();
         if !self.engine.model().supports_snapshot_reuse()
             || is_multimodal
             || crate::server::prompt_cache::boundary_snapshot_disabled()
@@ -746,6 +545,112 @@ impl BatchScheduler {
         ctx.history_prefix_tokens =
             history_boundary_len(&history_tokens, prompt_tokens, min_prefix)
                 .map(|boundary| prompt_tokens[..boundary].to_vec());
+
+        // The system-prompt root (#2885 Part B), clipped the same way and kept
+        // only strictly before the history boundary.
+        let Some(min_prompt) = crate::server::prompt_cache::system_root_min_prompt_tokens() else {
+            return;
+        };
+        let root_tokens = match root_tokens {
+            Some(ids) => Some(ids),
+            None => root_prompt.and_then(|text| {
+                crate::server::model_provider::tokenize_prompt_for_generation(
+                    &self.tokenizer,
+                    &text,
+                )
+                .map_err(|err| tracing::debug!("system-root tokenization failed: {err}"))
+                .ok()
+            }),
+        };
+        ctx.root_prefix_tokens = root_tokens.and_then(|root| {
+            system_root_len(
+                &root,
+                prompt_tokens,
+                ctx.history_prefix_tokens.as_ref().map(Vec::len),
+                min_prefix,
+                min_prompt,
+            )
+            .map(|len| prompt_tokens[..len].to_vec())
+        });
+    }
+
+    /// Restore a turn-boundary state checkpoint over its donor (issue #3047):
+    /// the checkpoint's recurrent state plus the donor's attention rows cut
+    /// back to `matched_len`. Returns the adopted sequence, or `None` when the
+    /// model refuses the pair; the caller then retries the lookup without
+    /// checkpoints (issue #3058). The store counts the hit only here, once the
+    /// rebuild succeeded, and a checkpoint the model refuses is discarded so
+    /// later requests are not offered it again.
+    fn adopt_state_checkpoint(
+        &mut self,
+        checkpoint: &Arc<ModelSnapshotEntry>,
+        donor: &ModelSnapshotEntry,
+        matched_len: usize,
+        prompt_len: usize,
+    ) -> Option<(SequenceId, usize)> {
+        let seq_id = match self.allocate_sequence_state() {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!("Cache pool allocation failed during checkpoint restore: {err}");
+                return None;
+            }
+        };
+        let (model, pool) = self.engine.parts_mut();
+        let restore = checkpoint.with_snapshot(|state| {
+            donor.with_snapshot(|whole| {
+                state_snapshot::restore_sequence_state_from_checkpoint(
+                    model, pool, seq_id, state, whole,
+                )
+            })
+        });
+        if let Err(err) = restore {
+            tracing::warn!(
+                seq_id = %seq_id,
+                checkpoint = matched_len,
+                donor = donor.tokens.len(),
+                "prompt-cache checkpoint restore failed ({err}); retrying with whole snapshots only"
+            );
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::LayoutConstraints,
+                Some(seq_id.as_u64()),
+                matched_len,
+            );
+            self.release_sequence_caches(seq_id);
+            if let Some(ref store) = self.prompt_cache {
+                store.discard_state_checkpoint(checkpoint);
+            }
+            return None;
+        }
+        tracing::debug!(
+            seq_id = %seq_id,
+            matched = matched_len,
+            donor = donor.tokens.len(),
+            total = prompt_len,
+            "prompt-cache checkpoint hit: rebuilt {matched_len}/{prompt_len} tokens from a \
+             turn-boundary checkpoint and a {}-token snapshot",
+            donor.tokens.len()
+        );
+        self.prompt_cache_adopted_lineage
+            .insert(seq_id, checkpoint.lineage.clone());
+        self.batch_observability
+            .record_prompt_cache_hit(matched_len);
+        self.batch_metrics
+            .record_prompt_cache_snapshot_hit(matched_len);
+        if let Some(ref store) = self.prompt_cache {
+            store.record_state_checkpoint_hit(matched_len);
+            self.batch_metrics
+                .update_prompt_cache_gauges(store.bytes(), store.len());
+        }
+        if apc_trace_enabled() {
+            tracing::info!(
+                apc_event = "adopt",
+                seq_id = %seq_id,
+                matched_len,
+                total_tokens = prompt_len,
+                "prompt-cache adopt (state checkpoint)"
+            );
+        }
+        Some((seq_id, matched_len))
     }
 
     /// Copy the model-owned state of `seq_id` and insert it into the
@@ -787,11 +692,12 @@ impl BatchScheduler {
             );
             return;
         }
-        let snapshot = match self
-            .engine
-            .model()
-            .snapshot_sequence_state(seq_id, tokens.len())
-        {
+        let snapshot = match state_snapshot::snapshot_sequence_state(
+            self.engine.model(),
+            self.engine.pool(),
+            seq_id,
+            tokens.len(),
+        ) {
             Some(s) if !s.is_empty() => s,
             Some(_) => {
                 tracing::debug!(
@@ -822,13 +728,68 @@ impl BatchScheduler {
                 return;
             }
         };
-        let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
+        let snapshot_family = snapshot.family().to_string();
+        // Stepped growth under the macOS memory guardrail (#2883 step 4): the
+        // store's byte budget is a static ceiling sized at startup, so a host
+        // that has since run short still must not grow it. A store at its
+        // budget only replaces entries and passes.
+        let growth = store.snapshot_growth_bytes(snapshot.nbytes()) as u64;
+        if !snapshot_growth_allowed(&self.snapshot_growth_gate, growth) {
+            // Counted like every other decline (#3146): a silent skip left a
+            // host short of memory looking like a model that never donates.
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::MemoryReserve,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
+            static GUARD_WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !GUARD_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    entry_bytes = snapshot.nbytes(),
+                    growth_bytes = growth,
+                    "prompt-cache snapshot skipped: storing it would take the host below the memory reserve; later skips stay at debug"
+                );
+            } else {
+                tracing::debug!(
+                    growth_bytes = growth,
+                    "prompt-cache snapshot skipped by the memory guardrail"
+                );
+            }
+            return;
+        }
+        // Every row past the adopted prefix was computed by this sequence
+        // (issue #3047). A history-boundary snapshot also yields a state
+        // checkpoint, taken now while the whole state is at hand; its tensors
+        // share the snapshot's buffers, so it costs no copy here.
+        let lineage = ctx.snapshot_lineage.extended(tokens.len(), seq_id.as_u64());
+        let checkpoint = (origin == SnapshotOrigin::Boundary
+            && store.state_checkpoint_capacity_bytes() > 0)
+            .then(|| state_snapshot::state_checkpoint_from_snapshot(self.engine.model(), &snapshot))
+            .flatten()
+            .filter(|state| !state.is_empty());
+        let entry = ModelSnapshotEntry::new(tokens, snapshot)
+            .with_origin(origin)
+            .with_lineage(lineage.clone());
         let entry_bytes = entry.size_bytes;
         let key_tokens = entry.tokens.clone();
         let key =
             Self::compose_prompt_cache_key(ctx, &key_tokens, self.rope_regime_for(encoded_span));
         match store.insert_snapshot(&key, entry) {
             Ok(()) => {
+                // One INFO line per process with the per-entry size and the
+                // budget it counts against, so a snapshot-only family's
+                // footprint is visible without debug logging (#2885).
+                static FIRST_INSERT: std::sync::Once = std::sync::Once::new();
+                FIRST_INSERT.call_once(|| {
+                    tracing::info!(
+                        token_len = key_tokens.len(),
+                        entry_bytes,
+                        snapshot_capacity_bytes = store.snapshot_capacity_bytes(),
+                        family = snapshot_family.as_str(),
+                        "prompt-cache first snapshot inserted"
+                    );
+                });
                 tracing::debug!(
                     seq_id = %seq_id,
                     token_len = key_tokens.len(),
@@ -838,8 +799,6 @@ impl BatchScheduler {
                     "prompt-cache snapshot inserted"
                 );
                 self.batch_observability.record_prompt_cache_insert();
-                self.batch_metrics
-                    .update_prompt_cache_gauges(store.bytes(), store.len());
                 if apc_trace_enabled() {
                     tracing::info!(
                         apc_event = "store",
@@ -849,6 +808,46 @@ impl BatchScheduler {
                         "prompt-cache store (snapshot)"
                     );
                 }
+                if let Some(checkpoint) = checkpoint {
+                    let checkpoint = ModelSnapshotEntry::new(key_tokens.clone(), checkpoint)
+                        .with_origin(origin)
+                        .with_lineage(lineage);
+                    let checkpoint_bytes = checkpoint.size_bytes;
+                    // Checkpoints grow the resident store like whole
+                    // snapshots do, so the same guardrail applies (#3058).
+                    if !state_checkpoint_growth_allowed(
+                        &self.snapshot_growth_gate,
+                        &store,
+                        checkpoint_bytes,
+                    ) {
+                        self.batch_observability.record_prompt_cache_reject(
+                            PromptCacheRejectReason::MemoryReserve,
+                            Some(seq_id.as_u64()),
+                            key_tokens.len(),
+                        );
+                        tracing::debug!(
+                            seq_id = %seq_id,
+                            checkpoint_bytes,
+                            "prompt-cache state checkpoint skipped by the memory guardrail"
+                        );
+                    } else {
+                        match store.insert_state_checkpoint(&key, checkpoint) {
+                            Ok(()) => tracing::debug!(
+                                seq_id = %seq_id,
+                                token_len = key_tokens.len(),
+                                checkpoint_bytes,
+                                "prompt-cache state checkpoint inserted"
+                            ),
+                            Err(err) => tracing::debug!(
+                                seq_id = %seq_id,
+                                checkpoint_bytes,
+                                "prompt-cache state checkpoint skipped: {err}"
+                            ),
+                        }
+                    }
+                }
+                self.batch_metrics
+                    .update_prompt_cache_gauges(store.bytes(), store.len());
             }
             Err(err) => {
                 // An entry that cannot fit even alone means this conversation
@@ -946,7 +945,7 @@ impl BatchScheduler {
             self.prompt_cache_warmups.clear();
             return;
         }
-        let Some((tokens, ctx)) = self.prompt_cache_warmups.pop_front() else {
+        let Some((tokens, mut ctx)) = self.prompt_cache_warmups.pop_front() else {
             return;
         };
         // Warm-ups compute KV for future requests, which snapshot the server
@@ -965,7 +964,10 @@ impl BatchScheduler {
         // would mean prefilling the whole history from cold, which is exactly
         // the foreground work this is supposed to avoid, spent speculatively.
         let key = Self::compose_prompt_cache_key(&ctx, &tokens, self.rope_regime_for(tokens.len()));
-        let Some((entry, matched_len)) = store.lookup_snapshot_prefix(&key, &tokens) else {
+        // A warm-up is not a request, so its lookup is not counted on either
+        // metrics surface (issue #3294); `peek_snapshot_prefix` selects and
+        // touches the snapshot exactly as a counted lookup would.
+        let Some((entry, matched_len)) = store.peek_snapshot_prefix(&key, &tokens) else {
             self.batch_observability.record_prompt_cache_warmup_skip();
             return;
         };
@@ -982,8 +984,23 @@ impl BatchScheduler {
                 return;
             }
         };
+        // The warm-up extends a prefix computed at the context's reasoning
+        // effort (#3435; folded into its key), so it is steered the same way.
+        if self
+            .engine
+            .model()
+            .set_sequence_reasoning_effort(Some(seq_id), ctx.model_reasoning_effort.as_deref())
+            .is_err()
+        {
+            self.release_sequence_caches(seq_id);
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
+        let (model, pool) = self.engine.parts_mut();
         if entry
-            .with_snapshot(|snapshot| self.engine.model().restore_sequence_state(seq_id, snapshot))
+            .with_snapshot(|snapshot| {
+                state_snapshot::restore_sequence_state(model, pool, seq_id, snapshot)
+            })
             .is_err()
         {
             self.release_sequence_caches(seq_id);
@@ -1030,6 +1047,9 @@ impl BatchScheduler {
         // conversation at one boundary snapshot while making that one cover the
         // previous reply as well.
         let warmed_len = tokens.len();
+        // The restored rows keep their producers; the delta is this
+        // sequence's own (issue #3047).
+        ctx.snapshot_lineage = entry.lineage.clipped(matched_len);
         self.insert_model_state_snapshot(
             seq_id,
             &ctx,
@@ -1134,6 +1154,158 @@ impl BatchScheduler {
         );
     }
 
+    /// Copy the model state at the end of `seq`'s system-prompt root and
+    /// insert it as a [`SnapshotOrigin::SystemRoot`] entry (#2885 Part B).
+    ///
+    /// Same mechanics as [`Self::insert_history_boundary_snapshot`]: the plan
+    /// forwarded `[.., root)` as one unpadded piece, so the state describes
+    /// exactly `prompt_tokens[..root]`. The entry is kept in this request's
+    /// session bucket like every other snapshot, so a new chat reuses it when
+    /// it resolves to the same session (the anonymous bucket of a client that
+    /// sets neither `prompt_cache_key` nor `user`, or a shared key).
+    pub(super) fn insert_system_root_snapshot(&mut self, seq: &SequenceInfo, root: usize) {
+        let _span = tracing::info_span!(
+            "system_root_snapshot",
+            seq_id = %seq.seq_id,
+            start = seq.prefill_start_offset,
+            root,
+            prompt_len = seq.prompt_tokens.len(),
+        )
+        .entered();
+        let ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let root_tokens = seq.prompt_tokens[..root].to_vec();
+        let encoded_span = seq.prompt_tokens.len();
+        self.insert_model_state_snapshot(
+            seq.seq_id,
+            &ctx,
+            root_tokens,
+            SnapshotOrigin::SystemRoot,
+            encoded_span,
+        );
+    }
+
+    /// Insert the snapshot for the plan boundary `seq` just reached: the
+    /// system-prompt root when `end` is that split, the history boundary
+    /// otherwise.
+    pub(super) fn insert_boundary_snapshot(&mut self, seq: &SequenceInfo, end: usize) {
+        if self.system_root_split(seq) == Some(end) {
+            self.insert_system_root_snapshot(seq, end);
+        } else if self.history_boundary_split(seq) == Some(end) {
+            self.insert_history_boundary_snapshot(seq, end);
+        } else {
+            self.insert_checkpoint_snapshot(seq, end);
+        }
+    }
+
+    /// Copy the model state at the periodic checkpoint `end` and insert it as
+    /// a [`SnapshotOrigin::Checkpoint`] entry (#2885 Part B).
+    ///
+    /// Same mechanics as [`Self::insert_history_boundary_snapshot`]: the plan
+    /// forwarded `[.., end)` as pieces ending exactly at `end`, so the state
+    /// describes exactly `prompt_tokens[..end]`.
+    pub(super) fn insert_checkpoint_snapshot(&mut self, seq: &SequenceInfo, end: usize) {
+        let _span = tracing::info_span!(
+            "checkpoint_snapshot",
+            seq_id = %seq.seq_id,
+            start = seq.prefill_start_offset,
+            end,
+            prompt_len = seq.prompt_tokens.len(),
+        )
+        .entered();
+        let ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
+            Some(c) => c.clone(),
+            None => return,
+        };
+        let tokens = seq.prompt_tokens[..end].to_vec();
+        let encoded_span = seq.prompt_tokens.len();
+        self.insert_model_state_snapshot(
+            seq.seq_id,
+            &ctx,
+            tokens,
+            SnapshotOrigin::Checkpoint,
+            encoded_span,
+        );
+    }
+
+    /// Every snapshot boundary `seq`'s `PrefillPlan` splits at: the
+    /// system-prompt root and the periodic checkpoints (#2885 Part B), and the
+    /// history boundary (#1143).
+    ///
+    /// The classic plan, the paged reservation estimate and both Gemma 4 MTP
+    /// prefill mirrors take their splits from here, so all of them build the
+    /// prompt state from the same partition.
+    pub(super) fn snapshot_splits(&self, seq: &SequenceInfo) -> PrefillSplits {
+        let root = self.system_root_split(seq);
+        let history = self.history_boundary_split(seq);
+        let reserved = usize::from(root.is_some()) + usize::from(history.is_some());
+        let mut points: Vec<usize> = [root, history].into_iter().flatten().collect();
+        points.extend(self.checkpoint_splits(seq, history, MAX_SPLITS - reserved));
+        PrefillSplits::from_points(&points)
+    }
+
+    /// The periodic checkpoints `seq`'s plan splits at (#2885 Part B): every
+    /// multiple of the resolved checkpoint interval (`--checkpoint-min-step` or
+    /// `MLXCEL_PROMPT_CACHE_CHECKPOINT_INTERVAL`) after the adopted
+    /// prefix and before the history boundary (or the prompt end), under the
+    /// same gates as [`Self::history_boundary_split`]. Capped at `max`, the
+    /// deepest points kept.
+    pub(super) fn checkpoint_splits(
+        &self,
+        seq: &SequenceInfo,
+        history: Option<usize>,
+        max: usize,
+    ) -> Vec<usize> {
+        let Some(interval) = self
+            .prompt_cache
+            .as_ref()
+            .and_then(|store| store.checkpoint_interval_tokens())
+        else {
+            return Vec::new();
+        };
+        if !self.engine.model().supports_snapshot_reuse()
+            || !self.prompt_cache_active()
+            || seq.vlm_embeddings.is_some()
+            || !self.prompt_cache_seq_ctx.contains_key(&seq.seq_id)
+        {
+            return Vec::new();
+        }
+        let min_prefix = self
+            .prompt_cache
+            .as_ref()
+            .map(|s| s.min_prefix_tokens())
+            .unwrap_or(0);
+        checkpoint_points(
+            interval,
+            seq.prefill_start_offset,
+            history.unwrap_or(seq.prompt_tokens.len()),
+            min_prefix,
+            max,
+        )
+    }
+
+    /// The system-prompt root `seq`'s plan splits at (#2885 Part B), under the
+    /// same gates as [`Self::history_boundary_split`].
+    pub(super) fn system_root_split(&self, seq: &SequenceInfo) -> Option<usize> {
+        if !self.engine.model().supports_snapshot_reuse()
+            || !self.prompt_cache_active()
+            || seq.vlm_embeddings.is_some()
+        {
+            return None;
+        }
+        let tokens = self
+            .prompt_cache_seq_ctx
+            .get(&seq.seq_id)?
+            .root_prefix_tokens
+            .as_ref()?;
+        let root = tokens.len();
+        (boundary_capture_applies(root, seq.prefill_start_offset, seq.prompt_tokens.len())
+            && seq.prompt_tokens[..root] == tokens[..])
+            .then_some(root)
+    }
+
     /// The history boundary `seq`'s `PrefillPlan` splits its prefill at
     /// (issue #1143), read without consuming the context's history tokens so
     /// the plan can be rebuilt on every tick of a chunked prefill.
@@ -1178,7 +1350,9 @@ impl BatchScheduler {
     /// prefix's physical pool blocks so a later `adopt_paged` can share them).
     /// `ModelOwned` sequences carry no detachable cross-request KV; families
     /// that opt into snapshot reuse donate a copied model-owned snapshot, while
-    /// the rest are skipped.
+    /// the rest are skipped. A snapshot family whose sequence decoded after a
+    /// classic prefill already stored its prompt-boundary snapshot in
+    /// [`Self::insert_prompt_end_snapshot`] and donates nothing here (#3040).
     ///
     /// `generated_tokens` must be the generated tokens the model state holds,
     /// which for the classic decode and prefill finishes is
@@ -1193,6 +1367,10 @@ impl BatchScheduler {
         generated_tokens: &[i32],
         healthy_finish: bool,
     ) {
+        // A sequence whose prompt-boundary snapshot was taken when its prefill
+        // finished stores nothing more here (#3040): the state now also holds
+        // the decode-written reply, which a restore must not reuse.
+        let prompt_end_stored = self.prompt_cache_prompt_end_stored.remove(&seq_id);
         if !healthy_finish {
             return;
         }
@@ -1249,6 +1427,9 @@ impl BatchScheduler {
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.engine.model().supports_snapshot_reuse() {
+            if prompt_end_stored {
+                return;
+            }
             let encoded_span = tokens.len();
             self.insert_model_state_snapshot(
                 seq_id,
@@ -1285,7 +1466,12 @@ impl BatchScheduler {
         // restored prefix would start without the conv state of its last token.
         // `kv_cache_captures_sequence_state()` declines it under the same
         // reason.
-        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
+        if self
+            .engine
+            .model()
+            .sequence_state_layout()
+            .backend
+            .keeps_state_outside_kv_slice()
             || !self.engine.model().kv_cache_captures_sequence_state()
         {
             self.batch_observability.record_prompt_cache_reject(
@@ -1303,8 +1489,9 @@ impl BatchScheduler {
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
 
-        // Other `ModelOwned` families carry no detachable cross-request KV.
-        if backend == SequenceStateBackend::ModelOwned {
+        // Other `ModelOwned` families carry no detachable cross-request KV,
+        // and a scheduler-owned sequence donates a snapshot above or nothing.
+        if backend.keeps_state_outside_kv_slice() {
             return;
         }
 
@@ -1340,7 +1527,7 @@ impl BatchScheduler {
                     None => return,
                 }
             }
-            SequenceStateBackend::ModelOwned => return,
+            SequenceStateBackend::ModelOwned | SequenceStateBackend::SchedulerOwned => return,
         };
 
         if kv_set.is_empty() {
@@ -1432,6 +1619,56 @@ impl BatchScheduler {
     }
 }
 
+/// The availability gate a new scheduler's snapshot growth goes through.
+///
+/// Every production scheduler shares one process-wide gate over the host's
+/// memory, so approvals granted between two probes count once across them.
+/// Under `cfg(test)` it is a gate whose availability is unknown, which
+/// approves every step: a unit test must store the same snapshots on a 16 GB
+/// CI runner as on a 512 GB workstation (#3146). Tests of the guardrail
+/// itself install their own gate through
+/// [`BatchScheduler::with_snapshot_growth_gate`].
+pub(super) fn default_snapshot_growth_gate() -> Arc<mlxcel_core::host_memory::AvailabilityGate> {
+    #[cfg(not(test))]
+    {
+        static GATE: std::sync::OnceLock<Arc<mlxcel_core::host_memory::AvailabilityGate>> =
+            std::sync::OnceLock::new();
+        GATE.get_or_init(|| Arc::new(mlxcel_core::host_memory::AvailabilityGate::new()))
+            .clone()
+    }
+    #[cfg(test)]
+    {
+        Arc::new(mlxcel_core::host_memory::AvailabilityGate::with_probe(
+            mlxcel_core::host_memory::AVAILABILITY_REFRESH_INTERVAL,
+            || None,
+        ))
+    }
+}
+
+/// Whether the snapshot store may grow by `growth_bytes` now; growth of zero
+/// (a store replacing entries at its budget) always passes.
+fn snapshot_growth_allowed(
+    gate: &mlxcel_core::host_memory::AvailabilityGate,
+    growth_bytes: u64,
+) -> bool {
+    growth_bytes == 0 || gate.allows_step(growth_bytes)
+}
+
+/// Whether a turn-boundary state checkpoint of `entry_bytes` may be stored
+/// now (#3058): the checkpoint budget's growth goes through the same
+/// availability gate as a whole snapshot's, and a budget that is full only
+/// replaces checkpoints and passes.
+fn state_checkpoint_growth_allowed(
+    gate: &mlxcel_core::host_memory::AvailabilityGate,
+    store: &crate::server::prompt_cache::PromptCacheStore,
+    entry_bytes: usize,
+) -> bool {
+    snapshot_growth_allowed(
+        gate,
+        store.state_checkpoint_growth_bytes(entry_bytes) as u64,
+    )
+}
+
 /// Longest prefix a request of `prompt_len` tokens may adopt from a cache hit
 /// that matched `matched_len` of them (#1760).
 ///
@@ -1443,4 +1680,70 @@ impl BatchScheduler {
 /// re-running the last one would leave it in the cache twice.
 pub(super) fn whole_prompt_reuse_cap(matched_len: usize, prompt_len: usize) -> usize {
     matched_len.min(prompt_len.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod snapshot_growth_tests {
+    use super::{snapshot_growth_allowed, state_checkpoint_growth_allowed};
+    use mlxcel_core::host_memory::{AvailabilityGate, HostMemoryStatus};
+    use std::time::Duration;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn gate(available: u64) -> AvailabilityGate {
+        AvailabilityGate::with_probe(Duration::from_secs(60), move || {
+            Some(HostMemoryStatus {
+                total_bytes: 128 * GIB,
+                available_now_bytes: available,
+                reserve_bytes: 8 * GIB,
+                wired_bytes: 0,
+            })
+        })
+    }
+
+    /// A growing insert is refused once the host is below the reserve, and a
+    /// store that only replaces entries (growth 0) always passes (#2883
+    /// step 4).
+    #[test]
+    fn snapshot_growth_stops_at_the_reserve_and_replacement_passes() {
+        let roomy = gate(64 * GIB);
+        assert!(snapshot_growth_allowed(&roomy, GIB));
+
+        let tight = gate(8 * GIB + GIB / 2);
+        assert!(!snapshot_growth_allowed(&tight, GIB));
+        assert!(snapshot_growth_allowed(&tight, 0));
+    }
+
+    /// Checkpoint growth goes through the same gate (#3058): a growing
+    /// checkpoint budget is refused below the reserve, and one with no room
+    /// to grow (here, checkpoints off) asks for no growth and passes. The
+    /// full-budget case, which reports zero growth, is pinned in the store's
+    /// own tests.
+    #[test]
+    fn state_checkpoint_growth_uses_the_snapshot_gate() {
+        use crate::server::prompt_cache::{PromptCacheConfig, PromptCacheStore};
+        let store = |capacity: usize| {
+            PromptCacheStore::with_config(
+                PromptCacheConfig::new(true, 1 << 20, 32, Duration::from_secs(600), 4)
+                    .with_state_checkpoint_capacity_bytes(capacity),
+            )
+        };
+        let entry = GIB as usize;
+        let growing = store(2 * entry);
+        assert!(state_checkpoint_growth_allowed(
+            &gate(64 * GIB),
+            &growing,
+            entry
+        ));
+        assert!(!state_checkpoint_growth_allowed(
+            &gate(8 * GIB + GIB / 2),
+            &growing,
+            entry
+        ));
+        assert!(state_checkpoint_growth_allowed(
+            &gate(8 * GIB + GIB / 2),
+            &store(0),
+            entry
+        ));
+    }
 }

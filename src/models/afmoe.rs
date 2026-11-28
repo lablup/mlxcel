@@ -104,7 +104,10 @@
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
+use mlxcel_core::utils::{
+    PrefillAttention, SlidingPrefillKeys, prefill_causal_mask, prefill_sliding_window_mask,
+    slice_axis,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -114,7 +117,8 @@ use std::path::Path;
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
 use crate::models::kv_snapshot::KvSnapshotNames;
-use crate::models::model_owned::{KvCacheLayerModes, LayerKv, ModelOwnedSequenceState};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::sliding_hybrid_lm::{self as hybrid, SlidingHybridModel};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
 
 /// Tensor-name and error-message vocabulary AFMoE hands to the shared
@@ -709,7 +713,12 @@ impl ModelArgs {
     }
 }
 
-fn rms_norm_from_weights(weights: &WeightMap, key: &str, eps: f32) -> Result<RMSNorm, String> {
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn rms_norm_from_weights(
+    weights: &WeightMap,
+    key: &str,
+    eps: f32,
+) -> Result<RMSNorm, String> {
     let weight = weights
         .get(key)
         .map(|w| mlxcel_core::copy(w))
@@ -727,8 +736,9 @@ pub struct Attention {
     pub v_proj: UnifiedLinear,
     pub o_proj: UnifiedLinear,
     /// The attention output gate. Unrelated to a SwiGLU `gate_proj` and to the
-    /// MoE router, despite sharing the name.
-    pub gate_proj: UnifiedLinear,
+    /// MoE router, despite sharing the name. Always present on AFMoE; `None`
+    /// for Kolibri-1, which reuses this block without the gate.
+    pub gate_proj: Option<UnifiedLinear>,
     pub q_norm: RMSNorm,
     pub k_norm: RMSNorm,
     pub num_heads: i32,
@@ -738,9 +748,36 @@ pub struct Attention {
     /// `false` on a full-attention layer, where upstream builds no rope at all.
     pub uses_rope: bool,
     pub rope_base: f32,
+    /// The window a mask-less multi-token forward attends with
+    /// (`maskless_prefill_attention`, #3072): the sliding window on a sliding
+    /// layer, `0` on a full-attention one, set by the decoder layer.
+    pub prefill_window: i32,
+}
+
+/// The scalars an [`Attention`] block is built from.
+///
+/// Lets a family that shares this block without sharing AFMoE's config build
+/// it. Used by: AFMoE, Kolibri1.
+pub(crate) struct AttentionGeometry {
+    pub num_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub rms_norm_eps: f32,
+    pub rope_theta: f32,
+    pub group_size: i32,
+    pub bits: i32,
 }
 
 impl Attention {
+    /// Head counts and head dim for the prefill mask choice (#3072).
+    pub(crate) fn prefill_attention(&self) -> PrefillAttention {
+        PrefillAttention::new(
+            self.num_heads as usize,
+            self.num_kv_heads as usize,
+            self.head_dim as usize,
+        )
+    }
+
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -782,8 +819,16 @@ impl Attention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
+        // A mask-less multi-token forward is a single-row prefill whose model
+        // left the mask to MLX's causal mode or native window route (#3072).
         let attn_out = if l > 1 && mask.is_none() {
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.prefill_window,
+            )
         } else {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
@@ -796,15 +841,24 @@ impl Attention {
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
-        // The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
-        // is computed from the block input rather than from the attention
-        // result.
-        let gate = mlxcel_core::sigmoid(&self.gate_proj.forward(x));
-        let gated = mlxcel_core::multiply(&attn_out, &gate);
-        self.o_proj.forward(&gated)
+        self.gate_and_project(x, &attn_out)
     }
 
-    fn forward_batched_decode(
+    /// The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
+    /// is computed from the block input rather than from the attention
+    /// result. A gateless block (Kolibri-1) goes straight to `o_proj`.
+    fn gate_and_project(&self, x: &MlxArray, attn_out: &MlxArray) -> UniquePtr<MlxArray> {
+        match &self.gate_proj {
+            Some(gate_proj) => {
+                let gate = mlxcel_core::sigmoid(&gate_proj.forward(x));
+                let gated = mlxcel_core::multiply(attn_out, &gate);
+                self.o_proj.forward(&gated)
+            }
+            None => self.o_proj.forward(attn_out),
+        }
+    }
+
+    pub(crate) fn forward_batched_decode(
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
@@ -864,12 +918,7 @@ impl Attention {
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
-        // The sigmoid gate multiplies the attention output BEFORE `o_proj`, and
-        // is computed from the block input rather than from the attention
-        // result.
-        let gate = mlxcel_core::sigmoid(&self.gate_proj.forward(x));
-        let gated = mlxcel_core::multiply(&attn_out, &gate);
-        self.o_proj.forward(&gated)
+        self.gate_and_project(x, &attn_out)
     }
 
     pub fn from_weights(
@@ -878,9 +927,30 @@ impl Attention {
         prefix: &str,
         uses_rope: bool,
     ) -> Result<Self, String> {
-        let group_size = args.group_size();
-        let bits = args.bits();
-        let head_dim = args.head_dim as i32;
+        let geometry = AttentionGeometry {
+            num_heads: args.num_attention_heads,
+            num_kv_heads: args.num_key_value_heads,
+            head_dim: args.head_dim,
+            rms_norm_eps: args.rms_norm_eps,
+            rope_theta: args.rope_theta,
+            group_size: args.group_size(),
+            bits: args.bits(),
+        };
+        Self::load(weights, prefix, &geometry, uses_rope, true)
+    }
+
+    /// Build the block from explicit geometry; `gated` loads the
+    /// `gate_proj` output gate. Used by: AFMoE (gated), Kolibri1 (gateless).
+    pub(crate) fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        geometry: &AttentionGeometry,
+        uses_rope: bool,
+        gated: bool,
+    ) -> Result<Self, String> {
+        let group_size = geometry.group_size;
+        let bits = geometry.bits;
+        let head_dim = geometry.head_dim as i32;
         let load = |leaf: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), group_size, bits)
         };
@@ -889,23 +959,28 @@ impl Attention {
             k_proj: load("k_proj")?,
             v_proj: load("v_proj")?,
             o_proj: load("o_proj")?,
-            gate_proj: load("gate_proj")?,
+            gate_proj: if gated {
+                Some(load("gate_proj")?)
+            } else {
+                None
+            },
             q_norm: rms_norm_from_weights(
                 weights,
                 &format!("{prefix}.q_norm.weight"),
-                args.rms_norm_eps,
+                geometry.rms_norm_eps,
             )?,
             k_norm: rms_norm_from_weights(
                 weights,
                 &format!("{prefix}.k_norm.weight"),
-                args.rms_norm_eps,
+                geometry.rms_norm_eps,
             )?,
-            num_heads: args.num_attention_heads as i32,
-            num_kv_heads: args.num_key_value_heads as i32,
+            num_heads: geometry.num_heads as i32,
+            num_kv_heads: geometry.num_kv_heads as i32,
             head_dim,
             scale: 1.0 / (head_dim as f32).sqrt(),
             uses_rope,
-            rope_base: args.rope_theta,
+            rope_base: geometry.rope_theta,
+            prefill_window: 0,
         })
     }
 }
@@ -932,8 +1007,16 @@ impl Mlp {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
-        let group_size = args.group_size();
-        let bits = args.bits();
+        Self::load(weights, prefix, args.group_size(), args.bits())
+    }
+
+    /// Used by: AFMoE, Kolibri1 (its shared expert).
+    pub(crate) fn load(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
         let load = |leaf: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{leaf}"), group_size, bits)
         };
@@ -1257,14 +1340,18 @@ impl DecoderLayer {
                 args.rms_norm_eps,
             )
         };
+        let mut self_attn = Attention::from_weights(
+            weights,
+            args,
+            &format!("{prefix}.self_attn"),
+            // Only sliding layers rotate.
+            uses_sliding,
+        )?;
+        if uses_sliding {
+            self_attn.prefill_window = i32::try_from(args.sliding_window).unwrap_or(i32::MAX);
+        }
         Ok(Self {
-            self_attn: Attention::from_weights(
-                weights,
-                args,
-                &format!("{prefix}.self_attn"),
-                // Only sliding layers rotate.
-                uses_sliding,
-            )?,
+            self_attn,
             mlp: if args.is_moe_layer(layer_idx) {
                 FeedForward::Sparse(Box::new(AfmoeMoe::from_weights(
                     weights,
@@ -1330,40 +1417,31 @@ impl AfmoeModel {
         }
     }
 
-    pub(crate) fn forward(
+    /// Single-sequence forward projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Cache],
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
-        let seq_len = mlxcel_core::array_shape(input_ids)[1];
-
         let mut h = self.embed_tokens.forward(input_ids);
         if self.embedding_scale != 1.0 {
             h = mlxcel_core::multiply_scalar(&h, self.embedding_scale);
         }
 
-        // Both prefill masks are sized from the cache's live window rather than
-        // the monotonic offset, so a trimmed cache does not produce a mask wider
-        // than the K/V it returns. Decode needs no mask: a RotatingKVCache
-        // already returns only its window.
-        let (full_mask, sliding_mask) = if seq_len > 1 {
-            let full_live = self
-                .full_attention_index
-                .map(|i| caches[i].as_interface().live_len())
-                .unwrap_or(0);
-            let sliding_live = self
-                .sliding_index
-                .map(|i| caches[i].as_interface().live_len())
-                .unwrap_or(0);
-            (
-                Some(create_causal_mask(seq_len, full_live)),
-                self.sliding_index.map(|_| {
-                    create_sliding_window_prefill_mask(seq_len, sliding_live, self.sliding_window)
-                }),
-            )
-        } else {
-            (None, None)
-        };
+        let (full_mask, sliding_mask) = hybrid_prefill_masks(
+            &h,
+            caches,
+            self.full_attention_index,
+            self.sliding_index,
+            self.sliding_window,
+            |idx| {
+                self.layers
+                    .get(idx)
+                    .map(|layer| layer.self_attn.prefill_attention())
+            },
+        );
 
         for (i, layer) in self.layers.iter().enumerate() {
             let mask = if layer.uses_sliding {
@@ -1374,6 +1452,7 @@ impl AfmoeModel {
             h = layer.forward(&h, caches[i].as_interface(), mask);
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1399,10 +1478,14 @@ impl AfmoeModel {
             .collect()
     }
 
+    /// The single-sequence forward against the model-owned caches of
+    /// `seq_id`, projecting every position (`row == None`) or only position
+    /// `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
     fn forward_for_sequence(
         &self,
         input: &MlxArray,
         seq_id: Option<SequenceId>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let seq_len = mlxcel_core::array_shape(input)[1];
         if seq_id.is_none() && seq_len > 1 {
@@ -1412,7 +1495,7 @@ impl AfmoeModel {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
             || self.make_internal_caches(),
-            |caches| self.forward(input, caches),
+            |caches| self.forward_rows(input, caches, row),
         )
     }
 
@@ -1497,6 +1580,55 @@ impl AfmoeModel {
     }
 }
 
+/// The two prefill masks of a sliding/full hybrid stack whose per-layer state
+/// is the gemma3 [`Cache`] enum, for an `[B, L, hidden]` activation `h`.
+///
+/// Both masks are sized from the cache's live window rather than the
+/// monotonic offset, so a trimmed cache does not produce a mask wider than the
+/// K/V it returns. Decode (`L == 1`) needs no mask: a RotatingKVCache already
+/// returns only its window. Each mask is `None` where a single row can take
+/// MLX's causal mode or native window route instead and MLX fuses it (#3072).
+/// `geometry` answers a layer index with that layer's attention shape.
+///
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn hybrid_prefill_masks(
+    h: &MlxArray,
+    caches: &mut [Cache],
+    full_attention_index: Option<usize>,
+    sliding_index: Option<usize>,
+    sliding_window: i32,
+    geometry: impl Fn(usize) -> Option<PrefillAttention>,
+) -> (Option<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
+    let shape = mlxcel_core::array_shape(h);
+    let seq_len = shape[1];
+    if seq_len <= 1 {
+        return (None, None);
+    }
+    let full_live = full_attention_index
+        .map(|i| caches[i].as_interface().live_len())
+        .unwrap_or(0);
+    let sliding_live = sliding_index
+        .map(|i| caches[i].as_interface().live_len())
+        .unwrap_or(0);
+    let dtype = mlxcel_core::array_dtype(h);
+    let batch = shape[0];
+    (
+        geometry(full_attention_index.unwrap_or(0))
+            .and_then(|attention| prefill_causal_mask(seq_len, full_live, batch, attention, dtype)),
+        sliding_index.and_then(&geometry).and_then(|attention| {
+            prefill_sliding_window_mask(
+                seq_len,
+                sliding_live,
+                sliding_window,
+                batch,
+                attention,
+                dtype,
+                SlidingPrefillKeys::Rotating,
+            )
+        }),
+    )
+}
+
 // Weight-shape validation.
 
 fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> &'static str {
@@ -1504,7 +1636,8 @@ fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> 
     mlxcel_core::layers::infer_quantization_mode(has_biases, group_size, bits)
 }
 
-fn validate_quantized_packing(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_quantized_packing(
     weights: &WeightMap,
     prefix: &str,
     in_features: usize,
@@ -1537,7 +1670,8 @@ fn validate_quantized_packing(
     )
 }
 
-fn validate_projection(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_projection(
     weights: &WeightMap,
     prefix: &str,
     out_features: usize,
@@ -1569,7 +1703,8 @@ fn validate_projection(
     validate_quantized_packing(weights, prefix, in_features, group_size, bits)
 }
 
-fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), String> {
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), String> {
     let weight = weights
         .get(key)
         .ok_or_else(|| format!("Weight not found: {key}"))?;
@@ -1589,7 +1724,9 @@ fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), Strin
 /// size to a negative index but performs no range check on a positive one, so a
 /// stacked tensor with fewer planes than the config claims turns an ordinary
 /// token into an out-of-bounds read whose result reaches the logits.
-fn validate_stacked_experts(
+///
+/// Used by: AFMoE, Kolibri1 (after its load-time expert stacking).
+pub(crate) fn validate_stacked_experts(
     weights: &WeightMap,
     prefix: &str,
     num_experts: usize,
@@ -1633,7 +1770,8 @@ fn validate_stacked_experts(
     validate_quantized_packing(weights, prefix, in_features, group_size, bits)
 }
 
-fn validate_mlp(
+/// Used by: AFMoE, Kolibri1.
+pub(crate) fn validate_mlp(
     weights: &WeightMap,
     prefix: &str,
     hidden: usize,
@@ -1809,6 +1947,43 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
 
 // LanguageModel trait implementation.
 
+impl SlidingHybridModel for AfmoeModel {
+    const FAMILY: &'static str = "afmoe";
+    const KV_NAMES: KvSnapshotNames = AFMOE_KV_SNAPSHOT_NAMES;
+
+    fn hybrid_sequence_state(&self) -> &ModelOwnedSequenceState<Cache> {
+        &self.sequence_state
+    }
+
+    fn hybrid_kv_cache_layer_modes(&self) -> &KvCacheLayerModes {
+        &self.kv_cache_layer_modes
+    }
+
+    fn hybrid_make_internal_caches(&self) -> Vec<Cache> {
+        self.make_internal_caches()
+    }
+
+    fn hybrid_num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    fn hybrid_layer_uses_sliding(&self, layer_idx: usize) -> bool {
+        self.layers[layer_idx].uses_sliding
+    }
+
+    fn hybrid_sliding_window(&self) -> i32 {
+        self.sliding_window
+    }
+
+    fn hybrid_forward_batched_decode(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Vec<Cache>],
+    ) -> UniquePtr<MlxArray> {
+        self.forward_batched_decode_with_caches(input_ids, caches)
+    }
+}
+
 impl LanguageModel for AfmoeModel {
     fn forward(
         &self,
@@ -1816,7 +1991,7 @@ impl LanguageModel for AfmoeModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, None)
+        self.forward_for_sequence(input_ids, None, None)
     }
 
     fn forward_with_sequence_id(
@@ -1826,7 +2001,7 @@ impl LanguageModel for AfmoeModel {
         _caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -1838,21 +2013,32 @@ impl LanguageModel for AfmoeModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Text-only family: there is no image-embedding prefill path.
-        self.forward_for_sequence(input_ids, seq_id)
+        self.forward_for_sequence(input_ids, seq_id, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: the embeddings entry runs the text forward too.
+        Some(self.forward_for_sequence(input_ids, seq_id, Some(last_pos)))
     }
 
     fn reset_runtime_state(&self) {
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::reset_runtime_state(self)
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
-        SequenceStateLayout::model_owned(self.layers.len())
+        hybrid::sequence_state_layout(self)
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.sequence_state
-            .prepare_sequence_state(seq_id, self.make_internal_caches());
+        hybrid::prepare_sequence_state(self, seq_id)
     }
 
     fn sync_sequence_storage(
@@ -1860,22 +2046,11 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         cache_pool: &mut CachePool,
     ) -> Result<(), String> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |caches| {
-                let visible_lens: Vec<_> = caches.iter().map(Cache::visible_len).collect();
-                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
-            })
-            .unwrap_or_else(|| {
-                Err(format!(
-                    "missing AFMoE sequence state while synchronizing sequence {seq_id}"
-                ))
-            })
+        hybrid::sync_sequence_storage(self, seq_id, cache_pool)
     }
 
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
-        self.kv_cache_layer_modes.set(modes);
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        hybrid::set_kv_cache_layer_modes(self, modes)
     }
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
@@ -1885,13 +2060,7 @@ impl LanguageModel for AfmoeModel {
     /// Sliding layers hold a `RotatingKVCache`, which stores FP16 for every
     /// mode but an aligned `Turbo4Asym` (issue #2783).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
-        self.kv_cache_layer_modes.storage_modes(|layer_idx| {
-            self.layers
-                .get(layer_idx)
-                .is_some_and(|layer| layer.uses_sliding)
-                .then_some(self.sliding_window)
-                .map_or(LayerKv::Full, LayerKv::Sliding)
-        })
+        hybrid::kv_cache_storage_modes(self)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
@@ -1907,30 +2076,7 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         token_len: usize,
     ) -> Option<ModelStateSnapshot> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |state| {
-                let mut snapshot = ModelStateSnapshot::new("afmoe", token_len);
-                for (idx, cache) in state.iter().enumerate() {
-                    if let Err(error) = cache.snapshot_into(
-                        &mut snapshot,
-                        &format!("layer{idx}"),
-                        AFMOE_KV_SNAPSHOT_NAMES,
-                    ) {
-                        tracing::warn!(
-                            error,
-                            layer_idx = idx,
-                            "AFMoE snapshot prompt-cache donation skipped"
-                        );
-                        return None;
-                    }
-                }
-                if snapshot.is_empty() {
-                    None
-                } else {
-                    Some(snapshot)
-                }
-            })
-            .flatten()
+        hybrid::snapshot_sequence_state(self, seq_id, token_len)
     }
 
     fn restore_sequence_state(
@@ -1938,45 +2084,14 @@ impl LanguageModel for AfmoeModel {
         seq_id: SequenceId,
         snapshot: &ModelStateSnapshot,
     ) -> Result<(), String> {
-        if snapshot.family() != "afmoe" {
-            return Err(format!(
-                "cannot restore {} snapshot into AFMoE",
-                snapshot.family()
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"), AFMOE_KV_SNAPSHOT_NAMES)?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state(self, seq_id, snapshot)
     }
 
     /// AFMoE mixes one sliding layer group with full-attention layers, both
     /// ordinary KV state, so a truncating restore is sound whenever every
     /// sliding layer is still unwrapped at `target_len`.
-    ///
-    /// The check is per layer at the requested target rather than a
-    /// conversation-length heuristic: one wrapped sliding layer is enough to
-    /// make the restore unsound.
     fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
-        if snapshot.family() != "afmoe" {
-            return false;
-        }
-        if target_len > snapshot.token_len() {
-            return false;
-        }
-        let Ok(target) = i32::try_from(target_len) else {
-            return false;
-        };
-        (0..self.layers.len()).all(|idx| {
-            Cache::snapshot_truncatable_to(
-                snapshot,
-                &format!("layer{idx}"),
-                target,
-                AFMOE_KV_SNAPSHOT_NAMES,
-            )
-        })
+        hybrid::snapshot_truncatable_to(self, snapshot, target_len)
     }
 
     fn restore_sequence_state_truncated(
@@ -1985,37 +2100,30 @@ impl LanguageModel for AfmoeModel {
         snapshot: &ModelStateSnapshot,
         target_len: usize,
     ) -> Result<(), String> {
-        if snapshot.family() != "afmoe" {
-            return Err(format!(
-                "cannot restore {} snapshot into AFMoE",
-                snapshot.family()
-            ));
-        }
-        let target = i32::try_from(target_len)
-            .map_err(|_| format!("AFMoE truncated restore: target {target_len} out of range"))?;
-        // Re-check rather than trust the caller: installing a partially
-        // truncated state would corrupt generation silently, while an error
-        // here just falls back to a cold prefill.
-        if !self.snapshot_truncatable_to(snapshot, target_len) {
-            return Err(format!(
-                "AFMoE truncated restore: snapshot cannot be truncated to {target_len} tokens"
-            ));
-        }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            let prefix = format!("layer{idx}");
-            cache.restore_from(snapshot, &prefix, AFMOE_KV_SNAPSHOT_NAMES)?;
-            cache
-                .truncate_to(target, AFMOE_KV_SNAPSHOT_NAMES)
-                .map_err(|err| format!("{prefix}: {err}"))?;
-        }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        hybrid::restore_sequence_state_truncated(self, seq_id, snapshot, target_len)
+    }
+
+    /// A ring-only checkpoint (issue #3255): the sliding layers' rings, which
+    /// a longer snapshot of the same conversation cannot give back once they
+    /// have wrapped. The global layers come from that snapshot.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        hybrid::state_checkpoint_from_snapshot(self, snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        hybrid::restore_sequence_state_from_checkpoint(self, seq_id, checkpoint, donor)
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
-        // Compatibility only: the real state lives in `sequence_state`.
-        (0..self.layers.len()).map(|_| KVCache::new()).collect()
+        hybrid::make_caches(self)
     }
 
     fn num_layers(&self) -> usize {
@@ -2033,7 +2141,7 @@ impl LanguageModel for AfmoeModel {
     fn forward_batched(
         &self,
         input_ids: &MlxArray,
-        caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_batched_with_ids(input_ids, None, caches, mask)
@@ -2042,58 +2150,11 @@ impl LanguageModel for AfmoeModel {
     fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
-        seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
-        batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(input_ids);
-        assert_eq!(shape.len(), 2, "afmoe batched input must be rank 2");
-        assert_eq!(
-            shape[0] as usize,
-            batch_caches.len(),
-            "afmoe input batch must match cache rows"
-        );
-        if let Some(ids) = seq_ids {
-            assert_eq!(
-                ids.len(),
-                batch_caches.len(),
-                "afmoe requires one sequence id per row"
-            );
-        }
-        mlxcel_core::generate::route_batched_decode_with_ids(
-            self,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            |batch_caches| {
-                let ids = seq_ids.expect("afmoe model-owned batched decode requires sequence ids");
-                if shape[1] != 1 || mask.is_some() {
-                    self.sequence_state
-                        .validate_sequence_states(ids)
-                        .unwrap_or_else(|error| panic!("afmoe batched decode: {error}"));
-                    let outputs: Vec<_> = batch_caches
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(row, caches)| {
-                            let input = mlxcel_core::utils::slice_axis(
-                                input_ids,
-                                0,
-                                row as i32,
-                                row as i32 + 1,
-                            );
-                            self.forward_with_sequence_id(&input, Some(ids[row]), caches, mask)
-                        })
-                        .collect();
-                    let output_refs: Vec<_> = outputs.iter().map(|output| &**output).collect();
-                    return mlxcel_core::concatenate_many(&output_refs, 0);
-                }
-                self.sequence_state
-                    .with_batched_sequence_states(ids, |states| {
-                        self.forward_batched_decode_with_caches(input_ids, states)
-                    })
-                    .unwrap_or_else(|error| panic!("afmoe batched decode: {error}"))
-            },
-        )
+        hybrid::forward_batched_with_ids(self, input_ids, seq_ids, batch_caches, mask)
     }
 
     /// Opt out of NA tile-aligned padded prefill: the scheduler's post-pad trim

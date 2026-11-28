@@ -94,31 +94,6 @@ fn checkpoint_default_instruction(model_dir: &Path) -> Option<String> {
     (!prompt.trim().is_empty()).then(|| prompt.to_string())
 }
 
-/// Apply the checkpoint's `preprocessor_config.json` pixel bounds to the
-/// shared Qwen2-VL processor.
-///
-/// The generative loader constructs the processor with the Qwen2-VL defaults
-/// (a 12.8M pixel ceiling, so up to 12544 visual tokens for a 16px patch and
-/// a merge size of 2). This checkpoint declares 1310720, which keeps one
-/// image at 1280 tokens and therefore well inside the embedder's 8192-token
-/// budget. Reading the file rather than hard-coding it keeps a re-exported
-/// checkpoint with different bounds correct.
-pub(crate) fn apply_pixel_bounds(
-    processor: &mut crate::vision::processors::qwen2_vl::Qwen2VLProcessor,
-    model_dir: &Path,
-) {
-    let Some(config) = read_json(&model_dir.join("preprocessor_config.json")) else {
-        return;
-    };
-    let read = |key: &str| config.get(key).and_then(Value::as_u64).filter(|&v| v > 0);
-    if let Some(min_pixels) = read("min_pixels") {
-        processor.min_pixels = min_pixels as usize;
-    }
-    if let Some(max_pixels) = read("max_pixels") {
-        processor.max_pixels = max_pixels as usize;
-    }
-}
-
 /// Replace every `image_token_id` in a single-row `[1, L]` id array with
 /// `counts` consecutive copies, expanding the mask alongside it.
 ///
@@ -193,14 +168,17 @@ impl Qwen3VLEmbeddingModel {
     pub fn load(model_dir: &Path, config: &Value) -> Result<Self> {
         let loaded = crate::loading::load_qwen3_vl(model_dir)
             .with_context(|| format!("failed to load {} as Qwen3-VL", model_dir.display()))?;
-        let crate::LoadedModel::Qwen3VL(mut vlm) = loaded else {
+        let crate::LoadedModel::Qwen3VL(vlm) = loaded else {
             bail!(
                 "{} did not load as a Qwen3-VL stack; Qwen3-VL-Embedding needs the dense \
                  Qwen3-VL layout",
                 model_dir.display()
             );
         };
-        apply_pixel_bounds(&mut vlm.processor, model_dir);
+        // `load_qwen3_vl` already resized against the checkpoint's own sidecar
+        // bounds and resampler (`QwenImageResizePolicy`); this checkpoint
+        // states 4096 / 1310720, which keeps one image at 1280 tokens, well
+        // inside the embedder's 8192-token budget.
 
         let chat_template = ChatTemplateProcessor::from_model_path(model_dir)
             .with_context(|| {

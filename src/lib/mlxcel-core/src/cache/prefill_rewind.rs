@@ -24,7 +24,7 @@
 //! physical buffer back to `idx`, which leaves exactly the state an unpadded
 //! prefill of the same tokens produces.
 
-use super::{KVCacheMode, RotatingKVCache};
+use super::{FIRST_FILL_REWIND_SLACK, KVCacheMode, RotatingKVCache};
 use crate::ffi;
 
 impl RotatingKVCache {
@@ -74,6 +74,20 @@ impl RotatingKVCache {
         }
 
         let keep = self.idx - n;
+        // A first fill past the window kept only `max_size +
+        // FIRST_FILL_REWIND_SLACK` positions (#3062). A rewind deeper than the
+        // slack leaves fewer than a window while older real positions exist,
+        // and the cache no longer holds them.
+        if keep < self.max_size && self.offset - n > keep {
+            return Err(format!(
+                "rotating prefill rewind: dropping {n} positions leaves {keep} of the \
+                 {}-token window stored ({} written); a first fill keeps only \
+                 {FIRST_FILL_REWIND_SLACK} positions of rewind slack, so a forward that \
+                 rewinds further must run inside a FullFirstFillScope",
+                self.max_size,
+                self.offset - n
+            ));
+        }
         let k = ffi::slice(
             keys,
             &[0, 0, 0, 0],

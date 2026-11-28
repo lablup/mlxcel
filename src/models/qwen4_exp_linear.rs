@@ -12,10 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Decode-equivalent reductions for Qwen4-Exp's quantized gate projections.
+//! Decode-equivalent reductions for Qwen4-Exp's gate projections.
 
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+/// `linear` applied to every row of `x` exactly as single-row decode applies
+/// it (issue #2880). A dense matrix takes `gemv` for one row and `gemm` for
+/// several, which reduce in different orders, so a dense projection is run
+/// one row at a time; a quantized one takes `qmv` per row below the batch
+/// limit already, which is the arithmetic the exactness probe measures.
+///
+/// Used by: the speculative verify block (router, shared-expert gate,
+/// hyper-connection injection, GatedDeltaNet gates when unfused).
+pub(super) fn decode_equivalent_projection(
+    linear: &UnifiedLinear,
+    x: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(x);
+    let rows = shape[shape.len() - 2];
+    if matches!(linear, UnifiedLinear::Quantized { .. }) || shape.len() < 2 || rows <= 1 {
+        return linear.forward(x);
+    }
+    let axis = shape.len() as i32 - 2;
+    let mut out: Option<UniquePtr<MlxArray>> = None;
+    for row in 0..rows {
+        let mut start = vec![0; shape.len()];
+        let mut stop = shape.clone();
+        start[shape.len() - 2] = row;
+        stop[shape.len() - 2] = row + 1;
+        let projected = linear.forward(&mlxcel_core::slice(x, &start, &stop));
+        out = Some(match out {
+            None => projected,
+            Some(previous) => mlxcel_core::concatenate(&previous, &projected, axis),
+        });
+    }
+    out.expect("at least one row")
+}
 
 /// Match mlx-vlm's `_row_invariant_quantized_projection`: each prefill token
 /// uses the singleton quantized matrix-vector kernel rather than a batched QMM.

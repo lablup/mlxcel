@@ -48,7 +48,7 @@ route discovery depend on the checkpoint.
 | Surface | Main routes | Notes |
 | --- | --- | --- |
 | OpenAI | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/responses/compact`, `/v1/embeddings`, `/v1/models` | Responses also supports retrieve, delete, and cancel by id, and conversation compaction (explicit, or automatic through `context_management`). |
-| Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | Uses the loaded chat template and the shared token accounting path. |
+| Anthropic | `/v1/messages`, `/v1/messages/count_tokens` | Uses the loaded chat template and the shared token accounting path. Claude Code's per-request billing stamp is pinned so its prompts keep their cached prefix; see [Context, batching, and caching](#context-batching-and-caching). |
 | Retrieval | `/v1/rerank`, `/v1/reranking` | Cohere/Jina-compatible reranking surface. |
 | Audio | `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations` | Kokoro TTS, audio-capable chat models, and Whisper are described in [`audio-api.md`](audio-api.md). |
 | Native llama-server | `/completion`, `/completions`, `/embedding`, `/embeddings`, `/tokenize`, `/detokenize`, `/infill`, `/apply-template` | Native response schemas are intentionally distinct from the OpenAI `/v1/...` schemas. |
@@ -73,6 +73,20 @@ the disaggregated HTTP router, and `InProcessServer::complete`, including
 direct Rust calls. Validation happens before dispatch or streaming setup.
 Prompt batching, token-ID input, and multiple choices (`n > 1`) remain
 separate follow-up work.
+
+`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, and
+`/v1/messages/count_tokens`, together with their aliases without `/v1`,
+answer a request body they cannot parse the same way `/v1/completions` does:
+with an `invalid_request_error` JSON body carrying the parser's message,
+truncated to 1 KiB, before
+the availability check, dispatch, or streaming setup. Malformed or empty JSON,
+and a missing or wrongly typed field such as `model`, return HTTP 400; a
+missing or non-JSON `Content-Type` returns HTTP 415. The Anthropic routes use
+their own error envelope, `{"type": "error", "error": {...}}`, and
+`count_tokens` answers exactly as `/v1/messages` does. The disaggregated HTTP
+router's `/v1/chat/completions` behaves the same way, including HTTP 413 for a
+body over its size limit. On the single-node server, one server-wide layer
+answers every HTTP 413 in the OpenAI envelope, on the Anthropic routes too.
 
 The checked-in b10621 manifest under `compat/llama-server/b10621/` is the
 authoritative compatibility inventory. It classifies every pinned option,
@@ -108,6 +122,15 @@ cache state, since a cache hit prefills in two parts and can round differently
 match b10621; enable `--context-shift` and configure `--keep` when an
 application intentionally wants to retain part of an overlong conversation.
 
+Claude Code starts its system prompt with an `x-anthropic-billing-header` stamp
+whose `cch` value changes on every request and whose fourth `cc_version` part
+changes on every session. On the Anthropic Messages routes the server replaces
+those two values with `f` characters of the same length before rendering, so a
+turn can reuse the whole previous prompt rather than stopping at the stamp.
+Only top-level `system` text starting with the exact header is touched. Set
+`MLXCEL_ANTHROPIC_PIN_BILLING_STAMP=0` to pass the client's text through
+unchanged.
+
 See [`CONTINUOUS_BATCHING.md`](CONTINUOUS_BATCHING.md) for scheduler and
 disaggregated-serving details and [`turbo-kv-cache.md`](turbo-kv-cache.md) for
 KV-cache modes.
@@ -132,6 +155,12 @@ Requests select an entry with the JSON `model` field, or the `model` query
 parameter on GET routes. `--models-max` bounds the resident set with LRU
 eviction. Autoload is on by default and can be disabled globally with
 `--no-models-autoload` or controlled on a management request with `autoload`.
+
+Responses API calls that address a response by id (`GET` and `DELETE
+/v1/responses/{id}`, `POST /v1/responses/{id}/cancel`) need no `model`: the
+router finds the loaded model that holds the id. A model with a running
+background response is not evicted. See
+[`responses-api.md`](responses-api.md#serving-roles).
 
 Router management uses `GET /models` or `/v1/models` for inventory and reload,
 `POST /models` for a background download, `DELETE /models?model=...` for a
@@ -394,6 +423,14 @@ when migrating an existing llama-server command. TLS is enabled by supplying
 both `--ssl-cert-file` and `--ssl-key-file`. A `--host` ending in `.sock` starts
 a Unix-domain-socket listener, and `--api-prefix` nests all routes below a path.
 
+The server does not remove its socket file when it stops, so a start on the same
+path replaces a socket nobody listens on any more. It does not replace a socket
+another server is still listening on, a socket it cannot probe (no permission to
+connect, or a socket of another type), or an entry at that path that is not a
+socket (a regular file, a symlink): the start fails and the entry is left as it
+is. On macOS a listener whose accept queue is completely full answers like a
+socket nobody listens on and is not recognised as in use.
+
 The public set is matched literally against the request path as the client sent
 it, prefix included. With `--api-prefix /llama` and keys enabled,
 `/llama/health` and `/llama/v1/health` are therefore not public and need a
@@ -409,14 +446,22 @@ environment map.
 
 ## Deliberate non-goals
 
-mlxcel does not ship llama-server's embedded Web UI and does not execute tools,
-MCP servers, an agent loop, or the UI CORS proxy. Its own bundled WebUI is a
-separate, opt-in feature started with `--webui`; see
-[`webui/README.md`](webui/README.md). Enabling those compatibility
-flags fails at startup instead of silently pretending that the capability is
-active. `/tools` and `/cors-proxy` retain the disabled-feature response shape
-expected by clients. Client-declared tools and parsed `tool_calls` remain
-supported because execution stays with the client.
+mlxcel does not ship llama-server's embedded Web UI and does not run
+llama-server's built-in tools, its `/tools` endpoint, an agent mode, or the UI
+CORS proxy. Its own bundled WebUI is a separate, opt-in feature started with
+`--webui`; see [`webui/README.md`](webui/README.md). Enabling those
+compatibility flags fails at startup instead of silently pretending that the
+capability is active. `/tools` and `/cors-proxy` retain the disabled-feature
+response shape expected by clients. Client-declared tools and parsed
+`tool_calls` remain supported because execution stays with the client.
+
+MCP servers are the one exception, and only as an explicit opt-in:
+`--mcp-tools` with `--mcp-servers-config` or `--mcp-servers-json` runs a
+server-side MCP tool loop for the built-in `mcp` tool of `/v1/responses`. It is
+off by default, refused on a non-loopback listener without API keys, and
+unavailable in router mode and on distributed launches (tensor-parallel, pipeline-stage, `--node-role`); without `--mcp-tools` the two server-set flags still
+fail startup. See
+[`responses-api.md`](responses-api.md#mcp-tools-server-side-tool-loop).
 
 For every b10621 option and native field, including intentional differences
 not repeated here, consult [`llama-server-compat.md`](llama-server-compat.md).

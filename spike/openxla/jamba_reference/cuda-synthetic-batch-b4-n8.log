@@ -1,0 +1,14 @@
+model = /tmp/epic564-models/jamba-moe-tiny/mlx
+device = cuda, slots B_max = 4, requests N = 8, full prompt = 6, buckets = None, eos = []
+  req 0: len 6 cap 12  req 1: len 6 cap 23  req 2: len 6 cap 24  req 3: len 6 cap 17
+  req 4: len 6 cap 24  req 5: len 6 cap 24  req 6: len 6 cap 22  req 7: len 6 cap 24
+
+phase 1 load: reference engine (B_max=4, capacity 256) 6.69 s
+phase 1: captured 8 single-seq references (170 tokens, 954.88 tok/s sequential baseline, generation only)
+phase 2 load: batch engine (B_max=4, capacity 256) 7.47 s
+
+phase 2: 46 pump steps, 8 requests served, 170 tokens
+throughput: 714.75 tok/s batched (vs 954.88 tok/s sequential baseline, 0.7x)
+RESULT: REFERENCE-EXACT PASS (every request matches its single-seq reference)
+BENCH	device=cuda	B=4	N=8	tok_s=714.745	pass=true
+exit=0

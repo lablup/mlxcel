@@ -368,6 +368,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                             load_elapsed.as_secs_f64(),
                             snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                         );
+                        // Issue #2883: `None` off macOS.
+                        if let Some(footprint) = mlxcel_core::host_memory::process_footprint() {
+                            tracing::info!(
+                                worker_model_id = %worker_model_id,
+                                phys_footprint_bytes = footprint.phys_footprint_bytes,
+                                compressed_bytes = footprint.compressed_bytes,
+                                "Process footprint after load: {:.2} GB ({:.2} GB compressed)",
+                                footprint.phys_footprint_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                                footprint.compressed_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                            );
+                        }
                         // A `--rope-scaling` / `--rope-scale` / `--rope-freq-base`
                         // request that reached no RoPE code path is fatal to
                         // serving, not a warning: the server would answer every
@@ -669,6 +680,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         "Model does not support batched decode; restored the per-request KV cap from the original context budget after clamping max_batch_size to 1"
                     );
                 }
+                // The dispatch thread refuses an over-long text prompt before
+                // SSE headers against the bound this scheduler enforces (#2877).
+                batch_metrics.publish_prompt_admission_bound(effective_max_kv_size);
                 if effective_max_batch_size == 1
                     && sched_config.max_batch_size > 1
                     && !sched_config.kv_unified
@@ -1477,10 +1491,13 @@ pub(crate) fn spawn_legacy_model_worker(
 /// the engine's bundled slot counts; the HAL device is read from
 /// `MLXCEL_XLA_DEVICE` (default [`mlxcel_xla::default_device`]: `metal` on Apple
 /// Silicon, `local-task` elsewhere), matching the single-sequence path.
+/// `max_queue_depth` is the `--max-queue-depth` admission bound the serve worker
+/// enforces against the engine's queued-request depth.
 #[cfg(feature = "xla-iree")]
 pub(crate) fn spawn_xla_model_worker(
     model_path: PathBuf,
     b_max: usize,
+    max_queue_depth: usize,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
     snapshot_reuse_capable: Arc<AtomicBool>,
@@ -1496,16 +1513,20 @@ pub(crate) fn spawn_xla_model_worker(
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
             // Capacities are static graph shapes, so the set has to be decided
             // before any engine is built and cannot be revisited per request.
-            // The worst-case image expansion is what makes a second, larger
-            // shape worth compiling, and it is derived from config alone.
+            // The worst-case image expansion is what makes an extra, larger
+            // shape worth compiling, and it is derived from config alone; the
+            // text shapes are bounded by the checkpoint window so no shape is
+            // compiled that the model itself could never fill (#2855).
             let image_floor = crate::xla_image_context_floor(&model_path);
-            let capacities = match mlxcel_xla::context_capacity_buckets_from_env(image_floor) {
-                Ok(value) => value,
-                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
-                    "model-worker-xla",
-                    &format!("failed to configure the OpenXLA engine: {err}"),
-                ),
-            };
+            let model_window = crate::read_model_context_window(&model_path);
+            let capacities =
+                match mlxcel_xla::context_capacity_buckets_from_env(image_floor, model_window) {
+                    Ok(value) => value,
+                    Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                        "model-worker-xla",
+                        &format!("failed to configure the OpenXLA engine: {err}"),
+                    ),
+                };
             let operator_pinned = std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some();
             // The guard asks whether ANY shape can admit an image, so it takes
             // the largest. With a derived set that is the image floor itself, so
@@ -1552,13 +1573,30 @@ pub(crate) fn spawn_xla_model_worker(
             };
             let engine =
                 match mlxcel_xla::XlaBucketSet::load(&model_path, b_max, &device, &capacities) {
-                    Ok((engine, dropped)) => {
+                    Ok((mut engine, dropped)) => {
+                        // Stop on the eager backend's EOS set, which also
+                        // covers the tokenizer's `eos_token` (#3292).
+                        engine.set_eos_token_ids(&crate::backend::xla::xla_stop_token_ids(
+                            &model_path,
+                        ));
                         // A bucket after the first can fail to compile or to
                         // allocate its cache without costing the process: the
                         // remaining shapes still serve every request that fits
                         // them. Say so rather than starting quietly degraded.
                         for reason in &dropped {
                             tracing::warn!("{reason}");
+                        }
+                        // The pre-load guard above judged the REQUESTED set.
+                        // Re-check the surviving set, because the shape that
+                        // made the guard pass may be the one that was dropped;
+                        // in that case image requests now fail at admission and
+                        // the operator should hear about it at startup.
+                        if let Some(warning) = crate::xla_image_surviving_bucket_warning(
+                            &engine.capacities(),
+                            &capacities,
+                            image_floor,
+                        ) {
+                            tracing::warn!("{warning}");
                         }
                         tracing::info!(
                             capacities = ?engine.capacities(),
@@ -1576,6 +1614,7 @@ pub(crate) fn spawn_xla_model_worker(
                 tokenizer,
                 model_path,
                 device.clone(),
+                max_queue_depth,
                 request_rx,
                 batch_metrics,
                 batch_observability,
@@ -1649,17 +1688,50 @@ fn decode_request_image_with_limits(
 ) -> image::ImageResult<DynamicImage> {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     reader.limits(limits.image_decode_limits());
-    reader.decode()
+    let mut image = reader.decode()?;
+    // Upright by the EXIF orientation: mlx-vlm's and transformers' `load_image`
+    // hand these models the picture that way, and a phone stores a portrait
+    // photo on its side.
+    crate::multimodal::image_orientation::turn_upright(&mut image, bytes);
+    Ok(image)
 }
 
 fn is_image_limit_error(err: &ImageError) -> bool {
     matches!(err, ImageError::Limits(_))
 }
 
+/// One vision feature cache key per request image, in request order.
+///
+/// The cached value is the vision tower's output, which for Gemma 4 depends on
+/// the soft-token budget as well as the image bytes. Fold the budget into the
+/// key so the same image requested at two budgets cannot serve one's features
+/// for the other.
+pub(crate) fn vision_cache_keys(
+    images: &[Vec<u8>],
+    image_soft_tokens: Option<usize>,
+) -> Vec<Option<crate::vision::feature_cache::CacheKey>> {
+    images
+        .iter()
+        .map(|bytes| {
+            Some(crate::vision::feature_cache::CacheKey::from_hash(
+                crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens(
+                    bytes,
+                    image_soft_tokens,
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// `image_soft_tokens` is the request-scoped Gemma 4 image soft-token budget
 /// (`None` = use the checkpoint's configured budget). It is already validated
 /// against the supported ladder at the request boundary. Every non-Gemma-4
 /// family ignores it.
+///
+/// `video_knobs` carries the server-wide `--video-num-frames` /
+/// `--video-min-frames` knobs (issue #2399) into the native-video decode paths.
+/// Only the families that decode frames natively consume them; Inkling keeps
+/// its own fixed adjacent-pair sampling.
 pub(crate) fn prepare_request_vlm_embeddings(
     model: &LoadedModel,
     tokenizer: &MlxcelTokenizer,
@@ -1670,6 +1742,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     videos: &[crate::server::media::ResolvedVideo],
     vision_caches: Option<&ModelVisionCaches>,
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
     cancelled: &AtomicBool,
     observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
@@ -1677,6 +1750,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     if !audio.is_empty() && !model.supports_audio_input() {
         observability.record_audio_feature_rejection();
+        if matches!(model, LoadedModel::MiMoV2VLM(_)) {
+            return Err(anyhow!(
+                "MiMo-V2 audio input is not supported yet: the checkpoint's 20-channel codec \
+                 tokenizer (audio_tokenizer/) and AudioEncoder have no mlxcel port. Send text, \
+                 image or video input instead."
+            ));
+        }
         return Err(anyhow!("Audio input is not supported by the loaded model"));
     }
     // Images and videos used to fall through to the text-only branch below, so
@@ -1778,6 +1858,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
                 audio,
                 end_of_turn_token_id,
                 image_soft_tokens,
+                video_knobs,
             );
         }
         return prepare_request_video_embeddings(
@@ -1787,6 +1868,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
             images,
             videos,
             image_soft_tokens,
+            video_knobs,
         );
     }
 
@@ -1891,21 +1973,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     if !images.is_empty() {
         let decoded_images = decode_request_images(images)?;
         let prepared = if let Some(caches) = vision_caches.filter(|c| c.enabled()) {
-            // The cached value is the vision tower's output, which for Gemma 4
-            // depends on the soft-token budget as well as the image bytes.
-            // Fold the budget into the key so the same image requested at two
-            // budgets cannot serve one's features for the other.
-            let image_cache_keys: Vec<Option<crate::vision::feature_cache::CacheKey>> = images
-                .iter()
-                .map(|bytes| {
-                    Some(crate::vision::feature_cache::CacheKey::from_hash(
-                        crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens(
-                            bytes,
-                            image_soft_tokens,
-                        ),
-                    ))
-                })
-                .collect();
+            let image_cache_keys = vision_cache_keys(images, image_soft_tokens);
             prepare_vlm_embeddings_with_cache(
                 model,
                 prompt_tokens,
@@ -2531,14 +2599,17 @@ fn materialize_phi4mm_ordered_prompt(
         ORDERED_MEDIA_PREFIX, OrderedMediaSegment, parse_ordered_media_segments,
     };
 
+    // A prompt without ordered markers did not come from the server's ordered
+    // content renderer: the CLI renders the user turn through the checkpoint
+    // template, which has no media branch, so `mlxcel generate --audio` reaches
+    // here with plain text (issue #3362). Pass it through unchanged, as the
+    // Gemma3n path keeps its pre-rendered prompt (#922):
+    // `prepare_phi4mm_prompt_tokens` keeps explicit `<|audio_N|>` /
+    // `<|image_N|>` tags, inserts missing ones at the start of the user turn
+    // (the same normalization the OpenXLA CLI applies), and still rejects any
+    // placeholder count that disagrees with the request.
     if !prompt.contains(ORDERED_MEDIA_PREFIX) {
-        return if expected_images == 0 && expected_audio == 0 {
-            Ok(prompt.to_string())
-        } else {
-            Err(anyhow!(
-                "rendered Phi4MM prompt lost ordered media markers for {expected_images} image/{expected_audio} audio inputs"
-            ))
-        };
+        return Ok(prompt.to_string());
     }
     let mut materialized = String::with_capacity(prompt.len());
     let mut images = 0usize;
@@ -3230,10 +3301,14 @@ fn prepare_request_video_embeddings(
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
     if let LoadedModel::InklingVLM(inkling) = model {
+        // Inkling samples adjacent timestamped pairs rather than independent
+        // frames, and caps a request at sixteen pairs. A frame-count knob
+        // would fight that pairing, so `video_knobs` deliberately stops here.
         let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
             crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
         );
@@ -3257,18 +3332,26 @@ fn prepare_request_video_embeddings(
             images,
             videos,
             image_soft_tokens,
+            video_knobs,
         );
     }
 
     // Kimi-VL / Kimi-VL 2.5 (kimi_k25) MoonViT 3D video path (issue #551).
     if let LoadedModel::KimiVL(kimi) = model {
-        return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos);
+        return prepare_kimi_vl_video_embeddings(kimi, prompt_tokens, images, videos, video_knobs);
     }
 
     // Qwen-VL video path (issue #1166): shared image/video patchifier,
     // prompt-order placeholder expansion, and exact scatter cardinality.
     if let Some(qwen) = crate::vlm_runtime::qwen_video_runtime(model) {
-        return prepare_qwen_vl_video_embeddings(qwen, prompt_tokens, images, videos);
+        return prepare_qwen_vl_video_embeddings(
+            qwen,
+            tokenizer,
+            prompt_tokens,
+            images,
+            videos,
+            video_knobs,
+        );
     }
 
     let gemma4_vl = match model {
@@ -3305,12 +3388,32 @@ fn prepare_request_video_embeddings(
     // never re-opens the canonical path, so an attacker cannot win the
     // canonicalise → ffmpeg-open swap race even with write access to an
     // allowlist directory.
+    // `process_videos` takes no target count: it samples each clip down to the
+    // processor's own `video_num_frames` (32 for the shipped checkpoint). A
+    // `--video-num-frames` larger than that cap therefore cannot be honored on
+    // this arm, so clamp it before decoding instead of decoding frames the
+    // sampler is about to drop, and report the clamp rather than truncating
+    // silently (issue #2399).
+    let processor_frame_cap = gemma4_vl.processor.video_num_frames;
+    let clamped_knobs = video_knobs.clamped_to_processor_cap(processor_frame_cap);
+    if clamped_knobs.num_frames != video_knobs.num_frames {
+        tracing::warn!(
+            requested_frames = video_knobs.num_frames,
+            processor_frame_cap,
+            effective_frames = clamped_knobs.num_frames,
+            "--video-num-frames exceeds the Gemma 4 processor frame cap for this \
+             checkpoint; the request is clamped to processor_frame_cap frames per clip"
+        );
+    }
+    let effective_knobs = clamped_knobs;
+
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     let mut fps_per_video: Vec<f64> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = effective_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3455,6 +3558,15 @@ pub(crate) fn prepare_inkling_video_embeddings(
         decoded_frame_count,
         videos.len(),
     );
+    for (clip, decoded) in decoded_videos.iter().enumerate() {
+        tracing::debug!(
+            clip,
+            sampled_frames = decoded.sampled_frame_count,
+            pairs = ?decoded.pairs,
+            timestamps_s = ?decoded.timestamps,
+            "Inkling video clip plan"
+        );
+    }
     let decoded_images = if images.is_empty() {
         Vec::new()
     } else {
@@ -3500,6 +3612,7 @@ fn prepare_kimi_vl_video_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -3517,8 +3630,9 @@ fn prepare_kimi_vl_video_embeddings(
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = video_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3560,9 +3674,11 @@ fn prepare_kimi_vl_video_embeddings(
 /// `max_frames` are rejected before generation instead of silently clamped.
 fn prepare_qwen_vl_video_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    tokenizer: &MlxcelTokenizer,
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -3574,15 +3690,15 @@ fn prepare_qwen_vl_video_embeddings(
     }
 
     let info = qwen.prompt_info();
-    let policy = info.processor.video_sampling_policy();
+    let policy = video_knobs.apply_to(info.processor.video_sampling_policy());
     let limits = video::VideoLimits::from_env();
-    let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
+    let mut sampled_videos: Vec<video::SampledVideo> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(info.processor.video_default_fps);
-        let frames = video::load_video_source_with_policy(
+        let sampled = video::load_video_source_sampled_with_policy(
             &resolved.source,
             Some(fps),
-            None,
+            video_knobs.num_frames,
             policy,
             &limits,
         )
@@ -3593,13 +3709,16 @@ fn prepare_qwen_vl_video_embeddings(
                 err
             )
         })?;
-        decoded_videos.push(frames);
+        sampled_videos.push(sampled);
     }
 
-    let total_frames: usize = decoded_videos.iter().map(Vec::len).sum();
+    let total_frames: usize = sampled_videos
+        .iter()
+        .map(|sampled| sampled.frames.len())
+        .sum();
     tracing::info!(
         "Qwen-VL video request: decoded {} video(s) ({} total frames after sampling)",
-        decoded_videos.len(),
+        sampled_videos.len(),
         total_frames
     );
 
@@ -3609,16 +3728,135 @@ fn prepare_qwen_vl_video_embeddings(
         decode_request_images(images)?
     };
 
+    qwen_vl_embeddings_from_sampled_videos(
+        qwen,
+        tokenizer,
+        prompt_tokens,
+        &decoded_images,
+        sampled_videos,
+    )
+    .map(Some)
+}
+
+/// Seconds of source video per temporal grid of each sampled clip, in clip
+/// order: `temporal_patch_size / sampled fps`, the Qwen2.5-VL reference
+/// processor's `second_per_grid_ts` (Blaizzy/mlx-vlm#2760).
+///
+/// The rate is the one the sampler achieved ([`SampledVideo::sampled_fps`]),
+/// not the one the request asked for: frame rounding, the policy bounds and
+/// the `num_frames` knob (#3204) all encode a frame count other than
+/// `duration * requested fps`, and the encoded frames are what the positions
+/// describe.
+///
+/// `None` for a family that renders per-group `<t seconds>` markers
+/// (`video_timestamps`, the Qwen3-VL family): its real time is in the text,
+/// and each temporal group is positioned on its own.
+///
+/// [`SampledVideo::sampled_fps`]: crate::multimodal::video::SampledVideo::sampled_fps
+fn qwen_vl_video_second_per_grid(
+    video_timestamps: bool,
+    temporal_patch_size: usize,
+    sampled_videos: &[crate::multimodal::video::SampledVideo],
+) -> Result<Option<Vec<f32>>> {
+    if video_timestamps {
+        return Ok(None);
+    }
+    sampled_videos
+        .iter()
+        .enumerate()
+        .map(|(idx, sampled)| {
+            let sampled_fps = sampled
+                .sampled_fps()
+                .map_err(|err| anyhow!("Qwen-VL video {idx}: {err}"))?;
+            let second_per_grid =
+                crate::qwen_vl::qwen_video_second_per_grid(sampled_fps, temporal_patch_size)
+                    .map_err(|err| anyhow!("Qwen-VL video {idx}: {err}"))?;
+            tracing::info!(
+                "Qwen-VL video {idx}: {} of {} frame(s) at {} fps, sampled fps {sampled_fps}, \
+                 second_per_grid {second_per_grid}",
+                sampled.frame_indices.len(),
+                sampled.total_frames,
+                sampled.source_fps
+            );
+            Ok(second_per_grid)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// Everything [`prepare_qwen_vl_video_embeddings`] does once the clips are
+/// sampled: derive the per-clip timing the family needs and compute the
+/// embeddings. Split out so the timing hand-off is testable without ffmpeg.
+fn qwen_vl_embeddings_from_sampled_videos(
+    qwen: &dyn crate::qwen_vl::QwenVlRuntime,
+    tokenizer: &MlxcelTokenizer,
+    prompt_tokens: &mut Vec<i32>,
+    decoded_images: &[image::DynamicImage],
+    sampled_videos: Vec<crate::multimodal::video::SampledVideo>,
+) -> Result<InputEmbeddings> {
+    let info = qwen.prompt_info();
+
+    // Qwen2.5-VL spaces a video's temporal positions by real time; the flat
+    // families that do not simply ignore this in the runtime.
+    let second_per_grid = qwen_vl_video_second_per_grid(
+        info.video_timestamps,
+        info.processor.temporal_patch_size,
+        &sampled_videos,
+    )?;
+
+    let mut decoded_videos: Vec<Vec<image::DynamicImage>> =
+        Vec::with_capacity(sampled_videos.len());
+    let mut sampled_timing: Vec<(Vec<usize>, f64)> = Vec::with_capacity(sampled_videos.len());
+    for sampled in sampled_videos {
+        sampled_timing.push((sampled.frame_indices, sampled.source_fps));
+        decoded_videos.push(sampled.frames);
+    }
+
+    // Qwen3-VL renders a `<t seconds>` marker before each temporal group; the
+    // times come from the frames the sampler actually kept (#2402).
+    let group_seconds: Vec<Vec<f64>> = if info.video_timestamps {
+        let temporal_patch_size = info.processor.temporal_patch_size;
+        sampled_timing
+            .iter()
+            .zip(&decoded_videos)
+            .map(|((indices, source_fps), frames)| {
+                let grid_t = frames.len().div_ceil(temporal_patch_size.max(1));
+                crate::qwen_vl::qwen_video_group_timestamps(
+                    indices,
+                    *source_fps,
+                    temporal_patch_size,
+                    grid_t,
+                )
+            })
+            .collect::<Result<_>>()?
+    } else {
+        Vec::new()
+    };
+    let encode_text = |text: &str| -> Result<Vec<i32>> {
+        let ids = tokenizer
+            .encode(text, false)
+            .map_err(|err| anyhow!("Failed to tokenize Qwen-VL video timestamp: {err}"))?;
+        Ok(ids.into_iter().map(|id| id as i32).collect())
+    };
+    let timestamps = info
+        .video_timestamps
+        .then_some(crate::vlm_runtime::QwenVideoTimestamps {
+            group_seconds: &group_seconds,
+            encode_text: &encode_text,
+        });
+
     let (embeddings, _stats) = crate::vlm_runtime::compute_qwen_vl_media_embeddings(
         qwen,
         prompt_tokens,
-        &decoded_images,
+        decoded_images,
         &decoded_videos,
+        timestamps.as_ref(),
+        second_per_grid.as_deref(),
         None,
         None,
     )?;
 
-    Ok(Some(embeddings))
+    Ok(embeddings)
 }
 
 /// Resolve `videos` into Gemma 4 Unified (encoder-free) video embeddings.
@@ -3640,8 +3878,9 @@ fn prepare_gemma4_unified_video_embeddings(
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
-    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    let decoded_videos = gemma4_unified_server_decode_videos(videos, video_knobs)?;
     // Optional companion images (e.g. user passes both image_url and video_url).
     let processed_images =
         gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
@@ -3665,6 +3904,7 @@ fn prepare_gemma4_unified_video_embeddings(
 /// canonical path.
 fn gemma4_unified_server_decode_videos(
     videos: &[crate::server::media::ResolvedVideo],
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Vec<Vec<image::DynamicImage>>> {
     use crate::multimodal::video;
 
@@ -3678,8 +3918,9 @@ fn gemma4_unified_server_decode_videos(
     let mut decoded_videos: Vec<Vec<image::DynamicImage>> = Vec::with_capacity(videos.len());
     for resolved in videos.iter() {
         let fps = resolved.fps.unwrap_or(video::DEFAULT_FPS);
-        let frames =
-            video::load_video_source(&resolved.source, Some(fps), None).map_err(|err| {
+        let frames = video_knobs
+            .load_source(&resolved.source, Some(fps))
+            .map_err(|err| {
                 anyhow!(
                     "Failed to load video {:?}: {}",
                     resolved.source.canonical_path(),
@@ -3752,6 +3993,7 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
     audio_data: &[Vec<u8>],
     end_of_turn_token_id: Option<i32>,
     image_soft_tokens: Option<usize>,
+    video_knobs: crate::multimodal::video::VideoFrameKnobs,
 ) -> Result<Option<InputEmbeddings>> {
     // Strict where the audio-only path (`prepare_gemma4_unified_audio_embeddings`)
     // is lenient: that one warns and drops the audio, this one refuses. The
@@ -3777,7 +4019,7 @@ fn prepare_gemma4_unified_video_and_audio_embeddings(
     // combined path from being the cheaper way to buy that work.
     let audio_input = gemma4_unified_server_audio_features(unified, audio_data)?;
 
-    let decoded_videos = gemma4_unified_server_decode_videos(videos)?;
+    let decoded_videos = gemma4_unified_server_decode_videos(videos, video_knobs)?;
     let processed_images =
         gemma4_unified_server_images(unified, prompt_tokens, images, image_soft_tokens)?;
     let video_frames = gemma4_unified_server_video_frames(unified, prompt_tokens, &decoded_videos)?;
@@ -3846,7 +4088,20 @@ pub(crate) fn build_generation_result_with_cache(
         completion_tokens,
         generation_time_ms: elapsed_ms,
         prompt_eval_ms,
+        // The decode window: from the first-token instant (`prompt_eval_ms`,
+        // stamped when the prefill-sampled token reaches the decode state, or
+        // the target prefill's end on a drafted request) to the finish.
         generation_only_ms: elapsed_ms.saturating_sub(prompt_eval_ms),
+        // The window opens at the first emitted token, so the remaining N-1
+        // tokens are the ones emitted inside it (issue #2938). Every producer
+        // of this builder stamps that instant through `StreamingDecodeState`:
+        // the batch scheduler (whose first token comes out of prefill, the
+        // only producer the `/metrics` histogram records) and the XLA worker
+        // decode one token per step after it. The diffusion worker commits a
+        // whole block at once, so the rest of its first block was computed
+        // before the window opened; its count is a bound on the window's
+        // work, not an exact one, and it does not reach the histogram.
+        decode_window_tokens: Some(completion_tokens.saturating_sub(1)),
         finish_reason: finish_reason.to_string(),
         // The EOS-or-length split this function has always made. A string
         // stop-sequence match cannot be seen from the token counts, so the

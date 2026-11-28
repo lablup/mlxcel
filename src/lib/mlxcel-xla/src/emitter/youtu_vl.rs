@@ -5,11 +5,15 @@
 
 //! StableHLO Youtu-VL windowed vision tower and built-in patch merger.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::numeric_ops::{exact_gelu, layer_norm_2d, rms_norm_2d, stable_softmax, tanh_gelu};
 #[cfg(any(test, feature = "diagnostics"))]
 use super::youtu_vl_plan::YoutuVlDiagnosticStage;
 use super::youtu_vl_plan::{YOUTU_VL_PATCH_BUCKETS, YoutuVlVisionConfig, YoutuVlWeightSpec};
+
+/// Contraction precision of this graph on every device. The runtime binds the
+/// same value into the artifact's operator numeric contract (issue #3211).
+pub(crate) const YOUTU_VL_VISION_PRECISION: Precision = Precision::F32;
 
 struct Args {
     values: Vec<Val>,
@@ -205,7 +209,7 @@ fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlG
     );
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(YOUTU_VL_VISION_PRECISION);
     let patch_width = config.channels * config.patch_size * config.patch_size;
     let head_dim = config.hidden / config.heads;
     let patches = args.input(

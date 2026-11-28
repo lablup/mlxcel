@@ -14,7 +14,7 @@
 #     on-device argmax. The root `xla-iree` feature enables it.
 [package]
 name = "mlxcel-xla"
-version = "0.8.0"
+version = "0.9.0-beta.2"
 edition = "2024"
 description = "OpenXLA / StableHLO compiler-family inference backend for mlxcel (default-off)"
 repository = "https://github.com/lablup/mlxcel"
@@ -61,8 +61,13 @@ serde_json = { version = "1" }
 
 [build-dependencies]
 cc = "1"
+# Digest of the linked IREE runtime archive, baked for the operator numeric
+# contract backend identity (issue #3211).
+sha2 = "0.11"
 
 [dev-dependencies]
+# Scratch directories for the private-cache tests (#3248).
+tempfile = "3"
 # Auxiliary artifact qualification is pure Rust and must remain testable
 # without enabling/linking the native IREE runtime.
 sha2 = "0.11"

@@ -49,14 +49,16 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
 | `src/models/qwen3_vl_embedding.rs` | Qwen3-VL-Embedding: multimodal chat formatting, vision injection and last-token pooling. |
 | `src/models/llama_nemotron_vl_embedding.rs` | Llama-Nemotron-VL-Embed: SigLIP tiling, projection and bidirectional Llama pooling. |
-| `src/models/col_late_interaction.rs` | Shared by the two late-interaction families: `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
+| `src/models/col_late_interaction.rs` | Shared by the two late-interaction VLM families (LFM2.5-ColBERT reuses only `project_and_normalize`): `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
 | `src/models/colidefics3.rs` | ColIdefics3: SmolVLM / Idefics3 without a head plus a 128-dim projection. |
 | `src/models/colqwen2_5.rs` | ColQwen2.5: Qwen2.5-VL without a head plus a 128-dim projection. |
 | `src/models/llama_bidirec.rs` | Bidirectional Llama (LLM2Vec): Llama 3 layers under a padding-only mask, mean pooling. |
 | `src/models/ministral3_embedding.rs` | Nemotron-3-Embed: bidirectional Ministral 3, Llama 4 attention scaling at offset 0, mean pooling. |
-| `src/models/lfm2_embedding.rs` | LFM2.5-Embedding: bidirectional LFM2 (non-causal short conv), CLS pooling. |
+| `src/models/lfm2_embedding.rs` | LFM2.5-Embedding and LFM2.5-Encoder: bidirectional LFM2 (non-causal short conv), CLS pooling; LFM2.5-ColBERT: the same backbone with a token projection, multi-vector. |
+| `src/models/lfm2_embedding_head.rs` | LFM2 head selection: finds the ColBERT projection (`1_Dense/`, `dense.*`, or an mlx-vlm re-export's `projection.*`) and validates it against `1_Dense/config.json` and `mlx.proj_dim`, and refuses a `modules.json` that lists a Pooling module. |
 | `src/rerank/mod.rs` | `Reranker` trait, `RerankerKind`, `RerankItem`, `detect_reranker_kind`. |
-| `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides. |
+| `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides; `load_reranker_or_late_interaction`, the `mlxcel rerank` fallback onto a multi-vector embedder. |
+| `src/rerank/late_interaction.rs` | `score_late_interaction`: the MaxSim scoring rule `/v1/rerank` and `mlxcel rerank` share; `LateInteractionReranker` for the CLI. |
 | `src/rerank/sequence_classifier.rs` | Cross-encoder path: pair tokenization, longest-first truncation, `sigmoid(logit)`. |
 | `src/rerank/qwen3_generative.rs` | Qwen3 yes/no path: the prompt recipe, left padding, `sigmoid(logit(yes) - logit(no))`. |
 | `src/rerank/qwen3_vl_generative.rs` | Qwen3-VL yes/no path: `reranker.jinja`, image merge, `1_LogitScore` token ids. |
@@ -71,7 +73,7 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 A checkpoint is served as an embedding model, before the ordinary `model_type` dispatch runs, when any of these hold:
 
 - `config.json` `model_type` is an encoder-only family: `bert`, `xlm-roberta`, `modernbert`, `siglip`, `embedding_gemma2`, `embedding_gemma2_text`. These never generate text; a `BertForMaskedLM` or `ModernBertForMaskedLM` export loads as an embedder with its MLM head dropped.
-- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `EmbeddingGemma2Model`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
+- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `EmbeddingGemma2Model`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Lfm2BidirectionalForMaskedLM`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
 - `modules.json` exists and lists a module whose `type` ends with `.Pooling` (the sentence-transformers layout). A `modules.json` whose only extra module is `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
 - `1_Pooling/config.json` exists.
 
@@ -327,7 +329,7 @@ maxsim(q, d) = sum over query rows i of ( max over document rows j of dot(q_i, d
 
 `crate::embeddings::maxsim` implements it over read-back rows and `maxsim_mlx` over device arrays. Because every row is L2-normalized, each inner product is a cosine and the score is bounded by the query's row count; it is reported raw rather than averaged, since comparing two documents for one query is what the number is read for. The score is asymmetric: the outer sum always runs over the first argument.
 
-`mlxcel embed` prints this matrix, labelled `MaxSim similarity`, in place of the cosine matrix whenever the loaded model is multi-vector.
+`mlxcel embed` prints this matrix, labelled `MaxSim similarity`, in place of the cosine matrix whenever the loaded model is multi-vector. `mlxcel-server` also serves the same score on `/v1/rerank` for a multi-vector embedder; see [Late-interaction scoring](#late-interaction-scoring).
 
 ### Bidirectional Llama, LLM2Vec (`LlamaBidirec`)
 
@@ -372,14 +374,32 @@ The attention layers take the usual padding-only mask. The short conv needs two 
 
 Pooling is CLS: the tokenizer's post-processor prepends `<|startoftext|>` and the sentence vector is the hidden state there. Right padding puts it at index 0 in every row, though the pooling finds it by first-real-token argmax rather than assuming that.
 
-The LFM2 and LFM2.5 ColBERT late-interaction checkpoints share this `model_type` and this architecture but project every token through a `1_Dense` module and emit one vector per token. They are rejected at load rather than served as a single pooled vector.
-
 `max_length` is 512 (`sentence_bert_config.json`), well under the hard cap. Prompt prefixes, applied by the caller: `query: ` and `document: `.
 
 ```sh
 mlxcel embed -m LiquidAI/LFM2.5-Embedding-350M \
   -p "query: how do solar panels generate electricity" \
   -p "document: Photovoltaic cells convert sunlight into electricity through the photovoltaic effect."
+```
+
+Two more checkpoints share this backbone, `model_type` and `ModelType`. The loader tells them apart by their weights:
+
+- `LiquidAI/LFM2.5-Encoder-350M` (`architectures: ["Lfm2BidirectionalForMaskedLM"]`) stores the backbone under `lfm2.`, which is stripped before the shared sanitize. Its masked-LM head is tied to `embed_tokens`, so nothing else is dropped and no fill-mask output is served. It pools like LFM2.5-Embedding: CLS, unless a `1_Pooling` folder or `--pooling` says otherwise, returning a 1024-wide vector. This is an MLM backbone published for fine-tuning, so its pooled vector is not a trained sentence embedding; use LFM2.5-Embedding for retrieval.
+- `LiquidAI/LFM2.5-ColBERT-350M` and its mlx-community conversions (`-bf16`, `-4bit`, `-8bit`) are late-interaction retrievers. The HF export keeps the token projection in `1_Dense/` (folded to `dense.0.*` at load); the conversions store it as a top-level `dense.*` linear, quantized with the backbone in the `-4bit` and `-8bit` builds; a checkpoint re-exported by mlx-vlm stores it as `projection.*`, quantized or not. Exactly one of these layouts may be present. With a projection present the model is multi-vector: every token's hidden state is projected to 128 dimensions and L2-normalized, pooling is skipped, and `/v1/embeddings` returns `[num_tokens, 128]` per input (see [Multi-vector output](#multi-vector-late-interaction-output)). A `1_Dense/config.json` must declare `activation_function` Identity and `use_residual` false, and its `out_features` (and the conversions' `mlx.proj_dim`) must match the weight. Two or more Dense modules are a load error, and so is a `modules.json` that lists a Pooling module (a pooled single-vector Dense head is not a ColBERT projection).
+
+The ColBERT head keeps the padding-zeroed conv input described above. The mlx-vlm reference runs it with `mask_convolutions=False`; both agree on unpadded rows, and keeping the mask makes a padded row equal the same row run alone.
+
+Known differences from PyLate scores, all caller-side or absent from the mlx-vlm reference too:
+
+- The `[Q] ` and `[D] ` prefixes (`config_sentence_transformers.json` `query_prefix` / `document_prefix`) are not added for you; prepend them as with the `query: ` / `document: ` prefixes above.
+- PyLate expands a query to `query_length` 32 with mask tokens; mlxcel embeds the query as given.
+- PyLate drops the vectors of punctuation tokens in documents (`skiplist_words`); mlxcel returns every token.
+
+```sh
+mlxcel embed -m LiquidAI/LFM2.5-ColBERT-350M \
+  -p "[Q] how do solar panels generate electricity" \
+  -p "[D] Photovoltaic cells convert sunlight into electricity." \
+  -p "[D] The recipe calls for two cups of flour and one egg."
 ```
 
 ### Batch geometry and bf16
@@ -421,7 +441,7 @@ A mask is never built as `(1 - m) * C` with a finite `C` in the activation dtype
 - Token-id inputs are used verbatim (no special tokens added) and every id must be `< vocab_size`.
 - `encoding_format: base64` encodes each vector as little-endian f32 bytes, standard base64 with padding. For multi-vector (late-interaction) models `embedding` is a list of vectors, `[num_real_tokens][D]`, in float mode; in base64 mode it is the row-major bytes plus a sibling `"shape": [num_real_tokens, D]`.
 - `usage.prompt_tokens` counts the real (non-padding) tokens across all inputs, special tokens included; `total_tokens` equals it.
-- `image_url` items accept a `data:image/...;base64,` URI, a `file://` path, an `http(s)://` URL or a local path, bounded by the shared image limits. Images are embedded one at a time; text items are sorted by token length, cut into micro-batches of `--embedding-batch-size`, and written back in request order.
+- `image_url` items accept a `data:image/...;base64,` URI, a `file://` path, an `http(s)://` URL or a local path, bounded by the shared image limits. A picture is turned upright by its EXIF orientation tag before it is embedded. Images are embedded one at a time; text items are sorted by token length, cut into micro-batches of `--embedding-batch-size`, and written back in request order.
 
 ### Errors
 
@@ -469,15 +489,16 @@ Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for 
 
 ## Reranking (`/v1/rerank`) and `mlxcel rerank`
 
-A reranker scores how relevant a document is to a query and returns a probability in `[0, 1]`; it is a cross-encoder over the pair rather than two independent vectors, so it cannot be indexed but it discriminates far better than a cosine over embeddings. The usual shape is retrieve with `/v1/embeddings`, then reorder the top candidates with `/v1/rerank`.
+A reranker scores how relevant a document is to a query and, for the checkpoint kinds, returns a probability in `[0, 1]`; it is a cross-encoder over the pair rather than two independent vectors, so it cannot be indexed but it discriminates far better than a cosine over embeddings. The usual shape is retrieve with `/v1/embeddings`, then reorder the top candidates with `/v1/rerank`.
 
-Three checkpoint shapes are served, and all three end at a probability:
+Three checkpoint shapes are served, and all three end at a probability. A fourth kind, `late_interaction`, needs no reranker checkpoint: it scores with a served multi-vector embedder and reports a raw MaxSim sum ([below](#late-interaction-scoring)).
 
 | Kind | Selected when | Score | Checkpoints |
 |------|---------------|-------|-------------|
 | `sequence_classifier` | `architectures[0]` ends with `ForSequenceClassification` and `model_type` is `bert`, `xlm-roberta` or `modernbert` | `sigmoid(logit)` from the one-label head | `BAAI/bge-reranker-v2-m3`, `cross-encoder/ms-marco-MiniLM-L6-v2`, `Alibaba-NLP/gte-reranker-modernbert-base` |
 | `generative_text` | `--reranker-model` points at a `model_type: qwen3` causal checkpoint | `sigmoid(logit("yes") - logit("no"))` at the last prompt position | `Qwen/Qwen3-Reranker-0.6B` and its MLX quantizations, e.g. `mlx-community/Qwen3-Reranker-0.6B-4bit` |
 | `generative_vl` | `--reranker-model` points at a `model_type: qwen3_vl` checkpoint | the same yes/no read, over a prompt whose query and documents may carry images | `Qwen/Qwen3-VL-Reranker-2B` |
+| `late_interaction` | the served embedding model is multi-vector and no reranker is configured | raw MaxSim `sum_i max_j dot(q_i, d_j)`, not a probability | LFM2.5-ColBERT, ColIdefics3 (colSmol), ColQwen2.5 |
 
 A classifier that does not expose exactly one output label is rejected at load with `reranker sequence classifiers must expose exactly one output label`; the count comes from the row count of the projection tensor, not from `config.json`. Any other `model_type` is rejected with `Unsupported reranker model type`.
 
@@ -509,6 +530,31 @@ Image placeholders are expanded to the visual-token count the Qwen2-VL processor
 
 Video documents are out of scope.
 
+### Late-interaction scoring
+
+When the embedding model `mlxcel-server` serves (from `-m` or `--embedding-model`) is multi-vector and neither `--reranker-model` nor a reranker `-m` is configured, `/v1/rerank` and its aliases score documents by MaxSim over that embedder (#1426). There is no second checkpoint and no second worker: the query and the documents are embedded through the embedding worker exactly as `/v1/embeddings` would embed them (every text item in one `embed_texts` call, so one queue slot and one reply timeout cover the whole request, then each image item in its own call, capped by the per-request image limit), and `crate::embeddings::maxsim` scores the read-back rows, the same function `mlxcel embed` prints its `MaxSim similarity` matrix with. `/props` reports `capabilities.reranking.kind` as `late_interaction`, and `/v1/models` lists the shared id once. A configured reranker always wins; the startup log then says the multi-vector embedder is not exposed on `/v1/rerank`. A single-vector embedder is never used this way, because MaxSim over one row is a plain dot product.
+
+- Scores are the raw MaxSim sum, not probabilities, and are not normalized. Each row is L2-normalized, so the score is bounded by the query's row count and grows with the query's length: it ranks documents for one query and is not comparable across queries or with a cross-encoder's score. The margin between documents is what the number is for.
+- An item is embedded as its image when it carries one (ColIdefics3 and ColQwen2.5 accept images, LFM2.5-ColBERT does not and answers `400`), otherwise as its text. A document whose embedding has no rows scores `0.0`.
+- `instruction` is rejected with `400`, as for the cross-encoder: there is no prompt to render it into.
+- `usage.prompt_tokens` is the sum of the embedding replies' token counts (query plus every document). Queue-full, timeout and inference errors from the embedding worker map to the route's `503`, `504` and `500`.
+- The server's `--embd-normalize` applies, so the rows scored are the rows `/v1/embeddings` returns.
+- LFM2.5-ColBERT expects the `[Q] ` and `[D] ` prefixes on the query and the documents; they are caller-side here as on `/v1/embeddings` and `mlxcel embed`, so send them in the request text. The col* VLM embedders add their own `Query: ` formatting.
+
+```sh
+mlxcel-server -m mlx-community/LFM2.5-ColBERT-350M-bf16 --port 8080
+curl -s localhost:8080/v1/rerank -H 'Content-Type: application/json' -d '{
+  "query": "[Q] how do solar panels generate electricity",
+  "documents": ["[D] The recipe calls for two cups of flour and one egg.",
+                "[D] Photovoltaic cells convert sunlight into electricity."]}'
+```
+
+ColIdefics3 and ColQwen2.5 serve page images the same way: send the pages as `{"image_url": "data:image/png;base64,..."}` documents. `vidore/colSmol-256M` is a LoRA adapter, so merge it into `vidore/ColSmolVLM-Instruct-256M-base` first (`tests/fixtures/generate_colsmol_rerank_fixture.py` does this) and serve the merged directory.
+
+Scoring with `maxsim_mlx` on the worker is not done (the read-back rows of every text item are held at once, the same footprint a `/v1/embeddings` response for those inputs has).
+
+`mlxcel rerank -m` accepts the same multi-vector embedders (#3300): when the checkpoint is not a reranker, it is loaded as an embedder and, if multi-vector, scored by `crate::rerank::score_late_interaction`, the function the server's provider calls over the embedding worker. The CLI runs it over an `EmbeddingEngine` on the calling thread with the server's default batch width (16, `--batch-size` overrides it), so the same request gives the same scores on both sides (the real-checkpoint gates hold them within `1e-5`). The checkpoint's own `normalize` flag applies, as on a server started without `--embd-normalize`. `--json` reports `kind: "late_interaction"`, and `--instruction` is refused as for the cross-encoder. A checkpoint that is neither a reranker nor a multi-vector embedder (a chat export, a single-vector embedder) still fails with the `is not a reranker checkpoint` detection error; a chat export is refused from `config.json` alone, while a single-vector embedder is loaded before it is refused.
+
 ### Request and response
 
 ```json
@@ -536,15 +582,15 @@ An item is either a bare string or an object with `text`, `image` and/or `image_
 }
 ```
 
-`results` is sorted by `relevance_score` descending with ties broken by ascending `index`, then truncated to `top_n`. `document` is present only when `return_documents` is true, and echoes the request item verbatim. `prompt_tokens` counts the real tokens of every scored pair.
+`relevance_score` is a probability for the checkpoint kinds and the raw MaxSim sum for `late_interaction`. `results` is sorted by `relevance_score` descending with ties broken by ascending `index`, then truncated to `top_n`. `document` is present only when `return_documents` is true, and echoes the request item verbatim. `prompt_tokens` counts the real tokens of every scored pair.
 
 | Status | Type | When |
 |--------|------|------|
-| 400 | `invalid_request_error` | Malformed body, empty `documents`, an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier reranker, or `model` not matching the served id. |
-| 501 | `not_implemented` | No reranker loaded: `No reranker loaded; start with -m <sequence-classifier checkpoint> or --reranker-model <path>`. |
+| 400 | `invalid_request_error` | Malformed body, empty `documents`, more documents than `MLXCEL_RERANK_MAX_DOCUMENTS` (default 1024), an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier or late-interaction reranker, or `model` not matching the served id. |
+| 501 | `not_implemented` | No reranker loaded: `This server does not support reranking. Start it with --reranking, with a sequence-classifier checkpoint or a multi-vector (late-interaction) embedder in -m, or with --reranker-model <path>.` |
 | 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`, shared with the embedding worker). |
 | 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |
-| 500 | `server_error` | The forward pass failed. |
+| 500 | `server_error` | The forward pass failed, or a checkpoint kind returned a score outside `[0, 1]` (any finite score is valid for `late_interaction`). |
 
 ### Reranker flags
 
@@ -582,7 +628,7 @@ mlxcel rerank -m <path or repo-id> -q "query" -d "doc" [-d "doc2" ...] [--image 
               [--max-length N] [--batch-size N] [--models-dir PATH] [--json]
 ```
 
-Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener.
+Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener. `-m` also takes a multi-vector embedder (LFM2.5-ColBERT, ColIdefics3, ColQwen2.5), scored by MaxSim exactly as `/v1/rerank` scores it over the same served model; see [Late-interaction scoring](#late-interaction-scoring).
 
 ```sh
 mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" \
@@ -591,6 +637,14 @@ mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" \
 
 mlxcel rerank -m Qwen/Qwen3-VL-Reranker-2B -q "a chart of quarterly revenue" \
   --image revenue-chart.png --image cat.jpg
+
+mlxcel rerank -m mlx-community/LFM2.5-ColBERT-350M-bf16 \
+  -q "[Q] how do solar panels generate electricity" \
+  -d "[D] The recipe calls for two cups of flour and one egg." \
+  -d "[D] Photovoltaic cells convert sunlight into electricity."
+
+mlxcel rerank -m models/colsmol-256m-merged -q "What was the total revenue in 2023?" \
+  --image matching.png --image unrelated.png
 ```
 
 ## Adding a family

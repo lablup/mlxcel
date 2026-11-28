@@ -23,8 +23,8 @@
 //!
 //! - run `mlxcel tune --op qmm-tile --op qmv-multirow` on a GB10 (or other
 //!   CUDA) host and compare against
-//!   `docs/benchmark_results/qmm-sm121-tile-tuning-gb10-2026-07-10.md` and
-//!   `docs/benchmark_results/qmv-multirow-gb10-2026-07-11.md`;
+//!   `docs/benchmark_results/versions/v0.4.0.md#qmm-sm121-tile-tuning-gb10-2026-07-10` and
+//!   `docs/benchmark_results/versions/v0.4.0.md#qmv-multirow-gb10-2026-07-11`;
 //! - confirm the tuner at minimum reproduces the current best-known manual
 //!   configuration before letting it override anything.
 //!

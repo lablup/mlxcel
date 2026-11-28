@@ -251,6 +251,16 @@ fn uses_request_memory_admission(
     )
 }
 
+/// The refusal for a prompt longer than the context, in upstream's wording
+/// (b10621 `ERROR_TYPE_EXCEED_CONTEXT_SIZE`, #1472). The route layer classifies
+/// the failure by this text.
+pub(crate) fn context_exceeded_message(request_tokens: usize, max: usize) -> String {
+    format!(
+        "request ({request_tokens} tokens) exceeds the available context size ({max} tokens), \
+         try increasing it"
+    )
+}
+
 /// One-shot HTTP admission signal. Clones share a single sender, not multiple
 /// acknowledgements. Providers remove this from generation options before enqueue.
 #[derive(Debug, Clone)]
@@ -547,7 +557,26 @@ pub struct GenerationResult {
     pub completion_tokens: usize,
     pub generation_time_ms: u64,
     pub prompt_eval_ms: u64,
+    /// Duration of the timed decode window, in milliseconds.
+    ///
+    /// When [`decode_window_tokens`](Self::decode_window_tokens) is `Some`,
+    /// this is the interval from the first token to the finish
+    /// (`generation_time_ms - prompt_eval_ms`), the window that count
+    /// describes. When it is `None`, the producer could not separate its
+    /// prompt or encoder pass from the decode loop, and this is the request's
+    /// whole wall time instead (Florence-2, Nemotron-Parse). The llama-server
+    /// `predicted_ms` field and counters read this value either way.
     pub generation_only_ms: u64,
+    /// Tokens produced inside the [`generation_only_ms`](Self::generation_only_ms)
+    /// window, or `None` when the producer has no isolated decode window.
+    ///
+    /// This is the numerator of the per-request decode rate (issue #2938),
+    /// following the rule in `docs/benchmarks.md` "How decode tok/s is
+    /// counted": a producer whose first token comes out of prefill reports
+    /// `completion_tokens - 1`, one that produces every token inside the
+    /// window reports `completion_tokens`. `None` makes the `/metrics` decode
+    /// histogram skip the request rather than record a wall-time rate.
+    pub decode_window_tokens: Option<usize>,
     pub finish_reason: String,
     /// Why generation ended, distinguishing a string stop-sequence match from
     /// an EOS token and from the length limit (issue #1466). `finish_reason`
@@ -719,6 +748,15 @@ pub enum WorkerShutdownError {
 /// Shared by every worker that must be joined before the process returns from
 /// `main`: the chat model worker and the audio, embedding, image, rerank and
 /// realtime side workers (#2738, #2745).
+///
+/// The watcher also releases the worker's MLX buffers once the join returns
+/// (#2399). `join` only completes after the worker's stack frame — and with it
+/// the loaded model and every array it owned — has been dropped, on the panic
+/// path too, so the buffers are already free and sitting in MLX's allocator
+/// cache. Clearing here reclaims them instead of leaving a whole model resident
+/// for the next load in the same process. One clear covers every worker
+/// constructor because every constructor goes through this function; the model
+/// worker's idle-sleep clear (`model_worker`) is a separate, still-needed site.
 pub(crate) fn observe_worker_exit(
     worker_handle: thread::JoinHandle<()>,
 ) -> (thread::JoinHandle<()>, Arc<WorkerExitObserver>) {
@@ -726,6 +764,15 @@ pub(crate) fn observe_worker_exit(
     let observer_for_thread = observer.clone();
     let watcher = thread::spawn(move || {
         let panic_message = worker_handle.join().err().map(worker_panic_message);
+        let before = mlxcel_core::memory::snapshot().cache_bytes;
+        mlxcel_core::memory::clear_cache();
+        let after = mlxcel_core::memory::snapshot().cache_bytes;
+        tracing::debug!(
+            cache_bytes_before = before,
+            cache_bytes_after = after,
+            released_bytes = before.saturating_sub(after),
+            "worker exited; cleared the MLX allocator cache"
+        );
         observer_for_thread.mark_observed(panic_message);
     });
     (watcher, observer)
@@ -888,7 +935,7 @@ impl ModelProvider {
         // speculative dispatch, prompt cache) does not apply; `max_batch_size`
         // maps to the engine's bundled slot count.
         #[cfg(feature = "xla-iree")]
-        if std::env::var("MLXCEL_BACKEND").ok().as_deref() == Some("xla") {
+        if crate::server::xla_prompt_cache_guard::xla_serve_backend_selected() {
             if config.no_batch {
                 tracing::warn!(
                     "--no-batch is ignored by the OpenXLA backend; it serves through the \
@@ -896,8 +943,21 @@ impl ModelProvider {
                 );
             }
             let b_max = xla_serve_b_max(config.max_batch_size);
-            let mut provider =
-                Self::new_with_xla_worker(model_path, b_max, batch_metrics, batch_observability)?;
+            // Recurrent models never get a store, so no prompt-cache or APC
+            // hook can reach them (#3341). Startup already built none for
+            // them; this covers any other caller that passes one.
+            let prompt_cache_store =
+                crate::server::xla_prompt_cache_guard::xla_provider_prompt_cache(
+                    &model_path,
+                    prompt_cache_store,
+                );
+            let mut provider = Self::new_with_xla_worker(
+                model_path,
+                b_max,
+                config.max_queue_depth,
+                batch_metrics,
+                batch_observability,
+            )?;
             provider.prompt_cache = prompt_cache_store;
             provider.decode_hang_timeout = decode_hang_timeout;
             return Ok(provider);
@@ -1153,7 +1213,7 @@ impl ModelProvider {
         Ok(Self {
             request_tx,
             model_id,
-            created_at: chrono::Utc::now().timestamp(),
+            created_at: crate::server::clock::unix_seconds_now(),
             loaded: Arc::new(AtomicBool::new(false)),
             snapshot_reuse_capable: Arc::new(AtomicBool::new(false)),
             chat_unavailable,
@@ -1192,7 +1252,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
@@ -1263,10 +1323,18 @@ impl ModelProvider {
     /// count, queue depth, and per-sequence completion the `/metrics` endpoint
     /// reports (the `batch_observability` handle is held for the provider API
     /// surface; the XLA path has no prompt cache or preemption to report there).
+    ///
+    /// `max_queue_depth` is the `--max-queue-depth` admission bound, enforced by
+    /// the worker against the number of requests queued and not yet admitted,
+    /// which is what the MLX scheduler's own bound counts. It has to reach the
+    /// worker: unlike the MLX path, nothing else on the OpenXLA path refuses a
+    /// request once the batch is full, and a queued multimodal request owns its
+    /// whole static-shape embeddings payload.
     #[cfg(feature = "xla-iree")]
     pub(crate) fn new_with_xla_worker(
         model_path: PathBuf,
         b_max: usize,
+        max_queue_depth: usize,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -1275,7 +1343,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let snapshot_reuse_capable = Arc::new(AtomicBool::new(false));
@@ -1284,6 +1352,7 @@ impl ModelProvider {
         let worker_handle = model_worker::spawn_xla_model_worker(
             model_path,
             b_max,
+            max_queue_depth,
             request_rx,
             loaded.clone(),
             snapshot_reuse_capable.clone(),
@@ -1302,7 +1371,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             chat_unavailable: Arc::new(AtomicBool::new(false)),
-            max_queue_depth: usize::MAX,
+            max_queue_depth,
             single_stream_queue_admission,
             request_memory_admission: false,
             // The OpenXLA serve worker has no idle-sleep lifecycle, so the flag
@@ -1569,7 +1638,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
@@ -1698,7 +1767,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        let created_at = chrono::Utc::now().timestamp();
+        let created_at = crate::server::clock::unix_seconds_now();
 
         // Create channel for requests
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
@@ -2617,13 +2686,13 @@ impl ModelProvider {
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let mut options = options;
         let mut notification = options.admission_notification.take();
-        // Unsupported paths keep their existing streaming semantics: this
+        // Media requests keep their existing streaming semantics: this
         // handshake must not wait for their worker's first event or reclassify
-        // asynchronous errors that previously followed SSE headers.
-        if (!self.request_memory_admission
-            || !images.is_empty()
-            || !audio.is_empty()
-            || !videos.is_empty())
+        // asynchronous errors that previously followed SSE headers. A text
+        // request answers it from the dispatch below, which waits for the
+        // worker only under request-memory admission, so a prompt the
+        // dispatch can already refuse gets a real status code (#2877).
+        if (!images.is_empty() || !audio.is_empty() || !videos.is_empty())
             && let Some(notification) = notification.take()
         {
             notification.complete(&Ok(()));
@@ -2699,6 +2768,22 @@ impl ModelProvider {
             })
         });
 
+        // A text prompt that cannot fit the per-slot KV bound is refused here,
+        // before SSE headers, with the wording the scheduler's own guard uses
+        // (#2877, #1472). `None` ids or an unpublished bound leave it to that
+        // guard.
+        if images.is_empty()
+            && audio.is_empty()
+            && videos.is_empty()
+            && let (Some(ids), Some(max)) = (
+                prompt_token_ids.as_ref(),
+                self.batch_metrics.prompt_admission_bound(),
+            )
+            && ids.len() >= max
+        {
+            return Err(anyhow::anyhow!(context_exceeded_message(ids.len(), max)));
+        }
+
         // Same treatment for the history-boundary render (issue #1143): it is
         // rendered by the route but must be tokenized with the exact
         // `tokenize_prompt_for_generation` convention the prompt itself uses,
@@ -2723,6 +2808,21 @@ impl ModelProvider {
                          deferring to the scheduler"
                     );
                     ctx.history_prompt = Some(history_prompt);
+                }
+            }
+        }
+        // The system-prompt root render (#2885 Part B) takes the same path.
+        if let Some(tok) = self.prompt_tokenizer.as_ref()
+            && let Some(ctx) = options.prompt_cache_ctx.as_mut()
+            && let Some(root_prompt) = ctx.root_prompt.take()
+        {
+            match tokenize_prompt_for_generation(tok, &root_prompt) {
+                Ok(ids) => ctx.root_prefix_tokens = Some(ids),
+                Err(err) => {
+                    tracing::debug!(
+                        "HTTP-side system-root tokenization failed ({err}); deferring to the scheduler"
+                    );
+                    ctx.root_prompt = Some(root_prompt);
                 }
             }
         }

@@ -212,3 +212,10 @@ fn hunyuan_cla_missing_owner_projection_names_the_layer() {
     assert!(message.contains("owner layer 2"), "{message}");
     assert!(message.contains("K projection"), "{message}");
 }
+
+// The prefill projects only the sampled row, with the CLA shared K/V still
+// threaded through every layer (#3070).
+crate::models::last_row_logits_harness::last_row_case!(hunyuan_moe_last_row_logits, || {
+    let args = tiny_cla_args();
+    HunyuanMoeModel::from_weights(&tiny_cla_weights(&args), &args).unwrap()
+});

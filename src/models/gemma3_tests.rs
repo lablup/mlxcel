@@ -66,6 +66,108 @@ fn max_abs_diff(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
+// A mixed-bit MLP.
+
+/// A deterministic float matrix in `[-1, 1)`.
+fn seeded(shape: &[i32], seed: u64) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let len: usize = shape.iter().map(|d| *d as usize).product();
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+    let data: Vec<f32> = (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 40) as f32) / ((1u32 << 24) as f32) * 2.0 - 1.0
+        })
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// A Gemma 3 MLP (hidden 64, intermediate 128) loaded from a weight map whose
+/// gate, up and down projections are quantized at `bits`, under a config that
+/// declares 4 bits for everything, the way a mixed-bit checkpoint declares it.
+fn mlp_quantized_at(bits: [i32; 3]) -> super::MLP {
+    let mut weights = mlxcel_core::weights::WeightMap::new();
+    for ((name, shape), bits) in [
+        ("gate_proj", [128, 64]),
+        ("up_proj", [128, 64]),
+        ("down_proj", [64, 128]),
+    ]
+    .into_iter()
+    .zip(bits)
+    {
+        let dense = seeded(&shape, shape[0] as u64 + name.len() as u64);
+        for (part, tensor) in [
+            ("weight", mlxcel_core::quantize_weights_w(&dense, 64, bits)),
+            (
+                "scales",
+                mlxcel_core::quantize_weights_scales(&dense, 64, bits),
+            ),
+            (
+                "biases",
+                mlxcel_core::quantize_weights_biases(&dense, 64, bits),
+            ),
+        ] {
+            weights.insert(format!("mlp.{name}.{part}"), tensor);
+        }
+    }
+    let declared = args(r#"{"quantization": {"group_size": 64, "bits": 4}}"#);
+    super::MLP::from_weights(&weights, &declared, "mlp").expect("the MLP must load")
+}
+
+/// `down(gelu(gate(x)) * up(x))`, one projection at a time.
+fn projection_by_projection(
+    mlp: &super::MLP,
+    x: &mlxcel_core::MlxArray,
+) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let activated = mlxcel_core::compiled_geglu_approx_activation(
+        &mlp.gate_proj.forward(x),
+        &mlp.up_proj.forward(x),
+    );
+    mlp.down_proj.forward(&activated)
+}
+
+#[test]
+fn a_mixed_bit_mlp_runs_each_projection_on_its_own_layout() {
+    // Layer 2 of `mlx-community/gemma-3-1b-it-DQ`: gate and down at 8 bits, up
+    // at 4. The fused forward takes one layout for the three and was handed the
+    // gate's, which MLX refuses for `up_proj` with an exception that crosses
+    // the bridge and ends the process.
+    for bits in [[8, 4, 8], [4, 8, 4], [4, 4, 8]] {
+        let mlp = mlp_quantized_at(bits);
+        let loaded = [&mlp.gate_proj, &mlp.up_proj, &mlp.down_proj]
+            .map(|projection| projection.quantized_weight().map(|weight| weight.bits));
+        assert_eq!(loaded, bits.map(Some), "the loader reads each width");
+
+        let x = seeded(&[1, 3, 64], 7);
+        let got = mlp.forward(&x);
+        assert_eq!(mlxcel_core::array_shape(&got), [1, 3, 64]);
+        assert_eq!(
+            to_vec(&got),
+            to_vec(&projection_by_projection(&mlp, &x)),
+            "{bits:?}"
+        );
+    }
+}
+
+#[test]
+fn a_uniform_mlp_keeps_the_fused_forward() {
+    for bits in [4, 8] {
+        let mlp = mlp_quantized_at([bits; 3]);
+        assert!(
+            mlxcel_core::layers::fused_mlp_quantized_weights(
+                &mlp.gate_proj,
+                &mlp.up_proj,
+                &mlp.down_proj
+            )
+            .is_some()
+        );
+        let x = seeded(&[1, 3, 64], 7);
+        let difference = max_abs_diff(&mlp.forward(&x), &projection_by_projection(&mlp, &x));
+        assert!(difference < 1e-3, "{bits} bits: {difference}");
+    }
+}
+
 // What the block resolves to.
 
 #[test]
@@ -287,6 +389,7 @@ pub(crate) mod snapshot_prompt_cache {
     const SEQ_BASE: u64 = 1_335_000;
 
     use super::super::{Gemma3Model, Gemma3Wrapper, ModelArgs};
+    use crate::models::pooled_model::Pooled;
     use mlxcel_core::cache::{KVCacheMode, SequenceId};
     use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
     use mlxcel_core::weights::WeightMap;
@@ -430,16 +533,16 @@ pub(crate) mod snapshot_prompt_cache {
         w
     }
 
-    pub(super) fn build_wrapper() -> Gemma3Wrapper {
+    pub(super) fn build_wrapper() -> Pooled<Gemma3Wrapper> {
         build_wrapper_with_window(8)
     }
 
-    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
+    pub(crate) fn build_wrapper_with_window(sliding_window: i32) -> Pooled<Gemma3Wrapper> {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
-        Gemma3Wrapper::new(
+        Pooled::new(Gemma3Wrapper::new(
             Gemma3Model::from_weights(&weights, &args).expect("synthetic Gemma 3 must load"),
-        )
+        ))
     }
 
     pub(super) fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
@@ -455,7 +558,7 @@ pub(crate) mod snapshot_prompt_cache {
         range.map(|i| i.rem_euclid(VOCAB - 1) + 1).collect()
     }
 
-    pub(super) fn prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) {
+    pub(super) fn prefill(wrapper: &Pooled<Gemma3Wrapper>, seq: SequenceId, tokens: &[i32]) {
         wrapper.prepare_sequence_state(seq);
         let prompt = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let _ = wrapper.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
@@ -467,13 +570,17 @@ pub(crate) mod snapshot_prompt_cache {
     /// Deliberately not `prefill`: that one calls `prepare_sequence_state`,
     /// which throws the restored caches away and turns the append into a cold
     /// run.
-    fn append_prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) -> Vec<f32> {
+    fn append_prefill(
+        wrapper: &Pooled<Gemma3Wrapper>,
+        seq: SequenceId,
+        tokens: &[i32],
+    ) -> Vec<f32> {
         let chunk = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let logits = wrapper.forward_with_sequence_id(&chunk, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
     }
 
-    pub(super) fn decode(wrapper: &Gemma3Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
+    pub(super) fn decode(wrapper: &Pooled<Gemma3Wrapper>, seq: SequenceId, token: i32) -> Vec<f32> {
         let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
         let logits = wrapper.forward_with_sequence_id(&input, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
@@ -1146,3 +1253,132 @@ mod batched_decode_entry {
 
 #[path = "gemma3_vlm_mask_tests.rs"]
 mod vlm_external_mask;
+
+#[path = "gemma3_layer_state_tests.rs"]
+mod layer_state;
+
+// A ModelOpt NVFP4 MLP: each projection carries a per-tensor scale beside its
+// block scales. The fused forward has no argument for it and ran all three
+// projections unscaled, with no error.
+#[test]
+fn a_gemma3_mlp_preserves_each_projection_global_scale() {
+    use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+    use mlxcel_core::weights::WeightMap;
+
+    if quant_mode_support(QuantMode::Nvfp4) != QuantModeSupport::Native {
+        eprintln!("skipping: this backend has no native NVFP4 kernel");
+        return;
+    }
+    let declared = args(
+        r#"{
+        "hidden_size": 64, "intermediate_size": 128,
+        "quantization": {"group_size": 16, "bits": 4}
+    }"#,
+    );
+    let values: Vec<f32> = (0..128).map(|i| ((i % 13) as f32 - 6.0) * 0.03).collect();
+    let x = mlxcel_core::from_slice_f32(&values, &[1, 2, 64]);
+    let mut failed = Vec::new();
+    for scales in [
+        [1.0, 1.0, 1.0],
+        [0.5, 1.0, 1.0],
+        [1.0, 2.0, 1.0],
+        [1.0, 1.0, 3.25],
+        [0.5, 2.0, 3.25],
+    ] {
+        let mut weights = WeightMap::new();
+        for (index, (name, out, input)) in [
+            ("gate_proj", 128, 64),
+            ("up_proj", 128, 64),
+            ("down_proj", 64, 128),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dense: Vec<f32> = (0..out * input)
+                .map(|i| (((i * 17 + index as i32 * 23) % 101) as f32 - 50.0) * 0.002)
+                .collect();
+            let dense = mlxcel_core::from_slice_f32(&dense, &[out, input]);
+            let packed = mlxcel_core::quantize_weights_with_mode(&dense, 16, 4, "nvfp4");
+            let prefix = format!("mlp.{name}");
+            weights.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::quantized_weights_w(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.scales"),
+                mlxcel_core::quantized_weights_scales(&packed),
+            );
+            weights.insert(
+                format!("{prefix}.global_scale"),
+                mlxcel_core::from_slice_f32(&[scales[index]], &[1]),
+            );
+        }
+        let mlp =
+            super::MLP::from_weights(&weights, &declared, "mlp").expect("synthetic NVFP4 MLP");
+        let gate = mlp.gate_proj.forward(&x);
+        let up = mlp.up_proj.forward(&x);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let expected = mlp.down_proj.forward(&activated);
+        let actual = mlp.forward(&x);
+        let actual_values = to_vec(&actual);
+        let expected_values = to_vec(&expected);
+        assert_eq!(actual_values.len(), expected_values.len());
+        assert!(!actual_values.is_empty());
+        // f32::max ignores an isolated NaN; reject it explicitly so an invalid
+        // calculation cannot accidentally count as numerical agreement.
+        assert!(
+            actual_values
+                .iter()
+                .chain(&expected_values)
+                .all(|v| v.is_finite()),
+            "non-finite output for global scales {scales:?}"
+        );
+        let error = actual_values
+            .iter()
+            .zip(&expected_values)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("MLP global scales {scales:?}: max_abs={error:e}");
+        if error > 1e-5 {
+            failed.push((scales, error));
+        }
+
+        // The same numbers without `UnifiedLinear`'s own scale handling: the
+        // unit-scale projections, each multiplied by its scalar on the host.
+        let unit = {
+            let mut unit = WeightMap::new();
+            for (name, tensor) in &weights {
+                let tensor = if name.ends_with(".global_scale") {
+                    mlxcel_core::from_slice_f32(&[1.0], &[1])
+                } else {
+                    mlxcel_core::copy(tensor)
+                };
+                unit.insert(name.clone(), tensor);
+            }
+            super::MLP::from_weights(&unit, &declared, "mlp").expect("unit-scale MLP")
+        };
+        let times = |array: &mlxcel_core::MlxArray, factor: f32| -> Vec<f32> {
+            to_vec(array).into_iter().map(|v| v * factor).collect()
+        };
+        let gate = mlxcel_core::from_slice_f32(
+            &times(&unit.gate_proj.forward(&x), scales[0]),
+            &[1, 2, 128],
+        );
+        let up =
+            mlxcel_core::from_slice_f32(&times(&unit.up_proj.forward(&x), scales[1]), &[1, 2, 128]);
+        let activated = mlxcel_core::compiled_geglu_approx_activation(&gate, &up);
+        let reference = times(&unit.down_proj.forward(&activated), scales[2]);
+        let largest = reference.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+        let off = actual_values
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        eprintln!("MLP global scales {scales:?}: host reference max_abs={off:e} of {largest:e}");
+        assert!(largest > 1e-5, "a degenerate reference: {largest}");
+        if off > 1e-4 * largest {
+            failed.push((scales, off));
+        }
+    }
+    assert!(failed.is_empty(), "MLP global-scale mismatches: {failed:?}");
+}

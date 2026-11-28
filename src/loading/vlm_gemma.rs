@@ -153,29 +153,76 @@ fn sanitize_gemma3n_weights(raw_weights: WeightMap) -> WeightMap {
     weights
 }
 
-/// Load a Gemma3 VLM model (text + vision tower + projector).
-pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
-    use vision::config::VLMConfig;
-    use vision::connectors::avg_pool::AvgPoolProjector;
-    use vision::encoders::siglip::SigLipVisionModel;
-    use vision::processors::siglip::SigLipProcessor;
-
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    let mut vlm_config: VLMConfig = serde_json::from_value(full_config.clone())
+/// Parse a Gemma 3 VLM `config.json` as the eager model reads it.
+///
+/// The shipped Gemma 3 configs omit `vision_config.hidden_act`; the SigLIP
+/// default is the tanh GELU (#2423), and the serde default of the shared
+/// [`VLMConfig`](vision::config::VLMConfig) alone would leave the tower on
+/// exact erf.
+///
+/// Used by: [`load_gemma3_vlm`], and the eager reference of the pinned
+/// eager-MLX-versus-IREE boundary gate (`xla_tests::reference_boundary`), which
+/// has to build the tower the loader builds.
+fn parse_gemma3_vlm_config(full_config: &Value) -> Result<vision::config::VLMConfig> {
+    let mut vlm_config: vision::config::VLMConfig = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse VLM config: {}", e))?;
-    // The shipped Gemma 3 configs omit `vision_config.hidden_act`; the SigLIP
-    // default is the tanh GELU (#2423).
     if let Some(raw_vision) = full_config.get("vision_config") {
         vlm_config
             .vision_config
             .default_missing_hidden_act_to_siglip(raw_vision);
     }
-    let text_config: models::gemma3::ModelArgs =
+    Ok(vlm_config)
+}
+
+/// Bring a Gemma 3 VLM checkpoint's weights to the names and formats the
+/// loader reads: the `language_model.` prefix, the tied embedding, and for an
+/// NVFP4 export from NVIDIA ModelOpt or compressed-tensors (llm-compressor)
+/// the repack of each quantized linear to MLX native NVFP4, as the text-only,
+/// Qwen3.5 VLM and Qwen2.5-VL routes do. Without the repack the text model
+/// does not find a compressed-tensors export's `weight` at all
+/// (`NeoChen1024/gemma-3-12b-it-NVFP4` stores it as `weight_packed`), and
+/// reads a ModelOpt export's packed codes as they are.
+///
+/// Returns the weights and whether the checkpoint was such an export
+/// (declared in `quantization_config` or in `hf_quant_config.json`), so the
+/// caller can give the text config that layout.
+///
+/// Used by: [`load_gemma3_vlm`]
+fn prepare_gemma3_vlm_weights(
+    raw_weights: WeightMap,
+    full_config: &Value,
+    model_path: &Path,
+) -> Result<(WeightMap, bool)> {
+    let mut weights = strip_language_model_prefix(raw_weights);
+    models::sanitize_tied_embeddings(&mut weights, full_config);
+    let external_nvfp4 = models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path);
+    if external_nvfp4 {
+        models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok((weights, external_nvfp4))
+}
+
+/// Load a Gemma3 VLM model (text + vision tower + projector).
+pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
+    use vision::connectors::avg_pool::AvgPoolProjector;
+    use vision::encoders::siglip::SigLipVisionModel;
+    use vision::processors::siglip::SigLipProcessor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let vlm_config = parse_gemma3_vlm_config(&full_config)?;
+    let mut text_config: models::gemma3::ModelArgs =
         serde_json::from_value(vlm_config.text_config.clone())
             .map_err(|e| anyhow::anyhow!("Failed to parse text_config: {}", e))?;
 
-    let mut weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
+    let (weights, external_nvfp4) = prepare_gemma3_vlm_weights(
+        load_vlm_weights_common(model_path, None)?,
+        &full_config,
+        model_path,
+    )?;
+    if external_nvfp4 {
+        text_config.declare_modelopt_nvfp4_layout();
+    }
 
     let text_model = models::Gemma3Model::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
@@ -522,6 +569,8 @@ fn sanitize_gemma4_audio_weights(weights: &mut mlxcel_core::weights::WeightMap) 
 pub(crate) fn load_gemma4_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let args: models::gemma4::ModelArgs = parse_vlm_config(&config_str, "Gemma4 config")?;
+    args.validate_text_config()
+        .map_err(|e| anyhow::anyhow!("Gemma4 config: {e}"))?;
     let (mut weights, weight_backing) = models::load_gemma4_vlm_weights_with_backing(model_path)
         .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 VLM weights: {}", e))?;
     // ModelOpt NVFP4 exports nest weights under `model.` and pack the text

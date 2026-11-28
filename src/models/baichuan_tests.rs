@@ -432,3 +432,8 @@ fn rejects_a_sliding_window_a_rotating_cache_cannot_take() {
     BaichuanModel::from_weights(&tiny_weights(&all_global), &all_global)
         .expect("an out-of-range sliding window index leaves every layer global");
 }
+
+crate::models::last_row_logits_harness::last_row_case!(
+    baichuan_last_row_logits,
+    tiny_baichuan_model
+);

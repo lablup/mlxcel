@@ -41,6 +41,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
+use mlxcel_core::prefill_plan::{MAX_SPLITS, PrefillSplits};
 use mlxcel_core::sampling::{FusedSampleParams, TokenBiasMap};
 use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
 use mlxcel_core::sampling_token_bias::compose_token_bias;
@@ -69,7 +70,7 @@ use crate::server::prompt_cache::key::PromptCacheKey;
 use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
 use crate::server::prompt_cache::{
     CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore, SnapshotLookupOutcome,
-    SnapshotOrigin,
+    SnapshotOrigin, state_snapshot,
 };
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
@@ -183,12 +184,24 @@ fn resolve_max_batch_prefill_tokens(
 /// Decide whether a request may participate in experimental VLM prompt-prefix
 /// cache sharing (#124 step c).
 ///
-/// Sharing is allowed only when all three hold:
+/// Sharing is allowed only when all four hold:
 /// 1. the operator opted in (`--enable-vlm-prefix-cache`),
-/// 2. the request actually carries multimodal content, and
-/// 3. it has no video payload (video frame bytes are NOT folded into the
-///    request's multimodal digest, so a video prefix could collide with a
-///    different video in the same bucket).
+/// 2. the request actually carries multimodal content,
+/// 3. it has no video payload, and
+/// 4. it needs no request-scoped mode restore (Phi4MM's adapter mode is not
+///    part of the cache snapshots).
+///
+/// Video stays excluded because the request's multimodal digest describes
+/// neither of the two things a video prefix depends on. The frame bytes are
+/// not folded into it, so a video prefix could collide with a different video
+/// in the same bucket. Nor is each clip's `second_per_grid`
+/// (`temporal_patch_size / sampled fps`): Qwen2.5-VL spaces a video's temporal
+/// MRoPE positions by it, so the same frames sampled at another rate put every
+/// later token at a different position and the cached KV rows would be wrong
+/// for it. Enabling video sharing therefore requires folding both the frame
+/// bytes and the per-clip `second_per_grid` into the digest first; upstream
+/// keys prefix reuse on per-clip timing for the same reason
+/// (Blaizzy/mlx-vlm#2760, commit `7fbd093f`).
 ///
 /// Text-only requests and any request with video always return `false`,
 /// preserving the legacy cold-prefill path. Keeping the decision in one pure
@@ -256,6 +269,69 @@ pub(crate) fn history_boundary_len(
         return None;
     }
     Some(boundary)
+}
+
+/// Decide the system-prompt root for a request (#2885 Part B).
+///
+/// `root` is the tokenized root render, `prompt_tokens` what the model will
+/// prefill, `history_boundary` the already resolved history boundary. The root
+/// is their longest common prefix minus its last token: the render ends at the
+/// first user turn's header, and the token there can merge with the first
+/// characters of the user's text, so dropping it keeps the length identical
+/// across chats that share the system prompt. Rejected when the prompt is
+/// shorter than `min_prompt_tokens` (the opt-in threshold), when the root is
+/// below the store's `min_prefix_tokens`, or when it does not end strictly
+/// before the history boundary (or the prompt end).
+///
+/// Used by: `BatchScheduler::resolve_history_boundary`
+pub(crate) fn system_root_len(
+    root: &[i32],
+    prompt_tokens: &[i32],
+    history_boundary: Option<usize>,
+    min_prefix_tokens: usize,
+    min_prompt_tokens: usize,
+) -> Option<usize> {
+    if prompt_tokens.len() < min_prompt_tokens {
+        return None;
+    }
+    let len = common_prefix_len(root, prompt_tokens)
+        .min(root.len())
+        .checked_sub(1)?;
+    let upper = history_boundary.unwrap_or(prompt_tokens.len());
+    (len > 0 && len >= min_prefix_tokens && len < upper).then_some(len)
+}
+
+/// The periodic checkpoint positions of a prefill (#2885 Part B): every
+/// multiple of `interval` strictly after `start` (the adopted prefix) and
+/// strictly before `upper` (the history boundary, or the prompt end when there
+/// is none), at or above the store's `min_prefix_tokens`.
+///
+/// The points are absolute multiples, so they depend only on the prompt
+/// prefix: two prompts that share the first `k * interval` tokens both split
+/// at `k * interval`. At most `max` points are returned, the deepest ones,
+/// so a very long prompt keeps the checkpoints closest to its history
+/// boundary and leaves the plan room for the root and the boundary.
+///
+/// Used by: `BatchScheduler::checkpoint_splits`
+pub(crate) fn checkpoint_points(
+    interval: usize,
+    start: usize,
+    upper: usize,
+    min_prefix_tokens: usize,
+    max: usize,
+) -> Vec<usize> {
+    if interval == 0 || max == 0 {
+        return Vec::new();
+    }
+    let first = (start / interval + 1) * interval;
+    let mut points: Vec<usize> = (first..upper)
+        .step_by(interval)
+        .filter(|&p| p >= min_prefix_tokens.max(1))
+        .collect();
+    if points.len() > max {
+        points.drain(..points.len() - max);
+    }
+    points
 }
 
 /// Whether a resolved boundary still splits this sequence's prefill at
@@ -613,6 +689,27 @@ pub struct BatchScheduler {
     /// removed from the map on finish / error.
     prompt_cache_seq_ctx: std::collections::HashMap<SequenceId, PromptCacheRequestContext>,
 
+    /// Sequences whose completion snapshot was taken at the prompt boundary
+    /// when their prefill finished (issue #3040), so the finish stores no
+    /// decode-written tail for them. Cleared at donate and at release.
+    prompt_cache_prompt_end_stored: std::collections::HashSet<SequenceId>,
+
+    /// Host-memory gate every prompt-cache snapshot and state-checkpoint
+    /// growth step goes through (#2883 step 4). Production schedulers share
+    /// one process-wide gate over `host_statistics64`. Unit-test schedulers
+    /// get a gate that reports availability as unknown, so they store what
+    /// they would store on any host: before #3146 they read the real host,
+    /// and a CI machine below the macOS reserve (`max(7 GiB, 15% of RAM)`)
+    /// silently stored nothing.
+    snapshot_growth_gate: Arc<mlxcel_core::host_memory::AvailabilityGate>,
+
+    /// Lineage of the rows a sequence adopted from the prompt cache (issue
+    /// #3047), set by `try_adopt_cached_prefix` and moved into the sequence's
+    /// [`PromptCacheRequestContext::snapshot_lineage`] at admission. Cleared at
+    /// release, so a request that fails between the two leaves nothing.
+    prompt_cache_adopted_lineage:
+        std::collections::HashMap<SequenceId, crate::server::prompt_cache::SnapshotLineage>,
+
     /// Pending background prompt-cache warm-ups (issue #1144).
     ///
     /// Each entry is the next turn's expected history prefix for a conversation
@@ -958,10 +1055,22 @@ pub(crate) fn select_block_reclaim_victim_from<'a>(
         .map(|seq| seq.seq_id)
 }
 
+/// Whether a detached dense KV set can be adopted by a sequence whose layers
+/// are built in `expected` modes.
+///
+/// Every layer's mode must match. A layer that holds an affine-quantized MLA
+/// latent must also hold it at the width this process packs a latent at
+/// (`mla::latent_cache_bits`: 8, or 4 under `--mla-latent-quant int4`): an
+/// entry saved under `int8` has the same `int8` storage mode as one saved
+/// under `int4`, and appending rows of the other width to it is not possible
+/// (issue #3179). The entry's width is read from its own buffers
+/// (`DetachedKVCache::stored_latent_bits`), so it is recorded per layer by
+/// construction.
 fn validate_dense_detached_kv_modes_against_table(
     dense: &mlxcel_core::cache::DetachedCacheSet,
     expected: &[KVCacheMode],
 ) -> Result<(), String> {
+    let expected_latent_bits = mlxcel_core::mla::latent_cache_bits(KVCacheMode::Int8);
     if expected.len() != dense.num_layers() {
         return Err(format!(
             "resolved {} KV cache layer modes for {} detached layers",
@@ -981,6 +1090,16 @@ fn validate_dense_detached_kv_modes_against_table(
                 "layer {idx} detached mode {actual} does not match resolved mode {expected_mode}"
             ));
         }
+        if let Some(stored) = detached.stored_latent_bits()
+            && Some(stored) != expected_latent_bits
+        {
+            let expected =
+                expected_latent_bits.map_or("no".to_string(), |bits| format!("{bits}-bit"));
+            return Err(format!(
+                "layer {idx} detached MLA latent is {stored}-bit and this server stores a \
+                 {expected} latent"
+            ));
+        }
     }
     Ok(())
 }
@@ -998,6 +1117,8 @@ mod paged_layout;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+mod prompt_cache_adopt;
+mod prompt_end_snapshot;
 pub(crate) mod prompt_lookup;
 mod queued_adoption;
 mod request_memory;
@@ -1049,6 +1170,14 @@ mod scheduler_model_owned_cache_tests;
 mod scheduler_model_owned_slot_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_reasoning_effort_tests.rs"]
+mod scheduler_reasoning_effort_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_cache_raon_tests.rs"]
+mod scheduler_model_owned_cache_raon_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_pipeline_failure_tests.rs"]
 mod scheduler_pipeline_failure_tests;
 
@@ -1065,12 +1194,24 @@ mod scheduler_whole_prompt_hit_tests;
 mod scheduler_prompt_lookup_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_inkling_prompt_lookup_tests.rs"]
+mod scheduler_inkling_prompt_lookup_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_dflash_routing_tests.rs"]
 mod scheduler_dflash_routing_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_qwen35_slice_guard_tests.rs"]
+mod scheduler_qwen35_slice_guard_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_state_checkpoint_tests.rs"]
+mod scheduler_state_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_model_owned_pad_trim_tests.rs"]
@@ -1087,6 +1228,10 @@ mod scheduler_lookahead_read_failure_tests;
 #[cfg(test)]
 #[path = "../scheduler_real_batch_parity_tests.rs"]
 mod scheduler_real_batch_parity_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_prompt_cache_metrics_tests.rs"]
+mod scheduler_prompt_cache_metrics_tests;
 
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.

@@ -1,0 +1,2 @@
+model,arm_reference,arm_candidate,chunk_tokens,context_tokens,traced_positions,chunks,positions,top1_disagree,decided_positions,decided_disagree,ref_logit_delta_max,ppl_reference,ppl_candidate,verdict
+llama-4-scout-17b-16e-instruct-4bit,MLXCEL_PREFILL_CAUSAL_MODE=0 (dense chunk mask),default (per-chunk causal mode),2048,7168,7168-9215,3,6144,0,756,0,0.0000,11.4503,11.4503,"byte-identical in effect, every position agrees"

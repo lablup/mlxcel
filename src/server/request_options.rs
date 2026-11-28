@@ -478,6 +478,7 @@ pub(crate) fn build_server_generate_options_with_live(
         logprobs,
         reasoning_budget: overrides.reasoning_budget,
         thinking_enter_block_on_start: overrides.thinking_enter_block_on_start,
+        thinking_primed_close: None,
         // Default unarmed; routes that accept the b10621 `reasoning_control`
         // field replace this with the shared force flag they registered in
         // the completion-control registry (#1444).
@@ -495,6 +496,11 @@ pub(crate) fn build_server_generate_options_with_live(
         // parts after the helper returns; the raw text-completion endpoints
         // carry no image parts and always leave it `None`.
         image_soft_tokens: None,
+        // Server-wide frame knobs (#2399): copied here so admission-time media
+        // preparation can sample native-video frames without reaching back
+        // for the live config.
+        video_num_frames: config.video_num_frames,
+        video_min_frames: config.video_min_frames,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
@@ -505,6 +511,7 @@ pub(crate) fn build_server_generate_options_with_live(
             .lora_runtime
             .as_ref()
             .map(|set| std::sync::Arc::new(set.server_scales())),
+        model_reasoning_effort: None,
     }
 }
 

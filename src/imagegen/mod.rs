@@ -33,6 +33,7 @@ pub mod latent;
 pub mod llada_image;
 pub mod mage_flow;
 pub mod ming_image;
+pub mod moss_image;
 pub mod output;
 pub mod pipeline;
 pub mod probe;

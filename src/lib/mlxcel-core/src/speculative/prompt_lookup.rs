@@ -85,7 +85,6 @@
 
 use std::collections::HashMap;
 
-use crate::cache::SequenceStateBackend;
 use crate::generate::LanguageModel;
 
 /// Default longest n-gram matched against the context.
@@ -253,7 +252,7 @@ impl PromptLookupConfig {
 /// Verification rolls rejected tokens back with `KVCache::trim`, which is only
 /// sound when every piece of per-sequence state lives in the external caches.
 /// `supports_batching` is the existing marker for that, and a
-/// [`SequenceStateBackend::ModelOwned`] layout is the direct statement of the
+/// [`crate::cache::SequenceStateBackend::ModelOwned`] layout is the direct statement of the
 /// opposite: such a family keeps its caches inside the model, the external
 /// caches are empty placeholders, and trimming them rolls nothing back.
 /// `supports_padded_prefill` is `false` for the families whose state trailing
@@ -265,6 +264,12 @@ impl PromptLookupConfig {
 /// only because they opt out of padded prefill, a flag that answers a
 /// different question (the scheduler's post-pad trim, issue #1335) and may
 /// change once that is solved.
+///
+/// A model-owned family that rewinds its own state
+/// ([`LanguageModel::supports_speculative_verify_rewind`]) passes both the
+/// layout and the padded-prefill check: the engine unwinds its rejected tail
+/// through `rewind_decode_appends` instead of a cache trim, so neither hazard
+/// applies (`qwen4_exp`, issue #2880).
 pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
     model: &M,
 ) -> Option<&'static str> {
@@ -275,13 +280,19 @@ pub fn prompt_lookup_unsupported_reason<M: LanguageModel + ?Sized>(
              cannot be rolled back",
         );
     }
-    if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+    let model_rewinds = model.supports_speculative_verify_rewind();
+    if model
+        .sequence_state_layout()
+        .backend
+        .keeps_state_outside_kv_slice()
+        && !model_rewinds
+    {
         return Some(
             "this model owns its attention caches internally rather than in the external KV \
              caches the generator trims, so a rejected draft cannot be rolled back",
         );
     }
-    if !model.supports_padded_prefill() {
+    if !model.supports_padded_prefill() && !model_rewinds {
         return Some(
             "this model's state is corrupted by trailing tokens that a cache trim cannot \
              undo (the same reason it opts out of padded prefill), so a rejected draft \

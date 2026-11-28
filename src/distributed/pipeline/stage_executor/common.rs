@@ -137,19 +137,22 @@ impl<L: TransformerStageLayer> TransformerStageModel<L> {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
-        let hidden = self.prepare_hidden(input)?;
-        self.execute_hidden(hidden, caches, mask)
+        self.execute_last_row(input, caches, mask, None)
     }
 
-    pub fn execute_with_computed_mask(
+    /// [`Self::execute`] that, on the stage hosting the LM head, projects only
+    /// hidden row `last_pos` (`[batch, 1, vocab]` logits) instead of every
+    /// position. A non-final stage ignores `last_pos` and returns its full
+    /// hidden states (#3074).
+    pub fn execute_last_row(
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
-        build_mask: impl FnOnce(&MlxArray, &[KVCache]) -> Option<UniquePtr<MlxArray>>,
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         let hidden = self.prepare_hidden(input)?;
-        let computed_mask = build_mask(hidden.as_ref().unwrap(), caches);
-        self.execute_hidden(hidden, caches, computed_mask.as_deref())
+        self.execute_hidden(hidden, caches, mask, last_pos)
     }
 
     fn prepare_hidden(&self, input: StageExecutionInput<'_>) -> Result<UniquePtr<MlxArray>> {
@@ -175,6 +178,7 @@ impl<L: TransformerStageLayer> TransformerStageModel<L> {
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         ensure!(
             caches.len() == self.layers.len(),
@@ -191,6 +195,12 @@ impl<L: TransformerStageLayer> TransformerStageModel<L> {
 
         match (&self.norm, &self.lm_head) {
             (Some(norm), Some(lm_head)) => {
+                // Norm and head act per position, so slicing first yields the
+                // row the full projection would have (#3074).
+                let hidden = match last_pos {
+                    Some(pos) => mlxcel_core::generate::logits_at_position(&hidden, pos),
+                    None => hidden,
+                };
                 let hidden = norm.forward(&hidden);
                 Ok(StageExecutionOutput::Logits(lm_head.forward(&hidden)))
             }
@@ -273,5 +283,107 @@ mod tests {
         };
 
         assert!(err.to_string().contains("stage cache count mismatch"));
+    }
+
+    /// A last-stage model with a real norm and head: [`execute_last_row`]
+    /// returns the one requested row, equal to that row of the full forward
+    /// (#3074).
+    #[test]
+    fn last_row_execution_matches_the_full_forward_row() {
+        let norm_weight = mlxcel_core::from_slice_f32(&[1.0, 0.5, 2.0, 1.5], &[4]);
+        let head_weight = mlxcel_core::from_slice_f32(
+            &(0..20).map(|v| (v as f32) * 0.1 - 0.7).collect::<Vec<_>>(),
+            &[5, 4],
+        );
+        let model = TransformerStageModel::new(
+            LayerFilter {
+                layer_range: 0..1,
+                has_embedding: false,
+                has_lm_head: true,
+            },
+            None,
+            vec![EchoLayer],
+            Some(RMSNorm::new(norm_weight, 1e-6)),
+            Some(UnifiedLinear::Regular(mlxcel_core::layers::Linear::new(
+                head_weight,
+                None,
+            ))),
+        )
+        .unwrap();
+        let input = mlxcel_core::from_slice_f32(
+            &(0..12).map(|v| (v as f32) * 0.3 - 1.0).collect::<Vec<_>>(),
+            &[1, 3, 4],
+        );
+
+        let full = model
+            .execute(
+                StageExecutionInput::HiddenStates(input.as_ref().unwrap()),
+                &mut model.make_caches(),
+                None,
+            )
+            .unwrap()
+            .into_logits()
+            .unwrap();
+        assert_eq!(mlxcel_core::array_shape(&full), vec![1, 3, 5]);
+
+        for pos in [0usize, 1, 2] {
+            let row = model
+                .execute_last_row(
+                    StageExecutionInput::HiddenStates(input.as_ref().unwrap()),
+                    &mut model.make_caches(),
+                    None,
+                    Some(pos),
+                )
+                .unwrap()
+                .into_logits()
+                .unwrap();
+            assert_eq!(mlxcel_core::array_shape(&row), vec![1, 1, 5]);
+            let want = mlxcel_core::generate::logits_at_position(&full, pos);
+            let close = mlxcel_core::allclose(&row, &want, 1e-5, 1e-5);
+            assert!(mlxcel_core::item_bool(&close), "row {pos} differs");
+        }
+
+        // `None` keeps every position.
+        let all = model
+            .execute_last_row(
+                StageExecutionInput::HiddenStates(input.as_ref().unwrap()),
+                &mut model.make_caches(),
+                None,
+                None,
+            )
+            .unwrap()
+            .into_logits()
+            .unwrap();
+        assert_eq!(mlxcel_core::array_shape(&all), vec![1, 3, 5]);
+    }
+
+    /// A stage that hosts no LM head ignores `last_pos` and still returns its
+    /// whole hidden state for the next stage.
+    #[test]
+    fn non_final_stage_ignores_last_pos() {
+        let model = TransformerStageModel::new(
+            LayerFilter {
+                layer_range: 0..1,
+                has_embedding: false,
+                has_lm_head: false,
+            },
+            None,
+            vec![EchoLayer],
+            None,
+            None,
+        )
+        .unwrap();
+        let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 2, 2]);
+        let hidden = model
+            .execute_last_row(
+                StageExecutionInput::HiddenStates(input.as_ref().unwrap()),
+                &mut model.make_caches(),
+                None,
+                Some(1),
+            )
+            .unwrap()
+            .into_hidden_states()
+            .unwrap();
+        assert_eq!(mlxcel_core::array_shape(&hidden), vec![1, 2, 2]);
     }
 }

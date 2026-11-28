@@ -20,6 +20,7 @@
 pub mod audio;
 pub mod backend;
 pub mod cli;
+pub mod decision;
 pub mod distributed;
 pub mod downloader;
 pub mod embeddings;
@@ -92,6 +93,7 @@ pub use multimodal::host_preprocessor::{
     CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
     HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
     ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
+    xla_image_surviving_bucket_warning,
 };
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::{LlavaIreeHostPreprocessor, YoutuVlIreeHostPreprocessor};
@@ -99,6 +101,10 @@ pub use multimodal::host_preprocessor::{LlavaIreeHostPreprocessor, YoutuVlIreeHo
 pub use multimodal::host_preprocessor::{
     Qwen2VlIreeHostPreprocessor, Qwen3VlIreeHostPreprocessor, Qwen3VlIreeVisionCapture,
     QwenVlProcessorCapture,
+};
+#[cfg(feature = "xla-backend")]
+pub use multimodal::xla_image_prefill::{
+    PreparedImagePrefill, prepare_image_prefill, xla_request_positions,
 };
 pub use multimodal::{
     falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,

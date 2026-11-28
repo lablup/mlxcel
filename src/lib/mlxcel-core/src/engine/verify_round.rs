@@ -37,7 +37,7 @@ use super::direct::{delivers_to_callback, logits_vocab};
 use super::rows::{RowError, RowOutcome, StepRow, StepRowHooks, finish_row, sample_and_finish_row};
 use super::speculative::SpeculativeRunError;
 use super::{Engine, EngineError};
-use crate::cache::{SequenceId, can_trim_prompt_cache};
+use crate::cache::{SequenceId, SequenceStateBackend, can_trim_prompt_cache};
 use crate::decode_finish::FinishCause;
 use crate::drafter::Drafter;
 use crate::ffi;
@@ -106,7 +106,11 @@ impl<M: LanguageModel> Engine<M> {
     /// [`token_only_rounds_unsupported`], a rejected block is dropped through
     /// the pool caches, so they must be trimmable (a family with no external
     /// caches has nothing to trim), and the model must keep all of its
-    /// sequence state in them ([`prompt_lookup_unsupported_reason`]).
+    /// sequence state in them ([`prompt_lookup_unsupported_reason`]). A
+    /// model-owned family that rewinds its own state
+    /// ([`LanguageModel::supports_speculative_verify_rewind`]) has no pool
+    /// caches to trim and is admitted on that capability instead: its
+    /// rejected tail goes through [`Engine::unwind_appends`]'s model rewind.
     pub fn verify_rounds_unsupported(
         &mut self,
         id: SequenceId,
@@ -116,11 +120,14 @@ impl<M: LanguageModel> Engine<M> {
         if let Some(err) = token_only_rounds_unsupported(sampling, drafter) {
             return Some(err);
         }
+        let model_rewinds = self.model.sequence_state_layout().backend
+            == SequenceStateBackend::ModelOwned
+            && self.model.supports_speculative_verify_rewind();
         let trimmable = self
             .pool
             .get_caches_mut(id)
             .is_some_and(|caches| !caches.is_empty() && can_trim_prompt_cache(caches));
-        if !trimmable {
+        if !trimmable && !model_rewinds {
             return Some(SpeculativeRunError::NotTrimmable);
         }
         prompt_lookup_unsupported_reason(&self.model).map(SpeculativeRunError::ModelUnsupported)

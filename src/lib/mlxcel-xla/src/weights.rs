@@ -23,7 +23,7 @@
 //! feature-gated `iree.rs`) so it is unit-tested without the IREE runtime and stays
 //! in lock-step with the emitter's arg order (`emitter::model::take_layer_weights`).
 
-use crate::emitter::{Config, quant_in_graph};
+use crate::emitter::{Config, ExpertAct, MoeScoring, ProjectionLayout};
 
 /// One checkpoint weight the loader reads, in the emitter's arg order. Most are a
 /// whole safetensors tensor; a Phi3 checkpoint fuses q/k/v into one `qkv_proj` and
@@ -85,6 +85,15 @@ impl WeightSpec {
             WeightSpec::QuantRaw { name, .. } => name,
         }
     }
+
+    /// Whether the loader uploads this spec's 2-D checkpoint matrix transposed
+    /// to `[in, out]` (issue #2859). Only the projection specs (`Proj`, `Rows`)
+    /// follow the graph's layout; every other spec keeps the checkpoint layout
+    /// whatever the layout, so the emitter must declare those args as stored.
+    pub(crate) fn uploads_transposed(&self, layout: ProjectionLayout) -> bool {
+        matches!(self, WeightSpec::Proj(_) | WeightSpec::Rows { .. })
+            && matches!(layout, ProjectionLayout::InOut)
+    }
 }
 
 /// The checkpoint weights the loader reads, in the emitter's exact arg order
@@ -104,7 +113,7 @@ impl WeightSpec {
 /// family, and it mirrors `take_layer_weights` so the loaded buffers line up with
 /// the emitted graph's args exactly.
 pub(crate) fn weight_specs(cfg: &Config) -> Vec<WeightSpec> {
-    weight_specs_q(cfg, quant_in_graph() && cfg.supports_packed_quant())
+    weight_specs_q(cfg, cfg.packed_args && cfg.supports_packed_quant())
 }
 
 /// Push a projection weight `name` (`X.weight`) in the emitter's arg order: three
@@ -169,26 +178,104 @@ fn fused_qkv_name(cfg: &Config, prefix: &str) -> String {
     match cfg.weight_scheme {
         crate::emitter::WeightScheme::Molmo => format!("{prefix}{}", s.q_proj),
         crate::emitter::WeightScheme::Molmo2 => format!("{prefix}self_attn.att_proj.weight"),
+        crate::emitter::WeightScheme::Plamo2 => format!("{prefix}{}", s.q_proj),
         _ => format!("{prefix}self_attn.qkv_proj.weight"),
     }
 }
 
+/// Push one Phi4MM adapter's A/B pair. They are `Whole` specs, not `Proj`: the
+/// emitter declares A as the checkpoint's `[rank, in]` and B as `[out, rank]` in
+/// every projection layout and contracts them with the untransposed helpers, so
+/// the loader must never apply the `InOut` transpose to them (issue #3362; a
+/// `Proj` spec here broke single-sequence prefill with a `320x3072` vs
+/// `3072x320` argument mismatch). `Whole` also keeps them f32-resident, which is
+/// the element type the emitter declares.
 fn push_phi4_lora_pair(out: &mut Vec<WeightSpec>, stem: &str, adapter: &str) {
-    out.push(WeightSpec::Proj(format!("{stem}.lora_A.{adapter}.weight")));
-    out.push(WeightSpec::Proj(format!("{stem}.lora_B.{adapter}.weight")));
+    out.push(WeightSpec::Whole(format!("{stem}.lora_A.{adapter}.weight")));
+    out.push(WeightSpec::Whole(format!("{stem}.lora_B.{adapter}.weight")));
+}
+
+/// One Mamba2 layer's tensors (issue #3338), in exactly the order
+/// `take_ssm_layer_weights` (`emitter/model_recurrent.rs`) declares them: the
+/// block norm, then the mixer's in_proj (+ bias), conv1d weight (+ bias),
+/// dt_bias, A_log, D, gated-norm weight, and out_proj (+ bias). The two
+/// projections go through [`push_proj`] like every other linear weight, so the
+/// packed and f16-resident paths line up with `take_weight`.
+fn push_ssm_layer_specs(out: &mut Vec<WeightSpec>, cfg: &Config, p: &str, quant: bool) {
+    let ssm = cfg
+        .ssm
+        .as_ref()
+        .expect("a recurrent layer implies an SsmConfig");
+    let m = if cfg.falcon_h1.is_some() || cfg.weight_scheme == crate::emitter::WeightScheme::Jamba {
+        format!("{p}mamba.")
+    } else if cfg.plamo2.is_some() {
+        // The PLaMo 2 block norms are pushed with the layer's MLP norms.
+        format!("{p}mixer.")
+    } else {
+        out.push(WeightSpec::Whole(format!("{p}norm.weight")));
+        format!("{p}mixer.")
+    };
+    push_proj(out, format!("{m}in_proj.weight"), quant);
+    if ssm.use_bias {
+        out.push(WeightSpec::Whole(format!("{m}in_proj.bias")));
+    }
+    out.push(WeightSpec::Whole(format!("{m}conv1d.weight")));
+    if ssm.use_conv_bias {
+        out.push(WeightSpec::Whole(format!("{m}conv1d.bias")));
+    }
+    match ssm.kind {
+        crate::emitter::SsmKind::Mamba2 => {
+            for name in ["dt_bias", "A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+            if cfg.falcon_h1.as_ref().is_none_or(|f| f.rms_norm) {
+                out.push(WeightSpec::Whole(format!("{m}norm.weight")));
+            }
+        }
+        crate::emitter::SsmKind::Mamba1 { bcdt_norm, .. } => {
+            push_proj(out, format!("{m}x_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            out.push(WeightSpec::Whole(format!("{m}dt_proj.bias")));
+            for name in ["A_log", "D"] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+            if bcdt_norm == crate::emitter::BcdtNorm::Weighted {
+                for name in ["dt_layernorm", "b_layernorm", "c_layernorm"] {
+                    out.push(WeightSpec::Whole(format!("{m}{name}.weight")));
+                }
+            }
+        }
+        crate::emitter::SsmKind::Plamo2 { .. } => {
+            push_proj(out, format!("{m}bcdt_proj.weight"), quant);
+            push_proj(out, format!("{m}dt_proj.weight"), quant);
+            for name in [
+                "dt_norm_weight",
+                "B_norm_weight",
+                "C_norm_weight",
+                "A_log",
+                "D",
+                "dt_bias",
+            ] {
+                out.push(WeightSpec::Whole(format!("{m}{name}")));
+            }
+        }
+    }
+    push_proj(out, format!("{m}out_proj.weight"), quant);
+    if cfg.falcon_h1.as_ref().map_or(ssm.use_bias, |f| f.out_bias) {
+        out.push(WeightSpec::Whole(format!("{m}out_proj.bias")));
+    }
 }
 
 /// [`weight_specs`] with the packed-path decision passed explicitly (so it is
 /// testable without the `MLXCEL_XLA_QUANT` env). `quant` already folds in
 /// [`Config::supports_packed_quant`], so it is `true` only for the standard Llama
 /// layout; the fused / dense / MoE branches below are therefore never quantized.
-fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
+pub(crate) fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let s = crate::weight_names::scheme_names(cfg.weight_scheme);
     let hd = cfg.head_dim;
     let nq = cfg.n_q * hd;
     let nkv = cfg.n_kv * hd;
     let gated = !cfg.dense_mlp;
-    let has_post = !cfg.parallel_block;
 
     let mut out: Vec<WeightSpec> = Vec::new();
     out.push(WeightSpec::Whole(s.embed.to_string()));
@@ -197,17 +284,54 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     if cfg.norm_bias {
         out.push(WeightSpec::Whole("model.norm.bias".to_string()));
     }
-    if !cfg.tie_word_embeddings {
-        out.push(WeightSpec::Whole(s.lm_head.to_string()));
+    // The final logits operand, in the layout the graph declares (issue #2863).
+    // `OutIn` keeps the checkpoint's `[V, H]` head (the untied `lm_head`, or the
+    // tied `embed` for which no extra spec is pushed). `InOut` always uploads a
+    // transposed `[H, V]` operand: the untied `lm_head`, or a second read of the
+    // tied `embed` tensor after the gather's own `Whole` spec.
+    match cfg.projection_layout {
+        ProjectionLayout::OutIn => {
+            if !cfg.tie_word_embeddings {
+                out.push(WeightSpec::Whole(s.lm_head.to_string()));
+            }
+        }
+        ProjectionLayout::InOut => {
+            let name = if cfg.tie_word_embeddings {
+                s.embed.to_string()
+            } else {
+                s.lm_head.to_string()
+            };
+            // issue #2891: when the checkpoint stores the head 4-bit, the decode
+            // graph declares three raw packed parts (in the checkpoint's `[V, H]`
+            // layout) and dispatches the native GEMV. Prefill keeps a
+            // loader-dequantized transposed `[H, V]` operand instead of
+            // reconstructing the whole matrix in the graph, so both are in the
+            // shared list and every graph kind gets the same argument positions.
+            if cfg.native_head {
+                push_proj(&mut out, name.clone(), true);
+                out.push(WeightSpec::Proj(name));
+            } else {
+                out.push(WeightSpec::Proj(name));
+            }
+        }
     }
     for i in 0..cfg.n_layers {
         let p = format!("{}{i}.", s.layer_stem);
+        // A recurrent (Mamba2) layer has its own tensor list (issue #3338).
+        if cfg.is_ffn_free_ssm_layer(i) {
+            push_ssm_layer_specs(&mut out, cfg, &p, quant);
+            continue;
+        }
+        let has_ffn = cfg.layer_has_ffn(i);
+        let has_attn = cfg.attn_layer_index(i).is_some();
+        let has_post = cfg.layer_has_post_mixer_norm(i);
+        let nemotron = cfg.weight_scheme == crate::emitter::WeightScheme::NemotronH;
         // A MoE layer (issue #500) takes no dense MLP weights (down/gate/up); its
         // expert bank is appended after the attention weights / norms instead.
         let moe_layer = cfg.is_moe_layer(i);
         // down (dense StarCoder2 uses c_proj; else the scheme's down projection).
-        if !moe_layer {
-            let name = if cfg.dense_mlp {
+        if has_ffn && !moe_layer {
+            let name = if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.weight")
             } else {
                 format!("{p}{}", s.down)
@@ -215,7 +339,7 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             push_proj(&mut out, phi4_base_projection(cfg, name), quant);
         }
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
-        if gated && !moe_layer {
+        if has_ffn && gated && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, (start, end), _) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -244,7 +368,7 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // up (c_fc for dense; the second half of gate_up_proj for a fused Phi3).
         // Skipped on a MoE layer (issue #500), which has no dense up projection.
-        if !moe_layer {
+        if has_ffn && !moe_layer {
             if cfg.fused_gate_up {
                 let (name, _, (start, end)) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
@@ -252,8 +376,12 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     start,
                     end,
                 });
-            } else if cfg.dense_mlp {
-                out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
+            } else if cfg.dense_mlp && !nemotron {
+                // `c_fc` is a projection like `c_proj`: the emitter takes it
+                // through `take_weight`, so the loader must follow the graph's
+                // layout and f16-resident rule for it (issue #2859; a `Whole`
+                // spec here broke the single-sequence StarCoder2 engine).
+                push_proj(&mut out, format!("{p}mlp.c_fc.weight"), quant);
             } else {
                 push_proj(
                     &mut out,
@@ -264,7 +392,9 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // Attention projections. Youtu-VL uses the checkpoint's native MLA
         // factors; ordinary families keep wk/wo/wq/wv in their historical order.
-        if cfg.mla.is_some() {
+        if !has_attn {
+            // FFN-only block: no attention projections.
+        } else if cfg.mla.is_some() {
             push_proj(&mut out, format!("{p}self_attn.q_a_proj.weight"), quant);
             out.push(WeightSpec::Whole(format!(
                 "{p}self_attn.q_a_layernorm.weight"
@@ -324,7 +454,7 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             );
         }
         // q/k/v projection biases (k, q, v order).
-        if cfg.qkv_bias {
+        if has_attn && cfg.qkv_bias {
             if cfg.fused_qkv && cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
                 let bias = format!("{p}{}", s.q_bias);
                 out.push(WeightSpec::Elements {
@@ -348,8 +478,9 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
             }
         }
-        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
-        if cfg.qk_norm.is_some() {
+        // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k. Only an
+        // attention layer has them (a PLaMo 2 Mamba block has none).
+        if cfg.qk_norm.is_some() && has_attn {
             out.push(WeightSpec::Whole(format!("{p}{}", s.q_norm)));
             out.push(WeightSpec::Whole(format!("{p}{}", s.k_norm)));
         }
@@ -369,22 +500,48 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 )));
             }
         }
-        if cfg.attn_o_bias {
-            out.push(WeightSpec::Whole(format!("{p}self_attn.o_proj.bias")));
+        if has_attn && cfg.attn_o_bias {
+            let stem = if nemotron { "mixer" } else { "self_attn" };
+            out.push(WeightSpec::Whole(format!("{p}{stem}.o_proj.bias")));
         }
-        if cfg.mlp_bias {
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+        if has_ffn && cfg.mlp_bias {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_proj.bias")
             } else {
-                format!("{p}mlp.down_proj.bias")
+                format!(
+                    "{p}{}.down_proj.bias",
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )
             }));
             if gated {
-                out.push(WeightSpec::Whole(format!("{p}mlp.gate_proj.bias")));
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{}.gate_proj.bias",
+                    if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )));
             }
-            out.push(WeightSpec::Whole(if cfg.dense_mlp {
+            out.push(WeightSpec::Whole(if cfg.dense_mlp && !nemotron {
                 format!("{p}mlp.c_fc.bias")
             } else {
-                format!("{p}mlp.up_proj.bias")
+                format!(
+                    "{p}{}.up_proj.bias",
+                    if nemotron {
+                        "mixer"
+                    } else if cfg.falcon_h1.is_some() {
+                        "feed_forward"
+                    } else {
+                        "mlp"
+                    }
+                )
             }));
         }
         // MoE expert bank (issue #500), last in the layer: the router, the stacked
@@ -395,25 +552,50 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         if moe_layer {
             let m = cfg.moe.as_ref().expect("a MoE layer has a MoeConfig");
             let mp = m.weight_prefix;
-            out.push(WeightSpec::Whole(format!("{p}{mp}.gate.weight")));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.gate_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.up_proj.weight"
-            )));
-            out.push(WeightSpec::Whole(format!(
-                "{p}{mp}.switch_mlp.down_proj.weight"
-            )));
+            let router = crate::weight_names::moe_router_stem(cfg.weight_scheme);
+            out.push(WeightSpec::Whole(format!("{p}{mp}.{router}.weight")));
+            if matches!(
+                m.scoring,
+                MoeScoring::Sigmoid {
+                    correction_bias: true,
+                    ..
+                }
+            ) {
+                out.push(WeightSpec::Whole(format!(
+                    "{p}{mp}.gate.e_score_correction_bias"
+                )));
+            }
+            match m.expert_act {
+                ExpertAct::SwiGlu => {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.gate_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.up_proj.weight"
+                    )));
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.switch_mlp.down_proj.weight"
+                    )));
+                }
+                ExpertAct::Relu2 => {
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc1.weight")));
+                    out.push(WeightSpec::Whole(format!("{p}{mp}.switch_mlp.fc2.weight")));
+                }
+            }
             if let Some(sh) = m.shared {
+                let stem = if m.expert_act == ExpertAct::Relu2 {
+                    "shared_experts"
+                } else {
+                    "shared_expert"
+                };
+                if m.expert_act == ExpertAct::SwiGlu {
+                    out.push(WeightSpec::Whole(format!(
+                        "{p}{mp}.{stem}.gate_proj.weight"
+                    )));
+                }
+                out.push(WeightSpec::Whole(format!("{p}{mp}.{stem}.up_proj.weight")));
                 out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.gate_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.up_proj.weight"
-                )));
-                out.push(WeightSpec::Whole(format!(
-                    "{p}{mp}.shared_expert.down_proj.weight"
+                    "{p}{mp}.{stem}.down_proj.weight"
                 )));
                 if sh.gated {
                     out.push(WeightSpec::Whole(format!(
@@ -421,6 +603,9 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                     )));
                 }
             }
+        }
+        if cfg.layer_mixer(i).is_recurrent() {
+            push_ssm_layer_specs(&mut out, cfg, &p, quant);
         }
         if cfg.phi4_lora.is_some() {
             for stem in [
@@ -460,6 +645,89 @@ pub(crate) fn slice_rows(
     Ok(buf[start * in_..end * in_].to_vec())
 }
 
+/// Transpose a row-major `[out, in]` f32 projection into the `[in, out]` layout
+/// the graphs declare (issue #2859).
+///
+/// The checkpoint stores projections `[out, in]`; the graph contracts the
+/// weight's input axis so IREE never materializes a transpose per decode step.
+/// Done once at upload, in 32x32 blocks so each block fits a cache line span.
+pub(crate) fn transpose_projection(buf: &[f32], out: usize, in_: usize) -> Vec<f32> {
+    assert_eq!(
+        buf.len(),
+        out.saturating_mul(in_),
+        "projection buffer is [out, in]"
+    );
+    const BLOCK: usize = 32;
+    let mut t = vec![0.0f32; buf.len()];
+    // Bands of whole `[in]` rows of the result, so each thread owns a disjoint
+    // slice of `t` and reads `buf` only.
+    fill_rows_parallel(
+        &mut t,
+        out,
+        conversion_threads(buf.len()),
+        |first_in, band| {
+            let band_in = band.len() / out.max(1);
+            for ob in (0..out).step_by(BLOCK) {
+                let o_end = (ob + BLOCK).min(out);
+                for ib in (0..band_in).step_by(BLOCK) {
+                    let i_end = (ib + BLOCK).min(band_in);
+                    for o in ob..o_end {
+                        for i in ib..i_end {
+                            band[i * out + o] = buf[o * in_ + first_in + i];
+                        }
+                    }
+                }
+            }
+        },
+    );
+    t
+}
+
+/// Elements below which a load-time conversion stays on the calling thread: on
+/// the norms, biases and other small tensors a thread costs more than it saves.
+const PARALLEL_MIN_ELEMENTS: usize = 1 << 20;
+
+/// Upper bound on load-time conversion threads (issue #2961). The conversions
+/// are memory-bound, so they stop scaling well before a large core count.
+const PARALLEL_MAX_THREADS: usize = 16;
+
+/// Threads to convert a tensor of `elements` values with.
+fn conversion_threads(elements: usize) -> usize {
+    if elements < PARALLEL_MIN_ELEMENTS {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_MAX_THREADS)
+}
+
+/// Fill `out` in bands of whole `row_len`-element rows, one scoped thread per
+/// band (issue #2961).
+///
+/// `fill(first_row, band)` receives the index of the band's first row and must
+/// compute every element from its position alone. Each element is then written
+/// by exactly one thread with the same arithmetic as the serial loop, so the
+/// result is bit-identical for every thread count.
+fn fill_rows_parallel<T: Send>(
+    out: &mut [T],
+    row_len: usize,
+    threads: usize,
+    fill: impl Fn(usize, &mut [T]) + Sync,
+) {
+    let rows = out.len().checked_div(row_len).unwrap_or(0);
+    if threads <= 1 || rows <= 1 {
+        fill(0, out);
+        return;
+    }
+    let band_rows = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in out.chunks_mut(band_rows * row_len).enumerate() {
+            let fill = &fill;
+            scope.spawn(move || fill(band * band_rows, chunk));
+        }
+    });
+}
+
 /// bf16 little-endian bytes -> f32 (bf16 is the high 16 bits of f32).
 pub(crate) fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
@@ -476,7 +744,10 @@ pub(crate) use crate::float::{f32_to_f16_bits, half_to_f32, round_bf16_f32};
 /// than arithmetic-bound (an 8B-param checkpoint otherwise spends minutes in
 /// per-element `powi`).
 pub(crate) fn f16_to_f32(bytes: &[u8]) -> Vec<f32> {
-    let table: Vec<f32> = (0..=u16::MAX).map(half_to_f32).collect();
+    // Built once per process rather than once per call: a quantized checkpoint
+    // widens two f16 buffers (scales, biases) per projection (issue #2961).
+    static TABLE: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..=u16::MAX).map(half_to_f32).collect());
     bytes
         .chunks_exact(2)
         .map(|c| table[u16::from_le_bytes([c[0], c[1]]) as usize])
@@ -496,7 +767,19 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
 /// the in-graph demotion). The `u16` values are native-endian; the shim copies the
 /// raw bytes, so on a little-endian host they land as the f16 buffer IREE expects.
 pub(crate) fn pack_f16(data: &[f32]) -> Vec<u16> {
-    data.iter().map(|&x| f32_to_f16_bits(x)).collect()
+    let mut packed = vec![0u16; data.len()];
+    fill_rows_parallel(
+        &mut packed,
+        1,
+        conversion_threads(data.len()),
+        |first, band| {
+            let source = &data[first..first + band.len()];
+            for (dst, &x) in band.iter_mut().zip(source) {
+                *dst = f32_to_f16_bits(x);
+            }
+        },
+    );
+    packed
 }
 
 /// Dequantize one MLX affine-quantized weight to row-major `[out, in]` f32.
@@ -611,21 +894,34 @@ fn dequantize_affine_with_metadata(
     }
     let mask: u32 = (1u32 << bits) - 1;
     let mut w = vec![0f32; out * in_];
-    for o in 0..out {
-        let row = &packed[o * in_packed * 4..(o + 1) * in_packed * 4];
-        let grow = o * n_groups;
-        let wrow = o * in_;
-        for p in 0..in_packed {
-            let u =
-                u32::from_le_bytes([row[p * 4], row[p * 4 + 1], row[p * 4 + 2], row[p * 4 + 3]]);
-            for j in 0..per_u32 {
-                let i = p * per_u32 + j;
-                let q = ((u >> (bits * j)) & mask) as f32;
-                let g = i / group_size;
-                w[wrow + i] = q * scales[grow + g] + biases[grow + g];
+    // Rows are independent, so bands of rows convert on separate threads with
+    // the serial loop's arithmetic (issue #2961).
+    fill_rows_parallel(
+        &mut w,
+        in_,
+        conversion_threads(out * in_),
+        |first_row, band| {
+            for (r, wrow) in band.chunks_exact_mut(in_).enumerate() {
+                let o = first_row + r;
+                let row = &packed[o * in_packed * 4..(o + 1) * in_packed * 4];
+                let grow = o * n_groups;
+                for p in 0..in_packed {
+                    let u = u32::from_le_bytes([
+                        row[p * 4],
+                        row[p * 4 + 1],
+                        row[p * 4 + 2],
+                        row[p * 4 + 3],
+                    ]);
+                    for j in 0..per_u32 {
+                        let i = p * per_u32 + j;
+                        let q = ((u >> (bits * j)) & mask) as f32;
+                        let g = i / group_size;
+                        wrow[i] = q * scales[grow + g] + biases[grow + g];
+                    }
+                }
             }
-        }
-    }
+        },
+    );
     Ok(w)
 }
 
@@ -1038,6 +1334,110 @@ mod tests {
     }
 
     #[test]
+    fn inout_head_spec_is_a_transposed_projection() {
+        // Tied (llama-3.2-1b): the embed tensor is read twice, once as the
+        // gather's whole tensor and once as the transposed head operand.
+        let tied = Config::llama_3_2_1b();
+        let out_in = weight_specs_q(&tied, false);
+        assert_eq!(
+            out_in[0],
+            WeightSpec::Whole("model.embed_tokens.weight".to_string())
+        );
+        assert_eq!(
+            out_in[1],
+            WeightSpec::Whole("model.norm.weight".to_string())
+        );
+        assert!(
+            !out_in.iter().any(
+                |spec| matches!(spec, WeightSpec::Proj(name) if name == "model.embed_tokens.weight")
+            ),
+            "the tied OutIn head adds no projection spec"
+        );
+
+        let mut inout = tied.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        let specs = weight_specs_q(&inout, false);
+        assert_eq!(
+            specs[0],
+            WeightSpec::Whole("model.embed_tokens.weight".to_string())
+        );
+        assert_eq!(
+            specs[2],
+            WeightSpec::Proj("model.embed_tokens.weight".to_string()),
+            "the InOut head follows the norm as a transposed projection"
+        );
+
+        // Untied: the existing lm_head arg becomes the transposed projection
+        // instead of a fourth whole tensor.
+        let mut untied = tied;
+        untied.tie_word_embeddings = false;
+        untied.projection_layout = ProjectionLayout::InOut;
+        let specs = weight_specs_q(&untied, true);
+        assert_eq!(
+            specs[2],
+            WeightSpec::Proj("lm_head.weight".to_string()),
+            "the untied InOut head is the lm_head as a projection"
+        );
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| matches!(spec, WeightSpec::Whole(name) if name == "lm_head.weight")),
+            "the packed path never declares a whole lm_head arg"
+        );
+    }
+
+    /// issue #2891: a packed native head declares the packed triple for the
+    /// decode dispatch and keeps the loader-dequantized transposed operand for
+    /// prefill, so every graph kind shares one argument list.
+    #[test]
+    fn inout_packed_head_spec_is_the_raw_quantised_triple() {
+        let mut tied = Config::llama_3_2_1b();
+        tied.projection_layout = ProjectionLayout::InOut;
+        tied.native_head = true;
+        let specs = weight_specs_q(&tied, false);
+        assert_eq!(
+            &specs[2..5],
+            &[
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.weight".to_string(),
+                    part: QuantPart::Packed,
+                },
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.scales".to_string(),
+                    part: QuantPart::Scales,
+                },
+                WeightSpec::QuantRaw {
+                    name: "model.embed_tokens.biases".to_string(),
+                    part: QuantPart::Biases,
+                },
+            ],
+            "the tied packed head re-reads the embed tensor's raw parts"
+        );
+        assert_eq!(
+            specs[5],
+            WeightSpec::Proj("model.embed_tokens.weight".to_string()),
+            "the prefill operand follows the packed triple"
+        );
+
+        let mut untied = tied;
+        untied.tie_word_embeddings = false;
+        let specs = weight_specs_q(&untied, false);
+        assert_eq!(
+            specs[2],
+            WeightSpec::QuantRaw {
+                name: "lm_head.weight".to_string(),
+                part: QuantPart::Packed,
+            },
+            "the untied packed head reads lm_head's raw parts"
+        );
+        assert_eq!(
+            specs[5],
+            WeightSpec::Proj("lm_head.weight".to_string()),
+            "the untied prefill operand is the lm_head as a projection"
+        );
+    }
+
+    #[test]
     fn phi4mm_weight_schema_uses_base_layers_and_complete_adapter_pairs() {
         let config = phi4_config();
         let specs = weight_specs_q(&config, false);
@@ -1305,6 +1705,221 @@ mod tests {
         assert!(names.iter().any(|n| n.ends_with("mlp.c_proj.bias")));
     }
 
+    /// The `(loc, shape, element type)` of every weight argument of the
+    /// graph's `@main`, in declaration order (the loader's upload order).
+    fn main_weight_args(graph: &str) -> Vec<(String, Vec<usize>, String)> {
+        let signature = graph
+            .split("func.func public @main(")
+            .nth(1)
+            .and_then(|rest| rest.split(") -> ").next())
+            .expect("graph has a public @main");
+        let mut args = Vec::new();
+        for segment in signature.split("%arg").skip(1) {
+            let Some(ty) = segment.split("tensor<").nth(1) else {
+                continue;
+            };
+            let ty = ty.split('>').next().unwrap_or_default();
+            let Some(loc) = segment.split("loc(\"").nth(1) else {
+                continue;
+            };
+            let loc = loc.split("\")").next().unwrap_or_default();
+            if !loc.starts_with("params[") {
+                continue;
+            }
+            let mut parts: Vec<&str> = ty.split('x').collect();
+            let elt = parts.pop().unwrap_or_default().to_string();
+            let shape = parts
+                .iter()
+                .map(|d| d.parse().expect("static dim"))
+                .collect();
+            args.push((loc.to_string(), shape, elt));
+        }
+        args
+    }
+
+    /// Issues #3364 / #3362 / #2859: in every family, each weight argument the
+    /// emitter declares must match what the loader uploads for its spec. The
+    /// `OutIn` graphs (the gated batch engine) upload every tensor in its
+    /// checkpoint layout, so their declarations are the checkpoint shapes; the
+    /// `InOut` loader transposes exactly the `Proj` / `Rows` specs and keeps
+    /// every other spec as stored, and it uploads only `Proj` / `Rows` specs
+    /// f16-resident. StarCoder2's `c_fc` was a `Whole` spec declared through
+    /// `take_weight`, so the CLI failed with `expected 3072x12288, actual
+    /// 12288x3072` (local-task) and an f16 vs f32 mismatch (cuda).
+    #[test]
+    fn every_family_declares_weights_the_way_the_loader_uploads_them() {
+        let youtu = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":12,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":6,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let mamba2 = r#"{"model_type":"mamba2","hidden_size":16,"num_hidden_layers":2,
+            "vocab_size":40,"num_heads":4,"head_dim":8,"state_size":16,"n_groups":2,
+            "conv_kernel":4,"expand":2,"use_conv_bias":true,"use_bias":false,
+            "layer_norm_epsilon":1e-05,"chunk_size":256,"rms_norm":true,
+            "hidden_act":"silu","tie_word_embeddings":true}"#;
+        let families: Vec<(&str, String)> = vec![
+            (
+                "cohere",
+                include_str!("../assets/cohere/config.json").into(),
+            ),
+            (
+                "cohere2",
+                include_str!("../assets/cohere2/config.json").into(),
+            ),
+            (
+                "exaone",
+                include_str!("../assets/exaone/config.json").into(),
+            ),
+            (
+                "granite",
+                include_str!("../assets/granite/config.json").into(),
+            ),
+            (
+                "internlm3",
+                include_str!("../assets/internlm3/config.json").into(),
+            ),
+            (
+                "llama",
+                include_str!("../assets/llama-3.2-1b/config.json").into(),
+            ),
+            ("mimo", include_str!("../assets/mimo/config.json").into()),
+            (
+                "minicpm",
+                include_str!("../assets/minicpm/config.json").into(),
+            ),
+            (
+                "olmoe",
+                include_str!("../assets/olmoe-tiny/config.json").into(),
+            ),
+            ("phi3", include_str!("../assets/phi3/config.json").into()),
+            (
+                "qwen2",
+                include_str!("../assets/qwen2.5-0.5b/config.json").into(),
+            ),
+            (
+                "qwen2_moe",
+                include_str!("../assets/qwen2-moe-tiny/config.json").into(),
+            ),
+            (
+                "qwen3_moe",
+                include_str!("../assets/qwen3-moe-tiny/config.json").into(),
+            ),
+            (
+                "seed_oss",
+                include_str!("../assets/seed_oss/config.json").into(),
+            ),
+            (
+                "stablelm",
+                include_str!("../assets/stablelm/config.json").into(),
+            ),
+            (
+                "starcoder2",
+                include_str!("../assets/starcoder2/config.json").into(),
+            ),
+            ("youtu_vl", youtu.into()),
+            ("mamba2", mamba2.into()),
+            (
+                "falcon_h1",
+                include_str!("../assets/falcon_h1/config.json").into(),
+            ),
+            (
+                "plamo2",
+                include_str!("../assets/plamo2/config.json").into(),
+            ),
+            ("jamba", include_str!("../assets/jamba/config.json").into()),
+        ];
+        for (family, json) in &families {
+            let base = Config::from_json_str(json)
+                .unwrap_or_else(|e| panic!("{family}: {e}"))
+                .with_context_capacity(16)
+                .expect("context capacity");
+            assert_layouts_agree(family, &base);
+        }
+    }
+
+    fn assert_layouts_agree(family: &str, base: &Config) {
+        use crate::emitter::{
+            Precision, emit_decode_ragged_with, emit_decode_with, emit_prefill_with,
+        };
+        type Emit = fn(&Config, Precision) -> Option<String>;
+        let kinds: [(&str, Emit); 3] = [
+            ("prefill", |c, p| Some(emit_prefill_with(c, false, p))),
+            ("decode", |c, p| Some(emit_decode_with(c, false, p))),
+            ("ragged", |c, p| {
+                emit_decode_ragged_with(c, 2, false, p).ok()
+            }),
+        ];
+        let mut outin = base.clone();
+        outin.projection_layout = ProjectionLayout::OutIn;
+        let mut inout = base.clone();
+        inout.projection_layout = ProjectionLayout::InOut;
+        for (kind, emit) in kinds {
+            let Some(reference) = emit(&outin, Precision::F32) else {
+                continue;
+            };
+            // The checkpoint shape of every tensor, keyed by its argument.
+            let checkpoint: std::collections::HashMap<String, Vec<usize>> =
+                main_weight_args(&reference)
+                    .into_iter()
+                    .map(|(loc, shape, _)| (loc, shape))
+                    .collect();
+            for precision in [Precision::F32, Precision::F16] {
+                for c in [&outin, &inout] {
+                    let layout = c.projection_layout;
+                    let Some(graph) = emit(c, precision) else {
+                        continue;
+                    };
+                    let args = main_weight_args(&graph);
+                    let specs = weight_specs(c);
+                    assert_eq!(
+                        args.len(),
+                        specs.len(),
+                        "{family} {kind} {layout:?}: one weight arg per spec"
+                    );
+                    let resident_f16 = precision == Precision::F16 && c.supports_f16_resident();
+                    for ((loc, shape, elt), spec) in args.iter().zip(&specs) {
+                        let projection =
+                            matches!(spec, WeightSpec::Proj(_) | WeightSpec::Rows { .. });
+                        // The tied InOut head reads the embedding tensor again.
+                        let stored = checkpoint
+                            .get(loc)
+                            .or_else(|| checkpoint.get("params['embed']"))
+                            .unwrap_or_else(|| {
+                                panic!("{family} {kind}: no checkpoint shape for {loc}")
+                            });
+                        let uploaded: Vec<usize> =
+                            if projection && matches!(layout, ProjectionLayout::InOut) {
+                                stored.iter().rev().copied().collect()
+                            } else {
+                                stored.clone()
+                            };
+                        assert_eq!(
+                            shape,
+                            &uploaded,
+                            "{family} {kind} {layout:?} {precision:?}: {loc} ({}) is declared \
+                             {shape:?} but the loader uploads {uploaded:?}",
+                            spec.tensor_name()
+                        );
+                        let uploaded_elt = if projection && resident_f16 {
+                            "f16"
+                        } else {
+                            "f32"
+                        };
+                        assert_eq!(
+                            elt,
+                            uploaded_elt,
+                            "{family} {kind} {layout:?} {precision:?}: {loc} ({}) is declared \
+                             {elt} but the loader uploads {uploaded_elt}",
+                            spec.tensor_name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Cohere is tied, LayerNorm (no norm bias), parallel (no post-attn norm).
     #[test]
     fn weight_specs_cohere_is_tied_parallel_no_post_norm() {
@@ -1390,6 +2005,130 @@ mod tests {
         assert_eq!(slice_rows(&buf, 4, 1, 3).unwrap(), vec![2.0, 3.0, 4.0, 5.0]);
         assert!(slice_rows(&buf, 4, 2, 5).is_err());
         assert!(slice_rows(&buf, 3, 0, 1).is_err());
+    }
+
+    /// The projection transpose moves `[out, in]` to `[in, out]` exactly.
+    #[test]
+    fn transpose_projection_moves_the_out_axis_last() {
+        // 2 rows (out) x 3 cols (in), row-major.
+        let buf = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        assert_eq!(
+            transpose_projection(&buf, 2, 3),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+        // A larger-than-block shape keeps every element in its transposed slot.
+        let (out, in_) = (40, 70);
+        let buf: Vec<f32> = (0..out * in_).map(|x| x as f32).collect();
+        let t = transpose_projection(&buf, out, in_);
+        for o in 0..out {
+            for i in 0..in_ {
+                assert_eq!(t[i * out + o], buf[o * in_ + i]);
+            }
+        }
+    }
+
+    /// issue #2961: banding rows over threads never changes which element a
+    /// row index maps to, for band counts that do and do not divide the rows.
+    #[test]
+    fn fill_rows_parallel_matches_the_serial_fill_for_every_thread_count() {
+        let (rows, row_len) = (37usize, 5usize);
+        let fill = |first_row: usize, band: &mut [u32]| {
+            for (r, row) in band.chunks_exact_mut(row_len).enumerate() {
+                for (c, slot) in row.iter_mut().enumerate() {
+                    *slot = ((first_row + r) * 1000 + c) as u32;
+                }
+            }
+        };
+        let mut serial = vec![0u32; rows * row_len];
+        fill(0, &mut serial);
+        for threads in [1, 2, 3, 7, 16, 37, 64] {
+            let mut banded = vec![u32::MAX; rows * row_len];
+            fill_rows_parallel(&mut banded, row_len, threads, fill);
+            assert_eq!(banded, serial, "threads = {threads}");
+        }
+        // Degenerate shapes take the serial path instead of dividing by zero.
+        let mut empty: Vec<u32> = Vec::new();
+        fill_rows_parallel(&mut empty, 0, 8, |_, band| assert!(band.is_empty()));
+    }
+
+    /// Small tensors stay on the calling thread; large ones are capped.
+    #[test]
+    fn conversion_threads_is_serial_below_the_threshold_and_capped_above() {
+        assert_eq!(conversion_threads(0), 1);
+        assert_eq!(conversion_threads(PARALLEL_MIN_ELEMENTS - 1), 1);
+        let large = conversion_threads(PARALLEL_MIN_ELEMENTS);
+        assert!((1..=PARALLEL_MAX_THREADS).contains(&large));
+    }
+
+    /// issue #2961: at a size that takes the threaded path, the three load-time
+    /// conversions return exactly what a serial element-by-element reference
+    /// computes. 1024 x 1088 is above the threshold and not a multiple of the
+    /// transpose block or of a typical band count.
+    #[test]
+    fn threaded_conversions_are_bit_identical_to_the_serial_reference() {
+        let (out, in_packed, bits, group) = (1024usize, 136usize, 4usize, 64usize);
+        let in_ = in_packed * (32 / bits);
+        assert!(out * in_ >= PARALLEL_MIN_ELEMENTS);
+        let n_groups = in_ / group;
+        // A fixed LCG, so the test needs no RNG dependency and is reproducible.
+        let mut state = 0x2961_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let packed: Vec<u8> = (0..out * in_packed)
+            .flat_map(|_| next().to_le_bytes())
+            .collect();
+        // Finite f16 scales and biases with varied exponents and signs.
+        let half = |value: u32| {
+            let bits = (value as u16) & 0x7FFF;
+            let exponent = 10 + (bits >> 10) % 8;
+            (((value >> 16) as u16 & 0x8000) | (exponent << 10) | (bits & 0x03FF)).to_le_bytes()
+        };
+        let scales: Vec<u8> = (0..out * n_groups).flat_map(|_| half(next())).collect();
+        let biases: Vec<u8> = (0..out * n_groups).flat_map(|_| half(next())).collect();
+
+        let w = dequantize_affine(
+            &packed, &scales, &biases, out, in_packed, bits, group, false,
+        )
+        .unwrap();
+        let s = f16_to_f32(&scales);
+        let b = f16_to_f32(&biases);
+        let mut reference = vec![0f32; out * in_];
+        for o in 0..out {
+            for i in 0..in_ {
+                let word = (o * in_packed + i / 8) * 4;
+                let u = u32::from_le_bytes(packed[word..word + 4].try_into().unwrap());
+                let q = ((u >> (4 * (i % 8))) & 0xF) as f32;
+                reference[o * in_ + i] =
+                    q * s[o * n_groups + i / group] + b[o * n_groups + i / group];
+            }
+        }
+        assert!(
+            w.iter()
+                .zip(&reference)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "dequantize_affine differs from the serial reference"
+        );
+
+        let packed_f16 = pack_f16(&w);
+        assert!(
+            packed_f16
+                .iter()
+                .zip(&reference)
+                .all(|(&a, &b)| a == f32_to_f16_bits(b)),
+            "pack_f16 differs from the serial reference"
+        );
+
+        let t = transpose_projection(&w, out, in_);
+        for o in (0..out).step_by(7) {
+            for i in 0..in_ {
+                assert_eq!(t[i * out + o].to_bits(), reference[o * in_ + i].to_bits());
+            }
+        }
+        assert_eq!(t.len(), reference.len());
     }
 
     /// f16 widening is exact against `f32 as` for representative values: zero, one,
@@ -1658,3 +2397,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "weights_phi4_lora_tests.rs"]
+mod phi4_lora_layout_tests;

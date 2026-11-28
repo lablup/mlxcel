@@ -20,8 +20,8 @@
 //! behavior change for that family and needs its own measurement.
 
 use super::{
-    GeluActivation, array_to_vec_f32, compiled_gelu_tanh_f32, gelu_approx, gelu_sigmoid, gelu_tanh,
-    gelu_tanh_f32,
+    GeluActivation, array_to_vec_f32, compiled_gelu_tanh_f32, fused_gelu_tanh_f32,
+    fused_gelu_tanh_f32_accepts, gelu_approx, gelu_sigmoid, gelu_tanh, gelu_tanh_f32,
 };
 use crate::{dtype, ffi};
 use cxx::UniquePtr;
@@ -85,6 +85,9 @@ fn bits_equal(a: &ffi::MlxArray, b: &ffi::MlxArray) -> bool {
 
 #[test]
 fn tanh_f32_matches_the_folded_siglip_molmo2_qwen3_vl_copy_bit_for_bit() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     for target in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
         let x = as_dtype(&sample_inputs(), target);
         let folded = GeluActivation::TanhF32.apply(&x);
@@ -104,6 +107,9 @@ fn tanh_f32_matches_the_folded_siglip_molmo2_qwen3_vl_copy_bit_for_bit() {
 /// to 1e4) exceed anything a vision projection produces (max |x| about 170).
 #[test]
 fn compiled_tanh_f32_matches_the_eager_helper_to_f32_rounding() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     // (dtype, relative bound covering the allowed ulps, subnormal floor)
     let bounds = [
         (dtype::FLOAT32, 4.0 * f32::EPSILON, 4.0 * f32::from_bits(1)),
@@ -115,17 +121,25 @@ fn compiled_tanh_f32_matches_the_eager_helper_to_f32_rounding() {
         let x = as_dtype(&inputs, target);
         let compiled = compiled_gelu_tanh_f32(&x);
         assert_eq!(ffi::array_dtype(&compiled), target);
-        assert!(bits_equal(
-            &compiled,
-            &GeluActivation::TanhF32Compiled.apply(&x)
-        ));
+        let routed = GeluActivation::TanhF32Compiled.apply(&x);
+        // Without a kernel port, `TanhF32Compiled` is the graph-composed path
+        // itself and the two must agree bit for bit. With one, it is the fused
+        // custom kernel, a separate implementation of the same f32 formula; the
+        // tolerance loop below is its contract.
+        if !crate::ffi::fused_gelu_tanh_f32_available() {
+            assert!(bits_equal(&compiled, &routed));
+        }
         let eager = gelu_tanh_f32(&x);
         let got = array_to_vec_f32(&ffi::astype(&compiled, dtype::FLOAT32));
         let want = array_to_vec_f32(&ffi::astype(&eager, dtype::FLOAT32));
         assert_eq!(got.len(), inputs.len());
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(g.is_finite(), "dtype {target} lane {i}: compiled {g}");
-            let bound = (relative * w.abs()).max(floor);
+            // The fused kernel and the eager chain round tanh independently.
+            // `1.0f + tanh(inner)` subtracts almost to zero on the negative
+            // tail, so a lane's error there is set by ulp(1.0) times `|x|`, not
+            // by the size of the result; the `|x|`-scaled term covers that.
+            let bound = (relative * w.abs()).max(floor) + 2.0_f32.powi(-22) * inputs[i].abs();
             assert!(
                 (g - w).abs() <= bound,
                 "dtype {target} lane {i} (x = {}): compiled {g} vs eager {w}",
@@ -135,11 +149,11 @@ fn compiled_tanh_f32_matches_the_eager_helper_to_f32_rounding() {
     }
 }
 
-/// Tower-shaped bf16 input: one SigLIP MLP row block ([64, 4304]) of
-/// N(0, 4^2) values with sparse outliers out to +-170, the largest
+/// Tower-shaped input in dtype `target`: one SigLIP MLP row block ([64, 4304])
+/// of N(0, 4^2) values with sparse outliers out to +-170, the largest
 /// pre-activation magnitude measured on the gemma-3-4b-it-4bit tower. Built
 /// on the host with a fixed LCG so it does not touch the global MLX RNG.
-fn tower_like_bf16() -> (UniquePtr<ffi::MlxArray>, usize) {
+fn tower_like(target: i32) -> (UniquePtr<ffi::MlxArray>, usize) {
     let (rows, cols) = (64_usize, 4304_usize);
     let mut state = 0x2423_u64;
     let mut uniform = || {
@@ -160,18 +174,29 @@ fn tower_like_bf16() -> (UniquePtr<ffi::MlxArray>, usize) {
         values.push(v as f32);
     }
     let x = ffi::from_slice_f32(&values, &[rows as i32, cols as i32]);
-    (ffi::astype(&x, dtype::BFLOAT16), rows * cols)
+    (ffi::astype(&x, target), rows * cols)
+}
+
+/// [`tower_like`] in bf16, the dtype the SigLIP tower runs in.
+fn tower_like_bf16() -> (UniquePtr<ffi::MlxArray>, usize) {
+    tower_like(dtype::BFLOAT16)
 }
 
 /// Tower-scale check of the same bound, with the size of the disagreement
 /// printed for the record (`--nocapture`).
 #[test]
 fn compiled_tanh_f32_matches_the_eager_helper_on_tower_scale_bf16() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     let (x, lanes) = tower_like_bf16();
     let compiled = compiled_gelu_tanh_f32(&x);
     let eager = gelu_tanh_f32(&x);
     let got = array_to_vec_f32(&compiled);
     let want = array_to_vec_f32(&eager);
+    // The lane magnitudes the two paths actually consume: the bf16 input
+    // widened to f32, which is what the absolute tolerance term needs.
+    let xv = array_to_vec_f32(&ffi::astype(&x, dtype::FLOAT32));
     assert_eq!(got.len(), lanes);
     let (mut differing, mut max_abs, mut max_rel) = (0_usize, 0.0_f32, 0.0_f32);
     for (i, (g, w)) in got.iter().zip(&want).enumerate() {
@@ -180,11 +205,21 @@ fn compiled_tanh_f32_matches_the_eager_helper_on_tower_scale_bf16() {
         if diff > 0.0 {
             differing += 1;
             max_abs = max_abs.max(diff);
-            max_rel = max_rel.max(diff / w.abs());
+            // A GELU output can round to exactly zero, where a relative error
+            // has no meaning; the absolute term of `tol` is what judges it.
+            if *w != 0.0 {
+                max_rel = max_rel.max(diff / w.abs());
+            }
         }
+        // `1.0f + tanh(inner)` cancels almost to zero on the negative tail,
+        // so a lane's error there is set by ulp(1.0) times `|x|`, not by the
+        // size of the result; a relative-only bound would demand exact bits
+        // from a value whose result is a rounding residue.
+        let tol = 2.0_f32.powi(-7) * w.abs() + 2.0_f32.powi(-22) * xv[i].abs();
         assert!(
-            diff <= 2.0_f32.powi(-7) * w.abs(),
-            "lane {i}: compiled {g} vs eager {w}"
+            diff <= tol,
+            "lane {i} (x {:e}): compiled {g:e} vs eager {w:e}, |d| {diff:e} > {tol:e}",
+            xv[i]
         );
     }
     eprintln!(
@@ -195,6 +230,9 @@ fn compiled_tanh_f32_matches_the_eager_helper_on_tower_scale_bf16() {
 
 #[test]
 fn tanh_matches_the_folded_input_dtype_copy_bit_for_bit() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     // f32 covers Kokoro (which runs f32) and Kimi; bf16 / f16 cover Kimi K3
     // and LocateAnything, which run in the checkpoint dtype.
     for target in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
@@ -211,6 +249,9 @@ fn tanh_matches_the_folded_input_dtype_copy_bit_for_bit() {
 
 #[test]
 fn selector_variants_compute_their_named_formulas() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     let values = [-3.0_f32, -1.0, 0.0, 1.0, 3.0];
     let x = ffi::from_slice_f32(&values, &[5]);
     // Hugging Face `gelu_pytorch_tanh` and exact `gelu` at the same points
@@ -264,6 +305,9 @@ fn selector_variants_compute_their_named_formulas() {
 /// +-x or 0, never NaN.
 #[test]
 fn tanh_in_input_dtype_never_produces_nan_for_finite_input() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
     for target in [dtype::BFLOAT16, dtype::FLOAT16] {
         let x = as_dtype(&sample_inputs(), target);
         let out = gelu_tanh(&x);
@@ -298,4 +342,426 @@ fn hugging_face_names_map_to_the_act2fn_formula() {
     }
     assert_eq!(GeluActivation::Erf.in_f32_compiled(), GeluActivation::Erf);
     assert_eq!(GeluActivation::Fast.in_f32_compiled(), GeluActivation::Fast);
+}
+// The real Metal kernel runs only when the default device is the GPU with a
+// Metal port in the table; gated on `fused_gelu_tanh_f32_available()` so the
+// test skips on CPU-only hosts instead of panicking at the FFI boundary.
+#[test]
+fn fused_tanh_f32_matches_the_eager_helper_where_the_kernel_runs() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
+    if !crate::ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable (CPU-only host); skipping");
+        return;
+    }
+    let (x, lanes) = tower_like_bf16();
+    let compiled = GeluActivation::TanhF32Compiled.apply(&x);
+    let eager = gelu_tanh_f32(&x);
+    assert_eq!(ffi::array_dtype(&compiled), dtype::BFLOAT16);
+    assert_eq!(ffi::array_dtype(&eager), dtype::BFLOAT16);
+    let got = array_to_vec_f32(&ffi::astype(&compiled, dtype::FLOAT32));
+    let want = array_to_vec_f32(&ffi::astype(&eager, dtype::FLOAT32));
+    assert_eq!(got.len(), lanes);
+    let (mut differing, mut max_abs, mut max_rel) = (0_usize, 0.0_f32, 0.0_f32);
+    let xv = array_to_vec_f32(&ffi::astype(&x, dtype::FLOAT32));
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(g.is_finite(), "lane {i}: fused {g}");
+        let diff = (g - w).abs();
+        if diff > 0.0 {
+            differing += 1;
+            max_abs = max_abs.max(diff);
+            if *w != 0.0 {
+                max_rel = max_rel.max(diff / w.abs());
+            }
+        }
+        // Two tolerances, because the two paths round in different places.
+        // Relative, for lanes where the result is a healthy fraction of `x`.
+        // Absolute and scaled by `|x|` for the negative tail, where
+        // `1.0f + tanh(inner)` subtracts almost to zero: at x = -4.8 the sum is
+        // about 3.3e-7, so its f32 rounding error is set by ulp(1.0) times
+        // `|x|`, not by the size of the result, and a lane there can differ from
+        // the eager chain by ~17% while keeping the same first bf16 digits.
+        let tol = 2.0_f32.powi(-7) * w.abs() + 2.0_f32.powi(-22) * xv[i].abs();
+        assert!(
+            diff <= tol,
+            "lane {} (x {:e}): fused {:e} vs eager {:e}, |d| {:e} > {tol:e}",
+            i,
+            xv[i],
+            g,
+            w,
+            diff
+        );
+    }
+    eprintln!(
+        "fused vs eager TanhF32, bf16 [64, 4304]: {differing}/{lanes} lanes differ, \
+         max abs diff {max_abs:e}, max rel diff {max_rel:e}"
+    );
+}
+
+/// The other half of [`gelu_tanh_f32_compiled_where_available`]: with the
+/// default device moved to the CPU, `fused_gelu_tanh_f32_available()` must
+/// report false, the custom kernel must not be reached, and the dispatch arm
+/// must take the [`compiled_gelu_tanh_f32`] fallback bit for bit.
+///
+/// Without this the availability gate is only ever exercised on its `true`
+/// branch on a GPU host, so a gate that stopped refusing would silently start
+/// launching a Metal kernel on the CPU stream instead of failing a test.
+///
+/// The guard is held only while the CPU results are built and read back, and
+/// the expected value is read *through the guard* rather than precomputed on
+/// the GPU: the default device is process-global, so a wide guard would corrupt
+/// the other tests libtest runs in parallel.
+#[test]
+fn compiled_dispatch_falls_back_to_the_compiled_chain_on_the_cpu() {
+    let x = as_dtype(&sample_inputs(), dtype::BFLOAT16);
+    let (routed, fallback) = {
+        let _lock = crate::streams::lock_default_device();
+        let _cpu = crate::streams::DefaultDeviceGuard::cpu();
+        assert!(
+            !crate::ffi::default_device_is_gpu(),
+            "the CPU guard did not move the default device"
+        );
+        assert!(
+            !crate::ffi::fused_gelu_tanh_f32_available(),
+            "the fused kernel claims to be available on the CPU stream"
+        );
+        (
+            GeluActivation::TanhF32Compiled.apply(&x),
+            compiled_gelu_tanh_f32(&x),
+        )
+    };
+    assert_eq!(ffi::array_dtype(&routed), dtype::BFLOAT16);
+    assert_eq!(ffi::array_dtype(&fallback), dtype::BFLOAT16);
+    assert!(
+        bits_equal(&routed, &fallback),
+        "the CPU dispatch arm diverged from the compiled chain it claims to take"
+    );
+}
+
+/// An empty tensor must take the same route as any other shape.
+///
+/// The fused launcher returns an empty input without dispatching, because MLX
+/// clamps the threadgroup to the grid and `n == 0` would make it zero wide. This
+/// pins that the call does not throw and that the result keeps the input shape
+/// and dtype. It is asserted on both routes so the GPU port and the compiled
+/// fallback stay interchangeable at the edge.
+#[test]
+fn empty_input_takes_the_same_route_on_both_paths() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
+    let empty = ffi::from_slice_f32(&[], &[0, 3]);
+
+    let compiled = compiled_gelu_tanh_f32(&empty);
+    assert_eq!(ffi::array_shape(&compiled), vec![0, 3]);
+    assert_eq!(ffi::array_dtype(&compiled), dtype::FLOAT32);
+    assert_eq!(ffi::array_size(&compiled), 0);
+
+    // The fused launcher throws rather than degrading when the port table has
+    // no entry for this backend, so the launch itself is gated here.
+    if !crate::ffi::fused_gelu_tanh_f32_available() {
+        eprintln!(
+            "fused_gelu_tanh_f32 unavailable (CPU-only host); checked the compiled route only"
+        );
+        return;
+    }
+    let fused = fused_gelu_tanh_f32(&empty);
+    assert_eq!(ffi::array_shape(&fused), vec![0, 3]);
+    assert_eq!(ffi::array_dtype(&fused), dtype::FLOAT32);
+    assert_eq!(ffi::array_size(&fused), 0);
+}
+
+/// The fused kernel must cast back to the dtype it was given.
+///
+/// `activation_helpers_return_the_input_dtype` in `ffi_tests` pins this rule for
+/// the eager helpers, and `compiled_gelu_tanh_f32` is covered there by name. The
+/// fused launch is the third route into the same contract and it was not listed,
+/// so it was only ever exercised on bf16 -- one dtype out of the three the rule
+/// ranges over. A widened return is invisible numerically (the result is right,
+/// the throughput is not), which is exactly why the rule is a test.
+#[test]
+fn fused_kernel_returns_the_input_dtype() {
+    let _lock = crate::streams::lock_default_device();
+    if !ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable on this backend; skipping");
+        return;
+    }
+    for (dt, name) in [
+        (dtype::FLOAT16, "f16"),
+        (dtype::BFLOAT16, "bf16"),
+        (dtype::FLOAT32, "f32"),
+    ] {
+        let x = ffi::full_f32(&[4, 8], 0.75, dt);
+        let out = fused_gelu_tanh_f32(&x);
+        assert_eq!(
+            ffi::array_dtype(&out),
+            dt,
+            "fused_gelu_tanh_f32 returned dtype {} for a {name} input; the kernel stores \
+             through T, so a widened result means the template argument or the store is wrong",
+            ffi::array_dtype(&out),
+        );
+        assert_eq!(
+            ffi::array_shape(&out),
+            vec![4, 8],
+            "{name}: shape must survive"
+        );
+
+        // A dtype-only check passes even if the launch did nothing, so read the
+        // values back: gelu_tanh_f32(0.75) in f32 is the reference, and a
+        // half-precision input may differ from it only by that dtype's rounding.
+        let eager = gelu_tanh_f32(&x);
+        let want = array_to_vec_f32(&eager);
+        let got = array_to_vec_f32(&out);
+        let tol = if dt == dtype::FLOAT32 {
+            4.0 * f32::EPSILON
+        } else {
+            1.0e-2
+        };
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() <= tol,
+                "{name} lane {i}: fused {g} vs eager {w} differs by more than {tol}; the \
+                 kernel must apply the same formula the eager chain does"
+            );
+        }
+    }
+}
+
+/// CUDA has a port for this kernel (#2780), so on a CUDA build with a GPU
+/// default device the dispatch must reach it rather than the compiled chain.
+/// Gated on the device, not the feature alone: a CUDA build on a host without
+/// a device has a CPU default device and takes the chain, which
+/// `tests/cpu_device_custom_kernel_gates.rs` pins.
+#[cfg(feature = "cuda")]
+#[test]
+fn fused_kernel_is_reachable_on_cuda() {
+    let _lock = crate::streams::lock_default_device();
+    if !crate::ffi::default_device_is_gpu() {
+        eprintln!("no CUDA device (CPU default device); skipping");
+        return;
+    }
+    assert!(
+        ffi::fused_gelu_tanh_f32_available(),
+        "the fused tanh-GELU has a CUDA port (#2780); a CUDA build with a GPU must launch \
+         it rather than take the compiled chain"
+    );
+    assert!(
+        ffi::fused_gelu_tanh_f32_matches_eager_bits(),
+        "the CUDA port rounds each operation on its own and must say so, or \
+         GeluActivation::TanhF32 stays on the eager chain (#2780)"
+    );
+}
+
+/// The fused kernel is held to the bound the compiled chain is held to on the
+/// same sweep (`sample_inputs`, |x| up to 1e4, so both saturated tails are
+/// covered): a few f32 ulps for f32 output, one ulp of the narrow dtype after
+/// the cast back, plus the `|x|`-scaled term for the cancelling negative tail.
+/// Also pins that the dispatch arm is the kernel itself wherever it has a port
+/// (Metal, CUDA). Skips on the CPU device, where there is no port.
+#[test]
+fn fused_tanh_f32_matches_the_eager_helper_to_f32_rounding_on_the_sweep() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
+    if !crate::ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable (CPU-only host); skipping");
+        return;
+    }
+    // (dtype, relative bound covering the allowed ulps, subnormal floor)
+    let bounds = [
+        (dtype::FLOAT32, 4.0 * f32::EPSILON, 4.0 * f32::from_bits(1)),
+        (dtype::BFLOAT16, 2.0_f32.powi(-7), 0.0),
+        (dtype::FLOAT16, 2.0_f32.powi(-10), 2.0_f32.powi(-24)),
+    ];
+    let inputs = sample_inputs();
+    for (target, relative, floor) in bounds {
+        let x = as_dtype(&inputs, target);
+        let fused = fused_gelu_tanh_f32(&x);
+        assert_eq!(ffi::array_dtype(&fused), target);
+        let routed = GeluActivation::TanhF32Compiled.apply(&x);
+        assert!(
+            bits_equal(&fused, &routed),
+            "dtype {target}: TanhF32Compiled did not take the fused kernel its port table \
+             says is available"
+        );
+        let eager = gelu_tanh_f32(&x);
+        let got = array_to_vec_f32(&ffi::astype(&fused, dtype::FLOAT32));
+        let want = array_to_vec_f32(&ffi::astype(&eager, dtype::FLOAT32));
+        assert_eq!(got.len(), inputs.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                g.is_finite(),
+                "dtype {target} lane {i} (x = {}): fused {g}",
+                inputs[i]
+            );
+            // Same two-term bound as the compiled chain's test: the fused
+            // kernel and the eager chain round tanh independently, and
+            // `1.0f + tanh(inner)` cancels to a rounding residue on the
+            // negative tail, where the error scales with `|x|`.
+            let bound = (relative * w.abs()).max(floor) + 2.0_f32.powi(-22) * inputs[i].abs();
+            assert!(
+                (g - w).abs() <= bound,
+                "dtype {target} lane {i} (x = {}): fused {g} vs eager {w}",
+                inputs[i]
+            );
+        }
+    }
+}
+
+/// Lanes whose bits differ between two arrays, compared as f32 bit patterns
+/// (so `+0` and `-0` differ), NaN against NaN counted as equal.
+fn differing_lanes(a: &ffi::MlxArray, b: &ffi::MlxArray) -> usize {
+    let a = array_to_vec_f32(&ffi::astype(a, dtype::FLOAT32));
+    let b = array_to_vec_f32(&ffi::astype(b, dtype::FLOAT32));
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(&b)
+        .filter(|(p, q)| p.to_bits() != q.to_bits() && !(p.is_nan() && q.is_nan()))
+        .count()
+}
+
+/// Where the port claims to return the eager helper's bits (CUDA, #2780), it
+/// must: that claim is what lets [`GeluActivation::TanhF32`], whose call sites
+/// are pinned bit for bit, launch the kernel. Held on the sweep, on the
+/// tower-scale input, and on element counts either side of the 256-thread
+/// block (MLX's CUDA launcher rounds the grid up to whole blocks, so a count
+/// past 256 that is not a multiple of it runs lanes past `n`), in all three
+/// dtypes.
+///
+/// f32 on the tower-scale input is the case that tells. Written with plain
+/// operators the CUDA body contracts `x + 0.044715 * x^3` into a fused
+/// multiply-add, and 1171 of these 275456 lanes move by a rounding step of
+/// tanh (GB10); the 809-point sweep hits none of them, and bf16 and f16 hide
+/// them in the cast back. Skips where the port makes no such claim: Metal,
+/// whose body may contract, a backend without a port, and the CPU device.
+#[test]
+fn fused_kernel_returns_the_eager_helper_bits_where_it_claims_to() {
+    // The default device is process-global, and this module has a test that
+    // moves it to the CPU; take the shared lock so the two never interleave.
+    let _lock = crate::streams::lock_default_device();
+    if !ffi::fused_gelu_tanh_f32_matches_eager_bits() {
+        eprintln!("fused_gelu_tanh_f32 claims no bit-exactness on this backend; skipping");
+        return;
+    }
+    assert!(
+        ffi::fused_gelu_tanh_f32_available(),
+        "a port that returns the eager helper's bits is a port"
+    );
+    let check = |label: &str, x: &ffi::MlxArray| {
+        let eager = gelu_tanh_f32(x);
+        let fused = fused_gelu_tanh_f32(x);
+        assert_eq!(ffi::array_dtype(&fused), ffi::array_dtype(x), "{label}");
+        assert_eq!(
+            differing_lanes(&fused, &eager),
+            0,
+            "{label}: lanes of the fused kernel left the eager helper's bits"
+        );
+        // The dispatch arm the pinned call sites take, and the compiled-route
+        // arm, are then the same bits too.
+        for kind in [GeluActivation::TanhF32, GeluActivation::TanhF32Compiled] {
+            assert_eq!(
+                differing_lanes(&kind.apply(x), &eager),
+                0,
+                "{label}: {kind:?} left the eager helper's bits"
+            );
+        }
+    };
+    for target in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        check(
+            &format!("sweep, dtype {target}"),
+            &as_dtype(&sample_inputs(), target),
+        );
+        for n in [1_usize, 255, 256, 257, 511, 513, 4097] {
+            let ramp: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin() * 6.0).collect();
+            check(
+                &format!("{n} lanes, dtype {target}"),
+                &as_dtype(&ramp, target),
+            );
+        }
+        let (tower, lanes) = tower_like(target);
+        check(&format!("tower ({lanes} lanes), dtype {target}"), &tower);
+    }
+}
+
+/// The other half of [`gelu_tanh_f32_fused_where_bit_exact`]: with the default
+/// device moved to the CPU there is no kernel to launch, so the exactness
+/// claim must read false and the [`GeluActivation::TanhF32`] arm must be the
+/// eager helper itself. Without this the claim is only ever exercised on its
+/// `true` branch on a CUDA host. Same guard discipline as
+/// `compiled_dispatch_falls_back_to_the_compiled_chain_on_the_cpu`.
+#[test]
+fn tanh_f32_dispatch_keeps_the_eager_helper_on_the_cpu() {
+    let x = as_dtype(&sample_inputs(), dtype::BFLOAT16);
+    let (routed, eager) = {
+        let _lock = crate::streams::lock_default_device();
+        let _cpu = crate::streams::DefaultDeviceGuard::cpu();
+        assert!(
+            !crate::ffi::fused_gelu_tanh_f32_matches_eager_bits(),
+            "the fused kernel claims the eager helper's bits on the CPU stream"
+        );
+        (GeluActivation::TanhF32.apply(&x), gelu_tanh_f32(&x))
+    };
+    assert_eq!(ffi::array_dtype(&routed), dtype::BFLOAT16);
+    assert!(
+        bits_equal(&routed, &eager),
+        "the CPU dispatch arm of TanhF32 diverged from the eager helper"
+    );
+}
+
+/// The launch is written for three float dtypes and an `i32` grid, so anything
+/// else has to take the compiled chain, which handles any dtype and size.
+#[test]
+fn fused_route_accepts_only_float_dtypes_within_the_grid() {
+    let max_grid = i32::MAX as usize;
+    for dt in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        assert!(fused_gelu_tanh_f32_accepts(dt, 0));
+        assert!(fused_gelu_tanh_f32_accepts(dt, max_grid));
+        assert!(!fused_gelu_tanh_f32_accepts(dt, max_grid + 1));
+    }
+    for dt in [dtype::FLOAT64, dtype::COMPLEX64, dtype::INT32, dtype::BOOL] {
+        assert!(
+            !fused_gelu_tanh_f32_accepts(dt, 16),
+            "dtype {dt} must take the compiled chain"
+        );
+    }
+}
+
+#[test]
+fn fused_kernel_stays_correct_on_a_non_contiguous_input() {
+    // The launcher flattens with `reshape(x, {n})` before the launch. If MLX
+    // hands that a view with the original strides, the kernel would read the
+    // buffer in storage order and silently transpose the result. Transposing a
+    // 2-D f32 input makes the question observable: the fused output must equal
+    // the eager chain applied to the same non-contiguous view, lane for lane.
+    let _lock = crate::streams::lock_default_device();
+    if !ffi::fused_gelu_tanh_f32_available() {
+        eprintln!("fused_gelu_tanh_f32 unavailable (CPU-only host); skipping");
+        return;
+    }
+
+    // 4x8 in storage order, then transposed to a 8x4 non-contiguous view.
+    let (rows, cols) = (4usize, 8usize);
+    let data: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.125 - 2.0).collect();
+    let base = ffi::from_slice_f32(&data, &[rows as i32, cols as i32]);
+    let x = ffi::transpose(&base);
+    assert_eq!(ffi::array_shape(&x), vec![cols as i32, rows as i32]);
+
+    let eager = gelu_tanh_f32(&x);
+    let fused = fused_gelu_tanh_f32(&x);
+    assert_eq!(ffi::array_shape(&fused), ffi::array_shape(&eager));
+    assert_eq!(ffi::array_dtype(&fused), dtype::FLOAT32);
+
+    // Same 1-D lane order on both sides, so a wrong stride shows up as a
+    // permuted comparison rather than as rounding.
+    let want = array_to_vec_f32(&eager);
+    let got = array_to_vec_f32(&fused);
+    assert_eq!(got.len(), want.len());
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert!(
+            (g - w).abs() <= 2.0e-6,
+            "non-contiguous lane {i}: fused {g} vs eager {w}; the launcher's \
+             reshape must materialize contiguous storage, not keep the strides"
+        );
+    }
 }

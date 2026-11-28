@@ -35,8 +35,8 @@ at long context:
       --arm chunk512="--path cli --prefill-chunk 512" \\
       --out chunk-cli-qwen3.jsonl
 
---hostgate waits for a quiet host before every arm with the #1820 gate from
-docs/benchmark_results/data/sdpa-plan-bucket-gb10-2026-09-12/harness/.
+--hostgate waits for a quiet host before every arm with the #1820 gate in
+scripts/bench_hostgate.py. Reusable tooling lives outside historical results.
 
 Every benchmark process runs under --run-timeout seconds (default 3600, 0
 disables it) so a hung model load or decode cannot stall a round forever. An
@@ -53,8 +53,7 @@ import sys
 import time
 
 REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-HOSTGATE_DIR = os.path.join(REPO, "docs", "benchmark_results", "data",
-                            "sdpa-plan-bucket-gb10-2026-09-12", "harness")
+HOSTGATE_DIR = os.path.join(REPO, "scripts")
 MARK = "[engine-bench] {"
 METRICS = ("ttft_ms", "decode_tok_s")
 NULL_SUFFIX = "-null"
@@ -178,7 +177,7 @@ def main():
     gate = None
     if a.hostgate:
         sys.path.insert(0, HOSTGATE_DIR)
-        import hostgate as gate  # noqa: E402
+        import bench_hostgate as gate  # noqa: E402
     flags_of = dict(a.arm)
     null_sources = names if a.null_every_arm else names[:1]
     nulls = {f"{n}{NULL_SUFFIX}": n for n in null_sources}

@@ -232,7 +232,7 @@ impl ChatCompletionResponse {
         Self {
             id,
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![ChatChoice {
@@ -283,7 +283,7 @@ impl ChatCompletionResponse {
         Self {
             id,
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![ChatChoice {
@@ -461,7 +461,7 @@ impl CompletionResponse {
         Self {
             id,
             object: "text_completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![CompletionChoice {
@@ -694,6 +694,25 @@ pub struct AudioTranscriptionResponse {
     /// Source audio duration in seconds (verbose responses only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f32>,
+    /// Per-window transcript segments (verbose responses only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<TranscriptionSegment>>,
+}
+
+/// One transcript segment as serialized by the OpenAI-compatible
+/// `verbose_json` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionSegment {
+    /// Zero-based segment index.
+    pub id: usize,
+    /// Window start offset in mel frames (100 per second), as OpenAI reports it.
+    pub seek: usize,
+    /// Segment start in seconds.
+    pub start: f32,
+    /// Segment end in seconds.
+    pub end: f32,
+    /// Segment text.
+    pub text: String,
 }
 
 /// The resolved side-model capability block of `GET /props` (#1452).

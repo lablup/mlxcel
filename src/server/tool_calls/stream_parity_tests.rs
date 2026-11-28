@@ -865,3 +865,184 @@ fn harmony_role_header_with_unusual_whitespace_is_held_until_it_resolves() {
         assert_eq!(content, "", "separator {sep:?}");
     }
 }
+
+// -- 9. Muse Glimmer primed and post-`<|eom|>` recipient headers (#3025) --
+
+#[test]
+fn muse_primed_user_and_tool_headers_match_non_streamed_across_chunkings() {
+    let primed_user = " to=user<|message|>안녕하세요! 반갑습니다.<|eot|>";
+    let (content, reasoning, _) = assert_parity(primed_user, None);
+    assert_eq!(content, "안녕하세요! 반갑습니다.");
+    assert_eq!(reasoning, "");
+
+    let tools = [tool("weather.get_current")];
+    let primed_tool = concat!(
+        " to=weather.get_current<|message|><atem:function_calls>",
+        "<atem:invoke name=\"weather.get_current\">",
+        "<atem:parameter name=\"city\">Seoul</atem:parameter>",
+        "</atem:invoke></atem:function_calls><|eot|>"
+    );
+    let (content, reasoning, calls) = assert_parity(primed_tool, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "");
+    assert_eq!(calls.map(|c| c.len()), Some(1));
+    let (content, _, _) = assert_parity(primed_tool, None);
+    assert_eq!(content, "");
+
+    let multi_channel = concat!(
+        " to=self<|message|> First thought. <|eom|>\n",
+        "to=self<|message|> Second thought. <|eom|>\n",
+        "<|start|>assistant to=user<|message|> Part 1. <|eom|>",
+        " to=user<|message|> Part 2. <|eot|>"
+    );
+    let (content, reasoning, _) = assert_parity(multi_channel, Some(&tools));
+    assert_eq!(content, "Part 1.\nPart 2.");
+    assert_eq!(reasoning, "First thought.\nSecond thought.");
+    let (content, reasoning, _) = assert_parity(multi_channel, None);
+    assert_eq!(content, "Part 1.\nPart 2.");
+    assert_eq!(reasoning, "First thought.\nSecond thought.");
+}
+
+#[test]
+fn overlong_primed_to_prefix_does_not_hold_the_stream() {
+    let raw = format!("to={} {}", "x".repeat(400), filler(2000));
+    let (expected, _, _) = non_streamed(&raw, None);
+    assert_eq!(expected, raw);
+    for width in [1, 7, 64, raw.len()] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(live.len() + 64 >= raw.len(), "width {width} held the reply");
+    }
+}
+
+// -- Inkling tool calls (#3228) --
+
+const INKLING_THINK_THEN_CALL: &str = concat!(
+    "<|message_model|><|content_thinking|>I need the weather tool.<|end_message|>",
+    "<|message_model|><|content_text|>Checking.<|end_message|>",
+    "<|message_model|>get_weather<|content_invoke_tool_json|>",
+    r#"{"name":"get_weather","args":{"city":"Warsaw"}}<|end_message|>"#,
+);
+
+#[test]
+fn inkling_thinking_then_call_streams_no_recipient_or_json() {
+    let tools = [tool("get_weather")];
+    let (content, reasoning, calls) = assert_parity(INKLING_THINK_THEN_CALL, Some(&tools));
+    assert_eq!(content, "Checking.");
+    assert_eq!(reasoning, "I need the weather tool.");
+    let calls = calls.expect("tools were requested");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "get_weather");
+    assert_eq!(calls[0].arguments, r#"{"city":"Warsaw"}"#);
+    // A no-tools request still never shows the call markup.
+    let (content, _, _) = assert_parity(INKLING_THINK_THEN_CALL, None);
+    assert_eq!(content, "Checking.");
+}
+
+#[test]
+fn inkling_two_calls_with_thinking_between_leave_no_content() {
+    let raw = concat!(
+        "<|message_model|><|content_thinking|>First Warsaw.<|end_message|>",
+        "<|message_model|>get_weather<|content_invoke_tool_json|>",
+        r#"{"name":"get_weather","args":{"city":"Warsaw"}}<|end_message|>"#,
+        "<|message_model|><|content_thinking|>Then Paris.<|end_message|>",
+        "<|message_model|>get_weather<|content_invoke_tool_json|>",
+        r#"{"name":"get_weather","args":{"city":"Paris"}}<|end_message|>"#,
+    );
+    let tools = [tool("get_weather")];
+    let (content, _, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    let calls = calls.expect("tools were requested");
+    let cities: Vec<_> = calls.iter().map(|call| call.arguments.as_str()).collect();
+    assert_eq!(cities, [r#"{"city":"Warsaw"}"#, r#"{"city":"Paris"}"#]);
+}
+
+#[test]
+fn inkling_malformed_payloads_yield_no_call_and_no_markup() {
+    let tools = [tool("get_weather")];
+    for body in [
+        r#"{"name":"get_weather","args":{"city":"War"#,
+        r#"{"args":{"city":"Warsaw"}}"#,
+        r#"{"name":"get_weather","args":"Warsaw"}"#,
+    ] {
+        let raw = format!(
+            "<|message_model|><|content_text|>Let me check.<|end_message|>\
+             <|message_model|>get_weather<|content_invoke_tool_json|>{body}<|end_message|>"
+        );
+        let (content, _, calls) = assert_parity(&raw, Some(&tools));
+        assert_eq!(calls, Some(Vec::new()), "body {body}");
+        assert_eq!(content, "Let me check.", "body {body}");
+    }
+}
+
+#[test]
+fn inkling_message_header_without_a_call_streams_unchanged() {
+    // A long run after `<|message_model|>` is not a recipient and is not held.
+    let raw = format!("<|message_model|>{}", filler(600));
+    let (expected, _, _) = non_streamed(&raw, None);
+    for width in [1, 7, raw.len()] {
+        let (live, all) = feed_bounded(&raw, width);
+        assert_eq!(all, expected, "width {width}");
+        assert!(
+            live.len() + 300 >= expected.len(),
+            "width {width} held the reply"
+        );
+    }
+}
+
+// -- #3209: Mistral `[THINK]` reasoning, and reasoning after an in-reasoning call --
+
+#[test]
+fn mistral_think_pair_routes_to_reasoning() {
+    // Magistral / Ministral reasoning write `[THINK]...[/THINK]` ahead of the
+    // answer; `chunkings` covers widths 1, 2, 3, 5, 7 and every two-piece split.
+    let raw = "[THINK]reasoning[/THINK]answer";
+    let (content, reasoning, _) = assert_parity(raw, None);
+    assert_eq!(content, "answer");
+    assert_eq!(reasoning, "reasoning");
+    let tools = [tool("f")];
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "answer");
+    assert_eq!(reasoning, "reasoning");
+    assert_eq!(calls, Some(Vec::new()));
+
+    // Reasoning, then a Mistral call: the call is parsed, not content.
+    let raw = r#"[THINK]need f[/THINK][TOOL_CALLS]f[ARGS]{"x": 1}"#;
+    let (content, reasoning, calls) = assert_parity(raw, Some(&tools));
+    assert_eq!(content, "");
+    assert_eq!(reasoning, "need f");
+    let calls = calls.expect("tools requested");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "f");
+
+    // `[T` held at a fragment boundary: it could still become `[THINK]` or
+    // `[TOOL_CALLS]`, and resolves to whichever text follows.
+    let mut filter = StreamFilter::new();
+    let held = filter.feed("[T");
+    assert_eq!((held.content, held.reasoning), (None, None));
+    let out = filter.feed("HINK]r");
+    assert_eq!(out.content, None);
+    assert_eq!(out.reasoning.as_deref(), Some("r"));
+    let mut filter = StreamFilter::new();
+    assert_eq!(filter.feed("[T").content, None);
+    let out = filter.feed("o be");
+    assert_eq!(out.content.as_deref(), Some("[To be"));
+}
+
+#[test]
+fn reasoning_after_in_reasoning_call_stays_reasoning() {
+    let call = r#"<tool_call>{"name": "f", "arguments": {}}</tool_call>"#;
+    let tools = [tool("f")];
+    let raw = format!("<think>plan {call} more thought</think>answer");
+    for tools in [None, Some(&tools[..])] {
+        let (content, reasoning, calls) = assert_parity(&raw, tools);
+        assert_eq!(content, "answer");
+        assert_eq!(reasoning, format!("plan {call} more thought"));
+        if let Some(calls) = calls {
+            assert!(
+                calls.is_empty(),
+                "an example inside reasoning ran: {calls:?}"
+            );
+        }
+    }
+}

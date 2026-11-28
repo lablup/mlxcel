@@ -1,6 +1,6 @@
 # ROCm logit traces with the HIP fused add-RMSNorm and RoPE + append ports (lablup/mlxcel#2063)
 
-Teacher-forced traces from `examples/logit_trace` on the Radeon 8060S (`gfx1151`) after `fused_add_rms_norm` and `fused_rope_qk_append` gained HIP ports. Both fusions ship off, so each model is traced with them off (`fusedoff`) and on (`addrms`, `addrms-rope`); in every pair the data rows are byte-identical (`SHA256SUMS` shows it), so turning the fusions on changes no logit on ROCm. `METADATA.txt` records the host, versions, commit and binary hash; `RUNS.txt` the exit status and row count of every run. The comparisons are in `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`.
+Teacher-forced traces from `examples/logit_trace` on the Radeon 8060S (`gfx1151`) after `fused_add_rms_norm` and `fused_rope_qk_append` gained HIP ports. Both fusions ship off, so each model is traced with them off (`fusedoff`) and on (`addrms`, `addrms-rope`); in every pair the data rows are byte-identical (`SHA256SUMS` shows it), so turning the fusions on changes no logit on ROCm. `METADATA.txt` records the host, versions, commit and binary hash; `RUNS.txt` the exit status and row count of every run. The comparisons are in `docs/benchmark_results/versions/v0.8.0.md#rocm-fused-norm-rope-gfx1151-2026-10-05`.
 
 ```bash
 cargo build --release --features rocm --example logit_trace

@@ -56,7 +56,7 @@
 //! so its source is materialized here and the repack runs at the first token,
 //! where MLX frees each source as its repacked result is produced. The peak
 //! therefore stays near one copy of the weights; the measurements are in
-//! `docs/benchmark_results/weight-materialization-gb10-2026-10-20.md`.
+//! `docs/benchmark_results/versions/v0.8.0.md#weight-materialization-gb10-2026-10-20`.
 //!
 //! `MLXCEL_WEIGHT_MATERIALIZATION=lazy` restores the previous behaviour.
 
@@ -254,6 +254,8 @@ pub struct MaterializationReport {
     pub active_bytes: u64,
     /// See `active_bytes`.
     pub peak_bytes: u64,
+    /// Outcome of `MLXCEL_WIRE_WEIGHTS`, when it ran.
+    pub wiring: Option<crate::weight_wiring::WireReport>,
 }
 
 impl MaterializationReport {
@@ -388,6 +390,12 @@ fn materialize(policy: MaterializationPolicy, entries: Registry) -> Materializat
         ..MaterializationReport::default()
     };
     if policy == MaterializationPolicy::Lazy {
+        if crate::weight_wiring::wire_weights_requested() {
+            tracing::warn!(
+                "{} needs evaluated weights and is ignored under {POLICY_ENV}=lazy",
+                crate::weight_wiring::WIRE_WEIGHTS_ENV
+            );
+        }
         return report;
     }
     let mut kept: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(entries.len());
@@ -425,6 +433,8 @@ fn materialize(policy: MaterializationPolicy, entries: Registry) -> Materializat
         }
     }
     report.elapsed = start.elapsed();
+    // SAFETY: as above, `kept` keeps every array alive across the call.
+    report.wiring = unsafe { crate::weight_wiring::wire_evaluated_buffers(&targets) };
     report.transfer = before
         .zip(WeightTransferStats::snapshot())
         .map(|(before, after)| after.since(&before));

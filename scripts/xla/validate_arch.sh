@@ -7,7 +7,9 @@
 #                pre-gate that the registered fixtures still emit their goldens.
 #   [gate 1/2]   token-exact single-sequence vs an HF fp32 oracle (xla_oracle_check).
 #   [gate 2/2]   serve reference-exact: every batched request equals its single-seq
-#                reference (xla_batch_bench).
+#                reference (xla_batch_bench). Recurrent models (Mamba2) run it too:
+#                their per-slot state is carried by the continuous-batching engine
+#                (issue #3340).
 #
 # The oracle is produced here too: spike/openxla/oracle_continuation.py loads the
 # checkpoint in fp32 (dequantizing an MLX 4-bit/8-bit checkpoint offline first) and
@@ -39,6 +41,7 @@
 #   --oracle <json>     oracle JSON path (default: a temp file)
 #   --skip-structural   skip the byte-exact pre-gate
 #   --structural-only   run only the byte-exact pre-gate (no IREE build, no GPU)
+#   --single-only       run the pre-gate and gate 1 only (no serve gate)
 #   -h, --help          this help
 #
 # Exit status: 0 only if every run gate passes.
@@ -62,6 +65,7 @@ MAXCAP=24
 ORACLE=""
 SKIP_STRUCTURAL=0
 STRUCTURAL_ONLY=0
+SINGLE_ONLY=0
 TEMP_ORACLE=""
 
 cleanup() {
@@ -83,6 +87,7 @@ while [ $# -gt 0 ]; do
     --oracle) ORACLE="${2:?}"; shift 2 ;;
     --skip-structural) SKIP_STRUCTURAL=1; shift ;;
     --structural-only) STRUCTURAL_ONLY=1; shift ;;
+    --single-only) SINGLE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -137,16 +142,27 @@ cargo run --release --features xla-iree --example xla_oracle_check -- \
   --model "$MODEL" --oracle "$ORACLE" --device "$DEVICE" || gate1=$?
 
 # --- Gate 2/2: serve reference-exact (reuses the oracle's prompt_ids) ---
-echo "== [gate 2/2] serve reference-exact (xla_batch_bench) =="
 gate2=0
-cargo run --release --features xla-iree --example xla_batch_bench -- \
-  --model "$MODEL" --prompts "$ORACLE" --device "$DEVICE" \
-  --batch "$BATCH" --requests "$REQUESTS" --maxcap "$MAXCAP" || gate2=$?
+if [ "$SINGLE_ONLY" -eq 0 ]; then
+  echo "== [gate 2/2] serve reference-exact (xla_batch_bench) =="
+  cargo run --release --features xla-iree --example xla_batch_bench -- \
+    --model "$MODEL" --prompts "$ORACLE" --device "$DEVICE" \
+    --batch "$BATCH" --requests "$REQUESTS" --maxcap "$MAXCAP" || gate2=$?
+fi
 
 echo ""
 echo "== summary =="
 [ "$SKIP_STRUCTURAL" -eq 0 ] && echo "structural (byte-exact) : PASS" || echo "structural (byte-exact) : SKIPPED"
 [ "$gate1" -eq 0 ] && echo "token-exact single-seq  : PASS" || echo "token-exact single-seq  : FAIL"
+if [ "$SINGLE_ONLY" -eq 1 ]; then
+  echo "serve reference-exact   : SKIPPED (--single-only)"
+  if [ "$gate1" -eq 0 ]; then
+    echo "RESULT: PASS (single-sequence gate)"
+    exit 0
+  fi
+  echo "RESULT: FAIL"
+  exit 1
+fi
 [ "$gate2" -eq 0 ] && echo "serve reference-exact   : PASS" || echo "serve reference-exact   : FAIL"
 if [ "$gate1" -eq 0 ] && [ "$gate2" -eq 0 ]; then
   echo "RESULT: PASS (both execution gates)"

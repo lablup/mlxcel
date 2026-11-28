@@ -72,6 +72,36 @@ fn is_gemma4_text_weight(name: &str) -> bool {
         || name.starts_with("lm_head.")
 }
 
+/// Move a text-only Gemma 4 export under the `language_model.` prefix.
+///
+/// mlx-lm names the tensors of such an export `model.*` and `lm_head.*`. The
+/// Gemma 4 model, the KV-shared-layer strip and the tied-embedding step are
+/// written against the multimodal layout, `language_model.model.*`, and a
+/// text-only checkpoint used to stop at "Weight not found:
+/// language_model.model.embed_tokens.weight". A checkpoint with any
+/// `language_model.` tensor is left as it is.
+///
+/// Used by: [`load_gemma4_text_weights`], [`load_gemma4_text_weights_with_backing`].
+fn adopt_gemma4_language_model_prefix(weights: &mut mlxcel_core::weights::WeightMap) {
+    if !weights.contains_key("model.embed_tokens.weight")
+        || weights
+            .keys()
+            .any(|name| name.starts_with("language_model."))
+    {
+        return;
+    }
+    let names: Vec<String> = weights
+        .keys()
+        .filter(|name| name.starts_with("model.") || name.starts_with("lm_head."))
+        .cloned()
+        .collect();
+    for name in names {
+        if let Some(tensor) = weights.remove(&name) {
+            weights.insert(format!("language_model.{name}"), tensor);
+        }
+    }
+}
+
 fn is_gemma4_vlm_weight(name: &str) -> bool {
     is_gemma4_text_weight(name)
         || name.starts_with("vision_tower.")
@@ -363,7 +393,7 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
     }
 }
 
-const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
+pub(crate) const NVFP4_SOURCE_GROUP_SIZE: usize = 16;
 const NVFP4_AFFINE_BITS: i32 = 4;
 const NVFP4_NATIVE_BITS: i32 = 4;
 const NVFP4_NATIVE_MODE: &str = "nvfp4";
@@ -797,6 +827,12 @@ fn repack_nvfp4_weights_with_route(
         route.reason,
     );
 
+    // Where the repack spends its time, reported once per load at debug
+    // level (`RUST_LOG=mlxcel::models::sanitize=debug`, issue #3458).
+    let mut profile = Nvfp4RepackProfile::default();
+    let repack_start = std::time::Instant::now();
+    let layers = fp4_prefixes.len();
+
     for prefix in fp4_prefixes {
         let weight_key = format!("{prefix}.weight");
         let scale_key = format!("{prefix}.weight_scale");
@@ -818,6 +854,39 @@ fn repack_nvfp4_weights_with_route(
             continue;
         }
 
+        // The checkpoint's own planes, reinterpreted on the device with no
+        // host copy, when the triplet is in the canonical layout (#3458).
+        // Any other layout takes the host transcode below, which names what
+        // is wrong with it.
+        if strategy == Nvfp4RepackStrategy::DirectTranscode
+            && let Some((weight_u32, scales_u8, global_scale)) = nvfp4_device_transcode(
+                weights.get(&weight_key).unwrap(),
+                weights.get(&scale_key).unwrap(),
+                weights.get(&scale2_key).unwrap(),
+            )
+        {
+            // Materialized here, as the host transcode does, so the planes
+            // are ready when the load returns instead of at the first token.
+            let phase = std::time::Instant::now();
+            let ptrs: Vec<*const mlxcel_core::MlxArray> = [&weight_u32, &scales_u8, &global_scale]
+                .into_iter()
+                .map(|arr| arr.as_ref().unwrap() as *const mlxcel_core::MlxArray)
+                .collect();
+            // SAFETY: the three pointers borrow arrays that live until the
+            // inserts below.
+            unsafe { mlxcel_core::eval_all(&ptrs) };
+            profile.device_eval += phase.elapsed();
+            weights.insert(weight_key, weight_u32);
+            weights.insert(repacked_scales_key, scales_u8);
+            weights.insert(global_scale_key, global_scale);
+            weights.remove(&repacked_biases_key);
+            weights.remove(&scale_key);
+            weights.remove(&scale2_key);
+            weights.remove(&input_scale_key);
+            profile.device_transcoded += 1;
+            continue;
+        }
+
         let (
             weight_shape,
             weight_dtype,
@@ -831,6 +900,7 @@ fn repack_nvfp4_weights_with_route(
             let scale_arr = weights.get(&scale_key).unwrap();
             let scale2_arr = weights.get(&scale2_key).unwrap();
 
+            let phase = std::time::Instant::now();
             mlxcel_core::eval(weight_arr);
             mlxcel_core::eval(scale2_arr);
 
@@ -838,6 +908,8 @@ fn repack_nvfp4_weights_with_route(
             let weight_dtype = mlxcel_core::array_dtype(weight_arr);
             let scale_shape = mlxcel_core::array_shape(scale_arr);
             let weight_bytes = mlxcel_core::array_to_raw_bytes(weight_arr);
+            profile.weight_host_copy += phase.elapsed();
+            let phase = std::time::Instant::now();
             // The checkpoint stores the block scales as F8_E4M3; the Gemma 4
             // loader decodes them to f16 at load time (MLX has no native float8
             // dtype). Normalize to F32 before the raw-byte parse below so both
@@ -860,6 +932,8 @@ fn repack_nvfp4_weights_with_route(
                 mlxcel_core::eval(&scale_f32_arr);
                 mlxcel_core::array_to_raw_bytes(&scale_f32_arr)
             };
+
+            profile.scale_decode += phase.elapsed();
 
             // `weight_scale_2` must be a single-element per-tensor scalar
             // (ModelOpt's convention). `item_f32` reinterprets the buffer
@@ -1047,6 +1121,7 @@ fn repack_nvfp4_weights_with_route(
             // bytes. The decode is lossless, so this recovers the checkpoint's
             // exact per-block scale for MLX native NVFP4 without folding
             // weight_scale_2 into it.
+            let phase = std::time::Instant::now();
             let mut e4m3_bytes = Vec::with_capacity(out_dim * num_groups);
             for i in 0..(out_dim * num_groups) {
                 let base = i * 4;
@@ -1063,6 +1138,7 @@ fn repack_nvfp4_weights_with_route(
                 &[out_dim as i32, num_groups as i32],
                 mlxcel_core::dtype::UINT8,
             );
+            profile.scale_reencode += phase.elapsed();
 
             // Global-scale sidecar: the single per-tensor weight_scale_2, kept
             // as an f32 scalar and applied as a scalar multiply on the linear
@@ -1084,6 +1160,7 @@ fn repack_nvfp4_weights_with_route(
             weights.remove(&scale_key);
             weights.remove(&scale2_key);
             weights.remove(&input_scale_key); // may not exist; remove is a no-op then
+            profile.host_transcoded += 1;
             continue;
         }
 
@@ -1166,7 +1243,94 @@ fn repack_nvfp4_weights_with_route(
         weights.remove(&scale2_key);
         weights.remove(&input_scale_key); // may not exist; remove is a no-op then
     }
+    profile.report(layers, repack_start.elapsed());
     Ok(())
+}
+
+/// The direct ModelOpt NVFP4 transcode of one triplet without a host copy
+/// (issue #3458): `(weight, scales, global_scale)` in MLX's native NVFP4
+/// layout, or `None` when the triplet is not in the canonical layout.
+///
+/// The host transcode read every packed weight to a host buffer, decoded the
+/// E4M3 block scales to f32 and encoded them back to the bytes they started
+/// as, which took about 70 s for the 9538 triplets of Raon-1 mini. MLX's
+/// safetensors reader hands `F8_E4M3` back as its raw `uint8` bytes, so the
+/// scales are already the plane MLX reads and are passed through unchanged;
+/// the packed weight is viewed as little-endian `uint32` on the device (two
+/// E2M1 nibbles per byte, low nibble first, is MLX's eight-nibbles-per-word
+/// order); and `weight_scale_2` becomes the f32 `[1]` tensor scale. The
+/// caller evaluates the three arrays.
+///
+/// The result is byte-identical to the host transcode, except that a
+/// negative-NaN scale byte (`0xFF`) stays as stored where the decode and
+/// re-encode round trip rewrote it to the canonical `0x7F`; both are NaN.
+///
+/// A block scale the loader already decoded to a float dtype (the Gemma 4
+/// selective loader) is not canonical here and keeps the host transcode.
+pub(super) fn nvfp4_device_transcode(
+    weight: &mlxcel_core::MlxArray,
+    scale: &mlxcel_core::MlxArray,
+    scale2: &mlxcel_core::MlxArray,
+) -> Option<(
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+)> {
+    use mlxcel_core::dtype::{FLOAT32, UINT8, UINT32};
+    let weight_shape = mlxcel_core::array_shape(weight);
+    let [out_dim, packed_dim] = weight_shape[..] else {
+        return None;
+    };
+    // `in_dim = 2 * packed_dim` must be a whole number of 16-element blocks,
+    // which also makes `packed_dim` a whole number of u32 words.
+    let block_bytes = (NVFP4_SOURCE_GROUP_SIZE / 2) as i32;
+    if out_dim <= 0 || packed_dim <= 0 || packed_dim % block_bytes != 0 {
+        return None;
+    }
+    let canonical = mlxcel_core::array_dtype(weight) == UINT8
+        && mlxcel_core::array_dtype(scale) == UINT8
+        && mlxcel_core::array_shape(scale) == [out_dim, packed_dim / block_bytes]
+        && mlxcel_core::array_size(scale2) == 1;
+    if !canonical {
+        return None;
+    }
+    let weight_u32 = mlxcel_core::view(&mlxcel_core::contiguous(weight, false), UINT32);
+    let global_scale = mlxcel_core::reshape(&mlxcel_core::astype(scale2, FLOAT32), &[1]);
+    Some((weight_u32, mlxcel_core::copy(scale), global_scale))
+}
+
+/// Wall time of the ModelOpt NVFP4 repack by phase, summed over the layers of
+/// one load (issue #3458).
+#[derive(Default)]
+struct Nvfp4RepackProfile {
+    /// Evaluating the packed weight and copying it to a host buffer.
+    weight_host_copy: std::time::Duration,
+    /// Copying the block scales to host and decoding them to f32.
+    scale_decode: std::time::Duration,
+    /// Encoding the f32 block scales back to E4M3 bytes.
+    scale_reencode: std::time::Duration,
+    /// Evaluating the planes of the layers transcoded on the device.
+    device_eval: std::time::Duration,
+    /// Layers transcoded through host buffers.
+    host_transcoded: usize,
+    /// Layers transcoded on the device, with no host copy.
+    device_transcoded: usize,
+}
+
+impl Nvfp4RepackProfile {
+    fn report(&self, layers: usize, total: std::time::Duration) {
+        tracing::debug!(
+            layers,
+            host_transcoded = self.host_transcoded,
+            device_transcoded = self.device_transcoded,
+            total_ms = total.as_millis() as u64,
+            weight_host_copy_ms = self.weight_host_copy.as_millis() as u64,
+            scale_decode_ms = self.scale_decode.as_millis() as u64,
+            scale_reencode_ms = self.scale_reencode.as_millis() as u64,
+            device_eval_ms = self.device_eval.as_millis() as u64,
+            "ModelOpt NVFP4 repack profile"
+        );
+    }
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the quantized groups for the
@@ -1181,21 +1345,178 @@ pub(crate) fn sanitize_gemma4_nvfp4_weights(
     // checkpoint, so mlx-lm's per-expert tensor scales are resolved against
     // the config on the file's own key names (issue #2351).
     crate::models::switch_layers::apply_native_global_scale_flags(weights, config)?;
-    sanitize_modelopt_nvfp4_weights(weights, config)
+    sanitize_modelopt_nvfp4_weights(weights, config)?;
+    stack_gemma4_per_expert_planes(weights)?;
+    Ok(())
+}
+
+/// Stack a Gemma 4 MoE export's per-expert linears into the
+/// `experts.switch_glu.{proj}` planes the model loads.
+///
+/// mlx-lm stores a layer's experts stacked, as
+/// `…layers.{l}.experts.switch_glu.{gate_proj, up_proj, down_proj}`.
+/// llm-compressor writes each expert as its own `Linear`,
+/// `…layers.{l}.experts.{e}.{gate_proj, up_proj, down_proj}`
+/// (`RedHatAI/gemma-4-26B-A4B-it-NVFP4`), and the model then found no
+/// `switch_glu` plane. Each expert's NVFP4 tensor scale, which the repack
+/// leaves beside its plane, is stacked with it as the per-expert output
+/// multiplier ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+/// A no-op for a checkpoint without numbered experts.
+///
+/// Returns `Err` when an expert's plane disagrees in shape or dtype with the
+/// others (issue #3297).
+///
+/// Used by: [`sanitize_gemma4_nvfp4_weights`]
+fn stack_gemma4_per_expert_planes(
+    weights: &mut mlxcel_core::weights::WeightMap,
+) -> Result<(), String> {
+    let mut expert_roots: Vec<String> = weights
+        .keys()
+        .filter_map(|key| key.strip_suffix(".experts.0.gate_proj.weight"))
+        .map(|layer| format!("{layer}.experts"))
+        .collect();
+    expert_roots.sort();
+    for root in expert_roots {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                weights,
+                &root,
+                proj,
+                &format!("{root}.switch_glu.{proj}"),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Normalize ModelOpt NVFP4 keys and repack the `{weight, weight_scale,
-/// weight_scale_2}` triplets for the running backend. A no-op for a checkpoint
-/// without `weight_scale_2` keys.
+/// weight_scale_2}` triplets for the running backend. A compressed-tensors
+/// NVFP4 checkpoint's `{weight_packed, weight_scale, weight_global_scale}`
+/// linears are first read as such triplets. A no-op for a checkpoint with
+/// neither.
 ///
-/// Used by: [`sanitize_gemma4_nvfp4_weights`], and [`load_text_weights`] for
-/// every other text family whose config declares ModelOpt NVFP4 (issue #2351)
-fn sanitize_modelopt_nvfp4_weights(
+/// Used by: [`sanitize_gemma4_nvfp4_weights`], [`load_text_weights`] for
+/// every other text family whose config declares ModelOpt NVFP4 (issue #2351),
+/// and the VLM loaders that read their checkpoint without going through
+/// `load_text_weights`: `split_qwen3_5_vlm_weights`, `prepare_qwen2_5_vl_weights`,
+/// `prepare_gemma3_vlm_weights` and the Gemma 4 Unified route's
+/// `resolve_and_sanitize_gemma4_unified_weights`
+pub(crate) fn sanitize_modelopt_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
+    compressed_tensors_nvfp4_to_modelopt_triplets(weights)?;
     normalize_nvfp4_keys(weights);
-    repack_nvfp4_weights_to_quantized(weights, config)
+    repack_nvfp4_weights_to_quantized(weights, config)?;
+    crate::models::modelopt_mixed_precision::repack_mixed_precision_mxfp8_layers(weights, config)
+}
+
+/// The `format` a compressed-tensors (llm-compressor) checkpoint declares for
+/// packed NVFP4 weights.
+const COMPRESSED_TENSORS_NVFP4_FORMAT: &str = "nvfp4-pack-quantized";
+
+/// Rewrite compressed-tensors NVFP4 linears into ModelOpt's triplet, in place,
+/// so the one repack below serves both producers. A no-op for a checkpoint
+/// without `weight_packed` + `weight_global_scale` pairs.
+///
+/// The two layouts hold the same bytes under other names: compressed-tensors'
+/// own ModelOpt converter (`entrypoints/convert/converters/modelopt_nvfp4.py`)
+/// maps `weight` to `weight_packed` unchanged, keeps `weight_scale`, and
+/// writes `weight_global_scale = 1 / weight_scale_2` and
+/// `input_global_scale = 1 / input_scale`. This is that mapping backwards:
+///
+/// * `{p}.weight_packed` becomes `{p}.weight` (two E2M1 codes per byte);
+/// * `{p}.weight_scale` stays (one E4M3 scale per 16 elements);
+/// * `{p}.weight_global_scale` becomes `{p}.weight_scale_2`, inverted;
+/// * `{p}.input_global_scale` is dropped: it scales quantized activations,
+///   which this runtime does not use (ModelOpt's `input_scale` is dropped by
+///   the repack for the same reason).
+///
+/// Only a `weight_packed` with a `weight_global_scale` beside it is touched:
+/// compressed-tensors' integer `pack-quantized` format also names its plane
+/// `weight_packed` but has no global scale. A global scale that is not one
+/// finite non-zero number fails the load, since the layer cannot be decoded.
+///
+/// Used by: [`sanitize_modelopt_nvfp4_weights`]
+fn compressed_tensors_nvfp4_to_modelopt_triplets(
+    weights: &mut mlxcel_core::weights::WeightMap,
+) -> Result<(), String> {
+    let mut prefixes: Vec<String> = weights
+        .keys()
+        .filter_map(|key| key.strip_suffix(".weight_global_scale"))
+        .filter(|prefix| weights.contains_key(&format!("{prefix}.weight_packed")))
+        .map(str::to_string)
+        .collect();
+    if prefixes.is_empty() {
+        return Ok(());
+    }
+    prefixes.sort();
+    for prefix in &prefixes {
+        let weight_key = format!("{prefix}.weight");
+        if weights.contains_key(&weight_key) {
+            return Err(format!(
+                "compressed-tensors NVFP4 layer {prefix} has both weight and weight_packed"
+            ));
+        }
+        let global_key = format!("{prefix}.weight_global_scale");
+        let global = weights
+            .remove(&global_key)
+            .expect("collected from the map above");
+        mlxcel_core::eval(&global);
+        let value = (mlxcel_core::array_size(&global) == 1).then(|| {
+            mlxcel_core::item_f32(&mlxcel_core::astype(&global, mlxcel_core::dtype::FLOAT32))
+        });
+        let Some(value) = value.filter(|v| v.is_finite() && *v != 0.0) else {
+            return Err(format!(
+                "compressed-tensors NVFP4 layer {prefix}: weight_global_scale must be one \
+                 finite non-zero number, got {value:?} (shape {:?})",
+                mlxcel_core::array_shape(&global)
+            ));
+        };
+        weights.insert(
+            format!("{prefix}.weight_scale_2"),
+            mlxcel_core::from_slice_f32(&[1.0 / value], &[1]),
+        );
+        let packed = weights
+            .remove(&format!("{prefix}.weight_packed"))
+            .expect("filtered on this key above");
+        weights.insert(weight_key, packed);
+        weights.remove(&format!("{prefix}.input_global_scale"));
+    }
+    eprintln!(
+        "Read {} compressed-tensors NVFP4 linears as ModelOpt NVFP4 triplets",
+        prefixes.len()
+    );
+    Ok(())
+}
+
+/// The ModelOpt-shaped declaration of a compressed-tensors NVFP4 checkpoint,
+/// or `None` when `quantization_config` is not one.
+///
+/// compressed-tensors writes `quant_method: "compressed-tensors"` and `format:
+/// "nvfp4-pack-quantized"` with the same `config_groups` shape ModelOpt uses,
+/// so the groups are carried over and
+/// [`crate::models::gemma4::is_modelopt_nvfp4`] stays the one judge of them
+/// (4-bit float weights at group size 16 in every group).
+///
+/// Used by: [`modelopt_quantization_config`], [`modelopt_nvfp4_group_size`]
+fn compressed_tensors_nvfp4_as_modelopt(quantization_config: &Value) -> Option<Value> {
+    let text = |key: &str| {
+        quantization_config
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+    };
+    if text("quant_method").as_deref() != Some("compressed-tensors")
+        || text("format").as_deref() != Some(COMPRESSED_TENSORS_NVFP4_FORMAT)
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "quant_method": "modelopt",
+        "quant_algo": "NVFP4",
+        "config_groups": quantization_config.get("config_groups").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /// The ModelOpt quantization settings a text checkpoint declares, in the
@@ -1207,7 +1528,10 @@ fn sanitize_modelopt_nvfp4_weights(
 /// also reads (`{"producer": {"name": "modelopt"}, "quantization":
 /// {"quant_algo": "NVFP4", "group_size": 16}}`). The second shape is rewritten
 /// into the first so [`crate::models::gemma4::is_modelopt_nvfp4`] stays the one
-/// detector.
+/// detector. A compressed-tensors `nvfp4-pack-quantized` declaration in
+/// `config.json` is rewritten the same way
+/// ([`compressed_tensors_nvfp4_as_modelopt`]): it is the same weight format
+/// under other tensor names.
 fn modelopt_quantization_config(
     config: Option<&Value>,
     model_dir: &std::path::Path,
@@ -1216,13 +1540,21 @@ fn modelopt_quantization_config(
         let null = Value::Null;
         let text_config = config.get("text_config").unwrap_or(&null);
         for root in [config, text_config] {
-            if let Some(qc) = root.get("quantization_config")
-                && qc
-                    .get("quant_method")
-                    .and_then(Value::as_str)
-                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("modelopt"))
+            let Some(qc) = root.get("quantization_config") else {
+                continue;
+            };
+            if qc
+                .get("quant_method")
+                .and_then(Value::as_str)
+                .is_some_and(|m| {
+                    let m = m.trim();
+                    m.eq_ignore_ascii_case("modelopt") || m.eq_ignore_ascii_case("modelopt_fp4")
+                })
             {
                 return Some(qc.clone());
+            }
+            if let Some(as_modelopt) = compressed_tensors_nvfp4_as_modelopt(qc) {
+                return Some(as_modelopt);
             }
         }
     }
@@ -1246,9 +1578,16 @@ fn modelopt_quantization_config(
     }))
 }
 
-/// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export whose
-/// triplets [`load_text_weights`] must repack (issue #2351).
-fn is_modelopt_nvfp4_text_checkpoint(config: Option<&Value>, model_dir: &std::path::Path) -> bool {
+/// Whether a non-Gemma text checkpoint is a ModelOpt NVFP4 export, or a
+/// compressed-tensors NVFP4 one, whose triplets its loader must repack (issue
+/// #2351).
+///
+/// Used by: [`load_text_weights`], and the Qwen3.5 VLM loader's
+/// `split_qwen3_5_vlm_weights`
+pub(crate) fn is_modelopt_nvfp4_text_checkpoint(
+    config: Option<&Value>,
+    model_dir: &std::path::Path,
+) -> bool {
     modelopt_quantization_config(config, model_dir)
         .is_some_and(|qc| crate::models::gemma4::is_modelopt_nvfp4(&qc))
 }
@@ -1262,13 +1601,61 @@ fn is_modelopt_nvfp4_text_checkpoint(config: Option<&Value>, model_dir: &std::pa
 /// `quantization_config` declares ModelOpt NVFP4.
 ///
 /// Used by: the `group_size()` accessors of PhiMoE, Mistral 4, Qwen3 and
-/// Qwen3-MoE
+/// Qwen3-MoE and Llama/Qwen2.5
 pub(crate) fn modelopt_nvfp4_group_size(quantization_config: Option<&Value>) -> Option<i32> {
     let qc = quantization_config?;
-    if !crate::models::gemma4::is_modelopt_nvfp4(qc) {
-        return None;
+    let declared = crate::models::gemma4::is_modelopt_nvfp4(qc)
+        || compressed_tensors_nvfp4_as_modelopt(qc)
+            .is_some_and(|as_modelopt| crate::models::gemma4::is_modelopt_nvfp4(&as_modelopt));
+    declared.then_some(NVFP4_SOURCE_GROUP_SIZE as i32)
+}
+
+/// Give a text config the layout of an NVFP4 export's repacked linears, for a
+/// family whose config reader only knows MLX's `quantization` block.
+///
+/// An export from NVIDIA ModelOpt or compressed-tensors (llm-compressor)
+/// declares its format in `quantization_config` (or ModelOpt's
+/// `hf_quant_config.json`) and has no `quantization` block, so the family
+/// falls back to its affine default of 64 / 4 and every repacked linear is
+/// loaded from its tensor shapes with a `quantized layout does not match
+/// declared metadata` warning. This inserts `{"group_size": 16, "bits": 4}`,
+/// the layout the direct transcode keeps. Returns whether it did; a config
+/// that already has a `quantization` block, or a checkpoint that declares no
+/// NVFP4, is left alone.
+///
+/// `model_dir` is where `hf_quant_config.json` would be; `None` for a caller
+/// that only has the parsed config, which then reads `quantization_config`
+/// alone.
+///
+/// Used by: the Qwen3.5 text loader (`Qwen35Model::load`), the Qwen3.5 VLM
+/// loader (`load_qwen3_5_vlm_with_variant`) and `qwen35_text_config`
+/// (`src/loading/special.rs`)
+pub(crate) fn merge_modelopt_nvfp4_quantization(
+    text_config: &mut Value,
+    full_config: &Value,
+    model_dir: Option<&std::path::Path>,
+) -> Result<bool, String> {
+    if text_config.get("quantization").is_some() {
+        return Ok(false);
     }
-    Some(NVFP4_SOURCE_GROUP_SIZE as i32)
+    let declared = match model_dir {
+        Some(model_dir) => is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_dir),
+        None => [Some(full_config), full_config.get("text_config")]
+            .into_iter()
+            .flatten()
+            .any(|root| modelopt_nvfp4_group_size(root.get("quantization_config")).is_some()),
+    };
+    if !declared {
+        return Ok(false);
+    }
+    let object = text_config.as_object_mut().ok_or_else(|| {
+        "Cannot merge the NVFP4 quantization block into a non-object config".to_string()
+    })?;
+    object.insert(
+        "quantization".to_string(),
+        serde_json::json!({ "group_size": NVFP4_SOURCE_GROUP_SIZE, "bits": 4 }),
+    );
+    Ok(true)
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
@@ -1699,7 +2086,9 @@ fn load_gemma4_text_weights<P: AsRef<Path>>(
     // including pure language-model shards. Keep Gemma 4 on the selective
     // mmap + eager materialization path until the native loader can handle
     // these checkpoints.
-    load_weights_from_dir_with_filter(model_dir, is_gemma4_text_weight, false)
+    let mut weights = load_weights_from_dir_with_filter(model_dir, is_gemma4_text_weight, false)?;
+    adopt_gemma4_language_model_prefix(&mut weights);
+    Ok(weights)
 }
 
 pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
@@ -1711,7 +2100,10 @@ pub(crate) fn load_gemma4_text_weights_with_backing<P: AsRef<Path>>(
     // VLM and unified variants, which delegate, went without it. Diagnosing
     // that cost three wrong guesses about where Gemma 4 loads, because both
     // functions look right when read on their own.
-    load_gemma4_family_weights_with_backing(model_dir, is_gemma4_text_weight)
+    let (mut weights, backing) =
+        load_gemma4_family_weights_with_backing(model_dir, is_gemma4_text_weight)?;
+    adopt_gemma4_language_model_prefix(&mut weights);
+    Ok((weights, backing))
 }
 
 pub(crate) fn load_gemma4_vlm_weights_with_backing<P: AsRef<Path>>(
@@ -1996,8 +2388,18 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     let is_gemma4 = parsed_config.as_ref().is_some_and(is_gemma4_model_config);
     // Gemma 4 repacks its ModelOpt triplets through its own sanitizer below;
     // every other text family takes the same repack here (issue #2351).
-    let is_modelopt_nvfp4 =
-        !is_gemma4 && is_modelopt_nvfp4_text_checkpoint(parsed_config.as_ref(), model_dir);
+    // Laguna stacks its compressed-tensors NVFP4 expert planes in its own
+    // sanitizer (`laguna_sanitize`, issue #1347), which reads them under their
+    // `weight_packed` names, so the shared repack must not rename them first.
+    let laguna_compressed_tensors = parsed_config.as_ref().is_some_and(|config| {
+        config.get("model_type").and_then(Value::as_str) == Some("laguna")
+            && config
+                .get("quantization_config")
+                .is_some_and(|qc| compressed_tensors_nvfp4_as_modelopt(qc).is_some())
+    });
+    let is_modelopt_nvfp4 = !is_gemma4
+        && !laguna_compressed_tensors
+        && is_modelopt_nvfp4_text_checkpoint(parsed_config.as_ref(), model_dir);
     let keep_gemma3n_bf16 = parsed_config.as_ref().is_some_and(is_gemma3n_model_config);
     // BitNet runs in its native bf16: its squared-ReLU activation overflows the
     // f16 max (65504), so the usual bf16->f16 Apple-Silicon conversion produces
@@ -2014,6 +2416,23 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     let is_nanochat = parsed_config
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("nanochat"));
+
+    // Limite's every norm is a weightless RMSNorm whose epsilon is the
+    // activation dtype's `finfo.eps` (bf16 0.0078125, f16 0.00098), and its
+    // folded projection scalars round to the weight dtype, so the f16 cast
+    // changes the model's arithmetic rather than only its precision. Keep the
+    // checkpoint's bf16, as the reference runs it (issue #2360).
+    let is_limite = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("limite"));
+
+    // Decider-2b's output is a calibrated probability, not a token: its
+    // per-type temperatures were fitted on the bf16 weights the reference
+    // runs, and the f16 cast moves an isolated score level by 2e-3, the
+    // parity tolerance (issue #2359). Keep the checkpoint's bf16.
+    let is_decider2 = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("decider2"));
 
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
@@ -2127,7 +2546,12 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // 85.3 s to 4.8 s, decode 118.1 to 49.2 ms/token, with 17 * 23 answered
     // identically and the same token count generated in both dtypes. Ampere and
     // later keep the guard, so their behavior is unchanged.
-    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet && !is_nanochat {
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref())
+        && !is_bitnet
+        && !is_nanochat
+        && !is_limite
+        && !is_decider2
+    {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
         } else {
@@ -2222,6 +2646,47 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
         })
 }
 
+/// Whether `config` describes an Inkling 2 checkpoint (`inkling2`,
+/// `inkling2_loop`, or their `_text` towers).
+///
+/// Used by: [`bf16_to_f16_at_load`].
+fn is_inkling2_config(config: &Value) -> bool {
+    let is_inkling2 = |model_type: Option<&str>| {
+        matches!(
+            model_type,
+            Some("inkling2" | "inkling2_loop" | "inkling2_text" | "inkling2_loop_text")
+        )
+    };
+    is_inkling2(config.get("model_type").and_then(Value::as_str))
+        || is_inkling2(
+            config
+                .get("text_config")
+                .and_then(|text| text.get("model_type"))
+                .and_then(Value::as_str),
+        )
+}
+
+/// Whether `config` describes an Inkling checkpoint: the HMLP-wrapped
+/// `inkling_mm_model`, the standalone `inkling` text model, or a config whose
+/// `text_config` is `inkling_text`. `inkling2` is a different family.
+///
+/// Used by: [`bf16_to_f16_at_load`].
+fn is_inkling_config(config: &Value) -> bool {
+    let is_inkling = |model_type: Option<&str>| {
+        matches!(
+            model_type,
+            Some("inkling" | "inkling_mm_model" | "inkling_text")
+        )
+    };
+    is_inkling(config.get("model_type").and_then(Value::as_str))
+        || is_inkling(
+            config
+                .get("text_config")
+                .and_then(|text| text.get("model_type"))
+                .and_then(Value::as_str),
+        )
+}
+
 fn is_sapiens2_config(config: &Value) -> bool {
     config
         .get("architectures")
@@ -2263,6 +2728,22 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // Keep the family uniform in its checkpoint dtype on every backend so the
     // default CLI path preserves the published output.
     if config.is_some_and(is_sapiens2_config) {
+        return false;
+    }
+    // Inkling stays in its checkpoint dtype (issue #1549). The native
+    // `thinkingmachines/Inkling-Small-NVFP4` export declares its quantization
+    // only in the `hf_quant_config.json` sidecar, so it read as unquantized
+    // and its bf16 dense weights were cast to f16; every greedy token then
+    // decoded to id 0 on an M3 Ultra, while the same checkpoint loaded bf16
+    // matched mlx-vlm. Affine MLX conversions already stay bf16 as quantized
+    // checkpoints, and the f32 community checkpoints have no bf16 to convert.
+    if config.is_some_and(is_inkling_config) {
+        return false;
+    }
+    // Inkling 2 is the same case (issue #3228): the native Mini export declares
+    // `quantization_config: {modelopt, NVFP4}` but no MLX `quantization` block,
+    // and mlx-vlm keeps its bf16 dense weights, f32 queries and f32 router.
+    if config.is_some_and(is_inkling2_config) {
         return false;
     }
     if pre_ampere_cuda() {
@@ -2429,7 +2910,8 @@ fn is_f16_fragile_below_ampere(config: &Value) -> bool {
     // failures. BitNet's relu^2 is not listed because the text loader excludes
     // it separately through `is_bitnet`; nanochat is listed here as well as
     // excluded through `is_nanochat`, since its residual overflows f16.
-    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat"];
+    // Limite is listed for its dtype-dependent norm epsilon (#2360).
+    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat", "limite"];
     MEASURED_FRAGILE
         .iter()
         .any(|needle| model_type.contains(needle))
@@ -2556,7 +3038,8 @@ pub fn convert_bf16_weights(weights: &mut mlxcel_core::weights::WeightMap) -> bo
 ///
 /// Returns `true` if any bf16 tensors were found, whether converted or kept.
 ///
-/// Used by: load_text_weights, load_vlm_weights_common, load_internvl_vlm
+/// Used by: load_text_weights, load_vlm_weights_common, load_internvl_vlm,
+/// load_plamo2_vl
 #[must_use]
 pub fn convert_bf16_weights_with_keep<F>(
     weights: &mut mlxcel_core::weights::WeightMap,
@@ -2642,6 +3125,50 @@ mod tests {
         assert!(is_sapiens2_config(&legacy));
         assert!(!bf16_to_f16_at_load(false, Some(&modern)));
         assert!(!bf16_to_f16_at_load(false, Some(&legacy)));
+    }
+
+    /// Inkling keeps its checkpoint dtype even when its config carries no MLX
+    /// quantization block, the shape of the native NVFP4 export whose
+    /// quantization lives in `hf_quant_config.json` (issue #1549).
+    #[test]
+    fn inkling_configs_keep_checkpoint_dtype() {
+        let nvfp4 = serde_json::json!({
+            "model_type": "inkling_mm_model",
+            "text_config": {"hidden_size": 4096}
+        });
+        let text = serde_json::json!({"model_type": "inkling"});
+        let nested = serde_json::json!({
+            "model_type": "custom_wrapper",
+            "text_config": {"model_type": "inkling_text"}
+        });
+        let other = serde_json::json!({"model_type": "inkling2"});
+        assert!(is_inkling_config(&nvfp4));
+        assert!(is_inkling_config(&text));
+        assert!(is_inkling_config(&nested));
+        assert!(!is_inkling_config(&other));
+        for config in [&nvfp4, &text, &nested] {
+            assert!(!bf16_to_f16_at_load(false, Some(config)));
+        }
+    }
+
+    /// The native Inkling 2 Mini export has no MLX quantization block either
+    /// (issue #3228); its bf16 dense weights must stay bf16.
+    #[test]
+    fn inkling2_configs_keep_checkpoint_dtype() {
+        let mini = serde_json::json!({
+            "model_type": "inkling2_loop",
+            "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+        });
+        let small = serde_json::json!({"model_type": "inkling2"});
+        let text = serde_json::json!({"text_config": {"model_type": "inkling2_loop_text"}});
+        for config in [&mini, &small, &text] {
+            assert!(is_inkling2_config(config));
+            assert!(!is_inkling_config(config));
+            assert!(!bf16_to_f16_at_load(false, Some(config)));
+        }
+        assert!(!is_inkling2_config(
+            &serde_json::json!({"model_type": "inkling"})
+        ));
     }
 
     #[test]
@@ -3516,6 +4043,228 @@ mod tests {
         assert!(gemma3n_bf16_key("model.embed_vision.embedding.weight"));
     }
 
+    fn modelopt_nvfp4_declaration() -> Value {
+        serde_json::json!({
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        })
+    }
+
+    fn compressed_tensors_nvfp4_declaration() -> Value {
+        serde_json::json!({
+            "quant_method": "compressed-tensors",
+            "format": "nvfp4-pack-quantized",
+            "config_groups": { "group_0": { "weights": {
+                "num_bits": 4, "type": "float", "group_size": 16
+            } } }
+        })
+    }
+
+    /// An NVFP4 export has no MLX `quantization` block, so a family that only
+    /// reads that block loaded every repacked linear from its shapes, with a
+    /// warning each. The text config now gets the repacked layout, wherever
+    /// the export declares its format.
+    #[test]
+    fn an_nvfp4_declaration_gives_the_text_config_the_repacked_layout() {
+        let layout = serde_json::json!({ "group_size": 16, "bits": 4 });
+        let dir = std::env::temp_dir().join(format!(
+            "mlxcel_merge_nvfp4_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for declaration in [
+            modelopt_nvfp4_declaration(),
+            compressed_tensors_nvfp4_declaration(),
+        ] {
+            // Declared at the top level, as a VLM wrapper and a text-only
+            // checkpoint both do, with and without a model directory.
+            let full = serde_json::json!({
+                "model_type": "qwen3_5",
+                "quantization_config": declaration,
+                "text_config": { "hidden_size": 64 }
+            });
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = full["text_config"].clone();
+                assert!(
+                    merge_modelopt_nvfp4_quantization(&mut text_config, &full, model_dir).unwrap()
+                );
+                assert_eq!(text_config["quantization"], layout);
+                assert_eq!(text_config["hidden_size"], 64);
+            }
+            // Declared inside `text_config`.
+            let nested = serde_json::json!({
+                "text_config": { "quantization_config": full["quantization_config"] }
+            });
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = nested["text_config"].clone();
+                assert!(
+                    merge_modelopt_nvfp4_quantization(&mut text_config, &nested, model_dir)
+                        .unwrap()
+                );
+                assert_eq!(text_config["quantization"], layout);
+            }
+        }
+
+        // ModelOpt's sidecar file declares it too, for a caller that has the
+        // directory; one that has only the parsed config cannot see it.
+        std::fs::write(
+            dir.join("hf_quant_config.json"),
+            r#"{"producer": {"name": "modelopt"}, "quantization": {"quant_algo": "NVFP4", "group_size": 16}}"#,
+        )
+        .unwrap();
+        let bare = serde_json::json!({ "model_type": "qwen3_5" });
+        let mut text_config = bare.clone();
+        assert!(merge_modelopt_nvfp4_quantization(&mut text_config, &bare, Some(&dir)).unwrap());
+        assert_eq!(text_config["quantization"], layout);
+        let mut text_config = bare.clone();
+        assert!(!merge_modelopt_nvfp4_quantization(&mut text_config, &bare, None).unwrap());
+        assert!(text_config.get("quantization").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A declared `quantization` block always wins, and a checkpoint that
+    /// declares no NVFP4 is left alone.
+    #[test]
+    fn the_nvfp4_layout_is_merged_only_where_it_applies() {
+        let dir = std::env::temp_dir().join(format!(
+            "mlxcel_merge_nvfp4_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let declared = serde_json::json!({ "group_size": 64, "bits": 8 });
+        let full = serde_json::json!({ "quantization_config": modelopt_nvfp4_declaration() });
+        let mut text_config = serde_json::json!({ "quantization": declared });
+        assert!(!merge_modelopt_nvfp4_quantization(&mut text_config, &full, Some(&dir)).unwrap());
+        assert_eq!(text_config["quantization"], declared);
+
+        for quantization_config in [
+            None,
+            Some(serde_json::json!({ "quant_method": "modelopt", "quant_algo": "FP8" })),
+            Some(
+                serde_json::json!({ "quant_method": "modelopt", "quant_algo": "MIXED_PRECISION" }),
+            ),
+            Some(serde_json::json!({
+                "quant_method": "compressed-tensors", "format": "float-quantized"
+            })),
+            Some(serde_json::json!({ "quant_method": "fp8", "weight_block_size": [128, 128] })),
+        ] {
+            let mut full = serde_json::json!({ "model_type": "qwen3_5" });
+            if let Some(quantization_config) = quantization_config.clone() {
+                full["quantization_config"] = quantization_config;
+            }
+            for model_dir in [Some(dir.as_path()), None] {
+                let mut text_config = serde_json::json!({ "hidden_size": 64 });
+                assert!(
+                    !merge_modelopt_nvfp4_quantization(&mut text_config, &full, model_dir).unwrap(),
+                    "{quantization_config:?}"
+                );
+                assert_eq!(text_config, serde_json::json!({ "hidden_size": 64 }));
+            }
+        }
+
+        // A text config that is not an object cannot take the block.
+        let mut not_an_object = serde_json::json!("qwen3_5");
+        let error = merge_modelopt_nvfp4_quantization(&mut not_an_object, &full, None).unwrap_err();
+        assert!(error.contains("non-object"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// llm-compressor writes a Gemma 4 MoE layer's experts as one linear each
+    /// (`RedHatAI/gemma-4-26B-A4B-it-NVFP4`), and the model loads them stacked
+    /// under `experts.switch_glu`. Every layer's experts are stacked there,
+    /// each expert's NVFP4 tensor scale with them, and nothing else moves.
+    #[test]
+    fn gemma4_per_expert_planes_are_stacked_under_switch_glu() {
+        use crate::models::switch_layers::{
+            SwitchLinear, expect_native_nvfp4_load, insert_modelopt_expert_plane,
+            stacked_inv_global_scale,
+        };
+
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        for layer in 0..2usize {
+            for e in 0..3usize {
+                for (j, (proj, out, input)) in [
+                    ("gate_proj", 32, 64),
+                    ("up_proj", 32, 64),
+                    ("down_proj", 64, 32),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    insert_modelopt_expert_plane(
+                        &mut weights,
+                        &format!("language_model.model.layers.{layer}.experts.{e}.{proj}"),
+                        out,
+                        input,
+                        (1 + layer * 9 + e * 3 + j) as f32 * 0.25,
+                        (layer * 9 + e * 3 + j) as u32,
+                    );
+                }
+            }
+        }
+        // A dense MLP of the same layer and the router are not experts.
+        for key in [
+            "language_model.model.layers.0.mlp.gate_proj.weight",
+            "language_model.model.layers.0.router.proj.weight",
+        ] {
+            weights.insert(
+                key.to_string(),
+                mlxcel_core::from_slice_f32(&[1.0; 4], &[2, 2]),
+            );
+        }
+
+        stack_gemma4_per_expert_planes(&mut weights).unwrap();
+
+        for layer in 0..2usize {
+            let glu = format!("language_model.model.layers.{layer}.experts.switch_glu");
+            for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+                .into_iter()
+                .enumerate()
+            {
+                let want: Vec<f32> = (0..3)
+                    .map(|e| (1 + layer * 9 + e * 3 + j) as f32 * 0.25)
+                    .collect();
+                let prefix = format!("{glu}.{proj}");
+                assert_eq!(
+                    stacked_inv_global_scale(&weights, &prefix),
+                    want,
+                    "{prefix}"
+                );
+                expect_native_nvfp4_load(
+                    SwitchLinear::from_weights(&weights, &prefix, 16, 4),
+                    &prefix,
+                    "the stacked Gemma 4 expert plane loads with its multiplier",
+                );
+            }
+        }
+        assert!(
+            !weights
+                .keys()
+                .any(|k| k.contains(".experts.0.") || k.contains(".experts.2.")),
+            "no per-expert key is left behind"
+        );
+        // 2 layers x 3 projections x (weight, scales, inv_global_scale) + 2.
+        assert_eq!(weights.len(), 20);
+        assert!(weights.contains_key("language_model.model.layers.0.mlp.gate_proj.weight"));
+        assert!(weights.contains_key("language_model.model.layers.0.router.proj.weight"));
+
+        // A checkpoint whose experts are already stacked is left as it is.
+        let before: Vec<String> = {
+            let mut keys: Vec<String> = weights.keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        stack_gemma4_per_expert_planes(&mut weights).unwrap();
+        let mut after: Vec<String> = weights.keys().cloned().collect();
+        after.sort();
+        assert_eq!(before, after);
+    }
+
     #[test]
     fn normalize_nvfp4_keys_remaps_language_model_prefix() {
         let mut weights = mlxcel_core::weights::WeightMap::new();
@@ -3626,6 +4375,77 @@ mod tests {
         normalize_nvfp4_keys(&mut weights);
         // The existing key should remain unchanged.
         assert!(weights.contains_key("language_model.model.layers.0.mlp.gate_proj.weight"));
+    }
+
+    // --- adopt_gemma4_language_model_prefix tests ---
+
+    fn weights_named(names: &[&str]) -> mlxcel_core::weights::WeightMap {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    mlxcel_core::from_slice_f32(&[1.0], &[1]),
+                )
+            })
+            .collect()
+    }
+
+    fn sorted_names(weights: &mlxcel_core::weights::WeightMap) -> Vec<&str> {
+        let mut names: Vec<&str> = weights.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn a_text_only_gemma4_export_moves_under_the_language_model_prefix() {
+        // The layout of `mlx-community/Gemma4-E2B-IT-Text-int4`, which used to
+        // stop at "Weight not found: language_model.model.embed_tokens.weight".
+        let mut weights = weights_named(&[
+            "model.embed_tokens.weight",
+            "model.embed_tokens.scales",
+            "model.embed_tokens_per_layer.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.norm.weight",
+            "lm_head.weight",
+        ]);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        assert_eq!(
+            sorted_names(&weights),
+            [
+                "language_model.lm_head.weight",
+                "language_model.model.embed_tokens.scales",
+                "language_model.model.embed_tokens.weight",
+                "language_model.model.embed_tokens_per_layer.weight",
+                "language_model.model.layers.0.self_attn.q_proj.weight",
+                "language_model.model.norm.weight",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gemma4_checkpoint_in_another_layout_keeps_its_names() {
+        // The multimodal layout, with or without stray top-level tensors.
+        let multimodal = [
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.0.self_attn.q_proj.weight",
+            "model.embed_tokens.weight",
+        ];
+        let mut weights = weights_named(&multimodal);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        let mut expected = multimodal;
+        expected.sort_unstable();
+        assert_eq!(sorted_names(&weights), expected);
+
+        // `model.` tensors without the text-only embedding table are not that
+        // layout, and nothing is guessed about them.
+        let other = [
+            "model.language_model.embed_tokens.weight",
+            "model.vision_tower.weight",
+        ];
+        let mut weights = weights_named(&other);
+        adopt_gemma4_language_model_prefix(&mut weights);
+        assert_eq!(sorted_names(&weights), other);
     }
 
     // --- strip_gemma4_kv_shared_weights tests ---

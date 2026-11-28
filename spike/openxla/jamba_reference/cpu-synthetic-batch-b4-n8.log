@@ -1,0 +1,14 @@
+model = /tmp/epic564-models/jamba-moe-tiny/mlx
+device = local-task, slots B_max = 4, requests N = 8, full prompt = 6, buckets = None, eos = []
+  req 0: len 6 cap 12  req 1: len 6 cap 23  req 2: len 6 cap 24  req 3: len 6 cap 17
+  req 4: len 6 cap 24  req 5: len 6 cap 24  req 6: len 6 cap 22  req 7: len 6 cap 24
+
+phase 1 load: reference engine (B_max=4, capacity 256) 4.88 s
+phase 1: captured 8 single-seq references (170 tokens, 3102.50 tok/s sequential baseline, generation only)
+phase 2 load: batch engine (B_max=4, capacity 256) 6.56 s
+
+phase 2: 46 pump steps, 8 requests served, 170 tokens
+throughput: 5485.25 tok/s batched (vs 3102.50 tok/s sequential baseline, 1.8x)
+RESULT: REFERENCE-EXACT PASS (every request matches its single-seq reference)
+BENCH	device=local-task	B=4	N=8	tok_s=5485.248	pass=true
+exit=0

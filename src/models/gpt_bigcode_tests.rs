@@ -858,3 +858,8 @@ fn tiny_multi_head_model_forward_caches_every_kv_head() {
     );
     assert_eq!(key_shape[3], args.head_dim() as i32);
 }
+
+crate::models::last_row_logits_harness::last_row_case!(gpt_bigcode_last_row_logits, || {
+    let args = tiny_args();
+    GptBigCodeModel::from_weights(&hf_weights(&args), &args).expect("model builds")
+});

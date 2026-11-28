@@ -69,6 +69,35 @@ fn text_only_vision_config<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value).map_err(|e| anyhow::anyhow!("Failed to parse {label}: {e}"))
 }
 
+/// `full_config` with `vision_config.in_chans` dropped when `in_channels` is
+/// also present, else `full_config` itself.
+///
+/// A `transformers` re-export (NVIDIA's ModelOpt checkpoints among them)
+/// writes both `in_channels` and its older name `in_chans`. The Qwen vision
+/// structs take either through a serde alias, and serde rejects the pair as a
+/// duplicate field. One name alone is left as it is.
+///
+/// Used by: [`qwen_vision_config`] and the Qwen2-VL / Qwen2.5-VL IREE host
+/// preprocessor loaders
+fn without_duplicate_in_chans(
+    full_config: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    let has_both = full_config.get("vision_config").is_some_and(|vision| {
+        vision.get("in_channels").is_some() && vision.get("in_chans").is_some()
+    });
+    if !has_both {
+        return std::borrow::Cow::Borrowed(full_config);
+    }
+    let mut config = full_config.clone();
+    if let Some(vision) = config
+        .get_mut("vision_config")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        vision.remove("in_chans");
+    }
+    std::borrow::Cow::Owned(config)
+}
+
 /// Parse the vision config when a tower is being loaded, else the text-only
 /// stand-in of [`text_only_vision_config`].
 fn qwen_vision_config<T: serde::de::DeserializeOwned>(
@@ -76,6 +105,8 @@ fn qwen_vision_config<T: serde::de::DeserializeOwned>(
     has_vision: bool,
     label: &str,
 ) -> Result<T> {
+    let full_config = without_duplicate_in_chans(full_config);
+    let full_config = full_config.as_ref();
     if has_vision {
         parse_required_vlm_subconfig(full_config, "vision_config", label)
     } else {
@@ -187,9 +218,12 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
             actual: "unqualified qwen2_vl config without vision_config".to_string(),
         });
     }
-    let mut vision_config: Qwen2VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen2VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);
@@ -300,6 +334,31 @@ fn remap_qwen2_5_vl_native_keys(raw_weights: WeightMap) -> WeightMap {
     weights
 }
 
+/// Bring a Qwen2.5-VL checkpoint's weights to the names and formats the
+/// loader reads: the native-key remap, the tied embedding, and for an NVIDIA
+/// ModelOpt NVFP4 export the repack of each `{weight, weight_scale,
+/// weight_scale_2}` triplet to MLX native NVFP4, as the text-only and Qwen3.5
+/// VLM routes do. Without the repack the packed `uint8` codes reach the
+/// linear loaders as they are.
+///
+/// Returns the weights and whether the checkpoint was a ModelOpt NVFP4 one
+/// (declared in `quantization_config` or in `hf_quant_config.json`), so the
+/// caller can give the text config that layout.
+fn prepare_qwen2_5_vl_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
+    model_path: &Path,
+) -> Result<(WeightMap, bool)> {
+    let mut weights = remap_qwen2_5_vl_native_keys(strip_language_model_prefix(raw_weights));
+    models::sanitize_tied_embeddings(&mut weights, full_config);
+    let modelopt_nvfp4 = models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path);
+    if modelopt_nvfp4 {
+        models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok((weights, modelopt_nvfp4))
+}
+
 /// Load the Qwen2.5-VL processor and text embedding table while keeping its
 /// windowed vision tower and merger resident in IREE.
 #[cfg(feature = "xla-iree")]
@@ -325,9 +384,12 @@ pub(crate) fn load_qwen2_5_vl_iree_host_preprocessor(
                 .to_string(),
         });
     }
-    let mut vision_config: Qwen25VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2.5VL vision config")
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let mut vision_config: Qwen25VLVisionConfig = parse_required_vlm_subconfig(
+        without_duplicate_in_chans(&full_config).as_ref(),
+        "vision_config",
+        "Qwen2.5VL vision config",
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
     let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         let canonical = name.strip_prefix("language_model.").unwrap_or(name);
@@ -504,12 +566,19 @@ pub(crate) fn load_qwen3_vl_iree_host_preprocessor(
         },
     )
     .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    // The IREE vision artifact was validated against HF's bicubic resize at the
+    // checkpoint's own bounds, so require both explicitly before building the
+    // processor; the eager loader applies the same policy through the shared
+    // helper, which keeps the two backends on one image grid (#3290).
     let processor_policy = load_qwen3_vl_processor_policy(model_path)?;
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?
-            .with_pixel_bounds(processor_policy.min_pixels, processor_policy.max_pixels)
-            .with_resize_filter(FilterType::CatmullRom);
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    debug_assert_eq!(
+        (processor.min_pixels, processor.max_pixels),
+        (processor_policy.min_pixels, processor_policy.max_pixels)
+    );
+    debug_assert_eq!(processor.resize_filter(), FilterType::CatmullRom);
     let projector = mlxcel_xla::IreeQwen3VlProjector::load(model_path, device)
         .map_err(HostPreprocessorError::Iree)?;
     Qwen3VlIreeHostPreprocessor::from_parts(
@@ -537,52 +606,17 @@ struct Qwen3VlProcessorPolicy {
 fn load_qwen3_vl_processor_policy(
     model_path: &Path,
 ) -> Result<Qwen3VlProcessorPolicy, HostPreprocessorError> {
-    let path = model_path.join("preprocessor_config.json");
-    let bytes = std::fs::read(&path).map_err(|error| {
-        HostPreprocessorError::InvalidConfig(format!("{}: {error}", path.display()))
-    })?;
-    let root: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        HostPreprocessorError::InvalidConfig(format!("parse {}: {error}", path.display()))
-    })?;
-    let object = root.as_object().ok_or_else(|| {
-        HostPreprocessorError::InvalidConfig(format!("{} must contain an object", path.display()))
-    })?;
-    let size = match object.get("size") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(value) => Some(value.as_object().ok_or_else(|| {
-            HostPreprocessorError::InvalidConfig(
-                "Qwen3-VL preprocessor_config.json size must be an object".to_string(),
-            )
-        })?),
+    let policy = super::qwen_image_policy::QwenImageResizePolicy::read(model_path)
+        .map_err(HostPreprocessorError::InvalidConfig)?;
+    let (Some(min_pixels), Some(max_pixels)) = (policy.min_pixels, policy.max_pixels) else {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Qwen3-VL preprocessor_config.json requires size.shortest_edge/min_pixels and \
+             size.longest_edge/max_pixels"
+                .to_string(),
+        ));
     };
-    let positive_bound = |nested: &str, fallback: &str| -> Result<usize, HostPreprocessorError> {
-        let value = size
-            .and_then(|size| size.get(nested))
-            .or_else(|| object.get(fallback))
-            .ok_or_else(|| {
-                HostPreprocessorError::InvalidConfig(format!(
-                    "Qwen3-VL preprocessor_config.json requires size.{nested} or {fallback}"
-                ))
-            })?;
-        value
-                .as_u64()
-                .and_then(|value| usize::try_from(value).ok())
-                .filter(|&value| value > 0)
-                .ok_or_else(|| {
-                    HostPreprocessorError::InvalidConfig(format!(
-                        "Qwen3-VL preprocessor_config.json size.{nested}/{fallback} must be a positive integer"
-                    ))
-                })
-    };
-    let min_pixels = positive_bound("shortest_edge", "min_pixels")?;
-    let max_pixels = positive_bound("longest_edge", "max_pixels")?;
-    if min_pixels > max_pixels {
-        return Err(HostPreprocessorError::InvalidConfig(format!(
-            "Qwen3-VL preprocessor pixel bounds are inverted: min={min_pixels}, max={max_pixels}"
-        )));
-    }
-    match object.get("resample").and_then(serde_json::Value::as_u64) {
-        Some(3) => {}
+    match policy.resample {
+        Some(super::qwen_image_policy::PIL_BICUBIC) => {}
         Some(other) => {
             return Err(HostPreprocessorError::InvalidConfig(format!(
                 "Qwen3-VL IREE vision requires PIL BICUBIC resample=3, got {other}"
@@ -699,7 +733,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     let has_vision = models::vlm_has_vision(&full_config, model_path);
 
-    let text_config: models::qwen2_vl::Qwen2VLConfig =
+    let mut text_config: models::qwen2_vl::Qwen2VLConfig =
         parse_vlm_config(&config_str, "Qwen2.5VL text config")?;
 
     let mut vision_config: Qwen25VLVisionConfig =
@@ -707,11 +741,14 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
 
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
-    let mut weights = remap_qwen2_5_vl_native_keys(strip_language_model_prefix(
+    let (mut weights, modelopt_nvfp4) = prepare_qwen2_5_vl_weights(
         load_vlm_weights_common(model_path, None)?,
-    ));
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
-
+        &full_config,
+        model_path,
+    )?;
+    if modelopt_nvfp4 {
+        text_config.declare_modelopt_nvfp4_layout();
+    }
     // A raw `transformers` export keeps `Conv3d`'s native filter layout, which
     // the encoder would reshape without complaint and then read scrambled.
     if normalize_patch_embed_layout(&mut weights, "vision_tower", vision_config.in_channels) {
@@ -747,9 +784,50 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
         video_token_id: token_ids.video_token_id,
         vision_start_token_id: token_ids.vision_start_token_id,
         spatial_merge_size: vision_config.spatial_merge_size,
+        video_tokens_per_second: vision_config.tokens_per_second,
     };
 
     Ok(LoadedModel::Qwen25VL(vlm))
+}
+
+/// Bring a dense Qwen3-VL checkpoint's weights to the names and formats the
+/// loader reads: the key remap, the tied embedding, and for an NVFP4 export
+/// from NVIDIA ModelOpt or compressed-tensors (llm-compressor) the repack of
+/// each quantized linear to MLX native NVFP4, as the text-only, Qwen3.5 VLM
+/// and Qwen2.5-VL routes do. Without the repack the text model does not find
+/// a compressed-tensors export's `weight` at all, and reads a ModelOpt
+/// export's packed codes as they are.
+///
+/// Returns the weights and whether the checkpoint was such an export, so the
+/// caller can give the text config that layout.
+///
+/// Only the language model may be quantized this way. The vision tower loads
+/// with the MLX `quantization` block's layout, which these exports do not
+/// have, so one with packed vision linears is refused here by name.
+fn prepare_qwen3_vl_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
+    model_path: &Path,
+) -> Result<(WeightMap, bool)> {
+    let mut weights = remap_qwen3_vl_weights(raw_weights, false);
+    models::sanitize_tied_embeddings(&mut weights, full_config);
+    let external_nvfp4 = models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path);
+    if external_nvfp4 {
+        let packed_vision_linear = weights
+            .keys()
+            .filter(|key| key.starts_with("vision_tower."))
+            .filter(|key| key.ends_with(".weight_packed") || key.ends_with(".weight_scale_2"))
+            .min();
+        if let Some(key) = packed_vision_linear {
+            anyhow::bail!(
+                "Qwen3-VL: this NVFP4 export also quantizes the vision tower ({key}), which \
+                 this loader does not support; only the language model may be NVFP4"
+            );
+        }
+        models::sanitize_modelopt_nvfp4_weights(&mut weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    Ok((weights, external_nvfp4))
 }
 
 /// Load a Qwen3-VL model (ViT + interleaved MRoPE + DeepStack)
@@ -767,8 +845,14 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
         qwen_vision_config(&full_config, has_vision, "Qwen3VL vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
-    let mut weights = remap_qwen3_vl_weights(load_vlm_weights_common(model_path, None)?, false);
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
+    let (mut weights, external_nvfp4) = prepare_qwen3_vl_weights(
+        load_vlm_weights_common(model_path, None)?,
+        &full_config,
+        model_path,
+    )?;
+    if external_nvfp4 {
+        text_config.declare_modelopt_nvfp4_layout();
+    }
 
     let text_model = models::Qwen3VLModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL text model: {}", e))?;
@@ -863,36 +947,26 @@ pub(crate) fn load_qwen3_5_moe_vlm(model_path: &Path) -> Result<LoadedModel> {
     load_qwen3_5_vlm_with_variant(model_path, Qwen35VlmVariant::Moe)
 }
 
-fn load_qwen3_5_vlm_with_variant(
+/// Split a Qwen3.5 VLM checkpoint into the text model's weights and the vision
+/// tower's, each under its own key names, and repack a ModelOpt NVFP4 export's
+/// text weights.
+///
+/// ModelOpt stores each quantized linear as a `{weight, weight_scale,
+/// weight_scale_2}` triplet. The text-only loader repacks them inside
+/// `load_text_weights`; this route reads the checkpoint itself, so the same
+/// repack has to run here, or the packed `uint8` planes reach the model as
+/// dense weights. It runs on the split map: the keys then carry the text
+/// model's own names, and the vision tower, which ModelOpt leaves unquantized,
+/// has no triplets.
+///
+/// Used by: [`load_qwen3_5_vlm_with_variant`]
+pub(super) fn split_qwen3_5_vlm_weights(
+    raw_weights: WeightMap,
+    full_config: &serde_json::Value,
     model_path: &Path,
-    variant: Qwen35VlmVariant,
-) -> Result<LoadedModel> {
-    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
-
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-    models::qwen3_5::validate_qwen35_wrapper_config(&full_config)?;
-
-    let mut vision_config: Qwen3VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3.5 vision config")?;
-    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
-
-    // Vendor fine-grained FP8 releases (`quant_method: "fp8"`, one bf16
-    // inverse scale per 128x128 block) declare no `quantization` block and
-    // ship raw E4M3 bytes. Reconstruct and requantize them to MLX-native
-    // mxfp8 before the weight map is split, so the sidecars are still paired
-    // with their tensors and the vision tower (which the released
-    // checkpoints leave unconverted) simply has none to consume.
-    let fp8_block = models::qwen_fp8_block_quantization(&full_config)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-
-    let raw_weights = load_vlm_weights_common(model_path, None)?;
-    let raw_weights = match fp8_block {
-        Some(detected) => models::requantize_block_fp8_weights(raw_weights, detected.block_rows)
-            .map_err(|error| anyhow::anyhow!("{error}"))?,
-        None => raw_weights,
-    };
-    let mut text_weights = mlxcel_core::weights::WeightMap::new();
-    let mut vision_weights = mlxcel_core::weights::WeightMap::new();
+) -> Result<(WeightMap, WeightMap)> {
+    let mut text_weights = WeightMap::new();
+    let mut vision_weights = WeightMap::new();
 
     for (key, value) in raw_weights {
         if key.starts_with("model.language_model.") || key.starts_with("language_model.model.") {
@@ -913,6 +987,43 @@ fn load_qwen3_5_vlm_with_variant(
         }
     }
 
+    if models::is_modelopt_nvfp4_text_checkpoint(Some(full_config), model_path) {
+        models::sanitize_modelopt_nvfp4_weights(&mut text_weights, Some(full_config))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+
+    Ok((text_weights, vision_weights))
+}
+
+fn load_qwen3_5_vlm_with_variant(
+    model_path: &Path,
+    variant: Qwen35VlmVariant,
+) -> Result<LoadedModel> {
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    models::qwen3_5::validate_qwen35_wrapper_config(&full_config)?;
+
+    let mut vision_config: Qwen3VLVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3.5 vision config")?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+
+    // FP8 releases declare no `quantization` block and ship raw E4M3 bytes:
+    // the vendor layout pairs them with one bf16 inverse scale per 128x128
+    // block, compressed-tensors with a per-channel or per-block
+    // `.weight_scale`. Reconstruct and requantize them to MLX-native mxfp8
+    // before the weight map is split, so the sidecars are still paired with
+    // their tensors and the vision tower (which the released checkpoints leave
+    // unconverted) simply has none to consume.
+    let fp8 = models::fp8_checkpoint_quantization(&full_config)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    let raw_weights = load_vlm_weights_common(model_path, None)?;
+    let raw_weights = models::requantize_fp8_weights(raw_weights, fp8)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let (text_weights, mut vision_weights) =
+        split_qwen3_5_vlm_weights(raw_weights, &full_config, model_path)?;
+
     let mut text_config_val = full_config
         .get("text_config")
         .cloned()
@@ -925,16 +1036,21 @@ fn load_qwen3_5_vlm_with_variant(
         );
     }
 
-    if let Some(detected) = fp8_block {
-        models::merge_fp8_block_quantization(&mut text_config_val, detected)
+    if let Some(detected) = fp8 {
+        models::merge_fp8_quantization(&mut text_config_val, detected)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     }
+    // An NVFP4 export has no `quantization` block either;
+    // `split_qwen3_5_vlm_weights` above repacked its text linears.
+    models::merge_modelopt_nvfp4_quantization(&mut text_config_val, &full_config, Some(model_path))
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_val)
         .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3.5 text config: {}", e))?;
     text_config.validate_supported()?;
 
-    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config);
+    let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
     models::sanitize_tied_embeddings(&mut text_weights, &full_config);
 
     let mut text_model = models::Qwen35Model::from_weights(&text_weights, &text_config)

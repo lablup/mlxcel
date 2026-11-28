@@ -39,19 +39,24 @@ use crate::multimodal::gemma3_vlm_prompt::{
 use crate::multimodal::got_ocr_prompt::prepare_got_prompt_tokens;
 use crate::multimodal::llmjp_vl_prompt::{insert_llmjp_image_tokens, text_token_count};
 use crate::multimodal::minicpmv46_prompt::prepare_minicpmv46_prompt_tokens;
+use crate::multimodal::plamo2_vl_prompt::{Plamo2VlImageTokenIds, prepare_plamo2_vl_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
 use crate::pixtral_prompt::insert_pixtral_image_tokens;
 use crate::qwen_vl::{
     InsertedQwenVlmTokens, QwenVisualGrid, QwenVisualKind, insert_qwen_vl_image_tokens,
-    insert_qwen_vl_media_tokens, insert_qwen3_omni_image_tokens,
+    insert_qwen_vl_media_tokens, insert_qwen_vl_media_tokens_timestamped,
+    insert_qwen3_omni_image_tokens,
 };
 use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
 use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
-use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
+use crate::vision::feature_cache::{
+    CacheKey, ModelVisionCaches, hash_with_grid_layout, image_hash_from_pixels,
+    request_hash_from_image_keys,
+};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
@@ -343,6 +348,17 @@ pub enum VlmPreparationSummary {
     Lfm2Vl {
         image_blocks: usize,
         total_image_tokens: usize,
+    },
+    /// PLaMo 2.1 VL wrapped the text in its fixed instruction template and
+    /// framed each image as `<siglip2:img> + <plamo:image> * (729 * tiles) +
+    /// </siglip2:img>`. `pre_templated` records whether the text already
+    /// carried the template (the server render) or was wrapped (the CLI).
+    Plamo2Vl {
+        image_blocks: usize,
+        total_tiles: usize,
+        total_image_tokens: usize,
+        total_tokens: usize,
+        pre_templated: bool,
     },
     /// Granite Vision expanded each `<image>` into `num_image_tokens` copies.
     GraniteVision {
@@ -814,13 +830,37 @@ where
     ))
 }
 
-/// Pick the first explicit (non-None) cache key from a caller-supplied slice.
+/// Request-scoped cache key built from the caller's per-image keys.
 ///
-/// Used by Qwen-VL families which pack every image into a single pixel tensor
-/// per request: a request-scoped cache key is sufficient and we prefer the
-/// caller's key when they provided one (e.g. a filesystem path).
-fn first_explicit_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
-    keys.and_then(|slice| slice.iter().find_map(|k| k.clone()))
+/// Used by Qwen-VL families, which pack every image of a request into a single
+/// pixel tensor and cache the vision output of the whole request under one
+/// key, so the key has to cover every image in order (#3265). Returns `Some`
+/// only when the caller supplied exactly one key for each of the request's
+/// `image_count` images; otherwise `None`, and the caller falls back to
+/// [`qwen_pixel_cache_key`] over the whole tensor. Either key also covers the
+/// patch grids (`grid_thw`), so the same bytes encoded at another layout never
+/// share an entry.
+fn qwen_request_cache_key(
+    keys: Option<&[Option<CacheKey>]>,
+    image_count: usize,
+    grid_thw: &[(i32, i32, i32)],
+) -> Option<CacheKey> {
+    let keys = keys.filter(|keys| !keys.is_empty() && keys.len() == image_count)?;
+    let keys: Option<Vec<CacheKey>> = keys.iter().cloned().collect();
+    let request = request_hash_from_image_keys(&keys?);
+    Some(CacheKey::from_hash(hash_with_grid_layout(
+        &request, grid_thw,
+    )))
+}
+
+/// Fallback request key for Qwen-VL: the pixel tensor's bytes plus its patch
+/// grids. The flattened patches carry no shape, so the bytes alone cannot tell
+/// two layouts of the same patches apart.
+fn qwen_pixel_cache_key(pixel_values: &MlxArray, grid_thw: &[(i32, i32, i32)]) -> CacheKey {
+    CacheKey::from_hash(hash_with_grid_layout(
+        &image_hash_from_pixels(pixel_values),
+        grid_thw,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -934,8 +974,79 @@ pub fn qwen_video_runtime(model: &LoadedModel) -> Option<&dyn crate::qwen_vl::Qw
         LoadedModel::Qwen3VLMoe(model) => Some(model),
         LoadedModel::Qwen35VLM(model) | LoadedModel::Qwen35MoeVLM(model) => Some(model),
         LoadedModel::Qwen4ExpVLM(model) => Some(model),
+        LoadedModel::MiMoV2VLM(model) => Some(model),
         _ => None,
     }
+}
+
+/// Timing and tokenizer access for rendering per-group video timestamps (#2402).
+///
+/// Only the Qwen3-VL family renders timestamps; see
+/// [`crate::qwen_vl::QwenVlmPromptInfo::video_timestamps`].
+pub struct QwenVideoTimestamps<'a> {
+    /// `group_seconds[v][g]` is the timestamp, in seconds, of temporal group
+    /// `g` of the `v`-th decoded video.
+    pub group_seconds: &'a [Vec<f64>],
+    /// Encodes marker text such as `<1.5 seconds>` without special tokens.
+    pub encode_text: &'a dyn Fn(&str) -> Result<Vec<i32>>,
+}
+
+/// Resolve the per-group timestamp marker tokens for each video (#2402).
+///
+/// Returns `None` for a family (or request) that renders the flat, timeless
+/// video layout. Otherwise returns one `Vec<Vec<i32>>` per video, in video
+/// order, holding the encoded marker of every temporal group. A timestamp
+/// family with videos but no timing is an error, as is any disagreement
+/// between the timing and the processor-derived video grids; the caller never
+/// falls back to the flat layout.
+///
+/// Used by: Qwen3VLModel, Qwen3VLMoeModel, Qwen35VLModel (dense and MoE).
+fn qwen_video_group_prefixes(
+    family_renders_timestamps: bool,
+    media_order: &[QwenMediaOrdinal],
+    visual_grids: &[QwenVisualGrid],
+    video_count: usize,
+    video_timestamps: Option<&QwenVideoTimestamps<'_>>,
+) -> Result<Option<Vec<Vec<Vec<i32>>>>> {
+    if !family_renders_timestamps || video_count == 0 {
+        return Ok(None);
+    }
+    let timestamps = video_timestamps.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Qwen-VL video request needs per-group timestamps for this model family, but no \
+             video timing was provided"
+        )
+    })?;
+    if timestamps.group_seconds.len() != video_count {
+        anyhow::bail!(
+            "Qwen-VL video timing covers {} video(s), but request has {}",
+            timestamps.group_seconds.len(),
+            video_count
+        );
+    }
+    let mut group_prefixes = Vec::with_capacity(video_count);
+    for (ordinal, item) in media_order.iter().zip(visual_grids) {
+        let QwenMediaOrdinal::Video(idx) = *ordinal else {
+            continue;
+        };
+        let seconds = &timestamps.group_seconds[idx];
+        if seconds.len() != item.grid_thw.0 as usize {
+            anyhow::bail!(
+                "Qwen-VL video {idx} has {} temporal group(s), but {} timestamp(s) were provided",
+                item.grid_thw.0,
+                seconds.len()
+            );
+        }
+        if seconds.iter().any(|secs| !secs.is_finite() || *secs < 0.0) {
+            anyhow::bail!("Qwen-VL video timestamps must be finite non-negative seconds");
+        }
+        let prefixes = seconds
+            .iter()
+            .map(|&secs| (timestamps.encode_text)(&crate::qwen_vl::qwen_video_timestamp_text(secs)))
+            .collect::<Result<Vec<_>>>()?;
+        group_prefixes.push(prefixes);
+    }
+    Ok(Some(group_prefixes))
 }
 
 /// Compute Qwen-VL embeddings for a mixed image/video request.
@@ -943,11 +1054,25 @@ pub fn qwen_video_runtime(model: &LoadedModel) -> Option<&dyn crate::qwen_vl::Qw
 /// The media order is taken from the rendered prompt when it already contains
 /// image/video placeholders; otherwise it falls back to the CLI's historical
 /// images-then-videos order for text-only or no-template prompts.
+///
+/// A family whose reference processor renders per-group video timestamps
+/// (`video_timestamps`) requires `video_timestamps` whenever the request has
+/// videos; passing `None` there is an error rather than a silent fall back to
+/// the timeless flat layout. Families without timestamps ignore it.
+///
+/// `video_second_per_grid` is `temporal_patch_size / sampled fps` per clip,
+/// indexed like `videos`; it is reordered into prompt order here and handed
+/// to the runtime, which uses it only where the reference model spaces video
+/// positions by real time (Qwen2.5-VL, Blaizzy/mlx-vlm#2760). `None` means no
+/// video is timed, which is what an images-only caller passes.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_qwen_vl_media_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
     prompt_tokens: &mut Vec<i32>,
     images: &[DynamicImage],
     videos: &[Vec<DynamicImage>],
+    video_timestamps: Option<&QwenVideoTimestamps<'_>>,
+    video_second_per_grid: Option<&[f32]>,
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
 ) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
@@ -987,15 +1112,34 @@ pub fn compute_qwen_vl_media_embeddings(
             grid_thw: grid,
         })
         .collect::<Vec<_>>();
-    let stats = insert_qwen_vl_media_tokens(
-        prompt_tokens,
+    let inserted = if let Some(group_prefixes) = qwen_video_group_prefixes(
+        info.video_timestamps,
+        &media_order,
         &visual_grids,
-        info.spatial_merge_size,
-        info.vision_start_token_id,
-        info.image_token_id,
-        info.video_token_id,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("Qwen-VL failed to prepare visual placeholder tokens"))?;
+        videos.len(),
+        video_timestamps,
+    )? {
+        insert_qwen_vl_media_tokens_timestamped(
+            prompt_tokens,
+            &visual_grids,
+            info.spatial_merge_size,
+            info.vision_start_token_id,
+            info.image_token_id,
+            info.video_token_id,
+            &group_prefixes,
+        )?
+    } else {
+        insert_qwen_vl_media_tokens(
+            prompt_tokens,
+            &visual_grids,
+            info.spatial_merge_size,
+            info.vision_start_token_id,
+            info.image_token_id,
+            info.video_token_id,
+        )?
+    };
+    let stats = inserted
+        .ok_or_else(|| anyhow::anyhow!("Qwen-VL failed to prepare visual placeholder tokens"))?;
 
     let active_caches = if videos.is_empty() {
         caches.filter(|c| c.enabled())
@@ -1003,20 +1147,43 @@ pub fn compute_qwen_vl_media_embeddings(
         None
     };
     let qwen_cache_key = if active_caches.is_some() {
-        first_explicit_key(image_cache_keys)
-            .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
+        qwen_request_cache_key(image_cache_keys, images.len(), &grid_thw)
+            .or_else(|| Some(qwen_pixel_cache_key(&pixel_values, &grid_thw)))
     } else {
         None
     };
 
+    // Per-clip timing arrives in the caller's `videos` order; the runtime
+    // wants one entry per video grid in prompt order.
+    let prompt_order_second_per_grid = match video_second_per_grid {
+        Some(second_per_grid) => {
+            if second_per_grid.len() != videos.len() {
+                anyhow::bail!(
+                    "Qwen-VL video timing covers {} video(s), but request has {}",
+                    second_per_grid.len(),
+                    videos.len()
+                );
+            }
+            media_order
+                .iter()
+                .filter_map(|ordinal| match *ordinal {
+                    QwenMediaOrdinal::Video(idx) => Some(second_per_grid[idx]),
+                    QwenMediaOrdinal::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+        }
+        None => Vec::new(),
+    };
+
     let input_ids_arr = prompt_ids_array(prompt_tokens);
-    let embeddings = qwen.input_embeddings_with_cache(
+    let embeddings = qwen.input_embeddings_with_video_timing(
         &input_ids_arr,
         &pixel_values,
         &grid_thw,
+        &prompt_order_second_per_grid,
         qwen_cache_key.as_ref(),
         active_caches,
-    );
+    )?;
     Ok((embeddings, stats))
 }
 
@@ -1202,6 +1369,29 @@ where
                 }),
             }))
         }
+        VlmRuntimeRef::Inkling2(model) => {
+            let refs: Vec<&DynamicImage> = images.iter().collect();
+            let processed = model
+                .preprocess_image_refs(&refs)
+                .map_err(anyhow::Error::msg)?;
+            // One template placeholder per image becomes `rows * cols` slots.
+            let stats = expand_inkling_image_tokens(
+                prompt_tokens,
+                model.image_token_id(),
+                &processed.tiles_per_image(),
+            )?;
+            let input_ids = prompt_ids_array(prompt_tokens);
+            let embeddings = model
+                .prepare_input_embeddings(&input_ids, &processed)
+                .map_err(anyhow::Error::msg)?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Inkling {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                }),
+            }))
+        }
         VlmRuntimeRef::MuseGlimmer(model) => {
             crate::multimodal::muse_glimmer_runtime::prepare_muse_glimmer_vlm_embeddings(
                 model,
@@ -1216,6 +1406,8 @@ where
                 prompt_tokens,
                 images,
                 &[],
+                None,
+                None,
                 image_cache_keys,
                 active_caches,
             )?;
@@ -1932,6 +2124,66 @@ where
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
                 preparation,
+            }))
+        }
+        VlmRuntimeRef::Plamo2Vl(plamo) => {
+            // One shared context budget tiles every image (at most 4 tiles
+            // for a single image), then the fixed instruction template is
+            // assembled around the text and each image block is sized to its
+            // tile count. `prompt` is the raw `-p` text (CLI) or the builtin
+            // template's render (server); the builder converges both.
+            let (pixel_values, tiles_per_image) = plamo
+                .processor
+                .preprocess_with_tiles(images)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            let ids = Plamo2VlImageTokenIds {
+                bos: plamo.bos_token_id,
+                img_start: plamo.img_start_token_id,
+                image: plamo.image_token_id,
+                img_end: plamo.img_end_token_id,
+            };
+            let (tokens, stats) = prepare_plamo2_vl_prompt_tokens(
+                prompt,
+                &tiles_per_image,
+                plamo.num_image_token,
+                ids,
+                &mut encode,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            *prompt_tokens = tokens;
+            ensure_image_token_feature_cardinality(
+                "PLaMo 2.1 VL",
+                prompt_tokens,
+                plamo.image_token_id,
+                tiles_per_image.iter().copied(),
+                plamo.num_image_token,
+            )?;
+            tracing::debug!(
+                image_blocks = stats.image_blocks,
+                total_tiles = stats.total_tiles,
+                total_image_tokens = stats.total_image_tokens,
+                total_tokens = prompt_tokens.len(),
+                "PLaMo 2.1 VL prompt prepared"
+            );
+
+            // All tiles go through the tower in one call; the opportunistic
+            // vision cache is off, as for InternVL and GOT-OCR.
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = plamo
+                .get_input_embeddings(&input_ids_arr, &pixel_values, stats.total_image_tokens)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::Plamo2Vl {
+                    image_blocks: stats.image_blocks,
+                    total_tiles: stats.total_tiles,
+                    total_image_tokens: stats.total_image_tokens,
+                    total_tokens: prompt_tokens.len(),
+                    pre_templated: stats.pre_templated,
+                }),
             }))
         }
         VlmRuntimeRef::GotOcr(got) => {

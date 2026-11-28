@@ -546,6 +546,103 @@ fn model_owned_sequence_state_is_refused_even_when_other_flags_allow_it() {
     assert!(supports_prompt_lookup(&ConstantModel));
 }
 
+/// A model-owned family that unwinds a rejected verify tail from its own
+/// state through `rewind_decode_appends`, the `qwen4_exp` shape (#2880): it
+/// also opts out of padded prefill, and neither refusal applies to it.
+struct RewindingModelOwnedModel;
+
+impl LanguageModel for RewindingModelOwnedModel {
+    fn forward(
+        &self,
+        input_ids: &ffi::MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&ffi::MlxArray>,
+    ) -> UniquePtr<ffi::MlxArray> {
+        ConstantModel.forward(input_ids, caches, mask)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        Vec::new()
+    }
+
+    fn num_layers(&self) -> usize {
+        1
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![7]
+    }
+
+    fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
+        crate::cache::SequenceStateLayout::model_owned(1)
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn model_owned_state_is_admitted_when_the_model_rewinds_its_own_verify_tail() {
+    let model = RewindingModelOwnedModel;
+    // The lookahead flag stays off: admission rests on the verify rewind alone.
+    assert!(!model.supports_decode_lookahead_rewind());
+    assert_eq!(prompt_lookup_unsupported_reason(&model), None);
+    assert!(supports_prompt_lookup(&model));
+}
+
+/// A family whose lookahead rewind only pops whole single-token forwards
+/// (Gemma 3, Baichuan) cannot unwind inside a verify block, so the lookahead
+/// flag alone must not admit it (issue #2880).
+struct LookaheadOnlyModelOwnedModel;
+
+impl LanguageModel for LookaheadOnlyModelOwnedModel {
+    fn forward(
+        &self,
+        input_ids: &ffi::MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&ffi::MlxArray>,
+    ) -> UniquePtr<ffi::MlxArray> {
+        ConstantModel.forward(input_ids, caches, mask)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        Vec::new()
+    }
+
+    fn num_layers(&self) -> usize {
+        1
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![7]
+    }
+
+    fn sequence_state_layout(&self) -> crate::cache::SequenceStateLayout {
+        crate::cache::SequenceStateLayout::model_owned(1)
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn lookahead_rewind_alone_does_not_admit_a_model_owned_family() {
+    let model = LookaheadOnlyModelOwnedModel;
+    assert!(model.supports_decode_lookahead_rewind());
+    assert!(!model.supports_speculative_verify_rewind());
+    assert!(prompt_lookup_unsupported_reason(&model).is_some());
+}
+
 #[test]
 fn generate_refuses_a_model_without_external_caches() {
     let mut drafter = PromptLookupDrafter::new(PromptLookupConfig::default());

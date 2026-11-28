@@ -176,9 +176,8 @@ fn assert_delegating_contract<M: LanguageModel>(model: &M) {
     crate::models::batched_decode_harness::assert_empty_batch_returns_empty_logits(model);
 }
 
-#[test]
-fn deepseek_ocr_delegates_actual_batched_decode_to_text_model() {
-    let model = DeepSeekOcrVlModel {
+fn tiny_ocr() -> DeepSeekOcrVlModel {
+    DeepSeekOcrVlModel {
         text_model: minimal_text_model(),
         sam: minimal_sam(1),
         clip: minimal_clip(),
@@ -189,13 +188,16 @@ fn deepseek_ocr_delegates_actual_batched_decode_to_text_model() {
         image_token_id: 15,
         eos_token_id: 1,
         n_embed: 1,
-    };
-    assert_delegating_contract(&model);
+    }
 }
 
 #[test]
-fn deepseek_ocr2_delegates_actual_batched_decode_to_text_model() {
-    let model = DeepSeekOcr2VlModel {
+fn deepseek_ocr_delegates_actual_batched_decode_to_text_model() {
+    assert_delegating_contract(&tiny_ocr());
+}
+
+fn tiny_ocr2() -> DeepSeekOcr2VlModel {
+    DeepSeekOcr2VlModel {
         text_model: minimal_text_model(),
         sam: minimal_sam(1),
         resampler: minimal_resampler(),
@@ -205,6 +207,46 @@ fn deepseek_ocr2_delegates_actual_batched_decode_to_text_model() {
         image_token_id: 15,
         eos_token_id: 1,
         n_embed: 1,
+    }
+}
+
+#[test]
+fn deepseek_ocr2_delegates_actual_batched_decode_to_text_model() {
+    assert_delegating_contract(&tiny_ocr2());
+}
+
+/// Text and embeddings prefill through a wrapper reach the text model's
+/// last-row projection (#3070). The embeddings are the text model's own
+/// lookup, which is what the wrapper's merge step starts from.
+fn assert_wrapper_last_row_logits<M: LanguageModel>(make: impl Fn() -> M) {
+    use crate::models::last_row_logits_harness::{
+        TOKENS, assert_embedded_rows, assert_last_row_logits,
     };
-    assert_delegating_contract(&model);
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    assert_last_row_logits(&make, TOKENS);
+
+    let input = mlxcel_core::from_slice_i32(TOKENS, &[1, TOKENS.len() as i32]);
+    let embeds = minimal_text_model().embed_tokens_forward(&input);
+    let reference = make();
+    let mut caches = reference.make_caches();
+    let full = reference.forward_with_embeddings_and_sequence_id(
+        &input,
+        Some(&embeds),
+        None,
+        &mut caches,
+        None,
+    );
+    mlxcel_core::eval(&full);
+    assert_embedded_rows(&make, &input, &embeds, &full, TOKENS.len() - 1);
+}
+
+#[test]
+fn deepseek_ocr_last_row_logits_match_the_full_forward() {
+    assert_wrapper_last_row_logits(tiny_ocr);
+}
+
+#[test]
+fn deepseek_ocr2_last_row_logits_match_the_full_forward() {
+    assert_wrapper_last_row_logits(tiny_ocr2);
 }

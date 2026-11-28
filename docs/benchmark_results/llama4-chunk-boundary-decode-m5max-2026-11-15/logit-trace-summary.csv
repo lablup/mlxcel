@@ -1,0 +1,13 @@
+reference,candidate,query_positions,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,ppl_reference,ppl_candidate
+"mlxcel one-pass prefill (branch, width 8449)","main, width-1 decode",8001-8191,191,3,4,0,0.102,22.0144,22.0217
+"mlxcel one-pass prefill (branch, width 8449)","main, width-1 decode",8192-8448,257,130,75,20,5.766,5.8628,27.8667
+"mlxcel one-pass prefill (branch, width 8449)","branch, width-1 decode",8001-8191,191,3,4,0,0.102,22.0144,22.0217
+"mlxcel one-pass prefill (branch, width 8449)","branch, width-1 decode",8192-8448,257,2,75,0,0.078,5.8628,5.8623
+"mlxcel one-pass prefill (branch, width 8449)","main, B=2 batched decode row 0",8001-8191,191,2,4,0,0.016,22.0144,22.0328
+"mlxcel one-pass prefill (branch, width 8449)","main, B=2 batched decode row 0",8192-8448,257,129,75,20,5.766,5.8628,27.8832
+"mlxcel one-pass prefill (branch, width 8449)","branch, B=2 batched decode row 0",8001-8191,191,2,4,0,0.016,22.0144,22.0328
+"mlxcel one-pass prefill (branch, width 8449)","branch, B=2 batched decode row 0",8192-8448,257,5,75,0,0.094,5.8628,5.8608
+"mlx-lm 0.31.3 one-pass, RoPE set to mlxcel's","main, width-1 decode",8001-8191,191,2,4,0,0.078,22.1686,22.0217
+"mlx-lm 0.31.3 one-pass, RoPE set to mlxcel's","main, width-1 decode",8192-8448,257,129,74,20,5.766,5.8609,27.8667
+"mlx-lm 0.31.3 one-pass, RoPE set to mlxcel's","branch, width-1 decode",8001-8191,191,2,4,0,0.078,22.1686,22.0217
+"mlx-lm 0.31.3 one-pass, RoPE set to mlxcel's","branch, width-1 decode",8192-8448,257,4,74,0,0.109,5.8609,5.8623

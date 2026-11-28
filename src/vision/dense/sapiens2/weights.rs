@@ -209,9 +209,7 @@ pub fn deconv_weight(
 #[allow(clippy::excessive_precision)]
 mod tests {
     use super::*;
-    use crate::vision::addmm_oracle_test_support::{
-        ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
-    };
+    use crate::vision::addmm_oracle_test_support::{ROUTING_ROWS, routing_rows};
     use crate::vision::dense::sapiens2::config::Sapiens2Task;
 
     fn one_layer_config() -> Sapiens2Config {
@@ -237,8 +235,8 @@ mod tests {
 
     #[test]
     fn sapiens2_bf16_linear_uses_fused_bias_epilogue() {
-        // Two rows select a single-rounding addmm kernel on every backend;
-        // one row on Metal does not (see `addmm_oracle_test_support`).
+        // Every backend rounds `addmm` once at one row and at two (see
+        // `addmm_oracle_test_support`), so both shapes expect the fused value.
         let _device_lock = mlxcel_core::streams::lock_default_device();
         let bf16 = |values: &[f32], shape: &[i32]| {
             mlxcel_core::astype(
@@ -284,14 +282,13 @@ mod tests {
             routing_rows(&separate)
         );
         let single = bf16(&input, &[1, 4]);
-        let single_expected = if single_row_addmm_rounds_twice() {
-            separate
-        } else {
-            fused
-        };
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&linear_forward(&layer, &single)),
-            single_expected
+            fused
+        );
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(&layer.forward(&single)),
+            separate
         );
     }
 

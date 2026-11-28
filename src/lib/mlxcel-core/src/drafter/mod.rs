@@ -67,7 +67,7 @@
 //! | Variant | Concrete impl | Wired by |
 //! |---------|---------------|----------|
 //! | [`DrafterKind::Mtp`] | `Gemma4AssistantDraftModel`, and (since issue #1165) `Qwen35MtpDraftModel` (`qwen3_5_mtp` model_type); the `glm4_moe_lite_mtp` drafter resolves to this kind here but is built by the binary crate's `mlxcel::models::drafter_loader` (issue #1326) | |
-//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type) | |
+//! | [`DrafterKind::Dflash`] | `DFlashDraftModel` (Qwen 3.5 DFlash and LFM2 DSpark), and (since issue #1343) `MuseAssistantDrafter` (`muse_glimmer_assistant` model_type), and (since issue #1351) `LagunaDFlashDrafter` (`laguna` model_type), and (since issue #3374) `Inkling2DsparkDraftModel` (an Inkling 2 checkpoint with `mtp.safetensors`) | |
 //! | [`DrafterKind::InternalMtp`] | `InternalMtpDrafter` | |
 //!
 //! Until those land, [`load_drafter`] returns a typed
@@ -77,6 +77,7 @@
 
 pub mod laguna_dflash;
 pub mod masks;
+pub mod raon_dflash2;
 
 use crate::ffi::MlxArray;
 use crate::generate::LanguageModel;
@@ -94,6 +95,7 @@ pub mod dflash;
 /// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
 /// Native Inkling chained-MTP head loaded from `model.mtp.layers.*` tensors.
+pub mod inkling2_dspark;
 pub mod inkling_mtp;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
@@ -363,6 +365,11 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
         // builds it. The kind still has to resolve here so `--draft-model`
         // auto-detects MTP without a `--draft-kind` flag.
         m.insert(GLM4_MOE_LITE_MTP_MODEL_TYPE, DrafterKind::Mtp);
+        // The Qwen3.8-Flash-Next native MTP head (`qwen4_exp_mtp`, issue
+        // #2880): built in the binary crate for the same reason as the GLM
+        // drafter (it reuses the `qwen4_exp` QSA layer, MoE block and
+        // hyper-connection mixer), refused by name in [`load_drafter`].
+        m.insert(QWEN4_EXP_MTP_MODEL_TYPE, DrafterKind::Mtp);
         // The Muse Glimmer assistant (issue #1343) is a DFlash-family block
         // drafter with its own `model_type`. It would resolve to the DFlash
         // default anyway; the explicit entry is what lets an explicit
@@ -532,6 +539,17 @@ pub enum DrafterError {
          mlxcel_core::drafter::load_drafter"
     )]
     BinaryCrateDrafter { model_type: String },
+
+    /// `--draft-kind mtp` named a target checkpoint (`model_type:
+    /// "qwen4_exp"`) as its own drafter, but the checkpoint carries no
+    /// `mtp.*` head tensors (issue #2917). Conversions that drop the head
+    /// need the split `qwen4_exp_mtp` drafter directory instead.
+    #[error(
+        "{path} is a qwen4_exp target checkpoint without an embedded MTP head (no mtp.* \
+         tensors); pass a split qwen4_exp_mtp drafter directory as the drafter, or a \
+         conversion that keeps the mtp.* tensors"
+    )]
+    NoEmbeddedMtpHead { path: String },
 }
 
 /// Subset of the drafter's `config.json` that [`resolve_drafter_kind`] and
@@ -548,13 +566,60 @@ struct DrafterConfigPeek {
 /// `model_type` value that identifies a Qwen 3.5 MTP drafter checkpoint
 /// (see [`qwen3_5_mtp::Qwen35MtpConfig`]). Named so the block-size peek
 /// below and the kind map in [`drafter_kind_by_model_type`] cannot drift
-/// independently.
-const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
+/// independently. Public so the binary-side drafter loader, which installs
+/// the YaRN table core cannot build (issue #3479), dispatches on the same
+/// spelling.
+pub const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
 
 /// `model_type` value that identifies a GLM-4.7-Flash MTP drafter directory
 /// produced by `mlxcel split-mtp` (issue #1326). Public so the binary-side
 /// drafter loader dispatches on the same spelling the kind map registers.
 pub const GLM4_MOE_LITE_MTP_MODEL_TYPE: &str = "glm4_moe_lite_mtp";
+
+/// `model_type` value that identifies a Qwen3.8-Flash-Next (`qwen4_exp`)
+/// native MTP drafter directory (upstream `Qwen4ExpMTPConfig`, issue #2880).
+/// Public for the same reason as [`GLM4_MOE_LITE_MTP_MODEL_TYPE`]: the drafter
+/// is built by the binary crate's `mlxcel::models::drafter_loader`.
+pub const QWEN4_EXP_MTP_MODEL_TYPE: &str = "qwen4_exp_mtp";
+
+/// `model_type` of a Qwen3.8-Flash-Next (`qwen4_exp`) target checkpoint.
+/// Passed as its own drafter, a checkpoint that keeps its `mtp.*` head
+/// resolves to [`DrafterKind::Mtp`] (issue #2917); the binary crate's
+/// `mlxcel::models::drafter_loader` builds the head from those tensors.
+pub const QWEN4_EXP_MODEL_TYPE: &str = "qwen4_exp";
+
+/// Tensor-name prefixes of the `qwen4_exp` MTP head in every checkpoint
+/// layout: raw Hugging Face (`mtp.`), the canonical text layout
+/// (`model.mtp.`) and the mlx-vlm VLM wrapper (`language_model.mtp.`),
+/// the three upstream's drafter `sanitize` strips.
+pub const QWEN4_EXP_MTP_PREFIXES: [&str; 3] = ["mtp.", "model.mtp.", "language_model.mtp."];
+
+/// The `qwen4_exp` MTP head's tensor predicate (issue #2917). The target's
+/// sanitize skips exactly these keys and the drafter keeps exactly these,
+/// so both delegate here.
+///
+/// Used by: [`resolve_drafter_kind`] (through
+/// [`has_qwen4_exp_mtp_tensors`]), `mlxcel::models::qwen4_exp_sanitize`
+/// (`is_mtp_key`), `Qwen4ExpMtpDraftModel::from_target_checkpoint`.
+pub fn is_qwen4_exp_mtp_tensor_name(name: &str) -> bool {
+    strip_qwen4_exp_mtp_prefix(name).is_some()
+}
+
+/// `name` without its `qwen4_exp` MTP head prefix, or `None` when `name` is
+/// not a head tensor (or quantization module path).
+pub fn strip_qwen4_exp_mtp_prefix(name: &str) -> Option<&str> {
+    QWEN4_EXP_MTP_PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+}
+
+/// Whether the checkpoint at `path` stores any `qwen4_exp` MTP head tensor.
+/// Reads the index and the safetensors headers only; with an index, only
+/// the shards it maps head tensors to are opened.
+pub fn has_qwen4_exp_mtp_tensors(path: &Path) -> Result<bool, DrafterError> {
+    crate::weights::dir_has_tensor_name(path, is_qwen4_exp_mtp_tensor_name)
+        .map_err(|reason| DrafterError::WeightLoad { reason })
+}
 
 fn read_drafter_config_peek(model_path: &Path) -> Option<DrafterConfigPeek> {
     let cfg_path = model_path.join("config.json");
@@ -604,7 +669,7 @@ fn peek_configured_block_size_for(model_path: &Path, expected_model_type: &str) 
 /// the PR's own measurement showed block 3 (drafter-configured)
 /// outperforming block 4 (the flat constant) on the published pairing
 /// (16.48 vs 13.81 tok/s, 0.591 vs 0.465 acceptance, see
-/// `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`), so shipping
+/// `docs/benchmark_results/versions/v0.5.2.md#qwen38-mtp-m1ultra-2026-08-16`), so shipping
 /// the flat constant as the silent default was shipping the slower
 /// measured configuration.
 ///
@@ -635,6 +700,27 @@ pub fn peek_glm4_moe_lite_mtp_configured_block_size(model_path: &Path) -> Option
 pub fn peek_inkling_mtp_configured_block_size(model_path: &Path) -> Option<usize> {
     let config = inkling_mtp::InklingMtpConfig::from_dir(model_path).ok()?;
     Some(config.block_size())
+}
+
+/// Default verify width of the DSpark drafter bundled with the Inkling 2
+/// checkpoint at `model_path` (issue #3374): its trained `block_size`, one
+/// anchor and `block_size - 1` proposals. `None` for any other directory.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_inkling2_dspark_configured_block_size(model_path: &Path) -> Option<usize> {
+    inkling2_dspark::peek_configured_block_size(model_path)
+}
+
+/// The default verify width of the Raon-1 mini DFlash2 drafter at
+/// `model_path` (issue #3436): [`raon_dflash2::DEFAULT_VERIFY_WIDTH`], the
+/// measured width, not the checkpoint's trained `block_size` (8), which
+/// verifies more rows than it accepts on an M3 Ultra. `None` for any other
+/// directory.
+///
+/// Used by: `resolve_draft_block_size` in the `mlxcel` binary crate.
+pub fn peek_raon_dflash2_default_block_size(model_path: &Path) -> Option<usize> {
+    raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(model_path)
+        .then_some(raon_dflash2::DEFAULT_VERIFY_WIDTH)
 }
 
 /// Read the default verify width of an LFM2 DSpark drafter at `model_path`
@@ -712,6 +798,45 @@ pub fn resolve_drafter_kind(
             "Auto-detected Inkling MTP from model.mtp.layers.* tensors"
         );
         return Ok(DrafterKind::Mtp);
+    }
+
+    // An Inkling 2 checkpoint passed as its own drafter (issue #3374): its
+    // bundled DSpark is a DFlash-kind drafter, detected by `mtp_config` and
+    // `mtp.safetensors` as upstream's `load_drafter` does.
+    if kind.is_none()
+        && model_type
+            .as_deref()
+            .is_some_and(|mt| inkling2_dspark::INKLING2_MODEL_TYPES.contains(&mt))
+        && inkling2_dspark::is_inkling2_dspark_dir(model_path)
+    {
+        tracing::info!(
+            drafter = %model_path.display(),
+            resolved = %DrafterKind::Dflash,
+            "Auto-detected the Inkling 2 bundled DSpark drafter from mtp_config and mtp.safetensors"
+        );
+        return Ok(DrafterKind::Dflash);
+    }
+
+    // A `qwen4_exp` target checkpoint passed as its own drafter (issue
+    // #2917): detected by the head's tensors, like Inkling above. An explicit
+    // `--draft-kind mtp` on a checkpoint without them is refused by name; any
+    // other explicit kind is honored without probing.
+    if model_type.as_deref() == Some(QWEN4_EXP_MODEL_TYPE)
+        && matches!(kind, None | Some(DrafterKind::Mtp))
+    {
+        if has_qwen4_exp_mtp_tensors(model_path)? {
+            tracing::info!(
+                drafter = %model_path.display(),
+                resolved = %DrafterKind::Mtp,
+                "Auto-detected the qwen4_exp checkpoint's embedded MTP head from mtp.* tensors"
+            );
+            return Ok(DrafterKind::Mtp);
+        }
+        if kind == Some(DrafterKind::Mtp) {
+            return Err(DrafterError::NoEmbeddedMtpHead {
+                path: model_path.display().to_string(),
+            });
+        }
     }
 
     match (kind, expected) {
@@ -1152,6 +1277,35 @@ pub trait Drafter {
         Ok(())
     }
 
+    /// Whether [`Self::extend_history`] keeps this drafter's own history in
+    /// step with the target after classic decode steps that no round drafted
+    /// (issue #3425). The MTP round loop falls back to classic decode only
+    /// for a drafter that says yes. The default says no.
+    fn extends_history_without_draft(&self) -> bool {
+        false
+    }
+
+    /// Append target-emitted tokens that no round drafted: the classic decode
+    /// steps the MTP round loop ran instead of a round (issue #3425).
+    /// `hidden` (`[1, n, H]`) holds the target's hidden at each step's input
+    /// position and `tokens` (`n` ids) the token each step emitted, so row
+    /// `i` pairs with `tokens[i]` as [`Self::accept_verified_tokens`] pairs a
+    /// verify row with the token after it. The drafter appends them and
+    /// precomputes the next round's seed. Called only when
+    /// [`Self::extends_history_without_draft`] is true; failures degrade
+    /// draft quality only.
+    #[allow(unused_variables)]
+    fn extend_history(
+        &mut self,
+        hidden: &MlxArray,
+        tokens: &[i32],
+        sampler: &crate::generate::SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        Err(DrafterError::DraftFailed {
+            reason: "this drafter has no history to extend".to_string(),
+        })
+    }
+
     /// Reset the drafter's own KV cache between full generation calls.
     ///
     /// **DFlash- and InternalMtp-only** by original design; this trait
@@ -1196,6 +1350,30 @@ pub trait Drafter {
     fn prefer_requested_block_size(&self) -> bool {
         false
     }
+
+    /// Whether the draft is a function of the context alone (no sampler
+    /// draws), so the DFlash round loop may accept it under sampling by
+    /// sampling each verify row and comparing (issue #3436; see
+    /// `dflash::sampled_verify`). The default keeps the argmax walk.
+    fn supports_sampled_verify(&self) -> bool {
+        false
+    }
+
+    /// How many of the newest context positions this drafter keeps, when it
+    /// keeps a bounded window (the Raon DFlash2 drafter's
+    /// `swa_window_size`, issue #3436). A target may then capture only that
+    /// many of the newest prompt rows at prefill and report the rest through
+    /// [`Self::skip_context`]. `None` (the default) wants every row.
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// The first hidden handed to a draft call after [`Self::reset`] starts
+    /// `positions` rows into the prompt, because the target captured only
+    /// the newest [`Self::context_window`] rows. A drafter that tracks
+    /// absolute positions advances past them; the default ignores it.
+    #[allow(unused_variables)]
+    fn skip_context(&mut self, positions: usize) {}
 
     /// Whether this drafter can only draft under an argmax sampler.
     ///
@@ -1246,6 +1424,22 @@ pub trait Drafter {
     /// other DFlash-family drafter, so the server's DFlash target gate reads
     /// this to refuse a mismatched pairing by name before any forward runs.
     fn is_laguna_dflash(&self) -> bool {
+        false
+    }
+
+    /// Whether this drafter is the DSpark drafter bundled with an Inkling 2
+    /// checkpoint (issue #3374). Same role as [`Self::is_laguna_dflash`]: it
+    /// reads Inkling 2 pre-layer captures, so the target gate pairs it with
+    /// an Inkling 2 target only.
+    fn is_inkling2_dspark(&self) -> bool {
+        false
+    }
+
+    /// Whether this drafter is the Raon-1 mini DFlash2 speculator (issue
+    /// #3436). Same role as [`Self::is_laguna_dflash`]: its `fc` reads the
+    /// four mHC streams of five Raon layers, so the target gate pairs it with
+    /// a Raon-1 mini target only.
+    fn is_raon_dflash2(&self) -> bool {
         false
     }
 
@@ -1432,8 +1626,18 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 let drafter = dflash::MuseAssistantDrafter::load(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
+            if raon_dflash2::RaonDFlash2Config::is_raon_dflash2_dir(path) {
+                let drafter = raon_dflash2::RaonDFlash2Drafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
             if laguna_dflash::LagunaDFlashConfig::is_laguna_dflash_dir(path) {
                 let drafter = laguna_dflash::LagunaDFlashDrafter::load(path)?;
+                return Ok((Box::new(drafter), resolved));
+            }
+            // An Inkling 2 checkpoint passed as its own drafter: the bundled
+            // `mtp.safetensors` DSpark (issue #3374).
+            if inkling2_dspark::is_inkling2_dspark_dir(path) {
+                let drafter = inkling2_dspark::Inkling2DsparkDraftModel::from_path(path)?;
                 return Ok((Box::new(drafter), resolved));
             }
             let drafter = dflash::drafter::DFlashDrafter::load(path)?;
@@ -1452,7 +1656,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                     let model = inkling_mtp::InklingMtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
                 }
-                Some("qwen3_5_mtp") => {
+                // Without YaRN: a `rope_parameters` block naming `yarn` is
+                // applied by the binary crate's `drafter_loader`, which every
+                // binary caller goes through (issue #3479).
+                Some(QWEN35_MTP_MODEL_TYPE) => {
                     let model = qwen3_5_mtp::Qwen35MtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
                 }
@@ -1462,6 +1669,16 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 // whose weight-inventory error would blame the wrong family.
                 Some(GLM4_MOE_LITE_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
                     model_type: GLM4_MOE_LITE_MTP_MODEL_TYPE.to_string(),
+                }),
+                // Same arrangement for the Qwen3.8-Flash-Next head (#2880):
+                // its decoder layer is the binary crate's `qwen4_exp` QSA
+                // layer, so core refuses by name and the binary loader builds it.
+                Some(QWEN4_EXP_MTP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
+                    model_type: QWEN4_EXP_MTP_MODEL_TYPE.to_string(),
+                }),
+                // The same head embedded in the target checkpoint (#2917).
+                Some(QWEN4_EXP_MODEL_TYPE) => Err(DrafterError::BinaryCrateDrafter {
+                    model_type: QWEN4_EXP_MODEL_TYPE.to_string(),
                 }),
                 _ => {
                     let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
@@ -1640,8 +1857,132 @@ mod tests {
             map.get("muse_glimmer_assistant"),
             Some(&DrafterKind::Dflash)
         );
-        // The four MTP spellings plus the Muse assistant, nothing else.
-        assert_eq!(map.len(), 5);
+        // The Qwen3.8-Flash-Next native MTP head (issue #2880).
+        assert_eq!(map.get("qwen4_exp_mtp"), Some(&DrafterKind::Mtp));
+        // The five MTP spellings plus the Muse assistant, nothing else.
+        assert_eq!(map.len(), 6);
+    }
+
+    #[test]
+    fn qwen4_exp_mtp_resolves_to_mtp_kind_and_is_refused_by_name_here() {
+        // `--draft-model <qwen4_exp_mtp dir>` auto-detects MTP without a
+        // `--draft-kind` flag, and the core loader names the binary-side
+        // builder instead of falling into the Gemma 4 assistant loader.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp_mtp"));
+        assert_eq!(resolve(dir.path(), None).unwrap(), DrafterKind::Mtp);
+        let err = load(dir.path(), None).expect_err("must refuse");
+        assert!(
+            matches!(err, DrafterError::BinaryCrateDrafter { ref model_type } if model_type == "qwen4_exp_mtp"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A one-tensor safetensors file whose header names `name`.
+    fn write_one_tensor(path: &Path, name: &str) {
+        let mut header =
+            format!("{{\"{name}\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}}}");
+        while !header.len().is_multiple_of(8) {
+            header.push(' ');
+        }
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&1.0_f32.to_le_bytes());
+        fs::write(path, bytes).expect("write safetensors");
+    }
+
+    #[test]
+    fn qwen4_exp_target_with_mtp_tensors_resolves_to_mtp_and_is_refused_by_name_here() {
+        // Issue #2917: the target checkpoint passed again as its own drafter.
+        for name in [
+            "mtp.fc_hidden.weight",
+            "model.mtp.fc_hidden.weight",
+            "language_model.mtp.fc_hidden.weight",
+        ] {
+            let dir = tempdir().unwrap();
+            write_drafter_config(&dir, Some("qwen4_exp"));
+            write_one_tensor(&dir.path().join("model.safetensors"), name);
+            assert!(
+                super::has_qwen4_exp_mtp_tensors(dir.path()).unwrap(),
+                "{name}"
+            );
+            assert_eq!(resolve(dir.path(), None).unwrap(), DrafterKind::Mtp);
+            assert_eq!(
+                resolve(dir.path(), Some(DrafterKind::Mtp)).unwrap(),
+                DrafterKind::Mtp
+            );
+            let err = load(dir.path(), None).expect_err("must refuse");
+            assert!(
+                matches!(err, DrafterError::BinaryCrateDrafter { ref model_type } if model_type == "qwen4_exp"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen4_exp_target_without_mtp_tensors_keeps_the_old_resolution() {
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp"));
+        write_one_tensor(
+            &dir.path().join("model.safetensors"),
+            "language_model.model.embed_tokens.weight",
+        );
+        assert!(!super::has_qwen4_exp_mtp_tensors(dir.path()).unwrap());
+        // No `--draft-kind`: the default fallback, exactly as before #2917.
+        assert_eq!(resolve(dir.path(), None).unwrap(), DEFAULT_DRAFTER_KIND);
+        // Another explicit kind is honored without probing.
+        assert_eq!(
+            resolve(dir.path(), Some(DrafterKind::FullModel)).unwrap(),
+            DrafterKind::FullModel
+        );
+        // `--draft-kind mtp` names the missing head.
+        let err = resolve(dir.path(), Some(DrafterKind::Mtp)).expect_err("no head");
+        assert!(
+            matches!(err, DrafterError::NoEmbeddedMtpHead { ref path } if path == &dir.path().display().to_string()),
+            "unexpected error: {err}"
+        );
+        assert!(err.to_string().contains("qwen4_exp_mtp"), "{err}");
+    }
+
+    #[test]
+    fn qwen4_exp_head_probe_names_a_missing_indexed_shard() {
+        // The index maps the head to a shard that is not on disk: the probe
+        // fails with a weight-load error naming that shard.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen4_exp"));
+        fs::write(
+            dir.path().join("model.safetensors.index.json"),
+            r#"{"weight_map": {"mtp.fc_hidden.weight": "model-mtp-00001-of-00001.safetensors"}}"#,
+        )
+        .unwrap();
+        let err = resolve(dir.path(), None).expect_err("missing shard");
+        assert!(
+            matches!(err, DrafterError::WeightLoad { ref reason } if reason.contains("model-mtp-00001-of-00001.safetensors")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn qwen4_exp_mtp_prefix_predicate_matches_the_three_layouts_only() {
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("mtp.layers.0.mlp.switch_mlp.gate_proj"),
+            Some("layers.0.mlp.switch_mlp.gate_proj")
+        );
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("model.mtp.fc_hidden.weight"),
+            Some("fc_hidden.weight")
+        );
+        assert_eq!(
+            super::strip_qwen4_exp_mtp_prefix("language_model.mtp.fc_hidden.weight"),
+            Some("fc_hidden.weight")
+        );
+        for other in [
+            "language_model.model.layers.0.mlp.gate.weight",
+            "model.layers.0.mtp.weight",
+            "mtpx.weight",
+        ] {
+            assert!(!super::is_qwen4_exp_mtp_tensor_name(other), "{other}");
+        }
     }
 
     #[test]

@@ -98,6 +98,9 @@ pub struct ServerStartupInput {
     pub api_prefix: String,
     /// `--webui` / `--ui`: serve the bundled local WebUI and typed UI API.
     pub webui_enabled: bool,
+    /// `--mcp-tools` with its server set and bounds, already resolved by
+    /// [`crate::server::mcp::resolve_mcp_startup`] (#1457). `None` = off.
+    pub mcp: Option<crate::server::mcp::McpStartupConfig>,
     /// Raw `--sse-ping-interval`; `-1` disables the pings.
     pub sse_ping_interval: i64,
     /// Raw `--threads-http`; any value below 1 selects the automatic sizing.
@@ -170,6 +173,9 @@ pub struct ServerStartupInput {
     pub reranker_model_path: Option<PathBuf>,
     /// `--rerank-batch-size`: query/document pairs per rerank forward pass.
     pub rerank_batch_size: usize,
+    /// `--decision-model`: resolved decision checkpoint directory served on
+    /// `/v1/decisions` next to the chat model.
+    pub decision_model_path: Option<PathBuf>,
     /// Explicit `--prefill-chunk-size`, or `None` to use the adaptive policy.
     pub prefill_chunk_size: Option<usize>,
     /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
@@ -241,6 +247,7 @@ pub struct ServerStartupInput {
     pub repeat_last_n: usize,
     pub repeat_penalty: f32,
     pub presence_penalty: f32,
+    pub presence_penalty_was_set: bool,
     pub frequency_penalty: f32,
     pub dry_multiplier: f32,
     pub dry_base: f32,
@@ -338,6 +345,12 @@ pub struct ServerStartupInput {
     pub video_max_frames: usize,
     /// Sampling rate for the no-native-video-path fallback (`--video-fps`).
     pub video_fps: f64,
+    /// Exact frame count replacing fps sampling (`--video-num-frames`, issue
+    /// #2399). `None` keeps fps sampling.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (`--video-min-frames`, issue
+    /// #2399). `None` keeps the built-in floor.
+    pub video_min_frames: Option<usize>,
     pub max_image_payload_size: usize,
     pub max_images_per_request: usize,
     pub max_image_width: u32,
@@ -430,6 +443,11 @@ pub struct ServerStartupInput {
     /// Raw string from `--kv-cache-mode` (legacy shorthand).
     /// `None` means the flag was not provided (= default FP16).
     pub kv_cache_mode_legacy: Option<String>,
+    /// `--mla-latent-quant` as parsed (issue #3179). `None` means the flag
+    /// was not given; the value in force then comes from
+    /// `MLXCEL_MLA_LATENT_QUANT`. The binary fixes the option for the process
+    /// before this input is resolved (`cli::mla_latent_option`).
+    pub mla_latent_quant: Option<mlxcel_core::mla::MlaLatentQuant>,
 
     // prompt-prefix KV cache knobs.
     // Each field stores the raw CLI/env value before normalization into
@@ -589,6 +607,15 @@ pub struct ServerStartupInput {
     pub responses_store_max_bytes: usize,
     /// `--responses-store-ttl-secs` value (`0` disables TTL).
     pub responses_store_ttl_secs: u64,
+    /// `--responses-background-max-jobs` value (`0` disables background
+    /// mode).
+    pub responses_background_max_jobs: usize,
+    /// `--responses-background-ephemeral-ttl-secs` value (at least 1; clap
+    /// rejects `0`).
+    pub responses_background_ephemeral_ttl_secs: u64,
+    /// `--responses-background-event-log-bytes` value (`0` refuses
+    /// `stream: true` on background responses).
+    pub responses_background_event_log_bytes: usize,
     /// `--conversation-store-max-entries` value (`0` disables
     /// the OpenAI Responses API conversation transcript store entirely).
     pub conversation_store_max_entries: usize,
@@ -795,6 +822,7 @@ impl ServerStartupInput {
                 ("--webui", self.webui_enabled),
                 ("--embedding-model", self.embedding_model_path.is_some()),
                 ("--reranker-model", self.reranker_model_path.is_some()),
+                ("--decision-model", self.decision_model_path.is_some()),
                 ("--reranking", embedding_compat.rerank_only),
                 (
                     "--embeddings",
@@ -819,10 +847,12 @@ impl ServerStartupInput {
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // b10621's slot-state and checkpoint spellings (#1473). Resolved here
-        // so a request for per-slot prompt retention, slot-similarity
-        // selection, a unified KV buffer or a checkpoint ring fails the
-        // command line on both binaries with one message.
-        self.slot_compat
+        // so a request for per-slot prompt retention or slot-similarity
+        // selection, or an invalid checkpoint count or spacing, fails the
+        // command line on both binaries with one message. The checkpoint
+        // flags ride the prompt-cache config to startup (#3255).
+        let ctx_checkpoint_flags = self
+            .slot_compat
             .resolve()
             .map_err(|message| anyhow::anyhow!("{message}"))?;
         // `--no-cache-prompt` and mlxcel's `--no-prompt-cache` are two
@@ -921,6 +951,8 @@ impl ServerStartupInput {
             self.prompt_cache_snapshot_ttl_seconds,
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
+        let mut prompt_cache = prompt_cache;
+        prompt_cache.ctx_checkpoint_flags = ctx_checkpoint_flags;
 
         // Resolve the effective KV cache mode from split flags,
         // legacy shorthand, or the default (FP16).
@@ -962,42 +994,95 @@ impl ServerStartupInput {
         // (`BatchKvQuantConfig::base_mode` maps `--kv-quant-scheme turboquant`
         // to Turbo4Asym and `--kv-bits 8` to Int8, and the scheduler prefers
         // that table over `kv_cache_mode`), so a family that cannot hold a
-        // quantized cache has to be taken off both.
+        // quantized cache has to be taken off both. On an absorbing DeepSeek
+        // V2 `--kv-bits 8` is held: its Int8 caches store the MLA latent
+        // quantized (issue #3155), while `--kv-quant-scheme turboquant` is
+        // still taken off there.
+        //
+        // `--mla-latent-quant` (issue #3179) is resolved in the same call: the
+        // process-wide option, which the binary fixed from this flag or its
+        // environment variable, decides the mode of a model that holds an MLA
+        // latent. A flag value that is not the one in force means the binary
+        // skipped that step, and the caches would not follow the flag.
+        let mla_latent_quant = mlxcel_core::mla::mla_latent_quant();
+        if let Some(flag) = self.mla_latent_quant
+            && flag != mla_latent_quant
+        {
+            anyhow::bail!(
+                "--mla-latent-quant {flag} was not applied at process start (the value in \
+                 force is {mla_latent_quant}); call cli::mla_latent_option::init_mla_latent_quant \
+                 before resolving the server configuration"
+            );
+        }
+        // The lines an explicit value prints are phrased against the mode the
+        // operator's flags select, which is the `--kv-bits` table's when it is
+        // on.
+        let latent_notice_mode = if batch_kv_quant.is_enabled() {
+            batch_kv_quant.base_mode()
+        } else {
+            kv_cache_mode
+        };
+        startup_notices.extend(
+            crate::cli::mla_latent_option::mla_latent_option_notices(
+                latent_notice_mode,
+                &self.model_path,
+            )
+            .into_iter()
+            .map(StartupNotice::warn),
+        );
         let (kv_cache_mode, kv_mode_warning) =
             crate::cli::turbo_args::resolve_effective_kv_cache_mode(
                 kv_cache_mode,
                 &self.model_path,
             );
         startup_notices.extend(kv_mode_warning.map(StartupNotice::warn));
-        if batch_kv_quant.is_enabled() {
-            let requested_batch_mode = batch_kv_quant.base_mode();
-            // The resolver's own warning is deliberately discarded here. It is
-            // phrased for `--kv-cache-mode`, so an operator who passed
-            // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
-            // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
-            // passed, on a line nearly identical to the one below. The line
-            // below names the flag that was actually set.
-            let (batch_effective, _) = crate::cli::turbo_args::resolve_effective_kv_cache_mode(
-                requested_batch_mode,
-                &self.model_path,
-            );
-            // `!=` rather than `== Fp16`. Fp16 is the only landing place a
-            // `--kv-bits` request can have today (rule 2 of
-            // `resolve_kv_cache_mode_for_model` fires only on a `Turbo4`
-            // request and `base_mode` never returns one), but the condition
-            // that matters is "the batch table asked for a mode this family
-            // cannot hold", not which mode it was moved to. Written this way,
-            // a future rule that substitutes something other than Fp16 still
-            // disables the batch table instead of silently keeping it.
-            if batch_effective != requested_batch_mode {
-                startup_notices.push(StartupNotice::warn(format!(
-                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
-                     family; it selects a {requested_batch_mode} KV cache, which this family \
-                     cannot hold. Serving its KV caches at fp16",
+        // The resolver's own warning is deliberately discarded inside the
+        // helper. It is phrased for `--kv-cache-mode`, so an operator who passed
+        // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
+        // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
+        // passed, on a line nearly identical to the one below. The line
+        // below names the flag that was actually set.
+        if let Some(requested_batch_mode) =
+            disable_batch_kv_quant_for_family(&mut batch_kv_quant, &self.model_path)
+        {
+            if crate::cli::mla_latent_option::option_decides_model(&self.model_path) {
+                // Not a refusal: every KV cache of this model is an MLA latent
+                // cache, and the explicit option has already set their storage
+                // through `kv_cache_mode`.
+                startup_notices.push(StartupNotice::info(format!(
+                    "--kv-bits {} is not applied to this model: --mla-latent-quant \
+                     {mla_latent_quant} decides its MLA latent caches, which are all of its KV \
+                     caches (including the last layer)",
                     self.kv_bits
                 )));
-                batch_kv_quant.bits = 0;
+            } else {
+                startup_notices.push(StartupNotice::warn(format!(
+                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
+                 family; it selects a {requested_batch_mode} KV cache, which this family \
+                 cannot hold. Serving its KV caches at fp16",
+                    self.kv_bits
+                )));
             }
+        }
+        // An absorbed MLA latent is grouped in 64s only (issue #3155). A
+        // different `--kv-group-size` would be ignored by the latent codec, so
+        // it is refused here rather than accepted and not applied.
+        if batch_kv_quant.is_enabled()
+            && batch_kv_quant.group_size
+                != mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE
+            && crate::cli::turbo_args::model_stores_quantized_latent(
+                batch_kv_quant.base_mode(),
+                &self.model_path,
+            )
+        {
+            anyhow::bail!(
+                "--kv-group-size {} is not supported for this model: --kv-bits {} stores its \
+                 absorbed MLA latent in affine groups of {}. Drop --kv-group-size or set it to {}",
+                batch_kv_quant.group_size,
+                batch_kv_quant.bits,
+                mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE,
+                mlxcel_core::cache::latent_quant::LATENT_QUANT_GROUP_SIZE,
+            );
         }
 
         // H1: validate `--max-kv-size` bounds before we lower
@@ -1092,6 +1177,7 @@ impl ServerStartupInput {
             sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,
             webui_enabled: self.webui_enabled,
+            mcp: self.mcp,
             #[cfg(feature = "webui")]
             webui_terminal_secret: None,
             #[cfg(feature = "webui")]
@@ -1123,6 +1209,7 @@ impl ServerStartupInput {
             embedding_request_timeout_secs: self.embedding_request_timeout_secs,
             reranker_model_path: self.reranker_model_path,
             rerank_batch_size: self.rerank_batch_size,
+            decision_model_path: self.decision_model_path,
             prefill_chunk_size: prefill_chunk_policy.alone,
             prefill_chunk_size_contended: prefill_chunk_policy.contended,
             prefill_grant_interval: self.prefill_grant_interval,
@@ -1176,6 +1263,7 @@ impl ServerStartupInput {
             repeat_last_n: self.repeat_last_n,
             repeat_penalty: self.repeat_penalty,
             presence_penalty: self.presence_penalty,
+            presence_penalty_was_set: self.presence_penalty_was_set,
             frequency_penalty: self.frequency_penalty,
             dry_multiplier: self.dry_multiplier,
             dry_base: self.dry_base,
@@ -1226,6 +1314,8 @@ impl ServerStartupInput {
             vision_cache_size: self.vision_cache_size,
             video_max_frames: self.video_max_frames,
             video_fps: self.video_fps,
+            video_num_frames: self.video_num_frames,
+            video_min_frames: self.video_min_frames,
             max_image_payload_size: self.max_image_payload_size,
             max_images_per_request: self.max_images_per_request,
             max_image_width: self.max_image_width,
@@ -1242,6 +1332,7 @@ impl ServerStartupInput {
             chat_template_kwargs,
             prompt_cache,
             kv_cache_mode,
+            mla_latent_quant,
             startup_notices,
             batch_kv_quant,
             // lower the raw `usize` (0 = disabled) into a
@@ -1266,6 +1357,9 @@ impl ServerStartupInput {
             responses_store_max_entries: self.responses_store_max_entries,
             responses_store_max_bytes: self.responses_store_max_bytes,
             responses_store_ttl_secs: self.responses_store_ttl_secs,
+            responses_background_max_jobs: self.responses_background_max_jobs,
+            responses_background_ephemeral_ttl_secs: self.responses_background_ephemeral_ttl_secs,
+            responses_background_event_log_bytes: self.responses_background_event_log_bytes,
             conversation_store_max_entries: self.conversation_store_max_entries,
             conversation_store_max_bytes: self.conversation_store_max_bytes,
             conversation_store_ttl_secs: self.conversation_store_ttl_secs,
@@ -1365,6 +1459,95 @@ pub use crate::cli::turbo_args::{
 };
 
 // ── — batched KV-cache quantization knobs ─────────────────────────
+
+/// Take batch KV quantization off a model family that cannot hold the cache
+/// mode it selects (issue #1350).
+///
+/// Returns the batch base mode that was refused when the table was disabled
+/// (`bits` reset to 0), `None` when it was already off or the family can hold
+/// it. The condition is `!=` rather than `== Fp16`: Fp16 is the only landing
+/// place a `--kv-bits` request can have today (rule 3 of
+/// `resolve_kv_cache_mode_for_model` fires only on a `Turbo4` request and
+/// `base_mode` never returns one), but what matters is "the batch table asked
+/// for a mode this family cannot hold", so a future rule that substitutes
+/// something other than Fp16 still disables the table.
+///
+/// `--kv-bits 8` on an absorbing DeepSeek V2 is held (`Int8` stores the MLA
+/// latent quantized, issue #3155), so the table stays on there.
+///
+/// Used by: [`ServerStartupInput::into_startup_config`] and
+/// [`effective_serve_kv_cache_mode`].
+pub fn disable_batch_kv_quant_for_family(
+    batch_kv_quant: &mut BatchKvQuantConfig,
+    model_path: &Path,
+) -> Option<mlxcel_core::cache::KVCacheMode> {
+    if !batch_kv_quant.is_enabled() {
+        return None;
+    }
+    let requested = batch_kv_quant.base_mode();
+    // An explicit `--mla-latent-quant` decides every KV cache of a model that
+    // holds an MLA latent (issue #3179), through `kv_cache_mode`. The table
+    // would otherwise keep its own last layer at fp16, or disagree on the
+    // storage, so it steps aside whatever it asked for.
+    if crate::cli::mla_latent_option::option_decides_model(model_path) {
+        batch_kv_quant.bits = 0;
+        return Some(requested);
+    }
+    let (effective, _) =
+        crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
+    if effective != requested {
+        batch_kv_quant.bits = 0;
+        return Some(requested);
+    }
+    None
+}
+
+/// The KV cache the scheduler builds each sequence in, as the estimators size
+/// it: the batch table's base mode when it is enabled, `kv_cache_mode`
+/// otherwise.
+///
+/// A quantized base mode with `--kv-skip-last-layer` keeps the last layer at
+/// FP16 (`BatchKvQuantConfig::resolve_layer_modes`), which the returned
+/// [`KvSizing`] carries so INT8 is not sized below what is built. Turbo modes
+/// stay at the FP16 width in the estimator, which overestimates them.
+///
+/// Used by: `server::startup::prompt_cache_sizing_kv_mode` and
+/// [`effective_serve_kv_cache_mode`].
+#[must_use]
+pub fn kv_mode_for_batch(
+    kv_cache_mode: mlxcel_core::cache::KVCacheMode,
+    batch_kv_quant: &BatchKvQuantConfig,
+) -> crate::execution::kv_arch::KvSizing {
+    if batch_kv_quant.is_enabled() {
+        let mode = batch_kv_quant.base_mode();
+        crate::execution::kv_arch::KvSizing {
+            mode,
+            fp16_last_layer: batch_kv_quant.skip_last_layer
+                && mode != mlxcel_core::cache::KVCacheMode::Fp16,
+        }
+    } else {
+        kv_cache_mode.into()
+    }
+}
+
+/// The KV cache `serve` will really build for a model, given the requested
+/// `--kv-cache-mode` and the resolved batch table. Applies the same family
+/// resolution and "disable if the family cannot hold it" rule as startup, so
+/// `--estimate-memory` sizes what the server allocates.
+///
+/// Used by: `commands::serve::serve_preflight_kv_mode`.
+#[must_use]
+pub fn effective_serve_kv_cache_mode(
+    requested: mlxcel_core::cache::KVCacheMode,
+    batch_kv_quant: BatchKvQuantConfig,
+    model_path: &Path,
+) -> crate::execution::kv_arch::KvSizing {
+    let (kv_cache_mode, _) =
+        crate::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
+    let mut batch = batch_kv_quant;
+    let _ = disable_batch_kv_quant_for_family(&mut batch, model_path);
+    kv_mode_for_batch(kv_cache_mode, &batch)
+}
 
 /// Resolve the [`BatchKvQuantConfig`] from the raw CLI string fields.
 ///

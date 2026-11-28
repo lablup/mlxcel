@@ -51,6 +51,10 @@ pub struct Qwen25VLVisionConfig {
     pub spatial_merge_size: usize,
     #[serde(default = "default_temporal_patch_size")]
     pub temporal_patch_size: usize,
+    /// Temporal MRoPE positions per second of video. Read by the language
+    /// side, not the tower: `Qwen25VLModel::video_tokens_per_second`.
+    #[serde(default = "default_tokens_per_second")]
+    pub tokens_per_second: f32,
     #[serde(alias = "in_chans", default = "default_in_channels")]
     pub in_channels: usize,
     /// Window size for windowed attention
@@ -87,6 +91,9 @@ fn default_spatial_merge_size() -> usize {
 }
 fn default_temporal_patch_size() -> usize {
     2
+}
+fn default_tokens_per_second() -> f32 {
+    2.0
 }
 fn default_in_channels() -> usize {
     3

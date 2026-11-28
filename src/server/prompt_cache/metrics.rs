@@ -114,12 +114,18 @@ pub enum PromptCacheRejectReason {
     /// failure: the request falls back to a full prefill under its own table,
     /// which is what the reference implementation does by resetting its cache.
     RopeRegimeMismatch,
+    /// The macOS memory guardrail (#2883 step 4) declined a snapshot or a
+    /// state checkpoint: storing it would take the host's available-now
+    /// memory below the reserve left for macOS. Before #3146 this decline was
+    /// silent, so a host short of memory showed only `prompt_cache_inserts`
+    /// stuck at zero.
+    MemoryReserve,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -131,6 +137,7 @@ impl PromptCacheRejectReason {
         Self::SnapshotDiverged,
         Self::ModelOwnedState,
         Self::RopeRegimeMismatch,
+        Self::MemoryReserve,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -148,6 +155,7 @@ impl PromptCacheRejectReason {
             Self::SnapshotDiverged => "snapshot_diverged",
             Self::ModelOwnedState => "model_owned_state",
             Self::RopeRegimeMismatch => "rope_regime_mismatch",
+            Self::MemoryReserve => "memory_reserve",
         }
     }
 }
@@ -208,6 +216,7 @@ pub struct PromptCacheRejectCounters {
     snapshot_diverged: AtomicU64,
     model_owned_state: AtomicU64,
     rope_regime_mismatch: AtomicU64,
+    memory_reserve: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -229,6 +238,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::SnapshotDiverged => &self.snapshot_diverged,
             PromptCacheRejectReason::ModelOwnedState => &self.model_owned_state,
             PromptCacheRejectReason::RopeRegimeMismatch => &self.rope_regime_mismatch,
+            PromptCacheRejectReason::MemoryReserve => &self.memory_reserve,
         }
     }
 

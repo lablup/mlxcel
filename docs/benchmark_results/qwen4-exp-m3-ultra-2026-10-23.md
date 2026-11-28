@@ -1,5 +1,7 @@
 # Qwen3.8-Flash-Next on M3 Ultra — 2026-10-23
 
+> Retention note (2026-11-10): final results are retained here. Superseded experiments are indexed in [benchmark index](README.md); retired run captures and any historical artifact paths resolve in the [frozen evidence tree](https://github.com/lablup/mlxcel/tree/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/). Measurement values and their original limitations have not been remeasured.
+
 This run qualifies PR #2475 against the OptiQ 2-bit checkpoint and the updated mlx-vlm reference. Both runtimes keep the text backbone resident; SSD expert streaming is not used.
 
 ## Environment and checkpoint
@@ -55,14 +57,14 @@ The optimizations preserve bf16 expert reduction boundaries, use the native inde
 
 ## Measured results
 
-Median of five measured runs; the full warmup row is retained in each raw JSONL file but excluded below. Peak memory is the maximum measured active allocation, in decimal GB. This is model execution throughput, not an HTTP or asynchronous generation benchmark.
+Median of five measured runs; the full warmup row is retained in each measurement CSV but excluded below. Peak memory is the maximum measured active allocation, in decimal GB. This is model execution throughput, not an HTTP or asynchronous generation benchmark.
 
 | Prompt tokens | Runtime | Prefill tok/s | Decode tok/s | Decode range | Peak GB |
 |---:|---|---:|---:|---:|---:|
-| 128 | [reference](qwen4-exp-2026-10-23/reference-128.jsonl) | 418.00 | 40.84 | 40.78–40.88 | 81.29 |
-| 128 | [mlxcel](qwen4-exp-2026-10-23/mlxcel-128.jsonl) | 434.02 | 41.39 | 40.60–41.41 | 81.27 |
-| 4,608 | [reference](qwen4-exp-2026-10-23/reference-4608.jsonl) | 1006.52 | 32.00 | 31.02–32.21 | 88.08 |
-| 4,608 | [mlxcel](qwen4-exp-2026-10-23/mlxcel-4608.jsonl) | 1056.91 | 37.77 | 36.89–37.79 | 87.92 |
+| 128 | [reference](qwen4-exp-2026-10-23/reference-128.csv) | 418.00 | 40.84 | 40.78–40.88 | 81.29 |
+| 128 | [mlxcel](qwen4-exp-2026-10-23/mlxcel-128.csv) | 434.02 | 41.39 | 40.60–41.41 | 81.27 |
+| 4,608 | [reference](qwen4-exp-2026-10-23/reference-4608.csv) | 1006.52 | 32.00 | 31.02–32.21 | 88.08 |
+| 4,608 | [mlxcel](qwen4-exp-2026-10-23/mlxcel-4608.csv) | 1056.91 | 37.77 | 36.89–37.79 | 87.92 |
 
 All 128 decode predictions agree in every paired run, including warmup. Median prefill improves by 3.83% at 128 tokens and 5.01% at 4,608 tokens; median decode improves by 1.35% and 18.02%, respectively. The short-decode difference is small relative to the observed run-to-run spread and should be treated as near parity, not a broad speedup claim. These results qualify this checkpoint and M3 Ultra configuration; they do not establish performance on other models, quantizations or hardware.
 
@@ -92,7 +94,7 @@ The loopback server ran with `--host 127.0.0.1 --port 18075 --alias qwen4-harden
 | MP4 data URL, four sampled frames | 118 / 192 | Identifies a color-bar test pattern, diagonal motion and the timer |
 | SSE text | streamed | `Hello!`, followed by `[DONE]` |
 
-Image and video answers reached the requested token cap; they are not presented as complete unconstrained answers. [Raw server responses](qwen4-exp-2026-10-23/server-smoke.jsonl) retain the finish reasons and usage. Model-owned state was reset between these independent requests; no cross-request cached prompt tokens were reported.
+Image and video answers reached the requested token cap; they are not presented as complete unconstrained answers. [Raw server responses](https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/qwen4-exp-2026-10-23/server-smoke.jsonl) retain the finish reasons and usage. Model-owned state was reset between these independent requests; no cross-request cached prompt tokens were reported.
 
 ## Checks and scope
 

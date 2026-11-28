@@ -78,6 +78,18 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).forward_last_logits(input_ids, caches, mask, last_pos)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        (**self).last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+    }
+
     fn forward_with_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -104,6 +116,12 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         (**self).final_norm_module()
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<crate::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        (**self).inkling2_dspark_binding()
+    }
+
     fn after_prefill(&self) {
         (**self).after_prefill()
     }
@@ -114,6 +132,10 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
 
     fn supports_decode_lookahead_rewind(&self) -> bool {
         (**self).supports_decode_lookahead_rewind()
+    }
+
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        (**self).supports_speculative_verify_rewind()
     }
 
     fn kv_cache_captures_sequence_state(&self) -> bool {
@@ -142,6 +164,18 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         (**self).release_sequence_state_by_id(seq_id)
+    }
+
+    fn set_sequence_reasoning_effort(
+        &self,
+        seq_id: Option<SequenceId>,
+        level: Option<&str>,
+    ) -> Result<(), String> {
+        (**self).set_sequence_reasoning_effort(seq_id, level)
+    }
+
+    fn sequence_reasoning_effort(&self, seq_id: SequenceId) -> Option<String> {
+        (**self).sequence_reasoning_effort(seq_id)
     }
 
     fn rope_table_regime(&self, total_prompt_len: usize) -> Option<u8> {
@@ -179,6 +213,22 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         target_len: usize,
     ) -> Result<(), String> {
         (**self).restore_sequence_state_truncated(seq_id, snapshot, target_len)
+    }
+
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &ModelStateSnapshot,
+    ) -> Option<ModelStateSnapshot> {
+        (**self).state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &ModelStateSnapshot,
+        donor: &ModelStateSnapshot,
+    ) -> Result<(), String> {
+        (**self).restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {
@@ -289,6 +339,26 @@ impl<M: LanguageModel + ?Sized> LanguageModel for &M {
         cache_pool: &mut CachePool,
     ) -> Result<(), String> {
         (**self).sync_sequence_storage(seq_id, cache_pool)
+    }
+
+    fn layer_state_kinds(&self) -> Option<Vec<crate::cache::LayerStateKind>> {
+        (**self).layer_state_kinds()
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<crate::cache::LayerState>> {
+        (**self).make_layer_state()
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<crate::cache::LayerStateSnapshotSpec> {
+        (**self).layer_state_snapshot_spec()
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &crate::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [crate::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        (**self).forward_layer_state(request, rows)
     }
 
     fn forward_batched_with_ids(

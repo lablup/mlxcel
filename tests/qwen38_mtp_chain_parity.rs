@@ -626,7 +626,7 @@ fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
     let chain = classic_chain(model, PROMPT_TOKENS, 240);
 
     <Qwen35Model as LanguageModel>::reset_runtime_state(model);
-    let adapter = Qwen35MtpTargetAdapter::new(model, None);
+    let adapter = Qwen35MtpTargetAdapter::fallback(model);
     let sampler = greedy();
     let logprobs = LogprobsConfig::default();
     let (bonus, _seed, _lp) = adapter.prefill_and_seed(PROMPT_TOKENS, &sampler, &[], &logprobs);
@@ -692,7 +692,7 @@ fn adapter_chain_with_rejected_drafts_matches_classic_chain() {
     let chain = classic_chain(model, PROMPT_TOKENS, 160);
 
     <Qwen35Model as LanguageModel>::reset_runtime_state(model);
-    let adapter = Qwen35MtpTargetAdapter::new(model, None);
+    let adapter = Qwen35MtpTargetAdapter::fallback(model);
     let sampler = greedy();
     let logprobs = LogprobsConfig::default();
     let (bonus, _seed, _lp) = adapter.prefill_and_seed(PROMPT_TOKENS, &sampler, &[], &logprobs);

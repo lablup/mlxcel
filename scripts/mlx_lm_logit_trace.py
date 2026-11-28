@@ -22,7 +22,17 @@ runtime imports this file.
 
 Usage:
     mlx_lm_logit_trace.py MODEL_DIR TEXT_FILE [CHUNK_TOKENS=256] [MAX_CHUNKS=4]
-        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] > reference.tsv
+        [TOPK=8] [PREFILL=0] [--no-prefix-sharing] [--mlx-vlm]
+        [--inkling2-mlx-community] > reference.tsv
+
+`--mlx-vlm` loads the checkpoint with mlx-vlm instead and traces its language
+model. It is for text checkpoints that only mlx-vlm implements, such as Hy4
+(`hy_v4`, #2354), and needs `mlx-vlm` in place of `mlx-lm`.
+
+`--inkling2-mlx-community` (implies `--mlx-vlm`) traces the mlx-community
+Inkling 2 4-bit export, which mlx-vlm cannot read as shipped: the export is
+rewritten into mlx-vlm's layout first by `scripts/inkling2_mlx_community_remap.py`
+(#3378), once, into a temporary directory that later runs reuse.
 
 Needs `mlx` and `mlx-lm` (with the `mlx-cuda-13` wheel on a CUDA host) plus
 `tokenizers` and `numpy`. The tokenizer, the BOS anchor and the chunk plan
@@ -31,9 +41,26 @@ are the ones `scripts/laguna_oracle_trace.py` transcribes from
 oracles cannot drift apart on which rows they score.
 
 What differs from `logit_trace`. mlx-lm runs every forward in the checkpoint's
-own activation dtype, as `mlxcel` does, so this is a same-precision reference,
-not a float32 oracle; a disagreement at a decided position is a real
-difference between the two runtimes. Like `laguna_oracle_trace.py`, each
+own dtype, so this is not a float32 oracle. `mlxcel` is not always in that
+dtype: on Apple Silicon it converts an unquantized checkpoint's bf16 tensors to
+f16 at load unless `MLXCEL_KEEP_BF16` is set (`bf16_to_f16_at_load` in
+`src/models/sanitize.rs`), while a quantized checkpoint keeps its bf16 side
+data, so only a quantized checkpoint is a same-precision pair by default. A
+second run with the mlx-lm model cast to float16 (`model.set_dtype(mx.float16,
+predicate=lambda d: d == mx.bfloat16)`) measures how much that dtype gap alone
+moves the trace.
+
+The two runtimes can also load different weights. A checkpoint that ships a
+fused, quantized MLA `kv_b_proj` (LongCat-Flash, `longcat_flash_ngram`) is
+split into `embed_q` / `unembed_out` at load: mlx-lm dequantizes it, splits
+it, and quantizes both halves again (`embed_q` along the transposed axis),
+while `mlxcel` keeps the dequantized halves dense. On
+`longcat-flash-lite-4bit` over 36864 positions the trace has 39 of 20486
+decided disagreements against the stock reference and 4 against one whose
+split is kept dense, where the bf16 and float16 references differ by 5
+(#3318). Read a residual on such a
+checkpoint against a dense-split reference before calling it a runtime
+difference. Like `laguna_oracle_trace.py`, each
 chunk is computed from one causal forward over its context plus its traced
 rows, and chunks whose token sequence is a prefix of another chunk's share
 that forward (`--no-prefix-sharing` runs one forward per chunk).
@@ -118,7 +145,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="one forward per chunk, to check how closely a shared forward agrees with it",
     )
+    ap.add_argument(
+        "--mlx-vlm",
+        action="store_true",
+        help="load with mlx-vlm and trace its language model (text checkpoints only mlx-vlm "
+        "implements, such as hy_v4)",
+    )
+    ap.add_argument(
+        "--inkling2-mlx-community",
+        action="store_true",
+        help="trace the mlx-community Inkling 2 4-bit export through the committed remap "
+        "(implies --mlx-vlm)",
+    )
     args = ap.parse_args(argv)
+    if args.inkling2_mlx_community:
+        args.mlx_vlm = True
 
     chunk_tokens = usize_arg(args.chunk_tokens, 256)
     max_chunks = usize_arg(args.max_chunks, 4)
@@ -128,14 +169,20 @@ def main(argv: list[str] | None = None) -> int:
     def log(message: str) -> None:
         print(message, file=sys.stderr, flush=True)
 
+    oracle = "mlx-vlm" if args.mlx_vlm else "mlx-lm"
     try:
         import mlx.core as mx
-        import mlx_lm
         import numpy  # noqa: F401
         import tokenizers
-        from mlx_lm import load
+
+        if args.mlx_vlm:
+            import mlx_vlm as oracle_module
+            from mlx_vlm.utils import load_model
+        else:
+            import mlx_lm as oracle_module
+            from mlx_lm import load
     except ModuleNotFoundError as err:
-        log(f"error: {err.name} is not installed here; run this with a Python that has mlx-lm")
+        log(f"error: {err.name} is not installed here; run this with a Python that has {oracle}")
         return 1
 
     try:
@@ -150,9 +197,40 @@ def main(argv: list[str] | None = None) -> int:
         chunks = plan_chunks(ids, bos_prefix, chunk_tokens, max_chunks, prefill)
         groups = plan_forwards(chunks, share_prefixes=not args.no_prefix_sharing)
 
-        log(f"loading {model_dir} with mlx-lm {mlx_lm.__version__} on {mx.default_device()}")
+        log(
+            f"loading {model_dir} with {oracle} {oracle_module.__version__} "
+            f"on {mx.default_device()}"
+        )
         started = time.perf_counter()
-        model, _ = load(str(model_dir))
+        if args.mlx_vlm:
+            # The processor is not needed, and a text-only checkpoint ships none.
+            # Load lazily and evaluate the parameters in slices: one eval over
+            # a 400 GB checkpoint is a single Metal command buffer, which hits
+            # the GPU watchdog timeout (seen on Hy4, #2354).
+            load_dir = model_dir
+            if args.inkling2_mlx_community:
+                from inkling2_mlx_community_remap import prepare_model_dir
+
+                load_dir = prepare_model_dir(model_dir)
+                log(f"mlx-community export remapped for mlx-vlm at {load_dir}")
+            language_model = load_model(load_dir, lazy=True).language_model
+            from mlx.utils import tree_flatten
+
+            # With the allocation cache off, each slice's transient buffers
+            # are returned before the next one: Inkling 2 Small (about 390 GB
+            # of target weights) does not fit a 512 GB host otherwise (#3373,
+            # mlx-vlm's Inkling 2 README).
+            cache_limit = mx.set_cache_limit(0)
+            params = tree_flatten(language_model.parameters())
+            for start in range(0, len(params), 64):
+                mx.eval([value for _, value in params[start : start + 64]])
+            mx.set_cache_limit(cache_limit)
+
+            def model(tokens):
+                return language_model(tokens).logits
+
+        else:
+            model, _ = load(str(model_dir))
         log(
             f"loaded in {time.perf_counter() - started:.0f}s; "
             f"{len(chunks)} chunks in {len(groups)} forward(s)"
@@ -172,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     out = sys.stdout
     out.write(f"# model\t{args.model_dir}\n")
     out.write(
-        f"# oracle\tmlx-lm\t{mlx_lm.__version__}\tmlx\t{mx.__version__}"
+        f"# oracle\t{oracle}\t{oracle_module.__version__}\tmlx\t{mx.__version__}"
         f"\ttokenizers\t{tokenizers.__version__}\n"
     )
     out.write(f"# device\t{mx.default_device()}\n")

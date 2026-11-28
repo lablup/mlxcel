@@ -25,6 +25,8 @@ use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_s
 use mlxcel_core::cache::BatchedAttentionMetadata;
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::row_invariant::linear_whole_block as row_linear;
+use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -163,6 +165,13 @@ fn router_topk_scores(
 
 impl SparseMoeBlock {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        // A verify block in the row-invariant scope (#3421) routes and runs
+        // the experts one position at a time, so each position takes the
+        // fused single-token kernel its decode step takes.
+        mlxcel_core::row_invariant::per_position(x, |x| self.forward_tokens(x))
+    }
+
+    fn forward_tokens(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden_dim = orig_shape[orig_shape.len() - 1];
 
@@ -181,7 +190,7 @@ impl SparseMoeBlock {
         // why this differs from a top-k-only softmax when norm_topk_prob is false
         // (issue #318). Both the fused-kernel path and the SwitchGLU +
         // moe_weighted_sum fallback below consume the same indices and scores.
-        let logits = self.router.forward(&x_flat);
+        let logits = row_linear(&self.router, &x_flat);
         let k = self.num_experts_per_tok as i32;
         let (topk_indices, scores) = router_topk_scores(&logits, k, self.norm_topk_prob);
 
@@ -249,10 +258,10 @@ impl Attention {
         let b = shape[0];
         let l = shape[1];
 
-        // Project Q, K, V
-        let q = self.q_proj.forward(x);
-        let k = self.k_proj.forward(x);
-        let v = self.v_proj.forward(x);
+        // Project Q, K, V (row-invariant inside the model's scope, #3421)
+        let q = row_linear(&self.q_proj, x);
+        let k = row_linear(&self.k_proj, x);
+        let v = row_linear(&self.v_proj, x);
 
         // Apply Q/K normalization on the full projection BEFORE the head reshape.
         // OLMoE normalizes over the whole num_heads*head_dim projection (the norm
@@ -291,6 +300,35 @@ impl Attention {
             offset,
         );
 
+        // A verify block in the row-invariant scope (#3421) appends and
+        // attends one row at a time, as the decode steps it stands for do.
+        if b == 1 && l > 1 && mask.is_none() && mlxcel_core::row_invariant::in_verify_block() {
+            let rows: Vec<UniquePtr<MlxArray>> = (0..l)
+                .map(|r| {
+                    let (cache_k, cache_v) = cache
+                        .update_and_fetch(slice_axis(&k, 2, r, r + 1), slice_axis(&v, 2, r, r + 1));
+                    // SAFETY: a null mask pointer is the maskless call a decode
+                    // step makes; the operands are live borrows.
+                    unsafe {
+                        mlxcel_core::layers::attention_from_ptr(
+                            &slice_axis(&q, 2, r, r + 1),
+                            &cache_k,
+                            &cache_v,
+                            self.scale,
+                            std::ptr::null(),
+                            0.0,
+                            0,
+                        )
+                    }
+                })
+                .collect();
+            let refs: Vec<&MlxArray> = rows.iter().map(|row| &**row).collect();
+            let attn_out = mlxcel_core::concatenate_many(&refs, 2);
+            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+            let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+            return row_linear(&self.o_proj, &attn_out);
+        }
+
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
@@ -313,7 +351,7 @@ impl Attention {
         let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
 
         // Output projection
-        self.o_proj.forward(&attn_out)
+        row_linear(&self.o_proj, &attn_out)
     }
 
     pub fn from_weights(
@@ -493,20 +531,44 @@ impl OlmoeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, caches, mask, None)
+    }
+
+    /// [`Self::forward`] projecting every position (`row == None`) or only
+    /// position `row` (`[B, 1, vocab]`, the prefill's sampled row, #3070).
+    fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        // Row-invariant products for this forward when
+        // `MLXCEL_MLA_ROW_INVARIANT` is on (#3421): a verify block of the
+        // token-only round then equals the decode steps it stands for.
+        let _row_invariant = crate::models::mla_batched::row_invariant_scope(
+            &mlxcel_core::array_shape(input_ids),
+            mask.is_some(),
+        );
+
         // Embed tokens
         let mut h = self.embed_tokens.forward(input_ids);
 
         // Pass through transformer layers
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
+            // Recorded only under the block-versus-chain diagnostic (#3418).
+            crate::models::speculative_exactness_diag::capture(i, "olmoe", "layer output", &h);
         }
+
+        let h = mlxcel_core::generate::select_row(h, row);
 
         // Final norm
         let h = self.norm.forward(&h);
 
         // LM head
         if let Some(ref lm_head) = self.lm_head {
-            lm_head.forward(&h)
+            row_linear(lm_head, &h)
         } else {
             self.embed_tokens.as_linear(&h)
         }
@@ -554,7 +616,7 @@ impl OlmoeModel {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights (join expert weights if separate)
-        let weights = sanitize_weights(weights, &args);
+        let weights = sanitize_weights(weights, &args)?;
 
         // Create model
         let model = Self::from_weights(&weights, &args)?;
@@ -639,12 +701,15 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .ok_or_else(|| format!("Weight not found: {}", name))
 }
 
-/// Sanitize weights by joining separate expert weights into stacked format
-fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
+/// Sanitize weights by joining separate expert weights into stacked format.
+///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// expert's plane differs in shape or dtype from expert 0's (issue #3320).
+fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> Result<WeightMap, String> {
     // Check if weights have separate expert format (e.g., mlp.experts.0.up_proj.weight)
     let check_key = "model.layers.0.mlp.experts.0.up_proj.weight";
     if !weights.contains_key(check_key) {
-        return weights;
+        return Ok(weights);
     }
 
     // Join expert weights into stacked format
@@ -654,19 +719,29 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
             for weight_name in &["weight", "scales", "biases"] {
                 let first_key = format!("{}.mlp.experts.0.{}.{}", prefix, proj_name, weight_name);
                 if weights.contains_key(&first_key) {
+                    let expert_key = |e: usize| {
+                        format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj_name, weight_name)
+                    };
                     let mut expert_arrays = Vec::new();
                     for e in 0..args.num_experts {
-                        let key =
-                            format!("{}.mlp.experts.{}.{}.{}", prefix, e, proj_name, weight_name);
-                        if let Some(w) = weights.remove(&key) {
-                            expert_arrays.push(w);
+                        if let Some(w) = weights.remove(&expert_key(e)) {
+                            expert_arrays.push((e, w));
                         }
                     }
                     if !expert_arrays.is_empty() {
-                        let expert_ptrs: Vec<*const MlxArray> = expert_arrays
+                        let parts: Vec<(usize, &MlxArray)> = expert_arrays
                             .iter()
-                            .map(|a| a.as_ref().unwrap() as *const _)
+                            .map(|(e, a)| {
+                                (*e, a.as_ref().expect("weight map holds no null handles"))
+                            })
                             .collect();
+                        // `stack` aborts on a shape mismatch, so refuse one
+                        // before it runs (issue #3320).
+                        crate::models::switch_layers::refuse_mismatched_expert_parts(
+                            &parts, expert_key,
+                        )?;
+                        let expert_ptrs: Vec<*const MlxArray> =
+                            parts.iter().map(|(_, a)| *a as *const MlxArray).collect();
                         let stacked = mlxcel_core::stack(&expert_ptrs, 0);
                         let target_key =
                             format!("{}.mlp.switch_mlp.{}.{}", prefix, proj_name, weight_name);
@@ -677,7 +752,7 @@ fn sanitize_weights(mut weights: WeightMap, args: &ModelArgs) -> WeightMap {
         }
     }
 
-    weights
+    Ok(weights)
 }
 
 // LanguageModel trait implementation.
@@ -693,6 +768,22 @@ impl LanguageModel for OlmoeModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         OlmoeModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_rows(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

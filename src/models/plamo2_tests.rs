@@ -175,16 +175,30 @@ fn plamo2_norm_offsets_match_reference() {
 }
 
 fn batching_model() -> super::plamo2::Plamo2Model {
+    batching_model_with(|_| {})
+}
+
+/// [`batching_model`] with `edit` applied to its weights before loading.
+fn batching_model_with(
+    edit: impl FnOnce(&mut mlxcel_core::weights::WeightMap),
+) -> super::plamo2::Plamo2Model {
+    batching_model_from(|_| {}, edit)
+}
+
+/// [`batching_model_with`] with `config_edit` applied to the tiny config first.
+fn batching_model_from(
+    config_edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    edit: impl FnOnce(&mut mlxcel_core::weights::WeightMap),
+) -> super::plamo2::Plamo2Model {
     use crate::models::embedding_test_support::Rng;
     use mlxcel_core::{dtype, weights::WeightMap};
-    let config = serde_json::from_value(
-        serde_json::json!({ "model_type":"plamo2", "vocab_size":32, "hidden_size":8,
-        "num_hidden_layers":2, "num_attention_heads":2, "num_key_value_heads":1,
-        "hidden_size_per_head":4, "intermediate_size":16, "mamba_num_heads":2,
-        "mamba_d_state":32, "mamba_d_conv":3, "mamba_step":2,
-        "tie_word_embeddings":true }),
-    )
-    .unwrap();
+    let mut config_json = serde_json::json!({ "model_type":"plamo2", "vocab_size":32,
+        "hidden_size":8, "num_hidden_layers":2, "num_attention_heads":2,
+        "num_key_value_heads":1, "hidden_size_per_head":4, "intermediate_size":16,
+        "mamba_num_heads":2, "mamba_d_state":32, "mamba_d_conv":3, "mamba_step":2,
+        "tie_word_embeddings":true });
+    config_edit(config_json.as_object_mut().expect("object config"));
+    let config = serde_json::from_value(config_json).unwrap();
     let mut weights = WeightMap::new();
     let mut rng = Rng::new(2571);
     rng.insert(&mut weights, "model.embed_tokens.weight", &[32, 8], 0.2);
@@ -271,6 +285,7 @@ fn batching_model() -> super::plamo2::Plamo2Model {
             );
         }
     }
+    edit(&mut weights);
     super::plamo2::Plamo2Model::from_weights(config, weights).unwrap()
 }
 
@@ -333,4 +348,167 @@ fn plamo2_fresh_and_mixed_recurrent_states_match_solo_rows() {
             }
         }
     }
+}
+
+// The prefill's last-row projection (#3070): the hook is taken and returns the
+// full forward's row while the recurrent state still advances over every row.
+crate::models::last_row_logits_harness::last_row_case!(plamo2_last_row_logits, batching_model);
+
+/// Issue #3057: the SSD scan computes `A` from a float32 copy of `A_log`, so
+/// an f16 `A_log` (values up to 19.5, past the 11.09 where f16 `exp`
+/// overflows) gives finite prefill logits, bit-identical to a float32 copy.
+#[test]
+fn plamo2_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::assert_f16_a_log_prefill_matches_its_f32_copy;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let build = |a_log: &mlxcel_core::MlxArray| {
+        batching_model_with(|weights| {
+            let mixer = "model.layers.layers.0.mixer";
+            weights.insert(format!("{mixer}.A_log"), mlxcel_core::copy(a_log));
+            // The 0.001 floor of this model's `time_step_limit` keeps every step
+            // positive, so no zero step can meet `-inf`. A step near 2 instead
+            // makes the decay, and so the logits, depend on the f16 rounding of `A`.
+            weights.insert(
+                format!("{mixer}.dt_bias"),
+                mlxcel_core::full_f32(&[2], 2.0, mlxcel_core::dtype::FLOAT32),
+            );
+        })
+    };
+    assert_f16_a_log_prefill_matches_its_f32_copy(build, &[2], "plamo2");
+}
+
+#[test]
+fn rope_base_defaults_to_10000_without_keys() {
+    // `plamo-2-1b` has no `rope_theta` / `rope_local_theta` / `full_attention_idx`.
+    let args: ModelArgs = serde_json::from_str(PLAMO2_1B_CONFIG).expect("parse config");
+    assert_eq!(args.rope_theta, 10000.0);
+    assert!(args.rope_local_theta.is_none());
+    assert!(args.full_attention_idx.is_none());
+    for i in 0..args.num_hidden_layers {
+        assert_eq!(args.rope_base(i), 10000.0, "layer {i}");
+    }
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = batching_model();
+    assert_eq!(model.attention_rope_bases(), vec![(1, 10000.0)]);
+}
+
+#[test]
+fn rope_base_uses_local_theta_for_non_full_attention_layers() {
+    let with_keys = PLAMO2_1B_CONFIG.replace(
+        "\"eos_token_id\": 2",
+        "\"eos_token_id\": 2, \"rope_theta\": 1000000.0, \"rope_local_theta\": 500000.0, \"full_attention_idx\": [1, 5]",
+    );
+    let args: ModelArgs = serde_json::from_str(&with_keys).expect("parse config");
+    assert_eq!(args.rope_base(1), 1_000_000.0);
+    assert_eq!(args.rope_base(5), 1_000_000.0);
+    assert_eq!(args.rope_base(3), 500_000.0);
+    assert_eq!(args.rope_base(0), 500_000.0);
+
+    // Without `rope_local_theta` every layer falls back to `rope_theta`, which
+    // is the PLaMo 2.1 VL shape (both keys 1e6, 8B has an empty index list).
+    let theta_only = PLAMO2_1B_CONFIG.replace(
+        "\"eos_token_id\": 2",
+        "\"eos_token_id\": 2, \"rope_theta\": 1000000.0, \"full_attention_idx\": []",
+    );
+    let args: ModelArgs = serde_json::from_str(&theta_only).expect("parse config");
+    for i in 0..args.num_hidden_layers {
+        assert_eq!(args.rope_base(i), 1_000_000.0, "layer {i}");
+    }
+
+    // The loader wires the selection into the attention layers.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = batching_model_from(
+        |config| {
+            config.insert("rope_theta".into(), serde_json::json!(1_000_000.0));
+            config.insert("rope_local_theta".into(), serde_json::json!(250_000.0));
+            config.insert("full_attention_idx".into(), serde_json::json!([0]));
+        },
+        |_| {},
+    );
+    assert_eq!(model.attention_rope_bases(), vec![(1, 250_000.0)]);
+}
+
+/// Max absolute difference, which is 0.0 exactly when the tensors are equal.
+fn max_abs_delta(a: &mlxcel_core::MlxArray, b: &mlxcel_core::MlxArray) -> f32 {
+    assert_eq!(mlxcel_core::array_shape(a), mlxcel_core::array_shape(b));
+    mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(
+        &mlxcel_core::subtract(a, b),
+    )))
+}
+
+#[test]
+fn forward_with_embeddings_matches_forward_on_token_embeddings() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tokens = mlxcel_core::from_slice_i32(&[3, 7, 1, 30, 12], &[1, 5]);
+    let next = mlxcel_core::from_slice_i32(&[9], &[1, 1]);
+
+    // Fallback (no sequence id) state.
+    let text = batching_model();
+    let injected = batching_model();
+    let mut text_caches = LanguageModel::make_caches(&text);
+    let mut injected_caches = LanguageModel::make_caches(&injected);
+    let expected = text.forward(&tokens, &mut text_caches, None);
+    let embeddings = injected
+        .embed_tokens(&tokens)
+        .expect("plamo2 exposes embed_tokens");
+    assert_eq!(mlxcel_core::array_shape(&embeddings), vec![1, 5, 8]);
+    let actual =
+        injected.forward_with_embeddings(&tokens, Some(&embeddings), &mut injected_caches, None);
+    assert_eq!(max_abs_delta(&expected, &actual), 0.0);
+    // The recurrent and KV state advanced identically: the next decode step matches.
+    let expected = text.forward(&next, &mut text_caches, None);
+    let actual = injected.forward(&next, &mut injected_caches, None);
+    assert_eq!(max_abs_delta(&expected, &actual), 0.0);
+
+    // Sequence-keyed state, plus the last-row prefill hook on embeddings.
+    let id = SequenceId::from_raw(4242);
+    let text = batching_model();
+    let injected = batching_model();
+    text.prepare_sequence_state(id);
+    injected.prepare_sequence_state(id);
+    let mut text_caches = LanguageModel::make_caches(&text);
+    let mut injected_caches = LanguageModel::make_caches(&injected);
+    let expected = text.forward_with_sequence_id(&tokens, Some(id), &mut text_caches, None);
+    let embeddings = injected.embed_tokens(&tokens).unwrap();
+    let actual = injected.forward_last_logits_with_embeddings_and_sequence_id(
+        &tokens,
+        Some(&embeddings),
+        Some(id),
+        &mut injected_caches,
+        None,
+        4,
+    );
+    // The last-row hook projects one row instead of five, so the head matmul
+    // may round differently in the last ulp; the hidden state is identical,
+    // which the exact next-step comparison below checks.
+    let expected_last = mlxcel_core::slice(&expected, &[0, 4, 0], &[1, 5, 32]);
+    assert!(max_abs_delta(&expected_last, &actual) < 1e-6);
+    let expected = text.forward_with_sequence_id(&next, Some(id), &mut text_caches, None);
+    let actual = injected.forward_with_sequence_id(&next, Some(id), &mut injected_caches, None);
+    assert_eq!(max_abs_delta(&expected, &actual), 0.0);
+}
+
+/// The PLaMo 2.1 VL bf16 export carries a tied copy of the embedding under
+/// `lm_head.weight` and no `tie_word_embeddings` key: the loader must keep the
+/// tied head and ignore that tensor.
+#[test]
+fn tied_head_ignores_lm_head_weight_when_tie_key_is_absent() {
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let drop_tie = |config: &mut serde_json::Map<String, serde_json::Value>| {
+        config.remove("tie_word_embeddings");
+    };
+    let tied = batching_model_from(drop_tie, |_| {});
+    let with_head = batching_model_from(drop_tie, |weights| {
+        let mut rng = crate::models::embedding_test_support::Rng::new(77);
+        rng.insert(weights, "lm_head.weight", &[32, 8], 0.5);
+    });
+    let tokens = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let mut a = LanguageModel::make_caches(&tied);
+    let mut b = LanguageModel::make_caches(&with_head);
+    let expected = tied.forward(&tokens, &mut a, None);
+    let actual = with_head.forward(&tokens, &mut b, None);
+    assert_eq!(max_abs_delta(&expected, &actual), 0.0);
 }

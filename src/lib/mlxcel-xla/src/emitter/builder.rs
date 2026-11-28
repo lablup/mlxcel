@@ -86,9 +86,10 @@ pub enum Precision {
 }
 
 impl Precision {
-    /// The narrow element type to demote contraction inputs to, or `None` for
-    /// f32 (no demotion).
-    fn dot_elt(self) -> Option<&'static str> {
+    /// The narrow element type contraction inputs are demoted to, or `None` for
+    /// f32 (no demotion). Also the storage type of the single-sequence decode KV
+    /// cache (issue #2886), which is read only through the contractions.
+    pub(crate) fn dot_elt(self) -> Option<&'static str> {
         match self {
             Precision::F32 => None,
             Precision::F16 => Some("f16"),
@@ -165,7 +166,7 @@ pub fn resolve_precision(device: &str) -> Precision {
 /// cannot lower there (issue #612). Every other device / precision pair lowers: bf16
 /// is fine on CUDA and the CPU (`local-task` / `local-sync`) targets, and f16 / f32
 /// lower everywhere. Pure (no env), so the guard logic is unit-testable directly.
-fn precision_lowers_on(device: &str, precision: Precision) -> bool {
+pub(crate) fn precision_lowers_on(device: &str, precision: Precision) -> bool {
     !(device == "metal" && precision == Precision::Bf16)
 }
 
@@ -214,9 +215,28 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
     resolve_precision_checked_with_override(device, raw.as_deref())
 }
 
+/// [`resolve_precision_checked_with_override`] for a config whose default is
+/// pinned to F32 on every device (`pin_f32`: MLA, and recurrent state since
+/// issue #3340). Only a recognised explicit override (`f16`, `bf16`, `f32`,
+/// as in [`precision_env_override`]) replaces the pin; an unset or unrecognised
+/// value keeps F32. Without the pin this is the ordinary checked resolver.
+pub fn resolve_pinned_precision_with_override(
+    device: &str,
+    pin_f32: bool,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
+    let explicit = raw_override.is_some_and(|raw| matches!(raw.trim(), "f16" | "bf16" | "f32"));
+    if pin_f32 && !explicit {
+        Ok(Precision::F32)
+    } else {
+        resolve_precision_checked_with_override(device, raw_override)
+    }
+}
+
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
-/// `packed_active` is whether the packed path is actually taken (the caller's
-/// `quant_in_graph() && cfg.supports_packed_quant()`). The metal HAL driver faults
+/// `packed_active` is whether the packed path is actually taken (the config's
+/// resolved `packed_args && supports_packed_quant()`, set by
+/// `MLXCEL_XLA_QUANT=packed` or by the native GEMV). The metal HAL driver faults
 /// at runtime on the packed prefill: the ui32-unpack + dequant command buffer fails
 /// to execute (issue #613, `metal_device.m`, "Metal command buffer failed"), where
 /// the same graph runs token-exact on CUDA. So packed does not run on `metal`; it
@@ -226,8 +246,8 @@ fn packed_runs_on(device: &str, packed_active: bool) -> bool {
 }
 
 /// Reject a packed int8 build the target cannot execute, before iree-compile and the
-/// weight upload (issue #613). `packed_active` is the caller's `quant_in_graph() &&
-/// cfg.supports_packed_quant()`. On Metal the packed prefill faults with an opaque
+/// weight upload (issue #613). `packed_active` is the config's resolved
+/// `packed_args && supports_packed_quant()`. On Metal the packed prefill faults with an opaque
 /// Metal command-buffer error, and its memory-bandwidth win is un-demonstrable on the
 /// compute-bound Metal decode anyway (ADR 0004), so fail fast with an actionable
 /// message instead. Unaffected on CUDA / CPU, and a no-op when packed is not active.
@@ -318,6 +338,63 @@ pub struct Builder {
     next: usize,
     precision: Precision,
     gemma3n_qmv: bool,
+    projection_layout: ProjectionLayout,
+    native_proj: bool,
+    packed_operands: std::collections::HashMap<String, PackedOperand>,
+}
+
+/// The packed tensors behind a projection weight that the graph leaves packed
+/// (issue #2889).
+///
+/// [`take_weight`] registers one of these in native-decode mode and returns a
+/// placeholder `Val` standing for the logical projection; the layout-aware
+/// linear helpers see the registration and emit the native GEMV dispatch
+/// instead of a `dot_general`. The placeholder must never reach any other op.
+#[derive(Clone, Debug)]
+pub struct PackedOperand {
+    pub packed: Val,
+    pub scales: Val,
+    pub biases: Val,
+    /// Output width (the checkpoint's `out` axis).
+    pub out: usize,
+    /// Contraction width (`in`).
+    pub input: usize,
+}
+
+/// Layout a graph declares for projection weights (issue #2859).
+///
+/// The best layout depends on the graph shape, not on the model: IREE lowers a
+/// single-row contraction against `[out, in]` into a separate full-weight
+/// transpose plus a vecmat (slow), but the same contraction at the ragged
+/// decode's row count into one transposed-B matmul (fast). The converse holds
+/// for the pre-transposed layout. The single-sequence session therefore loads
+/// [`ProjectionLayout::InOut`] and the continuous-batching engine keeps
+/// [`ProjectionLayout::OutIn`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectionLayout {
+    /// The checkpoint's `[out, in]` layout, uploaded unchanged.
+    #[default]
+    OutIn,
+    /// `[in, out]`, transposed once by the loader at upload.
+    InOut,
+}
+
+/// Chunk width for the two-stage argmax (issue #2873), or `None` to keep the
+/// single rank-1 reduce.
+///
+/// The first stage reduces rowwise over `width` elements and the second over
+/// `chunks`, so the width is the largest power of two up to 512 that divides the
+/// vocabulary. Vocabularies below 4096 keep the unsplit form (the split costs
+/// more than it saves there), and an odd vocabulary has no width above one.
+fn argmax_chunk_width(vocab: usize) -> Option<usize> {
+    if vocab < 4096 {
+        return None;
+    }
+    let mut width = 1;
+    while width * 2 <= 512 && vocab.is_multiple_of(width * 2) {
+        width *= 2;
+    }
+    (width >= 32 && vocab / width >= 2).then_some(width)
 }
 
 fn dims_list(d: &[usize]) -> String {
@@ -348,7 +425,47 @@ impl Builder {
             next: 0,
             precision: Precision::F32,
             gemma3n_qmv: false,
+            projection_layout: ProjectionLayout::OutIn,
+            native_proj: false,
+            packed_operands: std::collections::HashMap::new(),
         }
+    }
+
+    /// Run projections from packed 4-bit weights through the native GEMV
+    /// dispatch instead of dequantizing them in the graph (issues #2889, #2922).
+    /// The single-sequence and ragged decode graphs set this; the prefill graphs
+    /// leave it off, so their packed operands dequantize in the graph.
+    #[must_use]
+    pub fn with_native_proj(mut self, native: bool) -> Self {
+        self.native_proj = native;
+        self
+    }
+
+    /// Whether this graph uses the native packed-weight projections.
+    #[must_use]
+    pub fn native_proj_enabled(&self) -> bool {
+        self.native_proj
+    }
+
+    /// Register the packed tensors behind a projection the graph keeps packed,
+    /// keyed by the placeholder handle `logical`.
+    pub fn register_packed_operand(&mut self, logical: &Val, operand: PackedOperand) {
+        self.packed_operands.insert(logical.name.clone(), operand);
+    }
+
+    /// Set the projection weight layout (builder-style). Default is
+    /// [`ProjectionLayout::OutIn`], the checkpoint layout.
+    #[must_use]
+    pub fn with_projection_layout(mut self, layout: ProjectionLayout) -> Self {
+        self.projection_layout = layout;
+        self
+    }
+
+    /// The projection layout this graph declares. Read by the weight-argument
+    /// declaration and the layout-aware linear helpers.
+    #[must_use]
+    pub fn projection_layout(&self) -> ProjectionLayout {
+        self.projection_layout
     }
 
     /// Set the contraction precision (builder-style). Default is `F32`.
@@ -824,6 +941,26 @@ impl Builder {
         }
     }
 
+    /// Rebuild a rank-0 `tensor<i32>` from an ABI-level `i32` function argument
+    /// (issue #3060): `tensor.from_elements %argN : tensor<i32>`. The single-
+    /// sequence decode receives token, pos and cache_len as bare `i32` VM
+    /// arguments so IREE does not materialize a host-visible staging resource,
+    /// but the StableHLO ops below (`dynamic_slice` offsets, the mask broadcast,
+    /// the RoPE index) take a tensor operand. Wrapping at the prologue keeps the
+    /// op sequence after it byte-identical to the buffer-argument graph and does
+    /// not reintroduce the staging resource.
+    pub fn tensor_from_elements_i32(&mut self, scalar: &Val) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = tensor.from_elements {} : tensor<i32>",
+            r, scalar.name
+        ));
+        Val {
+            name: r,
+            ty: Ty::scalar("i32"),
+        }
+    }
+
     pub fn const_i1(&mut self, value: bool) -> Val {
         let r = self.fresh();
         self.line(format!(
@@ -894,6 +1031,30 @@ impl Builder {
             ty.render()
         ));
         Val { name: r, ty }
+    }
+
+    /// Load a module-level `util.global` into an SSA value. The decode graph
+    /// holds its KV cache this way (issue #3043) so the step updates it in
+    /// place instead of copying the whole cache into a fresh output tensor.
+    pub(crate) fn global_load(&mut self, symbol: &str, ty: Ty) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = util.global.load @{} : {}",
+            r,
+            symbol,
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Store an SSA value back into a module-level `util.global`.
+    pub(crate) fn global_store(&mut self, symbol: &str, x: &Val) {
+        self.line(format!(
+            "util.global.store {}, @{} : {}",
+            x.name,
+            symbol,
+            x.ty.render()
+        ));
     }
 
     pub fn broadcast(&mut self, x: &Val, dims: &[usize], out_shape: Vec<usize>) -> Val {
@@ -986,6 +1147,21 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Reinterpret the bits of `x` as `elt` (`stablehlo.bitcast_convert`), for
+    /// same-width types such as `f32` <-> `ui32`.
+    pub fn bitcast_convert(&mut self, x: &Val, elt: &'static str) -> Val {
+        let ty = Ty::new(x.ty.shape.clone(), elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.bitcast_convert {} : ({}) -> {}",
+            r,
+            x.name,
+            x.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     // --- quantized-weight dequant (issue #516) -----------------------------
 
     /// Bitwise AND of two same-shaped integer tensors (`stablehlo.and`). Masks the
@@ -1053,7 +1229,7 @@ impl Builder {
     /// ```
     ///
     /// where `per_u32 = 32 / bits`. The RESIDENT device weight stays packed
-    /// (4/8-bit + f16 scales/biases), the memory-bandwidth lever the OpenXLA path
+    /// (4/8-bit + f16 or bf16 scales/biases), the memory-bandwidth lever the OpenXLA path
     /// carries to an int-native target; whether IREE folds the unpack+dequant into
     /// the following matmul is target-dependent (the #513 / ADR-0004 open question).
     pub fn dequant_affine(
@@ -1081,8 +1257,16 @@ impl Builder {
         let q = self.and(&shifted, &mask_c);
         let q_flat = self.reshape(&q, vec![out, in_]);
         let q_f32 = self.convert(&q_flat, "f32");
-        // scale/bias: [out, n_groups] f16 -> f32, each group repeated across its
-        // group_size input columns -> [out, in], then w = q*scale + bias.
+        // scale/bias: [out, n_groups] f16 or bf16 -> f32 (both widen exactly, so
+        // the bf16 form issue #603 adds matches the host bf16 dequant bit for
+        // bit), each group repeated across its group_size input columns ->
+        // [out, in], then w = q*scale + bias.
+        assert!(
+            matches!(scales.ty.elt, "f16" | "bf16") && scales.ty.elt == biases.ty.elt,
+            "affine metadata must be a matching f16 or bf16 pair, got {} / {}",
+            scales.ty.elt,
+            biases.ty.elt
+        );
         let s_f32 = self.convert(scales, "f32");
         let b_f32 = self.convert(biases, "f32");
         let s_b = self.broadcast_groups(&s_f32, group_size, in_);
@@ -1489,6 +1673,13 @@ impl Builder {
     pub fn logical_not(&mut self, a: &Val) -> Val {
         self.unary("not", a)
     }
+    pub fn abs(&mut self, a: &Val) -> Val {
+        self.unary("abs", a)
+    }
+    /// `log(1 + a)`, accurate for small `a` (the stable softplus tail).
+    pub fn log_plus_one(&mut self, a: &Val) -> Val {
+        self.unary("log_plus_one", a)
+    }
 
     /// Error function from the CHLO extension accepted by StableHLO import.
     /// Gemma3n's sparse GELU uses the exact erf form (the ordinary GeGLU path
@@ -1564,56 +1755,8 @@ impl Builder {
     pub fn reduce_max(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
         self.reduce("maximum", x, dim, init)
     }
-
-    /// Inclusive prefix sum along one static axis using a left-padded window.
-    ///
-    /// This is the StableHLO cumsum lowering used by Gemma3n cumulative group
-    /// normalization. It avoids a quadratic triangular constant and keeps the
-    /// reduction in f32 on both CPU and CUDA.
-    pub fn reduce_window_prefix_add(&mut self, x: &Val, dim: usize) -> Val {
-        assert_eq!(x.ty.elt, "f32");
-        assert!(dim < x.ty.shape.len());
-        let rank = x.ty.shape.len();
-        let width = x.ty.shape[dim];
-        assert!(width > 0);
-        let zero = self.const_f32(0.0);
-        let window = (0..rank)
-            .map(|axis| if axis == dim { width } else { 1 })
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let strides = std::iter::repeat_n("1", rank)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let padding = (0..rank)
-            .map(|axis| {
-                if axis == dim {
-                    format!("[{}, 0]", width - 1)
-                } else {
-                    "[0, 0]".to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let r = self.fresh();
-        let suffix = r.trim_start_matches('%');
-        self.line(format!(
-            "{r} = \"stablehlo.reduce_window\"({x}, {zero}) ({{\n\
-             ^bb0(%rw_l_{suffix}: tensor<f32>, %rw_r_{suffix}: tensor<f32>):\n  \
-             %rw_sum_{suffix} = stablehlo.add %rw_l_{suffix}, %rw_r_{suffix} : tensor<f32>\n  \
-             stablehlo.return %rw_sum_{suffix} : tensor<f32>\n\
-             }}) {{window_dimensions = array<i64: {window}>, \
-             window_strides = array<i64: {strides}>, \
-             padding = dense<[{padding}]> : tensor<{rank}x2xi64>}} : \
-             ({ty}, tensor<f32>) -> {ty}",
-            x = x.name,
-            zero = zero.name,
-            ty = x.ty.render(),
-        ));
-        Val {
-            name: r,
-            ty: x.ty.clone(),
-        }
+    pub fn reduce_min(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
+        self.reduce("minimum", x, dim, init)
     }
 
     /// On-device argmax over a `[V]` vector -> scalar `i32` index (the first
@@ -1626,6 +1769,69 @@ impl Builder {
     /// args are named (not `%argN` / `%N`) so they never collide with the
     /// function args or the builder's SSA counter.
     pub fn argmax(&mut self, logits: &Val) -> Val {
+        let v = logits.ty.shape[0];
+        // issue #2873: IREE lowers a rank-1 reduction to one workgroup of one
+        // lane, so a straight `reduce` over the whole vocabulary is serial
+        // (3.9 ms for 128256 logits). Split it: reshape `[V]` to `[C, W]` with a
+        // power-of-two `W` that divides `V`, argmax each row (parallel over C),
+        // then argmax the C partials carrying their global vocabulary index.
+        // Each stage uses the same NaN/tie-break reducer, so the composite is
+        // the same first-max argmax as the unsplit form.
+        let Some(width) = argmax_chunk_width(v) else {
+            return self.argmax_unsplit(logits);
+        };
+        let chunks = v / width;
+        let c0 = self.fresh();
+        self.line(format!("{c0} = stablehlo.constant dense<0> : tensor<i32>"));
+        let ninf = self.fresh();
+        self.line(format!(
+            "{ninf} = stablehlo.constant dense<0xFF800000> : tensor<f32>"
+        ));
+        let rows = self.fresh();
+        self.line(format!(
+            "{rows} = stablehlo.reshape {l} : (tensor<{v}xf32>) -> tensor<{chunks}x{width}xf32>",
+            l = logits.name
+        ));
+        let iota = self.fresh();
+        self.line(format!(
+            "{iota} = stablehlo.iota dim = 1 : tensor<{chunks}x{width}xi32>"
+        ));
+        let part = self.fresh();
+        self.line(format!(
+            "{part}:2 = stablehlo.reduce({rows} init: {ninf}), ({iota} init: {c0}) across dimensions = [1] : (tensor<{chunks}x{width}xf32>, tensor<{chunks}x{width}xi32>, tensor<f32>, tensor<i32>) -> (tensor<{chunks}xf32>, tensor<{chunks}xi32>)"
+        ));
+        self.argmax_reducer_block();
+        // Map each row's in-row index back to the vocabulary.
+        let chunk = self.fresh();
+        self.line(format!(
+            "{chunk} = stablehlo.iota dim = 0 : tensor<{chunks}xi32>"
+        ));
+        let cw = self.fresh();
+        self.line(format!(
+            "{cw} = stablehlo.constant dense<{width}> : tensor<{chunks}xi32>"
+        ));
+        let base = self.fresh();
+        self.line(format!(
+            "{base} = stablehlo.multiply {chunk}, {cw} : tensor<{chunks}xi32>"
+        ));
+        let gidx = self.fresh();
+        self.line(format!(
+            "{gidx} = stablehlo.add {base}, {part}#1 : tensor<{chunks}xi32>"
+        ));
+        let res = self.fresh();
+        self.line(format!(
+            "{res}:2 = stablehlo.reduce({part}#0 init: {ninf}), ({gidx} init: {c0}) across dimensions = [0] : (tensor<{chunks}xf32>, tensor<{chunks}xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)"
+        ));
+        self.argmax_reducer_block();
+        Val {
+            name: format!("{res}#1"),
+            ty: Ty::scalar("i32"),
+        }
+    }
+
+    /// The unsplit rank-1 argmax used when the vocabulary is too small or too
+    /// awkwardly sized to split (see [`argmax_chunk_width`]).
+    fn argmax_unsplit(&mut self, logits: &Val) -> Val {
         let v = logits.ty.shape[0];
         let vf = Ty::f32(vec![v]).render();
         let vi = Ty::new(vec![v], "i32").render();
@@ -1821,6 +2027,48 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// A batched contraction that never demotes its f32 inputs, whatever the
+    /// graph precision. The SSM scan (issue #3337) runs its recurrence
+    /// contractions through this so the state stays f32 on the f16 path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dot_general_keep_f32(
+        &mut self,
+        lhs: &Val,
+        rhs: &Val,
+        lhs_batch: &[usize],
+        rhs_batch: &[usize],
+        lhs_contract: &[usize],
+        rhs_contract: &[usize],
+        out_shape: Vec<usize>,
+    ) -> Val {
+        assert_eq!(lhs.ty.elt, "f32");
+        assert_eq!(rhs.ty.elt, "f32");
+        let ty = Ty::f32(out_shape);
+        let r = self.fresh();
+        let batch = if lhs_batch.is_empty() && rhs_batch.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "batching_dims = {} x {}, ",
+                dims_list(lhs_batch),
+                dims_list(rhs_batch)
+            )
+        };
+        self.line(format!(
+            "{} = stablehlo.dot_general {}, {}, {}contracting_dims = {} x {} : ({}, {}) -> {}",
+            r,
+            lhs.name,
+            rhs.name,
+            batch,
+            dims_list(lhs_contract),
+            dims_list(rhs_contract),
+            lhs.ty.render(),
+            rhs.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     /// Convenience: y = x @ W^T for x:[K], W:[N,K] (weights stored [out,in]).
     /// Contracts x dim 0 with W dim 1, yielding [N]. No transpose needed.
     pub fn linear(&mut self, x: &Val, w: &Val) -> Val {
@@ -1835,6 +2083,322 @@ impl Builder {
         let l = x.ty.shape[0];
         let n = w.ty.shape[0];
         self.dot_general(x, w, &[], &[], &[1], &[1], vec![l, n])
+    }
+
+    /// y = x @ W for x:[K], W:[K,N] (weights stored [in,out], issue #2859).
+    ///
+    /// The checkpoint layout is `[out, in]`; the loader transposes it once at
+    /// upload. Contracting the shared axis instead of the weight's last axis
+    /// keeps IREE from materializing a `[out,in] -> [in,out]` transpose on every
+    /// decode step, which was 59% of the step's device time.
+    pub fn linear_t(&mut self, x: &Val, w: &Val) -> Val {
+        let k = x.ty.shape[0];
+        assert_eq!(k, w.ty.shape[0], "linear_t contracts the weight's in axis");
+        let n = w.ty.shape[1];
+        self.dot_general(x, w, &[], &[], &[0], &[0], vec![n])
+    }
+
+    /// Sequence-batched form of [`Self::linear_t`]: y[L,N] = x[L,K] @ W[K,N].
+    pub fn linear_seq_t(&mut self, x: &Val, w: &Val) -> Val {
+        let l = x.ty.shape[0];
+        let k = x.ty.shape[1];
+        assert_eq!(
+            k, w.ty.shape[0],
+            "linear_seq_t contracts the weight's in axis"
+        );
+        let n = w.ty.shape[1];
+        self.dot_general(x, w, &[], &[], &[1], &[0], vec![l, n])
+    }
+
+    /// Linear over a projection weight in the layout this graph declares.
+    pub fn linear_proj(&mut self, x: &Val, w: &Val) -> Val {
+        if let Some(operand) = self.packed_operands.get(&w.name).cloned() {
+            return self.native_qmv(x, &operand);
+        }
+        match self.projection_layout {
+            ProjectionLayout::OutIn => self.linear(x, w),
+            ProjectionLayout::InOut => self.linear_t(x, w),
+        }
+    }
+
+    /// Sequence-batched [`Self::linear_proj`].
+    ///
+    /// With a packed operand this takes the multi-row native GEMV (issue #2922),
+    /// which reduces every activation row against one weight read; otherwise
+    /// the dense sequence contraction.
+    pub fn linear_seq_proj(&mut self, x: &Val, w: &Val) -> Val {
+        if let Some(operand) = self.packed_operands.get(&w.name).cloned() {
+            return self
+                .native_qmv_rows(x, std::slice::from_ref(&operand))
+                .pop()
+                .expect("one result per packed operand");
+        }
+        match self.projection_layout {
+            ProjectionLayout::OutIn => self.linear_seq(x, w),
+            ProjectionLayout::InOut => self.linear_seq_t(x, w),
+        }
+    }
+
+    /// Emit the native packed-weight GEMV (issue #2889).
+    ///
+    /// `y[n] = sum_k x[k] * (q[n,k] * scale[n,k/group] + bias[n,k/group])`,
+    /// computed by the device kernel embedded in the module as an external
+    /// executable (`csrc/qmv4.hip` on hip, `csrc/qmv4.cu` on cuda). Activations are narrowed to f16 (matching the `dot_general`
+    /// operand demotion this replaces) and the kernel accumulates in f32.
+    ///
+    /// The kernel gives each output row one warp and each workgroup
+    /// [`crate::native_qmv::ROWS_PER_BLOCK`] rows (issue #2891), so the
+    /// dispatch's workgroup count is `ceil(N / ROWS_PER_BLOCK)` and `N` itself
+    /// travels as a constant the kernel uses to bound its rows. Rows wider than
+    /// [`crate::native_qmv::ROW_KERNEL_MIN_K`] use the block-per-row export
+    /// instead, whose count is one workgroup per row.
+    fn native_qmv(&mut self, x: &Val, operand: &PackedOperand) -> Val {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::InOut),
+            "the native packed projection is a single-sequence (InOut) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            1,
+            "the native GEMV consumes one activation row"
+        );
+        let k = x.ty.shape[0];
+        let n = operand.out;
+        assert_eq!(k, operand.input, "native GEMV contraction width mismatch");
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let (entry, groups) = crate::native_qmv::dispatch(k, n);
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        let n_i32 = self.fresh();
+        self.line(format!("{n_i32} = arith.constant {n} : i32"));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![n]);
+        self.line(format!(
+            "{result} = flow.dispatch {entry}[{grid}]\
+             ({k_i32}, {n_i32}, {x}, {packed}, {scales}, {biases}) : \
+             (i32, i32, {x_ty}, {packed_ty}, {scales_ty}, {biases_ty}) -> {result_ty}",
+            x = xf16.name,
+            x_ty = xf16.ty.render(),
+            packed = operand.packed.name,
+            packed_ty = operand.packed.ty.render(),
+            scales = operand.scales.name,
+            scales_ty = operand.scales.ty.render(),
+            biases = operand.biases.name,
+            biases_ty = operand.biases.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        Val {
+            name: result,
+            ty: result_ty,
+        }
+    }
+
+    /// Emit one native packed-weight GEMV over `B` activation rows (issue
+    /// #2922): `[B, K] x [N, K/8] -> [B, N]` for one operand, or one `[B, Ni]`
+    /// result per operand when two or three packed weights share the rows.
+    ///
+    /// The single-output and fused exports differ by binding count, so the entry
+    /// point follows the group size, exactly like [`Self::native_qmv_multi`] for
+    /// the single-row graphs. The kernel keeps one accumulator per row and reads
+    /// each weight word once, so a fused q/k/v or gate/up launch stays one launch
+    /// per layer rather than one per row. Supported batches are
+    /// `1..=MAX_BATCH`; the ragged engine only emits its bundled `B` values.
+    pub fn native_qmv_rows(&mut self, x: &Val, operands: &[PackedOperand]) -> Vec<Val> {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::OutIn),
+            "the multi-row native projection is a ragged (OutIn) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            2,
+            "the multi-row GEMV consumes [B, K] activations"
+        );
+        assert!(
+            (1..=3).contains(&operands.len()),
+            "the multi-row GEMV covers one to three weight sets"
+        );
+        let b = x.ty.shape[0];
+        let k = x.ty.shape[1];
+        assert!(
+            (1..=crate::native_qmv::MAX_BATCH).contains(&b),
+            "the multi-row GEMV supports B in 1..=MAX_BATCH"
+        );
+        for operand in operands {
+            assert_eq!(k, operand.input, "multi-row GEMV contraction mismatch");
+        }
+        let total: usize = operands.iter().map(|operand| operand.out).sum();
+        let (entry, groups) = match operands.len() {
+            1 => crate::native_qmv::multi_dispatch(k, total),
+            3 => crate::native_qmv::qkv_multi_dispatch(k, total),
+            _ => crate::native_qmv::gateup_multi_dispatch(k, total),
+        };
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let mut args = Vec::with_capacity(2 + operands.len() * 4);
+        let mut types = Vec::with_capacity(2 + operands.len() * 4);
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        args.push(k_i32);
+        types.push("i32".to_string());
+        for operand in operands {
+            let n_i32 = self.fresh();
+            self.line(format!("{n_i32} = arith.constant {} : i32", operand.out));
+            args.push(n_i32);
+            types.push("i32".to_string());
+        }
+        // The kernel's last constant is the batch size, after the N values.
+        let b_i32 = self.fresh();
+        self.line(format!("{b_i32} = arith.constant {b} : i32"));
+        args.push(b_i32);
+        types.push("i32".to_string());
+        args.push(xf16.name);
+        types.push(xf16.ty.render());
+        for operand in operands {
+            args.push(operand.packed.name.clone());
+            types.push(operand.packed.ty.render());
+            args.push(operand.scales.name.clone());
+            types.push(operand.scales.ty.render());
+            args.push(operand.biases.name.clone());
+            types.push(operand.biases.ty.render());
+        }
+        let results: Vec<String> = (0..operands.len()).map(|_| self.fresh()).collect();
+        let vals: Vec<Val> = operands
+            .iter()
+            .zip(&results)
+            .map(|(operand, name)| Val {
+                name: name.clone(),
+                ty: Ty::f32(vec![b, operand.out]),
+            })
+            .collect();
+        let result_tys: Vec<String> = vals.iter().map(|val| val.ty.render()).collect();
+        self.line(format!(
+            "{} = flow.dispatch {}[{}]({}) : ({}) -> ({})",
+            results.join(", "),
+            entry,
+            grid,
+            args.join(", "),
+            types.join(", "),
+            result_tys.join(", "),
+        ));
+        vals
+    }
+
+    /// The packed operands behind each weight, or `None` when any of them is not
+    /// registered (not native mode, or a projection the graph keeps dense).
+    pub fn packed_group(&self, weights: &[&Val]) -> Option<Vec<PackedOperand>> {
+        weights
+            .iter()
+            .map(|w| self.packed_operands.get(&w.name).cloned())
+            .collect()
+    }
+
+    /// Project the MLP gate and up in one native dispatch when both are packed
+    /// (issues #2895, #2922); otherwise the two per-projection calls at this
+    /// graph's rank.
+    pub fn gate_up_proj(&mut self, x: &Val, gate: &Val, up: &Val) -> (Val, Val) {
+        if let Some(operands) = self.packed_group(&[gate, up]) {
+            let mut outs = if x.ty.shape.len() == 2 {
+                self.native_qmv_rows(x, &operands)
+            } else {
+                self.native_qmv_multi(x, &operands)
+            };
+            let u = outs.pop().expect("gate/up dispatch results");
+            let g = outs.pop().expect("gate/up dispatch results");
+            return (g, u);
+        }
+        if x.ty.shape.len() == 2 {
+            return (self.linear_seq_proj(x, gate), self.linear_seq_proj(x, up));
+        }
+        (self.linear_proj(x, gate), self.linear_proj(x, up))
+    }
+
+    /// Emit one native GEMV dispatch over two or three packed weight sets that
+    /// share the activation row (issue #2895). The exports differ by binding
+    /// count, so the entry point follows the group size.
+    pub fn native_qmv_multi(&mut self, x: &Val, operands: &[PackedOperand]) -> Vec<Val> {
+        assert!(
+            matches!(self.projection_layout, ProjectionLayout::InOut),
+            "the native packed projections are a single-sequence (InOut) path"
+        );
+        assert_eq!(
+            x.ty.shape.len(),
+            1,
+            "the native GEMV consumes one activation row"
+        );
+        assert!(
+            operands.len() == 2 || operands.len() == 3,
+            "the fused native GEMV covers two or three weight sets"
+        );
+        let k = x.ty.shape[0];
+        for operand in operands {
+            assert_eq!(k, operand.input, "fused native GEMV contraction mismatch");
+        }
+        let total: usize = operands.iter().map(|operand| operand.out).sum();
+        let (entry, groups) = if operands.len() == 3 {
+            crate::native_qmv::qkv_dispatch(k, total)
+        } else {
+            crate::native_qmv::gateup_dispatch(k, total)
+        };
+        let xf16 = if x.ty.elt == "f16" {
+            x.clone()
+        } else {
+            self.convert(x, "f16")
+        };
+        let grid = self.fresh();
+        self.line(format!("{grid} = arith.constant {groups} : index"));
+        let mut args = Vec::with_capacity(2 + operands.len() * 4);
+        let mut types = Vec::with_capacity(2 + operands.len() * 4);
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k} : i32"));
+        args.push(k_i32);
+        types.push("i32".to_string());
+        for operand in operands {
+            let n_i32 = self.fresh();
+            self.line(format!("{n_i32} = arith.constant {} : i32", operand.out));
+            args.push(n_i32);
+            types.push("i32".to_string());
+        }
+        args.push(xf16.name);
+        types.push(xf16.ty.render());
+        for operand in operands {
+            args.push(operand.packed.name.clone());
+            types.push(operand.packed.ty.render());
+            args.push(operand.scales.name.clone());
+            types.push(operand.scales.ty.render());
+            args.push(operand.biases.name.clone());
+            types.push(operand.biases.ty.render());
+        }
+        let results: Vec<String> = (0..operands.len()).map(|_| self.fresh()).collect();
+        let vals: Vec<Val> = operands
+            .iter()
+            .zip(&results)
+            .map(|(operand, name)| Val {
+                name: name.clone(),
+                ty: Ty::f32(vec![operand.out]),
+            })
+            .collect();
+        let result_tys: Vec<String> = vals.iter().map(|val| val.ty.render()).collect();
+        self.line(format!(
+            "{} = flow.dispatch {}[{}]({}) : ({}) -> ({})",
+            results.join(", "),
+            entry,
+            grid,
+            args.join(", "),
+            types.join(", "),
+            result_tys.join(", "),
+        ));
+        vals
     }
 
     /// Linear projection over the final axis of an arbitrary-rank tensor.
@@ -1900,6 +2464,82 @@ mod tests {
         assert_eq!(default_precision("hip"), Precision::F16);
         assert_eq!(default_precision("local-task"), Precision::F32);
         assert_eq!(default_precision("local-sync"), Precision::F32);
+    }
+
+    /// The transposed-layout helpers contract the weight's in axis and keep the
+    /// output width from its last axis (issue #2859).
+    #[test]
+    fn transposed_linear_contracts_the_in_axis() {
+        let mut b = Builder::new();
+        let x = Builder::arg(0, Ty::f32(vec![2048]));
+        let w = Builder::arg(1, Ty::f32(vec![2048, 8192]));
+        let y = b.linear_t(&x, &w);
+        assert_eq!(y.ty.shape, vec![8192]);
+        let body = b.body();
+        assert!(
+            body.contains("dot_general %arg0, %arg1, contracting_dims = [0] x [0]"),
+            "{body}"
+        );
+        assert!(body.contains("(tensor<2048xf32>, tensor<2048x8192xf32>) -> tensor<8192xf32>"));
+    }
+
+    #[test]
+    fn transposed_linear_seq_contracts_the_in_axis() {
+        let mut b = Builder::new();
+        let x = Builder::arg(0, Ty::f32(vec![64, 2048]));
+        let w = Builder::arg(1, Ty::f32(vec![2048, 8192]));
+        let y = b.linear_seq_t(&x, &w);
+        assert_eq!(y.ty.shape, vec![64, 8192]);
+        assert!(
+            b.body().contains("contracting_dims = [1] x [0]"),
+            "{}",
+            b.body()
+        );
+    }
+
+    /// issue #2873: a large, even vocabulary argmax is split into a rowwise
+    /// stage (parallel over rows) and a small final stage that carries the
+    /// global index, instead of one rank-1 reduce that IREE lowers to one lane.
+    #[test]
+    fn argmax_splits_a_large_vocabulary() {
+        assert_eq!(argmax_chunk_width(128256), Some(256));
+        assert_eq!(argmax_chunk_width(32000), Some(256));
+        assert_eq!(argmax_chunk_width(262144), Some(512));
+        let mut b = Builder::new();
+        let logits = Builder::arg(0, Ty::f32(vec![128256]));
+        let tok = b.argmax(&logits);
+        assert_eq!(tok.ty.render(), Ty::scalar("i32").render());
+        let body = b.body();
+        assert!(
+            body.contains("tensor<501x256xf32>"),
+            "the split reshape is emitted: {body}"
+        );
+        assert_eq!(
+            body.matches("stablehlo.reduce(").count(),
+            2,
+            "one rowwise stage and one combine stage"
+        );
+        assert!(
+            body.contains("stablehlo.multiply") && body.contains("stablehlo.add"),
+            "the in-row index is mapped to the vocabulary index"
+        );
+    }
+
+    /// issue #2873: small or oddly sized vocabularies keep the single reduce.
+    #[test]
+    fn argmax_keeps_one_reduce_when_it_cannot_split() {
+        assert_eq!(argmax_chunk_width(2048), None, "below the split threshold");
+        assert_eq!(
+            argmax_chunk_width(128255),
+            None,
+            "an odd vocabulary has no width"
+        );
+        let mut b = Builder::new();
+        let logits = Builder::arg(0, Ty::f32(vec![2048]));
+        let _ = b.argmax(&logits);
+        let body = b.body();
+        assert_eq!(body.matches("stablehlo.reduce(").count(), 1, "{body}");
+        assert!(!body.contains("stablehlo.reshape"), "{body}");
     }
 
     /// Issue #612: only bf16-on-Metal is rejected; every other pair lowers. The
@@ -2049,6 +2689,51 @@ mod tests {
         );
         assert!(body.contains("stablehlo.multiply"), "q * scale");
         assert!(body.contains("stablehlo.add "), "+ bias");
+    }
+
+    /// bf16 affine metadata (issue #603): the scales/biases args keep their bf16
+    /// type and widen to f32 in the graph before `q*scale + bias`, exactly like
+    /// the f16 form, so the reconstructed weight is the same f32 `[out, in]`.
+    #[test]
+    fn dequant_affine_bf16_metadata_widens_to_f32_in_graph() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "bf16"));
+        let w = b.dequant_affine(&packed, &scales, &biases, 4, 8);
+        let body = b.body();
+        assert_eq!(w.ty.shape, vec![2, 8]);
+        assert_eq!(w.ty.elt, "f32");
+        assert_eq!(
+            body.matches("stablehlo.convert %arg1 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                .count()
+                + body
+                    .matches("stablehlo.convert %arg2 : (tensor<2x1xbf16>) -> tensor<2x1xf32>")
+                    .count(),
+            2,
+            "both bf16 metadata args widen to f32:\n{body}"
+        );
+        assert!(
+            !body.contains("xf16>"),
+            "no f16 type in the bf16 form:\n{body}"
+        );
+
+        // The f16 form is the same graph with only the metadata type changed.
+        let mut f = Builder::new();
+        let s16 = Builder::arg(1, Ty::new(vec![2, 1], "f16"));
+        let b16 = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        f.dequant_affine(&packed, &s16, &b16, 4, 8);
+        assert_eq!(f.body().replace("xf16>", "xbf16>"), body);
+    }
+
+    #[test]
+    #[should_panic(expected = "matching f16 or bf16 pair")]
+    fn dequant_affine_rejects_mismatched_metadata() {
+        let mut b = Builder::new();
+        let packed = Builder::arg(0, Ty::new(vec![2, 1], "ui32"));
+        let scales = Builder::arg(1, Ty::new(vec![2, 1], "bf16"));
+        let biases = Builder::arg(2, Ty::new(vec![2, 1], "f16"));
+        b.dequant_affine(&packed, &scales, &biases, 4, 8);
     }
 
     /// 8-bit affine dequant-in-graph: `per_u32 = 4` lanes (shifts 0,8,16,24; mask

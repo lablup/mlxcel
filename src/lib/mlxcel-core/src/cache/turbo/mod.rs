@@ -54,6 +54,7 @@ pub mod sparse_v;
 
 pub use allowlist::{
     ALLOWED_SYMMETRIC_TURBO_FAMILIES, is_symmetric_turbo_allowed, resolve_kv_cache_mode_for_model,
+    resolve_kv_cache_mode_for_model_with, resolve_kv_cache_mode_for_model_with_option,
     symmetric_turbo_warning_message,
 };
 pub use boundary::{

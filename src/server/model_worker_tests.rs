@@ -22,7 +22,7 @@ use super::{
     materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
     require_single_server_audio_clip, resolve_end_of_turn_token_id,
     resolve_worker_effective_max_kv_size, resolve_xtc_newline_token_ids,
-    tokenize_inkling_ordered_media_prompt,
+    tokenize_inkling_ordered_media_prompt, vision_cache_keys,
 };
 use crate::SamplingConfig;
 use crate::audio::AudioFamilyPolicy;
@@ -91,6 +91,45 @@ fn unified_context_keeps_startup_cap_after_worker_clamp() {
     assert_eq!(
         resolve_worker_effective_max_kv_size(Some(20_480), 20_480, None, 4, 1, true),
         Some(20_480)
+    );
+}
+
+/// Issue #3362: the CLI renders the Phi4MM user turn through a template with no
+/// media branch, so the prompt carries no ordered markers. It must pass through
+/// and get the audio tag at the start of the user turn, the normalization the
+/// OpenXLA CLI path applies to the same prompt.
+#[test]
+fn phi4mm_cli_prompt_without_ordered_markers_falls_back_to_normalization() {
+    let prompt = "<|user|>Hi<|end|><|assistant|>";
+    let materialized = materialize_phi4mm_ordered_prompt(prompt, 0, 1).unwrap();
+    assert_eq!(materialized, prompt);
+
+    let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+        &materialized,
+        0,
+        1,
+        |text, add_special| encode_test_text(text, add_special).unwrap(),
+    )
+    .unwrap();
+    let mut expected = vec![1];
+    expected.extend("<|user|>".bytes().map(i32::from));
+    expected.push(crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID);
+    expected.extend("Hi<|end|><|assistant|>".bytes().map(i32::from));
+    assert_eq!(prepared.tokens, expected);
+    assert_eq!((prepared.image_slots, prepared.audio_slots), (0, 1));
+
+    // Explicit template tags still have to match the request's clip count.
+    let tagged = "<|user|><|audio_1|>Hi<|end|><|assistant|>";
+    let materialized = materialize_phi4mm_ordered_prompt(tagged, 0, 2).unwrap();
+    assert!(
+        crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+            &materialized,
+            0,
+            2,
+            |text, add_special| encode_test_text(text, add_special).unwrap(),
+        )
+        .is_err(),
+        "a pre-rendered tag count that disagrees with the request must fail"
     );
 }
 
@@ -501,6 +540,28 @@ fn decode_request_images_keeps_valid_images_and_rejects_all_invalid_input() {
 }
 
 #[test]
+fn decode_request_images_turns_a_picture_upright_by_its_exif_orientation() {
+    use crate::multimodal::image_orientation::test_pictures::{
+        distinct_pixels, jpeg_with_orientation, png_with_orientation, stored_for,
+    };
+
+    // A portrait photo as a phone stores it: the sensor's rows, and tag 6.
+    let upright = distinct_pixels();
+    let stored = stored_for(6, &upright);
+    assert_eq!(stored.dimensions(), (4, 6));
+    let decoded = decode_request_images(&[
+        png_with_orientation(&stored, 6),
+        png_with_orientation(&upright, 1),
+        jpeg_with_orientation(&stored, 6),
+    ])
+    .unwrap();
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].to_rgb8(), upright);
+    assert_eq!(decoded[1].to_rgb8(), upright);
+    assert_eq!((decoded[2].width(), decoded[2].height()), (6, 4));
+}
+
+#[test]
 fn decode_request_images_rejects_decompression_bomb_header() {
     let limits = ImageInputLimits {
         max_width: 4096,
@@ -524,6 +585,9 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     let stop = build_generation_result("ok".to_string(), 10, 3, 120, 40, 8);
     assert_eq!(stop.finish_reason, "stop");
     assert_eq!(stop.generation_only_ms, 80);
+    // The first of the 3 tokens came out of prefill, before the 80ms window
+    // opened, so the window holds 2 (issue #2938).
+    assert_eq!(stop.decode_window_tokens, Some(2));
     // The EOS-or-length split this function makes carries into `stop_kind`
     // (issue #1466); only the scheduler can know about a stop-word match, and it
     // overrides the value through `finish_stopped_by_word`.
@@ -532,6 +596,11 @@ fn build_generation_result_computes_finish_reason_and_generation_split() {
     let length = build_generation_result("ok".to_string(), 10, 8, 50, 60, 8);
     assert_eq!(length.finish_reason, "length");
     assert_eq!(length.generation_only_ms, 0);
+    assert_eq!(length.decode_window_tokens, Some(7));
+
+    // Nothing generated (EOS at prefill): an empty window, not a negative one.
+    let empty = build_generation_result(String::new(), 10, 0, 30, 30, 8);
+    assert_eq!(empty.decode_window_tokens, Some(0));
     assert_eq!(
         length.stop_kind,
         crate::server::model_provider::StopKind::Limit
@@ -1433,4 +1502,205 @@ fn resolve_xtc_newline_token_ids_finds_single_token_newline() {
 fn resolve_xtc_newline_token_ids_empty_when_newline_not_in_vocab() {
     let tokenizer = stub_tokenizer_no_eot();
     assert_eq!(resolve_xtc_newline_token_ids(&tokenizer), Vec::<i32>::new());
+}
+
+// -- Qwen-VL video timing hand-off (#3234) -----------------------------------
+
+/// A `QwenVlRuntime` that records the per-video timing the shared media helper
+/// hands it and returns a placeholder embedding. `video_timestamps` selects
+/// the family layout the way the real runtimes do: `false` is the flat run of
+/// Qwen2.5-VL, `true` the per-group timestamped runs of Qwen3-VL.
+struct TimingRecordingQwenRuntime {
+    processor: crate::vision::processors::qwen2_vl::Qwen2VLProcessor,
+    video_timestamps: bool,
+    seen_second_per_grid: std::cell::RefCell<Vec<Vec<f32>>>,
+}
+
+impl TimingRecordingQwenRuntime {
+    fn new(video_timestamps: bool) -> Self {
+        Self {
+            processor: crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new(14, 2, 2),
+            video_timestamps,
+            seen_second_per_grid: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl crate::qwen_vl::QwenVlRuntime for TimingRecordingQwenRuntime {
+    fn prompt_info(&self) -> crate::qwen_vl::QwenVlmPromptInfo<'_> {
+        crate::qwen_vl::QwenVlmPromptInfo {
+            processor: &self.processor,
+            spatial_merge_size: 2,
+            vision_start_token_id: 28,
+            image_token_id: 29,
+            video_token_id: 30,
+            video_timestamps: self.video_timestamps,
+        }
+    }
+
+    fn input_embeddings(
+        &self,
+        _input_ids: &mlxcel_core::MlxArray,
+        _pixel_values: &mlxcel_core::MlxArray,
+        _grid_thw: &[(i32, i32, i32)],
+    ) -> crate::vision::merge::InputEmbeddings {
+        crate::vision::merge::InputEmbeddings {
+            inputs_embeds: mlxcel_core::from_slice_f32(&[0.0], &[1, 1, 1]),
+            attention_mask_4d: None,
+        }
+    }
+
+    fn input_embeddings_with_video_timing(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        pixel_values: &mlxcel_core::MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        video_second_per_grid: &[f32],
+        _cache_key: Option<&crate::vision::feature_cache::CacheKey>,
+        _caches: Option<&crate::vision::feature_cache::ModelVisionCaches>,
+    ) -> anyhow::Result<crate::vision::merge::InputEmbeddings> {
+        self.seen_second_per_grid
+            .borrow_mut()
+            .push(video_second_per_grid.to_vec());
+        Ok(self.input_embeddings(input_ids, pixel_values, grid_thw))
+    }
+
+    fn clear_pending_media_state(&self) {}
+}
+
+/// `sampled_frames` frames kept, evenly spaced, from a `total_frames` clip.
+fn sampled_clip(
+    sampled_frames: usize,
+    total_frames: usize,
+    source_fps: f64,
+) -> crate::multimodal::video::SampledVideo {
+    let step = total_frames / sampled_frames;
+    crate::multimodal::video::SampledVideo {
+        frames: (0..sampled_frames)
+            .map(|_| DynamicImage::new_rgb8(56, 56))
+            .collect(),
+        frame_indices: (0..sampled_frames).map(|frame| frame * step).collect(),
+        source_fps,
+        total_frames,
+    }
+}
+
+/// `second_per_grid` is `temporal_patch_size / sampled fps`, from the rate the
+/// sampler achieved. A family with per-group timestamps gets none.
+#[test]
+fn qwen_vl_video_second_per_grid_uses_the_sampled_rate() {
+    // 8 of 120 frames at 30 fps is 2 fps, so one 2-frame grid spans 1 s; 16 of
+    // the same clip (a `num_frames` request) is 4 fps and 0.5 s.
+    let clips = [sampled_clip(8, 120, 30.0), sampled_clip(16, 120, 30.0)];
+    assert_eq!(
+        super::qwen_vl_video_second_per_grid(false, 2, &clips).unwrap(),
+        Some(vec![1.0, 0.5])
+    );
+    assert_eq!(
+        super::qwen_vl_video_second_per_grid(true, 2, &clips).unwrap(),
+        None
+    );
+
+    // A clip with no usable rate is an error for the timed family only.
+    let unusable = [sampled_clip(8, 120, 0.0)];
+    let error = super::qwen_vl_video_second_per_grid(false, 2, &unusable)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Qwen-VL video 0"), "got: {error}");
+    assert_eq!(
+        super::qwen_vl_video_second_per_grid(true, 2, &unusable).unwrap(),
+        None
+    );
+}
+
+/// The video path both `mlxcel generate --video` and a server `video_url`
+/// request take (`prepare_qwen_vl_video_embeddings`, past the ffmpeg decode)
+/// hands the runtime one `second_per_grid` per clip for the flat Qwen2.5-VL
+/// layout and none for the timestamped Qwen3-VL layout.
+#[test]
+fn prepare_qwen_vl_video_embeddings_passes_timing_for_qwen25_and_none_for_qwen3() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tokenizer = MlxcelTokenizer::stub_with_byte_fallback();
+
+    // Qwen2.5-VL layout: two clips sampled at 2 fps and 4 fps.
+    let qwen25 = TimingRecordingQwenRuntime::new(false);
+    let mut prompt_tokens = vec![1, 2, 3];
+    super::qwen_vl_embeddings_from_sampled_videos(
+        &qwen25,
+        &tokenizer,
+        &mut prompt_tokens,
+        &[],
+        vec![sampled_clip(8, 120, 30.0), sampled_clip(16, 120, 30.0)],
+    )
+    .expect("the flat layout prepares");
+    assert_eq!(
+        *qwen25.seen_second_per_grid.borrow(),
+        vec![vec![1.0_f32, 0.5]],
+        "Qwen2.5-VL must receive temporal_patch_size / sampled fps per clip"
+    );
+    assert!(
+        prompt_tokens.iter().filter(|&&token| token == 30).count() > 2,
+        "the video placeholders were expanded, got {prompt_tokens:?}"
+    );
+
+    // Qwen3-VL layout: time is in the `<t seconds>` markers, not the positions.
+    let qwen3 = TimingRecordingQwenRuntime::new(true);
+    let mut prompt_tokens = vec![1, 2, 3];
+    super::qwen_vl_embeddings_from_sampled_videos(
+        &qwen3,
+        &tokenizer,
+        &mut prompt_tokens,
+        &[],
+        vec![sampled_clip(8, 120, 30.0)],
+    )
+    .expect("the timestamped layout prepares");
+    assert_eq!(
+        *qwen3.seen_second_per_grid.borrow(),
+        vec![Vec::<f32>::new()],
+        "a timestamped family must not receive positional video timing"
+    );
+}
+
+/// The request-to-key path for the vision feature cache (#3265): the per-image
+/// key the server hands the runtime must partition on the request's
+/// soft-token budget, and that budget is what `detail` resolves to. The
+/// hash-level partition is pinned in `feature_cache.rs`; this pins the path
+/// from the request's `detail` through `resolve_request_image_soft_tokens`.
+#[test]
+fn vision_cache_keys_partition_on_detail() {
+    use crate::server::types::request::{ImageUrl, resolve_request_image_soft_tokens};
+
+    let image = encode_png_bytes();
+    let key_for = |detail: Option<&str>| {
+        let mut part = ImageUrl::new("data:image/png;base64,AAAA");
+        part.detail = detail.map(str::to_string);
+        let budget = resolve_request_image_soft_tokens(&[part]).expect("valid detail");
+        let keys = vision_cache_keys(std::slice::from_ref(&image), budget);
+        assert_eq!(keys.len(), 1);
+        keys.into_iter()
+            .next()
+            .unwrap()
+            .expect("server keys are explicit")
+    };
+
+    let low = key_for(Some("low"));
+    let high = key_for(Some("high"));
+    let none = key_for(None);
+    assert_ne!(
+        low, high,
+        "detail low and high must not share a cache entry"
+    );
+    assert_ne!(
+        low, none,
+        "detail low and no detail must not share a cache entry"
+    );
+    assert_ne!(
+        high, none,
+        "detail high and no detail must not share a cache entry"
+    );
+    // `auto` asks for the checkpoint default, which is what no detail means.
+    assert_eq!(key_for(Some("auto")), none);
+    // The key is a function of the image bytes too.
+    let other = vision_cache_keys(&[b"other".to_vec()], None);
+    assert_ne!(other[0].clone().unwrap(), none);
 }

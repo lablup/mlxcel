@@ -112,3 +112,30 @@ fn spatial_scale_follows_the_number_of_down_blocks() {
     };
     assert_eq!(c.spatial_scale(), 2);
 }
+
+#[test]
+fn a_narrower_decoder_is_read_and_used() {
+    let c = Flux2VaeConfig::from_json(
+        r#"{"block_out_channels": [128, 256, 512, 512],
+            "decoder_block_out_channels": [96, 192, 384, 384]}"#,
+    )
+    .unwrap();
+    assert_eq!(c.block_out_channels, [128, 256, 512, 512]);
+    assert_eq!(c.decoder_channels(), [96, 192, 384, 384]);
+}
+
+#[test]
+fn an_absent_decoder_mirrors_the_encoder() {
+    let c = Flux2VaeConfig::default();
+    assert_eq!(c.decoder_channels(), c.block_out_channels);
+}
+
+#[test]
+fn a_decoder_of_a_different_depth_is_refused() {
+    let c = Flux2VaeConfig {
+        decoder_block_out_channels: Some(vec![96, 192, 384]),
+        ..Flux2VaeConfig::default()
+    };
+    let err = c.validate().unwrap_err().to_string();
+    assert!(err.contains("decoder has 3 blocks"), "{err}");
+}

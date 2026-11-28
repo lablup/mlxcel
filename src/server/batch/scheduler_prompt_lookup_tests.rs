@@ -49,7 +49,7 @@ fn copy_prompt() -> Vec<i32> {
 /// before it wraps.
 const PLAIN_PROMPT: &[i32] = &[0, 2, 4, 6, 8];
 
-fn cycle_llama() -> crate::models::Llama3Model {
+pub(super) fn cycle_llama() -> crate::models::Llama3Model {
     walk_llama(|t| (t + 1) % VOCAB)
 }
 
@@ -147,7 +147,7 @@ fn scheduler_with_storage(
     sched
 }
 
-fn enqueue(
+pub(super) fn enqueue(
     sched: &mut BatchScheduler,
     prompt: &[i32],
     max_tokens: usize,
@@ -198,14 +198,18 @@ fn enqueue_with_sampling(
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     };
     let (tx, rx) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -317,7 +321,7 @@ fn completion(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationRe
 
 /// The Done result's prompt-lookup acceptance counters `(proposed,
 /// accepted)`, `None` when it reports no drafter.
-fn acceptance(rx: &mpsc::Receiver<GenerateEvent>) -> Option<(usize, usize)> {
+pub(super) fn acceptance(rx: &mpsc::Receiver<GenerateEvent>) -> Option<(usize, usize)> {
     acceptance_of(rx, mlxcel_core::drafter::DrafterKind::PromptLookup)
 }
 

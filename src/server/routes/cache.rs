@@ -204,6 +204,22 @@ pub struct CacheStatsResponse {
     pub snapshot_self_evictions: u64,
     /// Lifetime snapshot insert rejections due to size.
     pub snapshot_rejections_oversized: u64,
+    /// Live turn-boundary state checkpoints (issue #3047): the recurrent state
+    /// of a hybrid model at earlier history boundaries, rebuilt over the
+    /// conversation's newest snapshot when a request edits an earlier turn.
+    pub state_checkpoint_entries: usize,
+    /// Bytes consumed by live state checkpoints.
+    pub state_checkpoint_bytes: usize,
+    /// Configured state checkpoint byte capacity; `0` when they are off.
+    pub state_checkpoint_capacity_bytes: usize,
+    /// Lifetime state checkpoint inserts.
+    pub state_checkpoint_inserts: u64,
+    /// Lifetime snapshot hits served by rebuilding a state checkpoint. Also
+    /// counted in `snapshot_hits`.
+    pub state_checkpoint_hits: u64,
+    /// Lifetime state checkpoints evicted by their LRU or TTL, or dropped
+    /// because their conversation holds no snapshot that can rebuild them.
+    pub state_checkpoint_evictions: u64,
 
     // ── Paged KV block pool (epic #116 #122 c) ───────────────────────────────
     // Sourced from the batch observability gauges (not the prompt-cache store),
@@ -276,10 +292,10 @@ pub struct CacheStatsResponse {
     /// Two consequences for anyone reading this endpoint alongside `/metrics`.
     /// `lookups` deliberately stays at zero for these families, because the
     /// adopt gate returns before the store lookup rather than performing one
-    /// that could only miss, while the Prometheus
-    /// `mlxcel_prompt_cache_misses_total` counter is recorded by the caller and
-    /// still advances per request; the two surfaces therefore disagree by
-    /// design here, where before this gate existed they agreed. And because the
+    /// that could only miss, and the Prometheus
+    /// `mlxcel_prompt_cache_misses_total` counter stays at zero with it: the
+    /// caller records a dense miss only when a dense lookup ran (#3294), so
+    /// both surfaces agree that no dense lookup happened. And because the
     /// decline fires on every healthy completion for these families, the
     /// `last_reject_*` fields stay pinned to `model_owned_state` and will mask
     /// an earlier, more interesting decline such as `oversized`; the per-reason
@@ -435,6 +451,12 @@ pub(crate) fn build_stats_response(
                 snapshot_supersedes: stats.snapshot_supersedes,
                 snapshot_self_evictions: stats.snapshot_self_evictions,
                 snapshot_rejections_oversized: stats.snapshot_rejections_oversized,
+                state_checkpoint_entries: stats.state_checkpoint_entries,
+                state_checkpoint_bytes: stats.state_checkpoint_bytes,
+                state_checkpoint_capacity_bytes: cfg.state_checkpoint_capacity_bytes,
+                state_checkpoint_inserts: stats.state_checkpoint_inserts,
+                state_checkpoint_hits: stats.state_checkpoint_hits,
+                state_checkpoint_evictions: stats.state_checkpoint_evictions,
                 // Paged block-pool gauges are store-independent.
                 paged_block_size: paged.block_size,
                 paged_blocks_allocated: paged.blocks_allocated,
@@ -497,6 +519,12 @@ pub(crate) fn build_stats_response(
             snapshot_supersedes: 0,
             snapshot_self_evictions: 0,
             snapshot_rejections_oversized: 0,
+            state_checkpoint_entries: 0,
+            state_checkpoint_bytes: 0,
+            state_checkpoint_capacity_bytes: 0,
+            state_checkpoint_inserts: 0,
+            state_checkpoint_hits: 0,
+            state_checkpoint_evictions: 0,
             // Paged decode can run with the prompt cache disabled, so these
             // still reflect the live pool even on the `None` branch.
             paged_block_size: paged.block_size,

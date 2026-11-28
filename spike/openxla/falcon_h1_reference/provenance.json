@@ -1,0 +1,25 @@
+{
+  "repo": "tiiuae/Falcon-H1-Tiny-90M-Instruct",
+  "revision": "e6389502a0b12cd8da894b395ba5bf7436873b16",
+  "gated": false,
+  "url": "https://huggingface.co/tiiuae/Falcon-H1-Tiny-90M-Instruct",
+  "oracle_backend": "native HF Transformers fp32 on CPU",
+  "packages": {
+    "torch": "2.12.1+cpu",
+    "transformers": "5.12.1"
+  },
+  "prompt_tokens": 5,
+  "continuation_tokens": 40,
+  "exit_code": 0,
+  "threads": 4,
+  "offline": true,
+  "oracle_script_sha256": "dc022c16d80d73771be9edae8f322cd24df5dd31fa0f7a5eec7a783152834df4",
+  "artifact_sha256": "bfb6aac06d3c99f552f8f2af9901bb4af9d20dcb6cb5f6ac29241cd064518fcb",
+  "metadata_sha256": {
+    "tokenizer_config.json": "c06815decc110e609e2672785640dce8e73d84f364681afb1abde0284fe042b9",
+    "generation_config.json": "63cd0919110f23b9526ce3c724b325293dd7e8247e08f36b00dd65cb0b78788e",
+    "config.json": "ad03d15093bb70a67db7d0179dea83172d6ec7fd29618e1d65edecd8eeea1563",
+    "tokenizer.json": "7f4447f316d59461f0e642b4d01c2413bdfad5def8fe20178a937f35b2eb804a"
+  },
+  "command": "OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /home/inureyes/Development/mlxcel/spike/openxla/.venv/bin/python spike/openxla/oracle_continuation.py --model /tmp/epic564-models/falcon-h1 --out /tmp/epic564-plan/falcon-h1-oracle.json --prompt 'The capital of France is' --max-new 40"
+}

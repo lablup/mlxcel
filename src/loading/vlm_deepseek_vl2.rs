@@ -79,25 +79,41 @@ fn parse_candidate_resolutions(full_config: &serde_json::Value) -> Vec<(i32, i32
         .unwrap_or_default()
 }
 
-pub(crate) fn load_deepseek_vl2_vlm(model_path: &Path) -> Result<LoadedModel> {
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+/// The `model_type` of the decoder a DeepSeek-VL2 checkpoint is built with.
+///
+/// `language_config` omits it; the decoder is [`models::deepseek_v2`].
+pub(crate) const DEEPSEEK_VL2_DECODER_MODEL_TYPE: &str = "deepseek_v2";
 
-    // Text decoder config from `language_config`, inheriting the root
-    // quantization block and the `deepseek_v2` model_type (the sub-config omits
-    // both). MLA head dims are absent and fall back to DeepSeek-V2 defaults.
-    let mut lc = full_config
-        .get("language_config")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing language_config in DeepSeek-VL2 config"))?;
+/// The text decoder config of a DeepSeek-VL2 checkpoint, as the loader builds
+/// the decoder from it: `language_config` inheriting the root quantization
+/// block and [`DEEPSEEK_VL2_DECODER_MODEL_TYPE`] (the sub-config omits both).
+/// MLA head dims are absent and fall back to DeepSeek-V2 defaults. `None` when
+/// `language_config` is missing.
+///
+/// Used by: [`load_deepseek_vl2_vlm`] and
+/// `execution::config_fields::kv_decoder_config`, so the KV cache mode rules
+/// and the sizing see the decoder the runtime builds (issue #3155).
+pub(crate) fn deepseek_vl2_language_config(
+    full_config: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut lc = full_config.get("language_config")?.clone();
     if let Some(obj) = lc.as_object_mut() {
         obj.entry("model_type".to_string())
-            .or_insert_with(|| json!("deepseek_v2"));
+            .or_insert_with(|| json!(DEEPSEEK_VL2_DECODER_MODEL_TYPE));
         if !obj.contains_key("quantization")
             && let Some(q) = full_config.get("quantization")
         {
             obj.insert("quantization".to_string(), q.clone());
         }
     }
+    Some(lc)
+}
+
+pub(crate) fn load_deepseek_vl2_vlm(model_path: &Path) -> Result<LoadedModel> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let lc = deepseek_vl2_language_config(&full_config)
+        .ok_or_else(|| anyhow::anyhow!("Missing language_config in DeepSeek-VL2 config"))?;
     let args: models::deepseek_v2::ModelArgs = serde_json::from_value(lc)
         .map_err(|e| anyhow::anyhow!("Failed to parse DeepSeek-VL2 language_config: {}", e))?;
     let (gs, bits) = (args.group_size(), args.bits());

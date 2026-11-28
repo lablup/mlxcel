@@ -89,6 +89,7 @@ pub enum LoadedModel {
     MuseGlimmer(models::MuseGlimmerTextWrapper),
     MuseGlimmerVLM(vision::MuseGlimmerVlmModel),
     InklingVLM(vision::InklingVlModel),
+    Inkling2VLM(vision::Inkling2VlModel),
     GraniteVisionVLM(vision::GraniteVisionVLModel),
     Granite4VisionVLM(vision::Granite4VisionVLModel),
     DeepSeekOcrVLM(vision::deepseekocr::DeepSeekOcrVlModel),
@@ -168,7 +169,9 @@ pub enum LoadedModel {
     DeepSeekV2(models::DeepSeekV2Model),
     DeepSeekV3(models::DeepSeekV3Model),
     DeepSeekV32(models::DeepSeekV32Model),
+    HyV4(models::HyV4Model),
     DeepSeekV4(models::DeepSeekV4Model),
+    Xing40(models::Xing40Model),
     Dots1(models::Dots1Model),
     Cohere(models::CohereModel),
     Cohere2(models::Cohere2Model),
@@ -186,10 +189,15 @@ pub enum LoadedModel {
     HunyuanV1Dense(models::HunyuanV1DenseModel),
     MiMo(models::MiMoModel),
     MiMoV2Flash(models::MiMoV2FlashModel),
+    /// Xiaomi MiMo-V2 / V2.6 (Flash decoder + `mimovl` vision tower).
+    MiMoV2VLM(vision::MimoV2VlModel),
     BailingMoe(models::BailingMoeModel),
     BailingMoeLinear(models::BailingMoeLinearModel),
     Afmoe(models::AfmoeModel),
+    /// Arcee AFM dense (`arcee`, issue #1719).
+    Arcee(models::ArceeModel),
     Klear(models::KlearModel),
+    Kolibri1(models::Kolibri1Model),
     Apertus(models::ApertusModel),
     SeedOss(models::SeedOssModel),
     Granite(models::GraniteModel),
@@ -216,6 +224,8 @@ pub enum LoadedModel {
     // the wrapper's per-sequence model-owned state.
     IQuestLoopCoder(models::IQuestLoopCoderWrapper),
     Laguna(models::LagunaWrapper),
+    // Sliding/global caches owned per sequence by the wrapper.
+    Limite(models::LimiteWrapper),
     MiniCPM(models::MiniCPMModel),
     MiniCPM3(models::MiniCPM3Model),
     StableLM(models::StableLMModel),
@@ -232,6 +242,7 @@ pub enum LoadedModel {
     Lfm2Moe(models::Lfm2Model),
     Inkling(models::InklingModel),
     Plamo2(models::Plamo2Model),
+    Plamo2VLM(vision::Plamo2VlModel),
     GraniteMoeHybrid(models::GraniteMoeHybridModel),
     NemotronH(models::NemotronHModel),
     /// Nemotron H Nano Omni — vision-capable variant (vision-only).
@@ -240,12 +251,15 @@ pub enum LoadedModel {
     Step3p5(models::Step3p5Model),
     KimiLinear(models::KimiLinearModel),
     KimiK3(models::KimiK3Model),
+    Raon1Mini(models::Raon1MiniModel),
     /// Kimi K3 with its MoonViT3D tower (#1342).
     KimiK3VLM(vision::KimiK3VLModel),
     LongcatFlash(models::LongcatFlashNgramModel),
     LongcatFlashNgram(models::LongcatFlashNgramModel),
+    LongcatFlashSparse(models::LongcatFlashSparseModel),
     Rwkv7(models::Rwkv7),
     RecurrentGemma(models::GriffinModel),
+    Z1t(models::Z1t),
 }
 
 // Keep the full variant list in one place so LanguageModel delegation stays
@@ -292,6 +306,7 @@ macro_rules! delegate_language_model {
             LoadedModel::MuseGlimmer(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MuseGlimmerVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::InklingVLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Inkling2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GraniteVisionVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Granite4VisionVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekOcrVLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -353,7 +368,9 @@ macro_rules! delegate_language_model {
             LoadedModel::DeepSeekV2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV32(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::HyV4(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::DeepSeekV4(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Xing40(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Dots1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Cohere2(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -371,10 +388,13 @@ macro_rules! delegate_language_model {
             LoadedModel::HunyuanV1Dense(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMo(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiMoV2Flash(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::MiMoV2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::BailingMoeLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Afmoe(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Arcee(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Klear(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Kolibri1(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Apertus(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::IQuestLoopCoder(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SeedOss(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -397,6 +417,7 @@ macro_rules! delegate_language_model {
             LoadedModel::StarCoder2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mellum(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Laguna(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Limite(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::StableLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -412,6 +433,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Lfm2Moe(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Inkling(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Plamo2(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Plamo2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GraniteMoeHybrid(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronH(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronHNanoOmniVLM(inner) => LanguageModel::$method(inner, $($arg),*),
@@ -419,11 +441,14 @@ macro_rules! delegate_language_model {
             LoadedModel::Step3p5(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiLinear(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiK3(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Raon1Mini(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiK3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlash(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LongcatFlashNgram(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::LongcatFlashSparse(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Rwkv7(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::RecurrentGemma(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Z1t(inner) => LanguageModel::$method(inner, $($arg),*),
         }
     };
 }
@@ -483,6 +508,21 @@ impl LanguageModel for LoadedModel {
         last_pos: usize,
     ) -> UniquePtr<mlxcel_core::MlxArray> {
         delegate_language_model!(self, forward_last_logits(input_ids, caches, mask, last_pos))
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        input_embeddings: Option<&mlxcel_core::MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&mlxcel_core::MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<mlxcel_core::MlxArray>> {
+        delegate_language_model!(
+            self,
+            last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+        )
     }
 
     fn forward_last_logits_with_sequence_id(
@@ -549,6 +589,12 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, lm_head_module())
     }
 
+    fn inkling2_dspark_binding(
+        &self,
+    ) -> Option<mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkBinding> {
+        delegate_language_model!(self, inkling2_dspark_binding())
+    }
+
     fn after_prefill(&self) {
         delegate_language_model!(self, after_prefill())
     }
@@ -570,6 +616,13 @@ impl LanguageModel for LoadedModel {
     // the rewind, fails every teardown), the #1755 lesson.
     fn supports_decode_lookahead_rewind(&self) -> bool {
         delegate_language_model!(self, supports_decode_lookahead_rewind())
+    }
+
+    // #2880: prompt lookup admits a model-owned family on this capability; a
+    // dropped delegation would read the trait default (the lookahead flag,
+    // `false` for qwen4_exp) and silently decline every prompt-lookup request.
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        delegate_language_model!(self, supports_speculative_verify_rewind())
     }
 
     // #2567: the engine's lookahead gate and the scheduler's prompt-cache and
@@ -600,6 +653,18 @@ impl LanguageModel for LoadedModel {
         seq_id: mlxcel_core::cache::SequenceId,
     ) -> Result<(), String> {
         delegate_language_model!(self, try_prepare_sequence_state(seq_id))
+    }
+
+    fn set_sequence_reasoning_effort(
+        &self,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        level: Option<&str>,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, set_sequence_reasoning_effort(seq_id, level))
+    }
+
+    fn sequence_reasoning_effort(&self, seq_id: mlxcel_core::cache::SequenceId) -> Option<String> {
+        delegate_language_model!(self, sequence_reasoning_effort(seq_id))
     }
 
     // The fallible forwards must reach the inner model's overrides (the
@@ -693,8 +758,47 @@ impl LanguageModel for LoadedModel {
         )
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        delegate_language_model!(self, state_checkpoint_from_snapshot(snapshot))
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        delegate_language_model!(
+            self,
+            restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+        )
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         delegate_language_model!(self, sequence_state_layout())
+    }
+
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        delegate_language_model!(self, layer_state_kinds())
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        delegate_language_model!(self, make_layer_state())
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        delegate_language_model!(self, layer_state_snapshot_spec())
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>, String> {
+        delegate_language_model!(self, forward_layer_state(request, rows))
     }
 
     fn supports_padded_prefill(&self) -> bool {

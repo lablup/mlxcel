@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub use fim::{FimToken, FimTokens, FimTriple};
-pub use thinking::{ThinkingMarkers, find_subseq, rfind_subseq};
+pub use thinking::{THINK_EFFORT_VARIANTS, ThinkingMarkers, find_subseq, rfind_subseq};
 pub use tiktoken::{KimiK3ControlIds, TiktokenFamily, TiktokenTokenizer};
 
 /// Unified tokenizer supporting HuggingFace (tokenizer.json), SentencePiece (tokenizer.model),
@@ -487,8 +487,9 @@ impl MlxcelTokenizer {
     /// `TokenizerWrapper.__init__`.  Recognizes:
     ///
     /// * **Single-token think pairs** — `<think>` / `</think>` (Qwen3.x,
-    ///   Exaone4, Hunyuan, GLM4, Nemotron-H, …) and
-    ///   `<longcat_think>` / `</longcat_think>`.
+    ///   Exaone4, Hunyuan, GLM4, Nemotron-H, …),
+    ///   `<longcat_think>` / `</longcat_think>` and the Mistral reasoning
+    ///   pair `[THINK]` / `[/THINK]` (mlx-lm#1974).
     /// * **Multi-token think pair** — `<|channel>thought` (open) /
     ///   `<channel|>` (close), used by Gemma 4 and any future model that
     ///   adopts the same channel-priming convention.  The `thought`
@@ -515,16 +516,67 @@ impl MlxcelTokenizer {
     /// peeling.  [`ThinkingMarkers::has_thinking`] is the canonical
     /// predicate for "is this a thinking model".
     ///
-    /// Used by: `server::chat_template::ChatTemplateProcessor`
-    /// (default for the `enable_thinking` Jinja kwarg),
-    /// `server::tool_calls::stream_filter` (future hookup for token-id
-    /// based marker detection on top of today's text-based scan).
+    /// This is the vocabulary-only form: it never sees a chat template, so it
+    /// misses a checkpoint whose template writes `<think>` as text. Callers
+    /// that hold the template use [`Self::infer_thinking_markers_with_template`].
+    ///
+    /// Used by: `server::startup::load_chat_front` (to log whether the markers
+    /// came from the vocabulary or the template), and the tokenizer and
+    /// K2-Horizon / Hy4 reasoning tests. It is
+    /// [`Self::infer_thinking_markers_with_template`] with no template.
     ///
     /// Note: `server::thinking_budget::resolve_thinking_token_ids` currently
     /// uses bare `<|channel>` / `<channel|>` single-token IDs directly rather
     /// than consuming this method.  Migrating it to use the multi-token
     /// sequences returned here is a separate follow-up task.
     pub fn infer_thinking_markers(&self) -> ThinkingMarkers {
+        self.infer_thinking_markers_with_template(None)
+    }
+
+    /// [`Self::infer_thinking_markers`] with the chat template as a last
+    /// resort, mirroring mlx-lm's `_infer_thinking` after mlx-lm#1974.
+    ///
+    /// The vocabulary result wins whenever it names a pair. Otherwise, when
+    /// `template` contains the text `<think>`, the markers are `<think>` /
+    /// `</think>` with whatever id sequences the tokenizer encodes them to
+    /// (several ids each when they are not added tokens). An empty encoding
+    /// falls through to the empty default, as the Gemma 4 branch does.
+    ///
+    /// The fallback makes [`ThinkingMarkers::has_thinking`] true for a
+    /// checkpoint whose template writes `<think>` without a vocabulary token,
+    /// so `server::chat_front::apply_thinking_default` turns its thinking
+    /// default on. That is upstream's behavior; `server::startup` logs the
+    /// marker source once.
+    ///
+    /// Used by: `server::chat_front::apply_thinking_default` (the
+    /// `enable_thinking` default), `server::startup::load_chat_front` (the
+    /// startup log), `server::state::AppState` (primed-open detection and the
+    /// reasoning filters of every route), `server::router_front` (the
+    /// disaggregated router's chat preparation) and `commands::generate`
+    /// (the CLI reasoning filter).
+    pub fn infer_thinking_markers_with_template(&self, template: Option<&str>) -> ThinkingMarkers {
+        let markers = self.infer_vocab_thinking_markers();
+        if markers.has_thinking() {
+            return markers;
+        }
+        if template.is_some_and(|t| t.contains("<think>")) {
+            let encode = |marker: &str| self.encode(marker, false).unwrap_or_default();
+            let start_tokens = encode("<think>");
+            let end_tokens = encode("</think>");
+            if !start_tokens.is_empty() && !end_tokens.is_empty() {
+                return ThinkingMarkers {
+                    think_start: Some("<think>".to_string()),
+                    think_end: Some("</think>".to_string()),
+                    think_start_tokens: Some(start_tokens),
+                    think_end_tokens: Some(end_tokens),
+                    ..ThinkingMarkers::default()
+                };
+            }
+        }
+        markers
+    }
+
+    fn infer_vocab_thinking_markers(&self) -> ThinkingMarkers {
         // Kimi K3 has no HF vocabulary to probe: its reasoning and tool-call
         // spans are XTML tags built from control tokens, so the markers are
         // synthesized from the control ids plus the encoded tag name. Giving
@@ -544,6 +596,15 @@ impl MlxcelTokenizer {
             ("<think>", "</think>"),
             ("<|content_thinking|>", "<|end_message|>"),
             ("<longcat_think>", "</longcat_think>"),
+            // IFM K2-Horizon. Its effort variants (`<ifm|think_fast>`,
+            // `<ifm|think_faster>`) come from `THINK_EFFORT_VARIANTS`.
+            ("<ifm|think>", "</ifm|think>"),
+            // Tencent Hy4 (#2354): every structural tag carries the template's
+            // `:opensource` suffix.
+            ("<think:opensource>", "</think:opensource>"),
+            // Mistral reasoning checkpoints (Magistral, Ministral reasoning):
+            // added tokens, after `<longcat_think>` as in mlx-lm#1974.
+            ("[THINK]", "[/THINK]"),
         ];
         for (start, end) in SINGLE_TOKEN_PAIRS {
             if let (Some(open_id), Some(close_id)) = (hf.token_to_id(start), hf.token_to_id(end)) {
@@ -912,7 +973,8 @@ struct SentencePieceConfig {
     /// `added_tokens_decoder` (or `added_tokens.json` when the decoder table
     /// is absent). See [`sp_added_vocab::read_sp_added_tokens`].
     added_tokens: Vec<(u32, tokenizers::AddedToken)>,
-    /// `add_bos_token`, defaulting to false when the key is absent.
+    /// `add_bos_token`, defaulting to false when the key is absent, except for
+    /// the tokenizer classes in [`SP_CLASSES_DEFAULTING_TO_BOS`].
     add_bos: bool,
     /// `add_prefix_space`, kept as an `Option` because "absent" and
     /// "explicitly false" mean different things here: absent leaves the
@@ -920,6 +982,14 @@ struct SentencePieceConfig {
     /// `false` overrides it. See [`open_sentencepiece_processor`].
     add_prefix_space: Option<bool>,
 }
+
+/// Remote-code SentencePiece tokenizer classes whose constructor defaults
+/// `add_bos_token` to true, so a `tokenizer_config.json` that omits the key
+/// still gets a BOS on every encode with special tokens in transformers.
+///
+/// `Xing4_0Tokenizer` (`tokenization_xing4_0.py`, issue #2356) prepends
+/// `<_start>`; the released Xing4.0 configs do not spell the key out.
+const SP_CLASSES_DEFAULTING_TO_BOS: &[&str] = &["Xing4_0Tokenizer"];
 
 /// Read the SentencePiece-relevant parts of `tokenizer_config.json`: the
 /// added tokens, `add_bos_token` and `add_prefix_space`.
@@ -934,9 +1004,16 @@ fn parse_special_tokens(model_path: &Path) -> SentencePieceConfig {
     let added_tokens = sp_added_vocab::read_sp_added_tokens(config.as_ref(), model_path);
 
     if let Some(config) = &config {
-        // Parse add_bos_token
+        // Parse add_bos_token; when absent, a class whose constructor
+        // defaults it to true keeps that default.
         if let Some(v) = config.get("add_bos_token").and_then(|v| v.as_bool()) {
             add_bos = v;
+        } else if config
+            .get("tokenizer_class")
+            .and_then(|v| v.as_str())
+            .is_some_and(|class| SP_CLASSES_DEFAULTING_TO_BOS.contains(&class))
+        {
+            add_bos = true;
         }
 
         // Parse add_prefix_space. Only an explicit boolean counts; a missing
@@ -1156,6 +1233,12 @@ fn plamo_added_token(id: u32, content: &str) -> serde_json::Value {
 /// bos=1, eos=2, pad=3) are also registered as added/special tokens so
 /// `decode(skip_special_tokens=true)` can strip them and EOS detection matches.
 ///
+/// Tokens a checkpoint declares past the jsonl vocabulary (PLaMo 2.1 VL's
+/// `<siglip2:img>` 100000, `</siglip2:img>` 100001, `<plamo:image>` 100002 and
+/// `<siglip2:dummy0..12>`, issue #1380) live only in `tokenizer_config.json`.
+/// They are appended as special added tokens (see [`plamo_extra_added_tokens`])
+/// so the image placeholder encodes to its own id instead of plain text.
+///
 /// Upstream reference:
 /// https://huggingface.co/pfnet/plamo-2-1b/blob/main/tokenization_plamo.py
 fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
@@ -1224,6 +1307,19 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
         ));
     }
 
+    let extra_tokens = plamo_extra_added_tokens(model_path, vocab.len())?;
+    let mut added_tokens = vec![
+        plamo_added_token(0, "<|plamo:unk|>"),
+        plamo_added_token(1, "<|plamo:bos|>"),
+        plamo_added_token(2, "<|plamo:eos|>"),
+        plamo_added_token(3, "<|plamo:pad|>"),
+    ];
+    added_tokens.extend(
+        extra_tokens
+            .iter()
+            .map(|(id, content)| plamo_added_token(*id, content)),
+    );
+
     // Raw text in, raw text out: no normalizer and no pre-tokenizer (PLaMo
     // tokens carry literal spaces, e.g. " of"/"  ", not SentencePiece `_`
     // markers), and a ByteFallback decoder mirrors `convert_tokens_to_string`.
@@ -1231,12 +1327,7 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
         "version": "1.0",
         "truncation": null,
         "padding": null,
-        "added_tokens": [
-            plamo_added_token(0, "<|plamo:unk|>"),
-            plamo_added_token(1, "<|plamo:bos|>"),
-            plamo_added_token(2, "<|plamo:eos|>"),
-            plamo_added_token(3, "<|plamo:pad|>"),
-        ],
+        "added_tokens": added_tokens,
         "normalizer": null,
         "pre_tokenizer": null,
         "post_processor": null,
@@ -1252,13 +1343,74 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     let json_bytes = serde_json::to_vec(&tokenizer_json)
         .map_err(|e| anyhow::anyhow!("Failed to serialize PLaMo tokenizer.json: {}", e))?;
 
-    tokenizers::Tokenizer::from_bytes(json_bytes).map_err(|e| {
+    let tokenizer = tokenizers::Tokenizer::from_bytes(json_bytes).map_err(|e| {
         anyhow::anyhow!(
             "Failed to build PLaMo tokenizer from {:?}: {}",
             jsonl_path,
             e
         )
-    })
+    })?;
+    // The `tokenizers` crate assigns added-token ids itself (one past the
+    // vocabulary, in order); confirm it landed every declared id.
+    for (id, content) in &extra_tokens {
+        let assigned = tokenizer.token_to_id(content);
+        if assigned != Some(*id) {
+            return Err(anyhow::anyhow!(
+                "PLaMo added token {content:?} declared at id {id} resolved to {assigned:?} in {:?}",
+                model_path
+            ));
+        }
+    }
+    Ok(tokenizer)
+}
+
+/// Added tokens a PLaMo checkpoint declares beyond its `tokenizer.jsonl`
+/// vocabulary, as `(id, content)` in id order.
+///
+/// Read from `tokenizer_config.json`'s `added_tokens_decoder` (or the
+/// `added_tokens.json` fallback, through [`read_added_tokens_sorted`]); entries
+/// whose id is inside the vocabulary (the four fixed specials) are skipped.
+/// When neither declares any, `additional_special_tokens` is assigned ids in
+/// order from `vocab_len`, which is how `transformers` appends them. The ids
+/// must continue the vocabulary without a gap: the `tokenizers` crate numbers
+/// added tokens sequentially, so a gap would shift every later id.
+///
+/// Used by: `build_plamo_tokenizer`.
+fn plamo_extra_added_tokens(model_path: &Path, vocab_len: usize) -> Result<Vec<(u32, String)>> {
+    let mut extra: Vec<(u32, String)> = read_added_tokens_sorted(model_path)?
+        .into_iter()
+        .filter(|(id, _)| *id as usize >= vocab_len)
+        .map(|(id, token)| (id, token.content))
+        .collect();
+    if extra.is_empty() {
+        let config = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+        let listed = config
+            .as_ref()
+            .and_then(|cfg| cfg.get("additional_special_tokens"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for (offset, item) in listed.iter().enumerate() {
+            let content = item
+                .as_str()
+                .or_else(|| item.get("content").and_then(|v| v.as_str()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("additional_special_tokens[{offset}] has no content")
+                })?;
+            extra.push(((vocab_len + offset) as u32, content.to_string()));
+        }
+    }
+    for (expected, (id, content)) in (vocab_len..).zip(&extra) {
+        if *id as usize != expected {
+            return Err(anyhow::anyhow!(
+                "PLaMo added token {content:?} has id {id}, but added ids must continue the \
+                 {vocab_len}-row tokenizer.jsonl without a gap (expected {expected})"
+            ));
+        }
+    }
+    Ok(extra)
 }
 
 /// The pre-tokenization regex `Qwen2Tokenizer` splits on, copied verbatim from
@@ -1900,6 +2052,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 
 #[cfg(test)]
 mod contains_id_tests;
+
+#[cfg(test)]
+mod thinking_markers_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3279,6 +3434,88 @@ mod tests {
         }
     }
 
+    /// Write a tiny PLaMo checkpoint tokenizer: a 6-row jsonl (the four fixed
+    /// specials, `a`, `b`) plus `config`, returning the temp dir.
+    fn tiny_plamo_tokenizer_dir(config: serde_json::Value) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rows = [
+            r#"["<|plamo:unk|>", 0.0, "UNKNOWN"]"#,
+            r#"["<|plamo:bos|>", 0.0, "CONTROL"]"#,
+            r#"["<|plamo:eos|>", 0.0, "CONTROL"]"#,
+            r#"["<|plamo:pad|>", 0.0, "CONTROL"]"#,
+            r#"["a", -1.0, "NORMAL"]"#,
+            r#"["b", -1.0, "NORMAL"]"#,
+        ];
+        std::fs::write(dir.path().join("tokenizer.jsonl"), rows.join("\n")).unwrap();
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Issue #1380: ids declared only in `tokenizer_config.json` past the jsonl
+    /// vocabulary (PLaMo 2.1 VL's `<plamo:image>` = 100002) encode as one
+    /// special token and are stripped by `skip_special_tokens`.
+    #[test]
+    fn plamo_tokenizer_registers_config_added_tokens_past_the_jsonl_vocab() {
+        let special = |content: &str| serde_json::json!({"content": content, "special": true});
+        let dir = tiny_plamo_tokenizer_dir(serde_json::json!({
+            "added_tokens_decoder": {
+                "0": special("<|plamo:unk|>"),
+                "1": special("<|plamo:bos|>"),
+                "2": special("<|plamo:eos|>"),
+                "3": special("<|plamo:pad|>"),
+                "6": special("<siglip2:img>"),
+                "7": special("<plamo:image>"),
+            }
+        }));
+        let tok = super::load_tokenizer(dir.path()).expect("load tiny PLaMo tokenizer");
+        let ids = tok.encode("a<plamo:image>b", false).expect("encode");
+        assert_eq!(ids, vec![4, 7, 5]);
+        assert_eq!(tok.encode("<siglip2:img>a", false).unwrap(), vec![6, 4]);
+        assert_eq!(tok.decode(&ids, true).expect("decode"), "ab");
+        assert_eq!(tok.decode(&ids, false).unwrap(), "a<plamo:image>b");
+    }
+
+    #[test]
+    fn plamo_tokenizer_falls_back_to_additional_special_tokens() {
+        let dir = tiny_plamo_tokenizer_dir(serde_json::json!({
+            "additional_special_tokens": ["<siglip2:img>", "</siglip2:img>", "<plamo:image>"]
+        }));
+        let tok = super::load_tokenizer(dir.path()).expect("load tiny PLaMo tokenizer");
+        assert_eq!(tok.encode("<plamo:image>b", false).unwrap(), vec![8, 5]);
+    }
+
+    #[test]
+    fn plamo_tokenizer_rejects_an_added_id_gap() {
+        let dir = tiny_plamo_tokenizer_dir(serde_json::json!({
+            "added_tokens_decoder": {"9": {"content": "<plamo:image>", "special": true}}
+        }));
+        let err = super::load_tokenizer(dir.path())
+            .err()
+            .expect("gap must fail");
+        assert!(err.to_string().contains("without a gap"), "{err}");
+    }
+
+    /// The real PLaMo 2.1 VL tokenizer: `<plamo:image>` must be id 100002.
+    #[test]
+    fn plamo2_vl_tokenizer_emits_the_image_placeholder_id() {
+        for name in ["plamo-2.1-2b-vl-mlx-4bit", "plamo-2.1-2b-vl"] {
+            let model_dir = std::path::Path::new("models").join(name);
+            if !model_dir.join("tokenizer.jsonl").exists() {
+                eprintln!("skipping {name}: checkpoint is absent");
+                continue;
+            }
+            let tok = super::load_tokenizer(&model_dir).expect("load PLaMo 2.1 VL tokenizer");
+            let ids = tok
+                .encode("<siglip2:img><plamo:image></siglip2:img>", false)
+                .unwrap();
+            assert_eq!(ids, vec![100000, 100002, 100001], "{name}");
+        }
+    }
+
     #[test]
     fn plamo_tokenizer_round_trips_decode() {
         let model_dir = std::path::Path::new("models/plamo-2-1b");
@@ -3320,6 +3557,36 @@ mod tests {
             std::fs::write(dir.path().join("tokenizer_config.json"), body.to_string()).unwrap();
             assert_eq!(
                 parse_special_tokens(dir.path()).add_prefix_space,
+                expected,
+                "for {body}"
+            );
+        }
+    }
+
+    /// `Xing4_0Tokenizer` defaults `add_bos_token` to true in its constructor,
+    /// so an absent key means a BOS (issue #2356); an explicit value and any
+    /// other class keep the absent-means-false rule.
+    #[test]
+    fn xing_tokenizer_class_defaults_add_bos_on() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (body, expected) in [
+            (
+                serde_json::json!({ "tokenizer_class": "Xing4_0Tokenizer" }),
+                true,
+            ),
+            (
+                serde_json::json!({ "tokenizer_class": "Xing4_0Tokenizer", "add_bos_token": false }),
+                false,
+            ),
+            (
+                serde_json::json!({ "tokenizer_class": "LlamaTokenizer" }),
+                false,
+            ),
+            (serde_json::json!({}), false),
+        ] {
+            std::fs::write(dir.path().join("tokenizer_config.json"), body.to_string()).unwrap();
+            assert_eq!(
+                parse_special_tokens(dir.path()).add_bos,
                 expected,
                 "for {body}"
             );

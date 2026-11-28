@@ -144,7 +144,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
     Ok(json!({
         "id": id,
         "object": "response.compaction",
-        "created_at": chrono::Utc::now().timestamp(),
+        "created_at": crate::server::clock::unix_seconds_now(),
         "model": state.display_model_id(),
         "output": output,
         "usage": {
@@ -323,8 +323,12 @@ async fn generate_summary(
         is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     let mut options = build_generate_options_with_live(&chat.params, &state.config, live, false);
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     // The summarized prefix is the prompt of earlier turns, so the prompt
     // cache can serve it.
     options.prompt_cache_ctx = build_prompt_cache_request_context(
@@ -333,7 +337,7 @@ async fn generate_summary(
         &chat,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
     let slot = state.slots.begin(
         &prepared.prompt,

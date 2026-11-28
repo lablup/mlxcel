@@ -38,6 +38,7 @@ use serde_json::{Value, json};
 use super::prompt_inspection::count_text_prompt_tokens;
 use super::responses_compact::{ResponsesCompactionBackend, validate_replay_size};
 use super::responses_compact_media::MediaCache;
+use super::responses_run::ResponseEventSink;
 use crate::server::chat_request::PreparedChatRequest;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::responses_compaction::{
@@ -45,7 +46,7 @@ use crate::server::responses_compaction::{
     default_keep_tokens, encode_capsule, summary_message,
 };
 use crate::server::responses_translator::{TranslatedRequest, responses_request_to_chat};
-use crate::server::streaming_responses::{ResponseStreamEmitter, ResponseStreamSender};
+use crate::server::streaming_responses::ResponseStreamEmitter;
 use crate::server::thinking_budget::ThinkingBudget;
 use crate::server::types::ErrorResponse;
 use crate::server::types::responses_request::{CreateResponseRequest, ResponseInput};
@@ -403,7 +404,7 @@ pub(crate) fn prepend_compaction_item(
 /// compaction item at the current `output_index`, which is then advanced so
 /// the generated items follow it. Sends nothing when no compaction ran.
 pub(crate) fn send_compaction_events(
-    sender: &ResponseStreamSender,
+    sink: &dyn ResponseEventSink,
     emitter: &mut ResponseStreamEmitter,
     response_id: &str,
     auto: Option<&AutoCompaction>,
@@ -437,7 +438,7 @@ pub(crate) fn send_compaction_events(
         },
     ];
     for event in &events {
-        let _ = sender.send_event(event);
+        sink.emit(event);
     }
     emitter.advance_output_index();
 }

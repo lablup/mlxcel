@@ -96,6 +96,10 @@
 // metadata line records it; traces without that line left chunk 0 unanchored
 // and are not comparable with newer ones at chunk 0.
 //
+// `MLXCEL_TRACE_PREFILL_CHUNK=N` (with `MLXCEL_TRACE_BATCH_ROWS`) runs the
+// context pass in forwards of at most N tokens, as the generator prefills a
+// long prompt; see `logit_trace/kv_mode.rs`.
+//
 // `MLXCEL_TRACE_KV_CACHE_MODE` and `MLXCEL_TRACE_DECODE_STEP` select the KV
 // cache storage and end the context pass with a single-token step (see
 // `logit_trace/kv_mode.rs`); together they reach the quantized sliding-cache
@@ -109,12 +113,39 @@
 // compare directly. With `MLXCEL_TRACE_IMAGE`, row zero is the real image
 // prompt and the companion rows are text-only.
 //
+// `MLXCEL_TRACE_REASONING_EFFORT=LEVEL` steers a reasoning-effort model
+// (Raon-1 mini) at LEVEL for every traced forward.
+//
+// `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr after
+// the trace, so an arm that claims the absorbed path can be checked against
+// the path its forward actually took. Each chunk's stderr line also reports the
+// traced forward's wall time, which with a nonzero `PREFILL` measures the
+// multi-token continuation itself rather than the context pass.
+//
+// A build made with `MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1` also prints a
+// `# fused_norm_route` line to stderr after the trace: which implementation of
+// the fused residual join the traced forwards used (graph path, existing
+// kernel, or cuda-oxide node) and the adapter's counters (issue #2834). Other
+// builds print nothing.
+//
 // `MLXCEL_LOGIT_TRACE_SCALAR_REFERENCE=1` requires
 // `MLXCEL_TRACE_BATCH_ROWS=1` and routes each decode step through
 // `forward_with_sequence_id`. Use it to build a scalar reference trace for a
 // model whose baseline predates its `forward_batched_with_ids` override; the
 // trait default drops sequence IDs, so its nominal B=1 batched trace can read
 // the fallback state instead of the ID-keyed state established by prefill.
+//
+// `MLXCEL_TRACE_LAST_ROW=1` scores only each chunk's final position, through
+// `forward_last_logits` instead of the full-width forward. That is the prefill
+// shape whose Gemma 4 KV-shared tail can be trimmed to the sampled row (issue
+// #2410), so this arm is how the trim is judged: compare it against the
+// default arm with `scripts/compare_logit_traces.py --decided 2` and the
+// overlapping (chunk, pos) rows should be identical. Set
+// `MLXCEL_GEMMA4_NO_KV_SHARED_TAIL_TRIM=1` in this arm to run the control:
+// with the trim disabled the two traces must agree, which separates "the arm
+// itself is neutral" from "the trim moved the numbers". `RUST_LOG=mlxcel=debug`
+// reports `trimmed the KV-shared tail to the sampled row` from the model, so a
+// run that never reached the trimmed branch says so.
 //
 // `MLXCEL_TRACE_TP_SIZE=N` loads the model through the production tensor-
 // parallel loader. Combine it with `MLXCEL_TRACE_BATCH_ROWS=1` and `=4` to
@@ -132,6 +163,14 @@
 // is judged, since only image-conditioned text can move (#2388).
 // `MLXCEL_TRACE_ENABLE_THINKING=0`/`1` renders that template with
 // `enable_thinking` off or on instead of the server default (#2761).
+//
+// `MLXCEL_TRACE_VIDEO=PATH` is the same arm behind one video clip, sampled as
+// the Qwen-VL video path of `mlxcel generate --video` samples it
+// (`MLXCEL_TRACE_VIDEO_PROMPT`, `MLXCEL_TRACE_VIDEO_FPS`; see
+// `logit_trace/video.rs`). `MLXCEL_TRACE_VIDEO_FRAMES_DIR=DIR` writes the
+// sampled frames for the reference arm, and `MLXCEL_TRACE_VIDEO_UNTIMED=1`
+// withholds the clip's `second_per_grid`, the unit-spaced positions Qwen2.5-VL
+// used before #3234.
 
 #[path = "logit_trace/audio.rs"]
 mod audio;
@@ -141,6 +180,8 @@ mod gemma4;
 mod image_arm;
 #[path = "logit_trace/kv_mode.rs"]
 mod kv_mode;
+#[path = "logit_trace/video.rs"]
+mod video_arm;
 
 use anyhow::{Context, Result};
 use mlxcel::{LanguageModel, distributed::ShardConfig};
@@ -148,6 +189,13 @@ use mlxcel_core::{
     argpartition, array_to_raw_bytes, astype, eval, from_slice_i32, log_softmax, take_along_axis,
 };
 use std::io::Write;
+
+/// Rows scored at once by [`emit_rows_to`]. The f32 copy, the log-softmax
+/// and the partition's scratch over the vocabulary scale with this, not with
+/// the chunk: scoring a whole 4608-row Llama 4 Scout chunk (202,048-entry
+/// vocabulary) at once raised the peak 22.3 GB above the forward's, which at
+/// 9216 rows aborted the trace (#3132).
+const SCORE_BLOCK_ROWS: i32 = 1024;
 
 /// Read an evaluated array as `f32`, whatever it was stored as.
 fn to_f32_vec(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
@@ -249,7 +297,7 @@ fn main() -> Result<()> {
         .unwrap_or(0);
     let gemma4_mode = gemma4::Mode::from_env()?;
     let audio_arm = audio::AudioArm::from_env()?;
-    let kv_arm = kv_mode::KvArm::from_env()?;
+    let mut kv_arm = kv_mode::KvArm::from_env()?;
     anyhow::ensure!(
         !kv_arm.decode_step || (prefill > 0 && gemma4_mode.is_none()),
         "MLXCEL_TRACE_DECODE_STEP needs a nonzero prefill and no Gemma 4 mode"
@@ -266,6 +314,22 @@ fn main() -> Result<()> {
         );
     }
     let lora_env = std::env::var("MLXCEL_TRACE_LORA").ok();
+    // `MLXCEL_TRACE_LAST_ROW=1` (issue #2410) scores each chunk's final
+    // position through `forward_last_logits` instead of the full-width forward,
+    // which is the prefill shape whose Gemma 4 KV-shared tail gets trimmed.
+    // Only the standard text arm can express it.
+    let last_row = std::env::var("MLXCEL_TRACE_LAST_ROW").as_deref() == Ok("1");
+    if last_row {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && audio_arm.is_none()
+                && batch_rows.is_none()
+                && tp_size.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none()
+                && !contiguous,
+            "MLXCEL_TRACE_LAST_ROW supports the standard text arm only"
+        );
+    }
     if tp_size.is_some() {
         anyhow::ensure!(
             gemma4_mode.is_none()
@@ -351,6 +415,20 @@ fn main() -> Result<()> {
 
     kv_arm.install(&model)?;
 
+    // `MLXCEL_TRACE_REASONING_EFFORT=LEVEL` runs a reasoning-effort steering
+    // model (Raon-1 mini, #3435) at LEVEL, as `mlxcel generate
+    // --reasoning-effort` does; unset keeps the config's default level. Models
+    // that do not steer ignore it.
+    if let Ok(level) = std::env::var("MLXCEL_TRACE_REASONING_EFFORT") {
+        mlxcel_core::generate::LanguageModel::set_sequence_reasoning_effort(
+            &model,
+            None,
+            Some(&level),
+        )
+        .map_err(|err| anyhow::anyhow!("MLXCEL_TRACE_REASONING_EFFORT: {err}"))?;
+        println!("# reasoning_effort\t{level}");
+    }
+
     // The audio arm traces one transcript behind one clip, so the corpus is
     // the transcript and there is no chunking.
     if let Some(arm) = audio_arm {
@@ -364,6 +442,48 @@ fn main() -> Result<()> {
         println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
         let (row_offset, target, logits) = arm.forward(&model, &tokenizer, &text)?;
         return emit_rows(0, &logits, row_offset as i32, &target, topk);
+    }
+
+    if let Some(arm) = video_arm::VideoArm::from_env()? {
+        anyhow::ensure!(
+            gemma4_mode.is_none()
+                && prefill == 0
+                && !contiguous
+                && start_token == 0
+                && batch_rows.is_none()
+                && std::env::var_os("MLXCEL_TRACE_IMAGE").is_none(),
+            "MLXCEL_TRACE_VIDEO runs alone: no image arm, Gemma 4 mode, prefill, start token, \
+             or batch rows"
+        );
+        let traced = video_arm::trace(&arm, &model, &tokenizer, model_dir, &text, chunk_tokens)?;
+        println!("# model\t{model_dir}");
+        println!("# device\t{}", runtime.device);
+        println!("# video\t{}\tprompt\t{}", arm.video_path, arm.prompt);
+        // What the reference arm needs to see the same clip: the frame count,
+        // and the sampled fps to pass as `--video-fps`.
+        println!(
+            "# video_timing\tframes\t{}\ttotal_frames\t{}\tsource_fps\t{}\tsampled_fps\t{}\t\
+             second_per_grid\t{}\ttimed\t{}",
+            traced.sampled_frames,
+            traced.total_frames,
+            traced.source_fps,
+            traced.sampled_fps,
+            traced.second_per_grid,
+            !arm.untimed
+        );
+        let traced = traced.trace;
+        println!("# prompt_tokens\t{}", traced.prompt_ids.len());
+        let ids: Vec<String> = traced.prompt_ids.iter().map(i32::to_string).collect();
+        println!("# prompt_ids\t{}", ids.join(","));
+        println!("# corpus\t{text_file}\ttokens\t{}", traced.targets.len());
+        println!(
+            "# chunks\t1\tchunk_tokens\t{}\ttopk\t{topk}\tprefill\t0",
+            traced.targets.len()
+        );
+        println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
+        emit_rows(0, &traced.logits, 0, &traced.targets, topk)?;
+        eprintln!("  video arm traced ({} positions)", traced.targets.len());
+        return Ok(());
     }
 
     if let Some(arm) = image_arm::ImageArm::from_env()? {
@@ -482,8 +602,11 @@ fn main() -> Result<()> {
     if kv_arm.decode_step {
         println!("# decode_step\ttrue");
     }
+    if last_row {
+        println!("# last_row\ttrue");
+    }
     if let Some(rows) = batch_rows {
-        return trace_batched_chunks(
+        trace_batched_chunks(
             &model,
             &ids,
             &bos_prefix,
@@ -495,7 +618,11 @@ fn main() -> Result<()> {
             topk,
             &kv_arm,
             scalar_reference,
-        );
+        )?;
+        // The batched arm is the width-one decode shape, which is exactly
+        // where an absorbed-MLA claim has to be checked (issue #3102).
+        print_mla_stats();
+        return Ok(());
     }
     for c in 0..n_chunks {
         let start = trace_start + c * chunk_tokens;
@@ -522,7 +649,7 @@ fn main() -> Result<()> {
         if !contiguous || c == 0 {
             model.reset_runtime_state();
         }
-        let mut caches = model.make_caches();
+        let mut caches = kv_arm.make_caches(&model);
         // Optional context pass. Its rows are discarded; it exists so the
         // traced forward runs at the chunk's width against a realistic
         // context rather than against nothing. A chunk with no history (chunk
@@ -549,25 +676,70 @@ fn main() -> Result<()> {
                 }
             }
         }
-        let logits = if let Some(mode) = gemma4_mode {
+        let forward_started = std::time::Instant::now();
+        let logits = if last_row {
+            model.forward_last_logits(&input, &mut caches, None, input_len as usize - 1)
+        } else if let Some(mode) = gemma4_mode {
             mode.forward(&model, &input)?
         } else {
             model.forward(&input, &mut caches, None)
         };
-        anyhow::ensure!(
-            mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
-            "model.forward returned {:?}, not per-position logits",
-            mlxcel_core::array_shape(&logits)
-        );
-        // Row j predicts input[j + 1]; the rows that score `seg[1..]` start
-        // at `target_offset`.
-        emit_rows(c, &logits, target_offset, &seg[1..], topk)?;
+        // Force the lazy graph now so the timing covers the traced forward and
+        // nothing else; `emit_rows` would otherwise fold in its host-side
+        // top-k over the vocabulary.
+        eval(&logits);
+        let forward_ms = forward_started.elapsed().as_secs_f64() * 1e3;
+        if last_row {
+            // The sampled-row prefill scores only `seg[l - 1]`, so the caller
+            // needs one row and the model may trim its KV-shared tail to it
+            // (issue #2410). Emitted at the same `pos` the full-width arm
+            // writes for it (the last target index), so traces compare
+            // directly.
+            emit_rows_at(c, l as usize - 2, &logits, 0, &seg[l as usize - 1..], topk)?;
+        } else {
+            anyhow::ensure!(
+                mlxcel_core::array_shape(&logits).get(1) == Some(&input_len),
+                "model.forward returned {:?}, not per-position logits",
+                mlxcel_core::array_shape(&logits)
+            );
+            // Row j predicts input[j + 1]; the rows that score `seg[1..]` start
+            // at `target_offset`.
+            emit_rows(c, &logits, target_offset, &seg[1..], topk)?;
+        }
 
         drop(caches);
         mlxcel_core::clear_memory_cache();
-        eprintln!("  chunk {c} traced ({} positions)", l - 1);
+        eprintln!(
+            "  chunk {c} traced ({} positions, forward {forward_ms:.2} ms)",
+            if last_row { 1 } else { l - 1 }
+        );
     }
+    // `MLXCEL_TRACE_MLA_STATS=1` prints the MLA dispatch counters to stderr so
+    // an arm that claims a path can be checked against the path it took
+    // (issue #2408's multi-token gate was accepted this way).
+    print_mla_stats();
     Ok(())
+}
+
+/// Print the MLA dispatch counters when `MLXCEL_TRACE_MLA_STATS=1`.
+fn print_mla_stats() {
+    if std::env::var("MLXCEL_TRACE_MLA_STATS").as_deref() == Ok("1") {
+        eprintln!("# mla_paths\t{}", mlxcel_core::mla::stats::take().summary());
+    }
+    // In a build with the cuda-oxide fused-norm adapter (#2833), say which
+    // implementation of the residual join the traced forwards used, so a trace
+    // that claims the cuda-oxide route can be checked against its counters
+    // (#2834). Other builds have no counters and print nothing.
+    if let Some(route) = mlxcel_core::fused_norm_route::fused_norm_route_snapshot() {
+        eprintln!(
+            "# fused_norm_route\t{}\toxide_routes\t{}\tnative_routes\t{}\tlaunches\t{}\tinstalled\t{}",
+            route.route(),
+            route.oxide_routes,
+            route.native_routes,
+            route.launches,
+            route.installed
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,6 +756,10 @@ fn trace_batched_chunks(
     kv_arm: &kv_mode::KvArm,
     scalar_reference: bool,
 ) -> Result<()> {
+    // A scheduler-owned family keeps no per-sequence state in the model, so
+    // the by-id forwards below go through a pool (issue #3254). Every other
+    // family is passed through.
+    let model = &mlxcel::models::pooled_model::Pooled::new(model);
     for chunk in 0..n_chunks {
         let traced_start = trace_start + chunk * chunk_tokens;
         let rows = batched_trace_rows(ids.len(), traced_start, chunk_tokens, prefill, batch_rows)?;
@@ -600,19 +776,21 @@ fn trace_batched_chunks(
         for (row_idx, row) in rows.iter().enumerate() {
             let mut prefix = bos_prefix.to_vec();
             prefix.extend_from_slice(&ids[row.prefix_from..row.start]);
-            let mut row_caches = model.make_caches();
+            let mut row_caches = kv_arm.make_caches(model);
             model.prepare_sequence_state(seq_ids[row_idx]);
             model.bind_qwen_vl_mrope_state_to_sequence(seq_ids[row_idx]);
             if !prefix.is_empty() {
                 let split = kv_arm.context_split(prefix.len());
-                let input = from_slice_i32(&prefix[..split], &[1, split as i32]);
-                let warm = model.forward_with_sequence_id(
-                    &input,
-                    Some(seq_ids[row_idx]),
-                    &mut row_caches,
-                    None,
-                );
-                eval(&warm);
+                for piece in kv_arm.context_pieces(&prefix[..split]) {
+                    let input = from_slice_i32(piece, &[1, piece.len() as i32]);
+                    let warm = model.forward_with_sequence_id(
+                        &input,
+                        Some(seq_ids[row_idx]),
+                        &mut row_caches,
+                        None,
+                    );
+                    eval(&warm);
+                }
                 if split < prefix.len() {
                     let step = from_slice_i32(&prefix[split..], &[1, 1]);
                     let warm = model.forward_with_sequence_id(
@@ -742,6 +920,31 @@ fn emit_rows_to<W: Write>(
     targets: &[i32],
     topk: usize,
 ) -> Result<()> {
+    emit_rows_blocked(
+        writer,
+        c,
+        position_offset,
+        logits,
+        row_offset,
+        targets,
+        topk,
+        SCORE_BLOCK_ROWS,
+    )
+}
+
+/// [`emit_rows_to`] scoring `block` rows at a time.
+#[allow(clippy::too_many_arguments)]
+fn emit_rows_blocked<W: Write>(
+    writer: &mut W,
+    c: usize,
+    position_offset: usize,
+    logits: &mlxcel_core::MlxArray,
+    row_offset: i32,
+    targets: &[i32],
+    topk: usize,
+    block: i32,
+) -> Result<()> {
+    anyhow::ensure!(block > 0, "score block must be positive, got {block}");
     let shape = mlxcel_core::array_shape(logits);
     let n = targets.len() as i32;
     anyhow::ensure!(
@@ -754,23 +957,38 @@ fn emit_rows_to<W: Write>(
         "vocabulary {vocab} is smaller than topk {topk}"
     );
 
-    let rows = mlxcel_core::slice(logits, &[0, row_offset, 0], &[1, row_offset + n, vocab]);
-    let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
+    // Score in blocks of rows. Every step below is per row, so a block gives
+    // the same numbers as the whole chunk at a bounded peak.
+    let mut nll = Vec::with_capacity(n as usize);
+    let mut head_ids = Vec::with_capacity(n as usize * topk);
+    let mut head_logits = Vec::with_capacity(n as usize * topk);
+    let mut r0 = 0i32;
+    while r0 < n {
+        let r1 = (r0 + block).min(n);
+        let rows = mlxcel_core::slice(
+            logits,
+            &[0, row_offset + r0, 0],
+            &[1, row_offset + r1, vocab],
+        );
+        let rows = astype(&rows, mlxcel_core::dtype::FLOAT32);
 
-    // Per-position NLL of the corpus token, so a trace also carries
-    // everything `examples/perplexity` reports and the two never
-    // disagree about the same run.
-    let lp = log_softmax(&rows, -1);
-    let target_arr = from_slice_i32(targets, &[1, n, 1]);
-    let nll = to_f32_vec(&take_along_axis(&lp, &target_arr, -1));
+        // Per-position NLL of the corpus token, so a trace also carries
+        // everything `examples/perplexity` reports and the two never
+        // disagree about the same run.
+        let lp = log_softmax(&rows, -1);
+        let target_arr = from_slice_i32(&targets[r0 as usize..r1 as usize], &[1, r1 - r0, 1]);
+        nll.extend(to_f32_vec(&take_along_axis(&lp, &target_arr, -1)));
+        drop(lp);
 
-    // Top-k by partition rather than sort: the vocabulary is large and
-    // only the head is wanted. The k entries come back unordered and are
-    // sorted host-side, where k is single digits.
-    let part = argpartition(&rows, vocab - topk as i32, -1);
-    let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, n, vocab]);
-    let head_ids = to_i32_vec(&head);
-    let head_logits = to_f32_vec(&take_along_axis(&rows, &head, -1));
+        // Top-k by partition rather than sort: the vocabulary is large and
+        // only the head is wanted. The k entries come back unordered and are
+        // sorted host-side, where k is single digits.
+        let part = argpartition(&rows, vocab - topk as i32, -1);
+        let head = mlxcel_core::slice(&part, &[0, 0, vocab - topk as i32], &[1, r1 - r0, vocab]);
+        head_ids.extend(to_i32_vec(&head));
+        head_logits.extend(to_f32_vec(&take_along_axis(&rows, &head, -1)));
+        r0 = r1;
+    }
 
     for (j, target) in targets.iter().enumerate() {
         let position = position_offset + j;
@@ -802,7 +1020,7 @@ fn emit_rows_to<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchedTraceRow, batched_trace_rows, emit_rows_to, parse_trace_tp_size,
+        BatchedTraceRow, batched_trace_rows, emit_rows_blocked, emit_rows_to, parse_trace_tp_size,
         validate_scalar_reference,
     };
 
@@ -835,6 +1053,31 @@ mod tests {
             assert!(validate_scalar_reference(true, rows, has_image_arm).is_err());
         }
         validate_scalar_reference(false, Some(4), true).unwrap();
+    }
+
+    /// Scoring a chunk in row blocks writes the same trace as scoring it at
+    /// once, whatever the block size and however it splits the rows (#3132).
+    #[test]
+    fn blocked_scoring_matches_whole_chunk_scoring() {
+        let (rows, vocab) = (7usize, 33usize);
+        let values: Vec<f32> = (0..rows * vocab)
+            .map(|i| ((i * 37 + 11) % 101) as f32 * 0.173 - 8.0)
+            .collect();
+        let logits = mlxcel_core::from_slice_f32(&values, &[1, rows as i32, vocab as i32]);
+        let targets: Vec<i32> = (0..rows as i32 - 1).map(|j| (j * 5) % 33).collect();
+        let trace = |block: i32| {
+            let mut out = Vec::new();
+            emit_rows_blocked(&mut out, 2, 9, &logits, 1, &targets, 4, block).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let whole = trace(i32::MAX);
+        assert_eq!(whole.lines().count(), targets.len());
+        for block in [1, 2, 4, 6, 1024] {
+            assert_eq!(trace(block), whole, "block {block}");
+        }
+        let mut default = Vec::new();
+        emit_rows_to(&mut default, 2, 9, &logits, 1, &targets, 4).unwrap();
+        assert_eq!(String::from_utf8(default).unwrap(), whole);
     }
 
     #[test]

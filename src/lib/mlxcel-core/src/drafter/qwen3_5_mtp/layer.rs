@@ -38,6 +38,14 @@
 //!   bit-parity with single-token decode — greedy parity is enforced on the
 //!   TARGET's verify pass, and drafter numerics only influence acceptance.
 //!
+//! YaRN is shared with the target, not a difference (issue #3479): when the
+//! drafter config's `rope_parameters` names `yarn`, the binary-side loader
+//! builds the same divisor table and attention factor the target uses and
+//! installs them through [`Qwen35MtpAttention::set_yarn_rope`]. Upstream's
+//! MTP head reuses the YaRN-aware attention layer, so without it the drafter
+//! would propose from a different position encoding than the target verifies
+//! with.
+//!
 //! The Q projection carries the Qwen 3.5 `attn_output_gate` layout: `q_proj`
 //! emits queries and a sigmoid gate concatenated per head
 //! (`[B, L, num_heads, 2 * head_dim]`), and the attention output is
@@ -66,9 +74,51 @@ pub struct Qwen35MtpAttention {
     scale: f32,
     rope_dims: i32,
     rope_base: f32,
+    /// YaRN divisor table (`[rope_dims / 2]` float32, the form
+    /// `fast_rope_with_freqs` takes), set by [`Self::set_yarn_rope`].
+    /// `None` keeps the plain `rope_base` rotation.
+    rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// YaRN attention factor applied to the rotated lanes of Q and K. 1.0
+    /// when no table is set.
+    rope_attention_factor: f32,
 }
 
 impl Qwen35MtpAttention {
+    /// Rotate with the YaRN divisor table `freqs` and scale the rotated lanes
+    /// by `attention_factor`, as the target's `Qwen3NextAttention` does.
+    pub fn set_yarn_rope(&mut self, freqs: UniquePtr<MlxArray>, attention_factor: f32) {
+        self.rope_freqs = Some(freqs);
+        self.rope_attention_factor = attention_factor;
+    }
+
+    /// The YaRN table and attention factor, when [`Self::set_yarn_rope`] set
+    /// them; `None` means the plain `rope_theta` rotation.
+    pub fn yarn_rope(&self) -> Option<(&MlxArray, f32)> {
+        self.rope_freqs
+            .as_deref()
+            .map(|freqs| (freqs, self.rope_attention_factor))
+    }
+
+    /// Rotate a `[B, H, L, D]` block at `offset`: the YaRN table when one is
+    /// set, the plain `rope_base` rotation otherwise.
+    fn rope(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        match &self.rope_freqs {
+            Some(freqs) => ffi::fast_rope_with_freqs(
+                &crate::rope_lanes::scale_rotary_lanes(
+                    x,
+                    self.rope_dims,
+                    self.rope_attention_factor,
+                ),
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                freqs,
+            ),
+            None => ffi::fast_rope(x, self.rope_dims, false, self.rope_base, 1.0, offset),
+        }
+    }
+
     /// Attention forward over the drafter's own KV cache.
     ///
     /// - `x`: `[B, L, hidden_size]` input (post `input_layernorm`).
@@ -123,22 +173,8 @@ impl Qwen35MtpAttention {
         let values = ffi::transpose_axes(&values, &[0, 2, 1, 3]);
 
         // Partial rotary embedding at the drafter's logical position.
-        let queries = ffi::fast_rope(
-            &queries,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            1.0,
-            rope_offset,
-        );
-        let keys = ffi::fast_rope(
-            &keys,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            1.0,
-            rope_offset,
-        );
+        let queries = self.rope(&queries, rope_offset);
+        let keys = self.rope(&keys, rope_offset);
 
         let (cache_k, cache_v) = cache.update_and_fetch(keys, values);
 
@@ -206,6 +242,8 @@ impl Qwen35MtpAttention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: config.rope_dims(),
             rope_base: config.rope_theta(),
+            rope_freqs: None,
+            rope_attention_factor: 1.0,
         })
     }
 }
@@ -221,6 +259,18 @@ pub struct Qwen35MtpDecoderLayer {
 }
 
 impl Qwen35MtpDecoderLayer {
+    /// Install the YaRN table on this layer's attention; see
+    /// [`Qwen35MtpAttention::set_yarn_rope`].
+    pub fn set_yarn_rope(&mut self, freqs: &MlxArray, attention_factor: f32) {
+        self.attention
+            .set_yarn_rope(ffi::copy(freqs), attention_factor);
+    }
+
+    /// See [`Qwen35MtpAttention::yarn_rope`].
+    pub fn yarn_rope(&self) -> Option<(&MlxArray, f32)> {
+        self.attention.yarn_rope()
+    }
+
     /// Layer forward. Argument semantics match
     /// [`Qwen35MtpAttention::forward`].
     pub fn forward(

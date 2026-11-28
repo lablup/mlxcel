@@ -116,7 +116,16 @@ python3 -c "open('$repo/tests/fixtures/big.txt','w').write('x' * 400000)"
 git -C "$repo" add -A
 run_case "large-text-ignored" "$repo" 0 "binary-assets: OK"
 
-# 6. The real tree must pass, or the rules above do not describe it.
+# 6. Retired benchmark archives must not bypass the real declaration policy.
+repo="$work/retired-benchmark-archive"
+setup_repo "$repo" $((32 * 1024)) $((256 * 1024))
+cp "$under_test" "$repo/scripts/ci/check_binary_assets.py"
+mkdir -p "$repo/docs/benchmark_results/data"
+printf '7z\274\257\047\034\000' > "$repo/docs/benchmark_results/data/attempt.7z"
+git -C "$repo" add -A
+run_case "retired-benchmark-archive" "$repo" 1 "undeclared: docs/benchmark_results/data/attempt.7z"
+
+# 7. The real tree must pass, or the rules above do not describe it.
 run_case "repository-as-committed" "$(cd "$script_dir/../.." && pwd)" 0 "binary-assets: OK"
 
 if [[ "$failures" -ne 0 ]]; then

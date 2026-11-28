@@ -195,14 +195,18 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 
@@ -248,10 +252,12 @@ fn run(prompt_len: usize, chunk: usize, align: bool, backend: DecodeStorageBacke
         if snapshot.is_none()
             && let Some(seq_id) = sched.active_batch.sequence_ids().first().copied()
         {
-            snapshot = sched
-                .engine
-                .model()
-                .snapshot_sequence_state(seq_id, prompt_len);
+            snapshot = crate::server::prompt_cache::state_snapshot::snapshot_sequence_state(
+                sched.engine.model(),
+                sched.engine.pool(),
+                seq_id,
+                prompt_len,
+            );
         }
         sched.finalize_completed();
         if sched.active_batch.is_empty()
@@ -394,6 +400,10 @@ fn padded_prefill_keeps_snapshot_reuse() {
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
+        model_reasoning_effort: None,
     };
     let enqueue = |sched: &mut BatchScheduler, prompt: Vec<i32>| {
         let mut opts = options(1);

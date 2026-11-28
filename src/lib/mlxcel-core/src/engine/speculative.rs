@@ -33,7 +33,7 @@ use super::direct::{
 use super::direct_decode::{DecodeState, Teardown, single};
 use super::verify_round::token_only_rounds_unsupported;
 use super::{Engine, EngineError, StepBatch};
-use crate::cache::{DecodeLookaheadAppendScope, SequenceId};
+use crate::cache::{DecodeLookaheadAppendScope, LayerStateForward, SequenceId};
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi;
 use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
@@ -54,15 +54,20 @@ impl<M: LanguageModel> Engine<M> {
         id: SequenceId,
         input: &MlxArray,
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
-        let caches = self
-            .pool
-            .get_caches_mut(id)
-            .ok_or(EngineError::MissingSequence(id))?;
         let logits = {
             let _speculative = DecodeLookaheadAppendScope::enter();
-            self.model
-                .try_forward_with_sequence_id(input, Some(id), caches, None)
-                .map_err(EngineError::Forward)?
+            match self.forward_layer_state_row(id, LayerStateForward::tokens(input)) {
+                Some(logits) => logits?,
+                None => {
+                    let caches = self
+                        .pool
+                        .get_caches_mut(id)
+                        .ok_or(EngineError::MissingSequence(id))?;
+                    self.model
+                        .try_forward_with_sequence_id(input, Some(id), caches, None)
+                        .map_err(EngineError::Forward)?
+                }
+            }
         };
         self.sync_sequence_storage(id);
         Ok(logits)
@@ -390,11 +395,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                decode_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         };
         Ok(SpeculativeRun {
             run: DirectRun {

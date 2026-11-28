@@ -129,7 +129,7 @@ async fn request_completion_feeds_the_llama_counters() {
     let state = metrics_state(true);
     state
         .batch_observability
-        .record_request_completion(100, 30, 400, 2000, 50);
+        .record_request_completion(100, 30, 400, 2000, 50, Some(49));
     state.batch_observability.record_decode_step(2);
     state.batch_observability.record_decode_step(0);
     let (_, _, body) = scrape(state).await;
@@ -160,7 +160,7 @@ async fn throughput_gauges_reset_between_scrapes() {
     let state = metrics_state(true);
     state
         .batch_observability
-        .record_request_completion(10, 0, 1000, 1000, 100);
+        .record_request_completion(10, 0, 1000, 1000, 100, Some(99));
     let (_, _, first) = scrape(state.clone()).await;
     let (_, _, second) = scrape(state).await;
     let value = |body: &str, name: &str| -> f64 {

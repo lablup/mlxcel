@@ -107,6 +107,7 @@ fn test_payload_size_with_mask() {
         seq_len: 1,
         timestamp_ns: 0,
         reply_nonce: None,
+        last_pos: None,
     };
     assert_eq!(msg.payload_size(), tensor.len() + mask.len() + pos.len());
 }

@@ -158,7 +158,7 @@ use crate::server::speculative_dispatch::TokenOnlyRounds;
 /// verify rounds and decodes plainly.
 ///
 /// Measured on GB10 (Qwen3-1.7B 4-bit, B=1, 256 tokens;
-/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): on paged
+/// `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11`): on paged
 /// storage the flag-on / flag-off decode ratio for a copy prompt and an open
 /// question was 2.69x / 1.27x at 1024 tokens, 2.79x / 1.64x at 2048 and
 /// 1.42x / 1.12x at 4096, then 1.15x / 0.62x at 8192, where the gathered
@@ -173,7 +173,7 @@ use crate::server::speculative_dispatch::TokenOnlyRounds;
 /// 4608 is the smallest 512-token boundary covering that measured envelope,
 /// while the 8192-token control remains excluded. This is admission evidence,
 /// not a claim that every context up to this limit is profitable. See
-/// `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md`.
+/// `https://github.com/lablup/mlxcel/blob/2dc8ed47b30dc204d892328098e8cc34ec02ddc1/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md`.
 pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = Some(4608);
 
 /// A sequence's token-only drafter state, carried on [`SequenceInfo`]

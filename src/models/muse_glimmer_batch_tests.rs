@@ -249,3 +249,18 @@ fn release_reset_and_snapshot_restore_make_reuse_equivalent() {
     mlxcel_core::eval(&second);
     assert_close(&logits_row(&first, 0), &logits_row(&second, 0));
 }
+
+/// The synthetic vocabulary has eight entries, so the shared prompt (ids up
+/// to 9) does not fit.
+const LAST_ROW_TOKENS: &[i32] = &[3, 1, 4, 1, 5, 2, 6, 5, 3, 7];
+
+#[test]
+fn muse_glimmer_last_row_logits() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || build_wrapper(&test_config());
+    crate::models::last_row_logits_harness::assert_last_row_logits(make, LAST_ROW_TOKENS);
+    crate::models::last_row_logits_harness::assert_last_row_logits_with_embeddings(
+        make,
+        LAST_ROW_TOKENS,
+    );
+}

@@ -127,6 +127,12 @@ pub enum RemoteStageCommand {
         input_ids: Vec<u8>,
         #[serde(with = "super::wire_bytes::base64_bytes_opt")]
         attention_mask: Option<Vec<u8>>,
+        /// Sequence position the request samples (a prefill's last prompt
+        /// row); the final stage projects only that row through the LM head
+        /// (#3074). Absent from an older coordinator, which gets every
+        /// position as before.
+        #[serde(default)]
+        last_pos: Option<u32>,
     },
     ProbeState,
 }
@@ -569,6 +575,7 @@ impl RemoteStageService {
                 micro_batch_id,
                 input_ids,
                 attention_mask,
+                last_pos,
             } => {
                 self.handle_run_entry(
                     reply_addr,
@@ -577,6 +584,7 @@ impl RemoteStageService {
                     micro_batch_id,
                     &input_ids,
                     attention_mask.as_deref(),
+                    last_pos,
                 )
                 .await
             }
@@ -603,6 +611,7 @@ impl RemoteStageService {
         micro_batch_id: u32,
         input_ids: &[u8],
         attention_mask: Option<&[u8]>,
+        last_pos: Option<u32>,
     ) -> Result<bool> {
         if self.stage_index != 0 {
             self.send_request_error(
@@ -666,10 +675,11 @@ impl RemoteStageService {
                 .caches_by_request
                 .entry(request_id.clone())
                 .or_insert_with(|| self.executor.make_caches());
-            self.executor.execute(
+            self.executor.execute_last_row(
                 StageExecutionInput::TokenIds(input_ids.as_ref().unwrap()),
                 caches,
                 attention_mask.as_ref().and_then(|mask| mask.as_ref()),
+                last_pos.map(|pos| pos as usize),
             )
         };
         match output {
@@ -724,7 +734,8 @@ impl RemoteStageService {
                             None,
                             seq_len,
                         )
-                        .with_reply_nonce(Some(nonce)),
+                        .with_reply_nonce(Some(nonce))
+                        .with_last_pos(last_pos),
                     )
                     .await
                 {
@@ -801,10 +812,11 @@ impl RemoteStageService {
                 .caches_by_request
                 .entry(request_key.to_string())
                 .or_insert_with(|| self.executor.make_caches());
-            self.executor.execute(
+            self.executor.execute_last_row(
                 StageExecutionInput::HiddenStates(hidden_states.as_ref().unwrap()),
                 caches,
                 attention_mask.as_ref().and_then(|mask| mask.as_ref()),
+                activation.last_pos.map(|pos| pos as usize),
             )?
         };
         match output {
@@ -831,7 +843,8 @@ impl RemoteStageService {
                     None,
                     seq_len,
                 )
-                .with_reply_nonce(activation.reply_nonce);
+                .with_reply_nonce(activation.reply_nonce)
+                .with_last_pos(activation.last_pos);
                 // A downstream that cannot be reached fails this request,
                 // not the stage: tell the coordinator so it does not wait
                 // out its timeout (#2712).

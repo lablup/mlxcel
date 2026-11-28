@@ -122,7 +122,7 @@ fn detector_dispatch_rejects_unknown_model_type() {
         r#"{"model_type":"not_a_detector"}"#,
     )
     .unwrap();
-    let error = crate::vision::detection::load_detector(directory.path(), 0.3)
+    let error = crate::vision::detection::load_detector(directory.path(), Some(0.3))
         .err()
         .expect("unknown detector must fail");
     assert_eq!(error, "unsupported detector model_type 'not_a_detector'");

@@ -310,6 +310,9 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// their VLM wrappers) builds the sequence's caches in
     /// `prepare_sequence_state` from the modes it holds at that moment, and
     /// a later `set_kv_cache_layer_modes` rebuilds only its fallback slot.
+    /// A scheduler-owned family (Gemma 3, Qwen 3.5) is the same case one step
+    /// earlier: the pool builds its layer state inside [`Engine::open`] from
+    /// the modes the model holds then.
     ///
     /// A model that cannot batch keeps one set of caches inside itself
     /// (NemotronNAS and LongCat-Flash / LongCat-Flash-Ngram hold them in one
@@ -535,6 +538,9 @@ impl<M: LanguageModel> DirectEngine<M> {
         let gen_count = generated.len();
         let prefill_ms = prefill_time.as_secs_f64() * 1000.0;
         let decode_ms = decode_time.as_secs_f64() * 1000.0;
+        // The first token comes out of `complete_prefill`, before
+        // `decode_start`, so the window produced the rest.
+        let decode_count = gen_count.saturating_sub(1);
         let stats = GenerationStats {
             prompt_tokens: prompt_count,
             generated_tokens: gen_count,
@@ -545,11 +551,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                gen_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         };
         Ok(DirectRun {
             tokens: generated,
@@ -570,8 +572,13 @@ impl<M: LanguageModel> DirectEngine<M> {
         // makes that choice once for the prompt, not once per piece.
         let _span = crate::prefill_span::announce(prompt_tokens.len() as i32);
         let mut last_logits = None;
-        for piece in plan.pieces() {
+        for (index, piece) in plan.pieces().iter().enumerate() {
             let tokens = &prompt_tokens[piece.range.clone()];
+            let upcoming = plan
+                .pieces()
+                .get(index + 1)
+                .map_or(&[][..], |next| &prompt_tokens[next.range.clone()]);
+            let _lookahead = crate::prefill_lookahead::announce(upcoming);
             // A fresh sequence's KV state holds exactly the earlier pieces.
             let (input, pad_mask) =
                 super::piece_input(&plan, piece, tokens, piece.range.start as i32);

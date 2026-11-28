@@ -1,0 +1,58 @@
+{
+  "runtime_source": "8c7b4412d37b91807f8d688ba2f3febbc7a7e41f",
+  "base": "2e46fc09e47208898e708d7090b196ec47b22357",
+  "core_tests": {
+    "passed": 560,
+    "ignored": 22,
+    "goldens_byte_exact": true,
+    "every_family_weight_layouts": true
+  },
+  "display_tests": 7,
+  "stream_filter_tests": 146,
+  "falcon_cpu": {
+    "passed": 2,
+    "synthetic_norm_modes": [
+      "none",
+      "before",
+      "after"
+    ],
+    "real_oracle_tokens": 40
+  },
+  "falcon_cuda": {
+    "passed": 2,
+    "synthetic_norm_modes": [
+      "none",
+      "before",
+      "after"
+    ],
+    "real_oracle_tokens": 40
+  },
+  "cuda_hybrid_regressions": 5,
+  "cuda_mamba2_single_regressions": 6,
+  "cuda_cli_oracle_tokens": 40,
+  "cuda_displayed_nonstream": {
+    "exact": 4,
+    "total": 4
+  },
+  "cuda_displayed_sse": {
+    "exact": 4,
+    "total": 4
+  },
+  "germany_suffix": "  \n",
+  "server_reaped": true,
+  "gpu_lock_released": true,
+  "fmt": "pass",
+  "python_syntax": "pass",
+  "hip_evidence_source": "852129eb1b4bf45d957f4c63b082d9d0276e4951",
+  "hip_final_head_replay": "pending external host; old HIP numerical pass is not new-head evidence",
+  "hosted_ci": "canceled under local-validation policy",
+  "clippy": "pass: cargo clippy --profile test-fast -p mlxcel-xla --lib -- -D warnings",
+  "env_var_docs": {
+    "status": "pass",
+    "discovered": 398,
+    "documented": 265,
+    "allowlisted": 133,
+    "python_tests": 15
+  },
+  "post_runtime_changes": "CI environment allowlist and evidence/report documentation only"
+}

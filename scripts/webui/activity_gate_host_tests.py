@@ -15,7 +15,7 @@ import tempfile
 import time
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -86,7 +86,7 @@ class ActivityGateHostTests(unittest.TestCase):
         return proc
 
     def args(self, **extra: object) -> Namespace:
-        base = {"installed_dir": self.installed, "run_root": self.root, "host_state": self.root / "host-state.json", "quiet_timeout": 30.0, "quiet_window": 3, "max_runnable": 4.0, "pid_file": self.root / "gate.pid"}
+        base = {"installed_dir": self.installed, "run_root": self.root, "host_state": self.root / "host-state.json", "quiet_timeout": 30.0, "quiet_window": 3, "max_runnable": 4.0, "min_free_gb": 0.0, "pid_file": self.root / "gate.pid"}
         base.update(extra)
         return Namespace(**base)
 
@@ -246,6 +246,50 @@ class ActivityGateHostTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(clock.t, 0, "no quiet wait before a GPU conflict is reported")
         self.assertIn("GPU compute processes are already present", out.getvalue())
+
+    def test_precheck_refuses_a_low_disk_before_anything_else(self) -> None:
+        clock = Clock()
+        low = mock.Mock(return_value=shutil._ntuple_diskusage(100 * 10**9, 99 * 10**9 + 600 * 10**6, 400 * 10**6))
+        with redirect_stdout(StringIO()) as out:
+            rc = host.precheck(self.args(min_free_gb=5.0), gpu_query=lambda: self.fail("must refuse before the GPU check"), read_runnable=lambda: self.fail("must refuse before the quiet wait"), sleep=clock.sleep, clock=clock, disk_usage=low)
+        self.assertEqual(rc, 1)
+        self.assertEqual(clock.t, 0)
+        low.assert_called_once_with(self.root)
+        self.assertIn(f"::error::infrastructure: only 0.4 GB free on {self.root}, need 5 GB", out.getvalue())
+        state = json.loads((self.root / "host-state.json").read_text())
+        self.assertIn("infrastructure: only 0.4 GB free", state["refused"])
+        self.assertEqual(state["disk"], {"path": str(self.root), "free_bytes": 400 * 10**6, "min_free_bytes": 5 * 10**9})
+
+    def test_precheck_proceeds_when_enough_disk_is_free(self) -> None:
+        clock = Clock()
+        enough = mock.Mock(return_value=shutil._ntuple_diskusage(100 * 10**9, 90 * 10**9, 10 * 10**9))
+        with redirect_stdout(StringIO()) as out:
+            rc = host.precheck(self.args(min_free_gb=5.0), gpu_query=lambda: [], read_runnable=lambda: 0, sleep=clock.sleep, clock=clock, disk_usage=enough)
+        self.assertEqual(rc, 0)
+        self.assertIn("host quiet after", out.getvalue())
+        state = json.loads((self.root / "host-state.json").read_text())
+        self.assertEqual(state["disk"]["free_bytes"], 10 * 10**9)
+        self.assertNotIn("refused", state)
+
+    def test_min_free_gb_defaults_to_five_and_rejects_a_negative_value(self) -> None:
+        base = ["precheck", "--installed-dir", "/i", "--run-root", "/r"]
+        self.assertEqual(host.parse_args(base).min_free_gb, 5.0)
+        self.assertEqual(host.parse_args([*base, "--min-free-gb", "0"]).min_free_gb, 0.0)
+        for bad in ("-1", "nan", "inf", "-inf"):
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit, msg=bad):
+                host.parse_args([*base, "--min-free-gb", bad])
+        # The option belongs to precheck only; reap must still parse without it.
+        self.assertEqual(host.parse_args(["reap", "--installed-dir", "/i", "--run-root", "/r", "--pid-file", "/p"]).command, "reap")
+
+    def test_precheck_keeps_the_refusal_when_the_host_state_write_fails(self) -> None:
+        clock = Clock()
+        low = mock.Mock(return_value=shutil._ntuple_diskusage(100 * 10**9, 99 * 10**9 + 600 * 10**6, 400 * 10**6))
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(host, "write_atomic", side_effect=full), redirect_stdout(StringIO()) as out:
+            rc = host.precheck(self.args(min_free_gb=5.0), gpu_query=lambda: [], read_runnable=lambda: 0, sleep=clock.sleep, clock=clock, disk_usage=low)
+        self.assertEqual(rc, 1)
+        self.assertIn("::error::infrastructure: only 0.4 GB free", out.getvalue())
+        self.assertIn("::warning::could not write the host state file", out.getvalue())
 
     def test_reap_without_a_pid_file_or_survivors_is_a_clean_no_op(self) -> None:
         with redirect_stdout(StringIO()) as out:

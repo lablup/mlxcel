@@ -140,6 +140,123 @@ fn unified_key_normalization_prefixes() {
     );
 }
 
+/// A module-layout export (`r0b0tlab/gemma-4-12B-it-nvfp4` and the other
+/// ModelOpt exports of this model) keeps the vision embedder's layers under
+/// `embed_vision.` and the projection under `embed_vision.multimodal_embedder.`.
+/// The loader reads `vision_embedder.*` and `embed_vision.embedding_projection`,
+/// so such a checkpoint failed with `Weight not found:
+/// vision_embedder.patch_ln1.weight`.
+#[test]
+fn unified_key_normalization_maps_the_module_layout_vision_keys() {
+    for (key, want) in [
+        (
+            "model.embed_vision.patch_dense.weight",
+            "vision_embedder.patch_dense.weight",
+        ),
+        (
+            "model.embed_vision.patch_dense.bias",
+            "vision_embedder.patch_dense.bias",
+        ),
+        (
+            "model.embed_vision.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "model.embed_vision.patch_ln2.bias",
+            "vision_embedder.patch_ln2.bias",
+        ),
+        (
+            "model.embed_vision.pos_embedding",
+            "vision_embedder.pos_embedding",
+        ),
+        (
+            "model.embed_vision.pos_norm.weight",
+            "vision_embedder.pos_norm.weight",
+        ),
+        (
+            "model.embed_vision.multimodal_embedder.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        // The same keys without the leading `model.`.
+        (
+            "embed_vision.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "embed_vision.multimodal_embedder.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        // The checkpoint layout, the audio projection and a text key that
+        // merely contains a layer name are left alone.
+        (
+            "model.embed_vision.embedding_projection.weight",
+            "embed_vision.embedding_projection.weight",
+        ),
+        (
+            "model.vision_embedder.patch_ln1.weight",
+            "vision_embedder.patch_ln1.weight",
+        ),
+        (
+            "model.embed_audio.embedding_projection.weight",
+            "embed_audio.embedding_projection.weight",
+        ),
+        (
+            "model.language_model.layers.0.pos_norm.weight",
+            "language_model.model.layers.0.pos_norm.weight",
+        ),
+    ] {
+        assert_eq!(normalize_gemma4_unified_key(key), want, "{key}");
+    }
+}
+
+/// The whole map of a module-layout export comes out under the names the
+/// vision embedder and the projection are loaded from, with the values intact.
+#[test]
+fn unified_sanitize_maps_a_module_layout_vision_embedder() {
+    let module_layout = [
+        "model.embed_vision.patch_dense.weight",
+        "model.embed_vision.patch_dense.bias",
+        "model.embed_vision.patch_ln1.weight",
+        "model.embed_vision.patch_ln1.bias",
+        "model.embed_vision.patch_ln2.weight",
+        "model.embed_vision.patch_ln2.bias",
+        "model.embed_vision.pos_embedding",
+        "model.embed_vision.pos_norm.weight",
+        "model.embed_vision.pos_norm.bias",
+        "model.embed_vision.multimodal_embedder.embedding_projection.weight",
+    ];
+    let checkpoint_layout = [
+        "vision_embedder.patch_dense.weight",
+        "vision_embedder.patch_dense.bias",
+        "vision_embedder.patch_ln1.weight",
+        "vision_embedder.patch_ln1.bias",
+        "vision_embedder.patch_ln2.weight",
+        "vision_embedder.patch_ln2.bias",
+        "vision_embedder.pos_embedding",
+        "vision_embedder.pos_norm.weight",
+        "vision_embedder.pos_norm.bias",
+        "embed_vision.embedding_projection.weight",
+    ];
+    let mut raw = WeightMap::new();
+    for (index, key) in module_layout.iter().enumerate() {
+        raw.insert(
+            key.to_string(),
+            mlxcel_core::from_slice_f32(&[index as f32; 2], &[2]),
+        );
+    }
+    let out = sanitize_gemma4_unified_weights(raw, false);
+    assert_eq!(out.len(), checkpoint_layout.len());
+    for (index, key) in checkpoint_layout.iter().enumerate() {
+        let value = out.get(*key).unwrap_or_else(|| panic!("missing {key}"));
+        mlxcel_core::eval(value);
+        assert_eq!(
+            mlxcel_core::utils::array_to_vec_f32(value),
+            vec![index as f32; 2],
+            "{key}"
+        );
+    }
+}
+
 #[test]
 fn unified_sanitize_drops_rotary_and_lm_head() {
     let mut raw = WeightMap::new();
@@ -504,4 +621,153 @@ fn unified_nvfp4_unflagged_global_scale_fails_at_the_switch_plane() {
         err.contains(&format!("{prefix}.global_scale")),
         "the error must name the switch_glu.gate_proj prefix: {err}"
     );
+}
+
+/// One NVFP4 linear (8 x 64, tensor scale 0.5) under `base`, in the tensor
+/// names NVIDIA ModelOpt writes or the ones compressed-tensors
+/// (llm-compressor) writes for the same bytes.
+fn insert_nvfp4_linear(weights: &mut WeightMap, base: &str, compressed_tensors: bool) {
+    let codes: Vec<u8> = (0..8 * 32).map(|i| (i * 37 + 19) as u8).collect();
+    let block_scales: Vec<u8> = (0..8 * 4).map(|i| [0x20, 0x28, 0x30][i % 3]).collect();
+    let codes = mlxcel_core::from_bytes(&codes, &[8, 32], dtype::UINT8);
+    weights.insert(
+        format!("{base}.weight_scale"),
+        mlxcel_core::from_bytes(&block_scales, &[8, 4], dtype::UINT8),
+    );
+    if compressed_tensors {
+        weights.insert(format!("{base}.weight_packed"), codes);
+        weights.insert(
+            format!("{base}.weight_global_scale"),
+            mlxcel_core::from_slice_f32(&[2.0], &[1]),
+        );
+        weights.insert(
+            format!("{base}.input_global_scale"),
+            mlxcel_core::from_slice_f32(&[37.5], &[1]),
+        );
+    } else {
+        weights.insert(format!("{base}.weight"), codes);
+        weights.insert(
+            format!("{base}.weight_scale_2"),
+            mlxcel_core::from_slice_f32(&[0.5], &[1]),
+        );
+    }
+}
+
+/// A `gemma4_unified` checkpoint in the `transformers` key layout: one NVFP4
+/// linear in the language model, a float text tensor and a float vision
+/// embedder tensor.
+fn nvfp4_unified_checkpoint(compressed_tensors: bool) -> WeightMap {
+    let mut weights = WeightMap::new();
+    insert_nvfp4_linear(
+        &mut weights,
+        "model.language_model.layers.0.mlp.gate_proj",
+        compressed_tensors,
+    );
+    weights.insert(
+        "model.language_model.norm.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[1.0; 64], &[64]),
+    );
+    weights.insert(
+        "model.vision_embedder.patch_dense.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.25; 16], &[4, 4]),
+    );
+    weights
+}
+
+/// The unified loader did not repack an NVFP4 export, unlike `load_gemma4_vlm`.
+/// A compressed-tensors one (`RedHatAI/gemma-4-12B-it-NVFP4`) failed with
+/// `Weight not found`; a ModelOpt one reached the linear loaders as packed
+/// bytes. Both are now repacked, to the same planes, under the sanitized keys.
+#[test]
+fn unified_nvfp4_export_is_repacked_for_both_producers() {
+    let base = "language_model.model.layers.0.mlp.gate_proj";
+    let mut planes = Vec::new();
+    for compressed_tensors in [false, true] {
+        let weights = resolve_and_sanitize_gemma4_unified_weights(
+            nvfp4_unified_checkpoint(compressed_tensors),
+            &serde_json::json!({}),
+            false,
+        )
+        .expect("sanitize");
+        for gone in [
+            "weight_packed",
+            "weight_global_scale",
+            "input_global_scale",
+            "weight_scale",
+            "weight_scale_2",
+        ] {
+            assert!(
+                !weights.contains_key(&format!("{base}.{gone}")),
+                "compressed-tensors {compressed_tensors}: {gone}"
+            );
+        }
+        assert!(weights.contains_key(&format!("{base}.scales")));
+        let weight = weights.get(&format!("{base}.weight")).expect("weight");
+        assert_ne!(
+            mlxcel_core::array_dtype(weight),
+            dtype::UINT8,
+            "compressed-tensors {compressed_tensors}: the packed bytes were left as they were"
+        );
+        // Everything else is routed as before.
+        assert!(weights.contains_key("language_model.model.norm.weight"));
+        assert!(weights.contains_key("vision_embedder.patch_dense.weight"));
+
+        let mut keys: Vec<String> = weights.keys().cloned().collect();
+        keys.sort();
+        let bytes: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| {
+                let array = weights.get(key).unwrap();
+                mlxcel_core::eval(array);
+                mlxcel_core::array_to_raw_bytes(array)
+            })
+            .collect();
+        planes.push((keys, bytes));
+    }
+    assert_eq!(
+        planes[0], planes[1],
+        "the two producers write one weight format"
+    );
+}
+
+/// Without a tensor scale beside it nothing is an NVFP4 triplet: a float
+/// checkpoint, and a `uint8` plane with only a `weight_scale` (the FP8
+/// layouts), come out exactly as the key sanitizer alone leaves them.
+#[test]
+fn unified_checkpoint_without_nvfp4_triplets_is_left_as_sanitized() {
+    let build = || {
+        let mut weights = WeightMap::new();
+        weights.insert(
+            "model.language_model.norm.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0; 64], &[64]),
+        );
+        weights.insert(
+            "model.language_model.layers.0.mlp.gate_proj.weight".to_string(),
+            mlxcel_core::from_bytes(&[7u8; 32], &[4, 8], dtype::UINT8),
+        );
+        weights.insert(
+            "model.language_model.layers.0.mlp.gate_proj.weight_scale".to_string(),
+            mlxcel_core::from_slice_f32(&[0.5; 4], &[4, 1]),
+        );
+        weights
+    };
+    let resolved =
+        resolve_and_sanitize_gemma4_unified_weights(build(), &serde_json::json!({}), false)
+            .expect("sanitize");
+    let sanitized = sanitize_gemma4_unified_weights(build(), false);
+    let mut keys: Vec<&String> = resolved.keys().collect();
+    keys.sort();
+    let mut expected: Vec<&String> = sanitized.keys().collect();
+    expected.sort();
+    assert_eq!(keys, expected);
+    for key in keys {
+        let (got, want) = (resolved.get(key).unwrap(), sanitized.get(key).unwrap());
+        mlxcel_core::eval(got);
+        mlxcel_core::eval(want);
+        assert_eq!(
+            mlxcel_core::array_to_raw_bytes(got),
+            mlxcel_core::array_to_raw_bytes(want),
+            "{key}"
+        );
+    }
 }

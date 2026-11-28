@@ -688,3 +688,34 @@ fn rejects_a_sliding_window_a_dense_prefill_mask_cannot_take() {
         assert!(err.contains(&format!("got {window}")), "{err}");
     }
 }
+
+#[test]
+fn cohere2_moe_last_row_logits_match_the_full_forward() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let make = || {
+        let cfg = tiny_config("sigmoid", "average");
+        Cohere2MoeModel::from_weights(&tiny_weights(&cfg), &cfg).expect("build tiny model")
+    };
+    // The fixture's vocabulary holds ten ids.
+    let tokens = &[3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 7];
+    crate::models::last_row_logits_harness::assert_last_row_logits(make, tokens);
+    crate::models::last_row_logits_harness::assert_last_row_logits_with_embeddings(make, tokens);
+}
+
+#[test]
+fn maskless_padded_prefill_matches_masked_past_the_sliding_window() {
+    use crate::models::padded_prefill_parity_tests::{assert_arms_agree, prompt, standard_arm};
+    use mlxcel_core::generate::LanguageModel;
+    let _guard = crate::models::padded_prefill_parity_tests::guard();
+    for gate_act in ["sigmoid", "softmax"] {
+        let cfg = tiny_config(gate_act, "average");
+        let weights = tiny_weights(&cfg);
+        let model = Cohere2MoeModel::from_weights(&weights, &cfg).expect("build tiny model");
+        assert!(model.supports_maskless_padded_prefill());
+        // 20 real tokens run past the 16-token window; 32 is the tile.
+        let tokens = prompt(20, cfg.vocab_size as i32);
+        assert_arms_agree(&format!("cohere2_moe {gate_act}"), |arm| {
+            standard_arm(&model, arm, &tokens, 32, 3, None)
+        });
+    }
+}

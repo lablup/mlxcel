@@ -625,3 +625,40 @@ fn chain_parity_block_matches_single_steps_bit_exactly_on_ops_path() {
         mlxcel_core::array_dtype(&y_ref)
     );
 }
+
+/// The bounded gate upcasts a bf16 `a` before adding the f32 `dt_bias`
+/// (issue #3457): bit for bit the explicit float32 form. Metal promotes
+/// bf16 + f32 to f32 on its own, so this passes there before and after the
+/// cast; the CUDA overlay types the sum bf16, which rounded it before.
+#[test]
+fn bounded_gate_upcasts_a_bf16_input_before_adding_dt_bias() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let (h, d) = (2, 8);
+    let a_vals: Vec<f32> = (0..2 * h * d)
+        .map(|i| (i as f32 * 0.37).sin() * 3.0 + 0.001 * i as f32)
+        .collect();
+    let a = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&a_vals, &[1, 2, h, d]),
+        dtype::BFLOAT16,
+    );
+    let dt_vals: Vec<f32> = (0..h * d).map(|i| 0.1234567 + 0.0137 * i as f32).collect();
+    let dt_bias = mlxcel_core::from_slice_f32(&dt_vals, &[h, d]);
+    let a_log = mlxcel_core::from_slice_f32(&[0.25, -0.5], &[h, 1]);
+
+    let got = super::compute_g_lower_bounded(&a_log, &a, &dt_bias, Some(-5.0));
+    let a_f32 = mlxcel_core::astype(&a, dtype::FLOAT32);
+    let sum = mlxcel_core::add(&a_f32, &dt_bias);
+    let inner = mlxcel_core::sigmoid(&mlxcel_core::multiply(&mlxcel_core::exp(&a_log), &sum));
+    let want = mlxcel_core::exp(&mlxcel_core::multiply_scalar(&inner, -5.0));
+
+    assert_eq!(mlxcel_core::array_dtype(&got), dtype::FLOAT32);
+    mlxcel_core::eval(&got);
+    mlxcel_core::eval(&want);
+    let bits = |x: &mlxcel_core::MlxArray| -> Vec<u32> {
+        mlxcel_core::utils::array_to_vec_f32(x)
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    };
+    assert_eq!(bits(&got), bits(&want));
+}

@@ -69,6 +69,7 @@ fn sample_args() -> crate::ServeArgs {
         embedding_request_timeout_secs: 120,
         reranker_model: None,
         rerank_batch_size: 0,
+        decision_model: None,
         prefill_chunk_size: Some(512),
         prefill_grant_interval: None,
         batch_size: None,
@@ -188,6 +189,8 @@ fn sample_args() -> crate::ServeArgs {
         vision_cache_size: 20,
         video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
         video_fps: mlxcel::video::DEFAULT_FPS,
+        video_num_frames: None,
+        video_min_frames: None,
         max_image_payload_size: mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
         max_images_per_request: mlxcel::server::DEFAULT_MAX_IMAGES_PER_REQUEST,
         max_image_width: mlxcel::server::DEFAULT_MAX_IMAGE_WIDTH,
@@ -219,6 +222,12 @@ fn sample_args() -> crate::ServeArgs {
         responses_store_max_bytes:
             mlxcel::server::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
         responses_store_ttl_secs: 3600,
+        responses_background_max_jobs:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS,
+        responses_background_ephemeral_ttl_secs:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS,
+        responses_background_event_log_bytes:
+            mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES,
         conversation_store_max_entries: 256,
         conversation_store_max_bytes:
             mlxcel::server::conversation_store::DEFAULT_CONVERSATION_STORE_MAX_BYTES,
@@ -427,4 +436,137 @@ fn image_only_refuses_embeddings_naming_both_flags() {
     let message = err.to_string();
     assert!(message.contains("--image-model"), "{message}");
     assert!(message.contains("--embeddings"), "{message}");
+}
+
+fn model_dir_with_type(model_type: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!("{{\"model_type\": \"{model_type}\"}}"),
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// `--estimate-memory` must size the mode the server builds. The scheduler
+/// prefers the `--kv-bits` / `--kv-quant-scheme` table over `--kv-cache-mode`,
+/// so the preflight has to see Int8 / Turbo4Asym from it rather than the
+/// requested `--kv-cache-mode` (#3153).
+#[test]
+fn serve_preflight_kv_mode_follows_batch_kv_quant() {
+    use mlxcel_core::cache::KVCacheMode;
+    let dir = model_dir_with_type("llama");
+
+    let mut args = sample_args();
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        KVCacheMode::Fp16
+    );
+
+    args.batch_quant.kv_bits = 8;
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        KVCacheMode::Int8
+    );
+    // `--kv-skip-last-layer` defaults on, so the last layer is sized FP16.
+    assert!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .fp16_last_layer
+    );
+
+    args.batch_quant.kv_bits = 4;
+    args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        KVCacheMode::Turbo4Asym
+    );
+
+    // With kv-bits off the resolved kv-cache-mode is used unchanged.
+    let mut args = sample_args();
+    args.turbo.kv_cache_mode = Some("int8".to_string());
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        KVCacheMode::Int8
+    );
+}
+
+/// On `deepseek_v2` the batch table is a route to the decompressed cache, which
+/// is what the preflight must size when absorbed decode is off (Int8 /
+/// Turbo4Asym). When it is on, `--kv-bits 8` keeps Int8 because the absorbed
+/// cache stores its latent as affine int8 (#3168), and the Turbo table is
+/// taken off (fp16 latent), the same as startup.
+#[test]
+fn serve_preflight_kv_mode_on_deepseek_v2_follows_the_absorption_decision() {
+    use mlxcel_core::cache::KVCacheMode;
+    let dir = model_dir_with_type("deepseek_v2");
+    let absorbed = mlxcel_core::mla::absorbed_enabled();
+
+    let mut args = sample_args();
+    args.batch_quant.kv_bits = 8;
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        KVCacheMode::Int8
+    );
+
+    args.batch_quant.kv_bits = 4;
+    args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
+    let expected = if absorbed {
+        KVCacheMode::Fp16
+    } else {
+        KVCacheMode::Turbo4Asym
+    };
+    assert_eq!(
+        super::serve_preflight_kv_mode(&args, dir.path())
+            .unwrap()
+            .mode,
+        expected
+    );
+}
+
+/// A latent family that cannot hold the batch table's mode has it disabled at
+/// startup and serves fp16; the preflight must agree. Every latent family
+/// refuses the Turbo table, and only the families outside
+/// `mla::QUANTIZED_LATENT_FAMILIES` refuse `--kv-bits 8`.
+#[test]
+fn serve_preflight_kv_mode_disables_batch_table_for_latent_families() {
+    use mlxcel_core::cache::KVCacheMode;
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        let dir = model_dir_with_type(family);
+
+        let mut args = sample_args();
+        args.batch_quant.kv_bits = 8;
+        let expected = if mlxcel_core::mla::stores_quantized_latent_pair(family) {
+            KVCacheMode::Int8
+        } else {
+            KVCacheMode::Fp16
+        };
+        assert_eq!(
+            super::serve_preflight_kv_mode(&args, dir.path())
+                .unwrap()
+                .mode,
+            expected,
+            "{family}"
+        );
+
+        args.batch_quant.kv_bits = 4;
+        args.batch_quant.kv_quant_scheme = Some("turboquant".to_string());
+        assert_eq!(
+            super::serve_preflight_kv_mode(&args, dir.path())
+                .unwrap()
+                .mode,
+            KVCacheMode::Fp16,
+            "{family}"
+        );
+    }
 }

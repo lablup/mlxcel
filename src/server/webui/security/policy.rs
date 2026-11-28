@@ -138,6 +138,12 @@ impl WebUiSecurityPolicy {
         self.control_rate.try_record()
     }
 
+    /// Move the startup allow-list to the port the listener actually bound.
+    ///
+    /// The startup list already names every accepted host (for a loopback
+    /// bind: `127.0.0.1`, `localhost` and `[::1]`); only the port can be
+    /// unknown before bind (`--port 0`). Keep those names, move them to the
+    /// bound port, and add the exact bound authority.
     pub(crate) fn update_exact_origin(&self, origin: HeaderValue) -> Result<()> {
         let origin = validate_allowed_origin(origin)?;
         let origin_text = origin
@@ -150,11 +156,28 @@ impl WebUiSecurityPolicy {
             .authority()
             .and_then(|authority| canonical_authority(authority.as_str()))
             .ok_or_else(|| anyhow::anyhow!("WebUI allowed Origin authority is malformed"))?;
+        let port = uri
+            .port_u16()
+            .ok_or_else(|| anyhow::anyhow!("WebUI bound Origin must include a port"))?;
         if let Ok(mut hosts) = self.allowed_hosts.write() {
-            *hosts = vec![authority];
+            let mut next: Vec<String> = hosts
+                .iter()
+                .map(|host| authority_with_port(host, port))
+                .collect();
+            next.push(authority);
+            next.sort();
+            next.dedup();
+            *hosts = next;
         }
         if let Ok(mut origins) = self.allowed_origins.write() {
-            *origins = vec![origin];
+            let mut next = origins
+                .iter()
+                .map(|allowed| origin_with_port(allowed, port))
+                .collect::<Result<Vec<_>>>()?;
+            next.push(origin);
+            next.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            next.dedup();
+            *origins = next;
         }
         Ok(())
     }
@@ -257,4 +280,27 @@ pub(crate) fn apply_security_headers(headers: &mut HeaderMap) {
         header::HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static(PERMISSIONS_POLICY),
     );
+}
+
+/// Replace the port of a canonical `host:port` / `[v6]:port` authority.
+fn authority_with_port(authority: &str, port: u16) -> String {
+    let host = match authority.find(']') {
+        Some(end) => &authority[..=end],
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
+    format!("{host}:{port}")
+}
+
+/// Replace the port of an already-validated `scheme://authority` Origin.
+fn origin_with_port(origin: &HeaderValue, port: u16) -> Result<HeaderValue> {
+    let text = origin.to_str()?;
+    let (scheme, authority) = text
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("WebUI allowed Origin requires a scheme"))?;
+    Ok(HeaderValue::from_str(&format!(
+        "{scheme}://{}",
+        authority_with_port(authority, port)
+    ))?)
 }

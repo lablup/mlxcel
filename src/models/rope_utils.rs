@@ -24,10 +24,19 @@
 //! attention parsed the block and dropped it.
 //!
 //! Used by: Llama 3.x text (`llama3`, and through it Qwen2 / Qwen2.5, Helium,
-//! the `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
+//! Arcee (`arcee`, which also reads `yarn_get_mscale`), K2-Horizon, the
+//! `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
-//! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, and
-//! InternLM3 / InternLM2 through `dynamic_ntk_rope`.
+//! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, Llama 4
+//! (text and VLM, through `llama4_helpers::Llama4Rope`), InternLM3 /
+//! InternLM2 through `dynamic_ntk_rope`, IQuest-Loop-Coder
+//! (`iquestloopcoder`), Muse Glimmer (`muse_glimmer_config`,
+//! `muse_glimmer_layers`), Nemotron-NAS (`nemotron_nas`), and the
+//! DeepSeek-style MLA families through `mla_rope::MlaRope` (#3295):
+//! DeepSeek-V3 / Kimi-K2 / JoyAI (`deepseek_v3`, and through it Kimi-VL's text
+//! model and the DeepSeek-V3 pipeline stage executor), Xing4.0, DeepSeek V3.2
+//! / GLM-5 (`deepseek_v32`, `glm_moe_dsa`), LongCat-Flash ngram and
+//! LongCat-Flash-Lite-Sparse.
 //!
 //! Since #1450 this is also the seam llama-server b10621's `--rope-scaling`,
 //! `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` are applied at:
@@ -36,6 +45,26 @@
 //! therefore also the list of families that honor the override, and a family
 //! added to it starts honoring it with no other change; one that is not on it
 //! is reported at startup rather than silently ignoring the flag.
+//!
+//! Used by, for one helper rather than [`RopeScalingKind::resolve`]:
+//!
+//! - Qwen 3.5 (`qwen3_5`, #3215): [`yarn_rope_setup`] builds the YaRN table a
+//!   `rope_parameters` block declares, so the `--yarn-*` knobs reach it. It is
+//!   not on the override seam: the four `--rope-*` flags above do not reach
+//!   it, and its attention factor is computed there with the transformers
+//!   rules.
+//! - K2-Horizon (`k2_horizon`): `yarn_get_mscale`, to check a declared
+//!   attention factor. Its rotation is `Llama3Model`'s, listed above.
+//! - The `rope_parameters` lift re-exported at the bottom of this file: Qwen3
+//!   and GraniteMoeHybrid (`granitemoehybrid`) at deserialization, MAGE-VL
+//!   (`src/vision/mage_vl_config.rs`, a re-export), and the Idefics2 and Qwen
+//!   VLM loaders (`src/loading/vlm_idefics2.rs`, `src/loading/vlm_qwen.rs`).
+//! - `rope_overrides` builds the [`RopeScalingSpec`] an operator flag replaces
+//!   the checkpoint's block with, and `src/cli/rope_args.rs` names the `Yarn`
+//!   arm in its documentation.
+//!
+//! Regenerate the file list with
+//! `grep -rln 'rope_utils::' src --include='*.rs' | grep -v 'tests\.rs$'`.
 
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::{Deserialize, Deserializer};
@@ -76,6 +105,16 @@ pub struct RopeScalingSpec {
     pub mscale: Option<f32>,
     /// YaRN attention-magnitude multiplier denominator (`mscale_all_dim`).
     pub mscale_all_dim: Option<f32>,
+    /// The transformers 5 YaRN `attention_factor` (`0.1 * ln(factor) + 1`).
+    /// [`yarn_rope_setup`] does not read it: the magnitude comes from
+    /// `mscale` / `mscale_all_dim`. A loader that wants to check a
+    /// checkpoint's declared value against that derivation reads it here.
+    pub attention_factor: Option<f32>,
+    /// YaRN `truncate` (ml-explore/mlx-lm#1931). `Some(false)` keeps the
+    /// correction band's fractional bounds instead of flooring and ceiling
+    /// them; absent reads as upstream's default `true`. Read from a JSON bool
+    /// only, so a string `"false"` is absent rather than a silent `false`.
+    pub truncate: Option<bool>,
 }
 
 impl RopeScalingSpec {
@@ -102,6 +141,8 @@ impl RopeScalingSpec {
             beta_slow: f32_at("beta_slow"),
             mscale: f32_at("mscale"),
             mscale_all_dim: f32_at("mscale_all_dim"),
+            attention_factor: f32_at("attention_factor"),
+            truncate: lookup("truncate").and_then(|v| v.as_bool()),
         }
     }
 
@@ -394,7 +435,7 @@ pub fn llama3_rope_freqs(
 /// Mirrors `yarn_get_mscale` in `src/models/deepseek_v2.rs` and b10621's
 /// `get_mscale`
 /// ([`src/llama-context.cpp`](https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/src/llama-context.cpp)).
-fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
+pub(crate) fn yarn_get_mscale(scale: f32, mscale: f32) -> f32 {
     if scale <= 1.0 {
         1.0
     } else {
@@ -413,19 +454,35 @@ fn yarn_find_correction_dim(num_rotations: f32, dims: usize, base: f32, max_pos:
 
 /// The YaRN correction band `[low, high]` in pair-index space, clamped to
 /// `[0, dims - 1]` exactly as ggml's `ggml_rope_yarn_corr_dims` clamps it.
+///
+/// With `truncate` the bounds are floored and ceiled to whole pair indices,
+/// which is what this function always did; without it the fractional bounds
+/// are kept, as upstream `YarnRoPE` does since ml-explore/mlx-lm#1931. A NaN
+/// bound (a base of exactly 1) reads as 0, which is what the integer cast
+/// this replaced produced.
 fn yarn_find_correction_range(
     beta_fast: f32,
     beta_slow: f32,
     dims: usize,
     base: f32,
     max_pos: f32,
-) -> (usize, usize) {
-    let low = yarn_find_correction_dim(beta_fast, dims, base, max_pos).floor() as i64;
-    let high = yarn_find_correction_dim(beta_slow, dims, base, max_pos).ceil() as i64;
-    (
-        low.max(0) as usize,
-        (high.max(0) as usize).min(dims.saturating_sub(1)),
-    )
+    truncate: bool,
+) -> (f32, f32) {
+    let mut low = yarn_find_correction_dim(beta_fast, dims, base, max_pos);
+    let mut high = yarn_find_correction_dim(beta_slow, dims, base, max_pos);
+    if truncate {
+        low = low.floor();
+        high = high.ceil();
+    }
+    let top = dims.saturating_sub(1) as f32;
+    let clamp = |bound: f32| {
+        if bound.is_nan() {
+            0.0
+        } else {
+            bound.clamp(0.0, top)
+        }
+    };
+    (clamp(low), clamp(high))
 }
 
 /// The resolved YaRN parameters a table is built from.
@@ -444,6 +501,8 @@ struct YarnParams {
     mscale_all_dim: f32,
     ext_factor: f32,
     attn_factor: f32,
+    /// Floor and ceil the correction band (upstream default `true`).
+    truncate: bool,
 }
 
 impl YarnParams {
@@ -474,6 +533,7 @@ impl YarnParams {
             mscale_all_dim: spec.mscale_all_dim.unwrap_or(0.0),
             ext_factor: knobs.and_then(|k| k.ext_factor).unwrap_or(1.0),
             attn_factor: knobs.and_then(|k| k.attn_factor).unwrap_or(1.0),
+            truncate: spec.truncate.unwrap_or(true),
         };
 
         for (name, value) in [
@@ -537,6 +597,22 @@ impl YarnParams {
 /// `yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)`
 /// and the `--yarn-attn-factor` value does not participate (b10621 recomputes
 /// over it); with a zero mix it is the attention factor itself.
+///
+/// The correction band honors the block's `truncate` flag
+/// (ml-explore/mlx-lm#1931): absent or `true` floors and ceils the band to
+/// whole pair indices, `false` keeps the fractional bounds. The ramp is
+/// computed in f32 as upstream's `yarn_linear_ramp_mask` does; for whole
+/// bounds that is the same arithmetic as the integer ramp it replaced, so a
+/// block without `truncate: false` builds a bit-identical table
+/// (`rope_utils_tests::yarn_truncate_default_is_bit_identical`).
+///
+/// Used by: [`RopeScalingKind::resolve`] (every family in the module header)
+/// and Qwen 3.5 (`qwen3_5::Qwen35Config::yarn`, which takes the table and
+/// computes the transformers attention factor itself). Not used by GptOss,
+/// OpenAIPrivacyFilter and Ministral3: they build their YaRN table with
+/// `gpt_oss_common::yarn_rope_freqs`, a second builder that takes no
+/// `--yarn-*` knobs. The two agree for the same parameters
+/// (`rope_utils_tests::yarn_truncate_false_matches_gpt_oss_builder`).
 pub(crate) fn yarn_rope_setup(
     spec: &RopeScalingSpec,
     dims: usize,
@@ -545,13 +621,18 @@ pub(crate) fn yarn_rope_setup(
 ) -> Result<(UniquePtr<MlxArray>, f32), String> {
     let params = YarnParams::resolve(spec, train_ctx)?;
 
-    let (low, high) = yarn_find_correction_range(
+    let (low, mut high) = yarn_find_correction_range(
         params.beta_fast,
         params.beta_slow,
         dims,
         base,
         params.original_ctx,
+        params.truncate,
     );
+    if high == low {
+        // Upstream's guard against a zero-width band.
+        high += 0.001;
+    }
 
     let half_dims = dims / 2;
     let mut freq_vals = Vec::with_capacity(half_dims);
@@ -562,13 +643,19 @@ pub(crate) fn yarn_rope_setup(
 
         // The correction ramp, `1` below the band (extrapolate), `0` above it
         // (interpolate), linear inside. Mirrors `YarnRoPE`'s
-        // `yarn_linear_ramp_mask` and deepseek_v2.rs's `freq_mask`.
-        let ramp = if i < low {
+        // `yarn_linear_ramp_mask` and deepseek_v2.rs's `freq_mask`. The two
+        // outer arms are what upstream's `clip` gives for `low <= high`; they
+        // are spelled out so an inverted band (`beta_fast < beta_slow`, or a
+        // band wholly above the table) keeps stepping at `low` as it did
+        // before the bounds became f32, where upstream's `clip` would invert
+        // the ramp.
+        let pair = i as f32;
+        let ramp = if pair < low {
             1.0
-        } else if i > high {
+        } else if pair > high {
             0.0
         } else {
-            let t = (i - low) as f32 / (high - low).max(1) as f32;
+            let t = (pair - low) / (high - low);
             1.0 - t.clamp(0.0, 1.0)
         };
         let mix = ramp * params.ext_factor;

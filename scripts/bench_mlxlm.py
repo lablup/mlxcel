@@ -11,7 +11,10 @@ Output CSV: benchmarks/pylm_<hw>_YYYY-MM-DD[ _vlm].csv
 Each model runs in a fresh Python subprocess for memory isolation and
 to survive crashes. Numbers come from mlx-lm / mlx-vlm's own
 `prompt_tps` / `generation_tps` fields on the final stream_generate
-response after a warmup pass.
+response after a warmup pass. `decode_tok_s` is converted from
+`generation_tps` to mlxcel's decode-window convention (see
+`decode_window`), so the column compares like with like against
+`scripts/bench_decode.sh`.
 """
 import argparse
 import csv
@@ -395,9 +398,16 @@ except Exception as e:
     sys.exit(3)
 
 last = None
+# Each GenerationResult carries only its own segment in `.text`, so the answer
+# is the concatenation over the measured loop. The parent reads it to tell an
+# image the model ignored from one it described (see vlm_refusal_reason).
+_text_parts = []
 try:
     for r in stream_generate(model, processor, prompt=formatted_prompt, image=image_path, max_tokens=max_tokens, **_kw):
         last = r
+        _segment = getattr(r, 'text', None)
+        if _segment:
+            _text_parts.append(_segment)
 except Exception as e:
     print('ERROR bench:', repr(e), file=sys.stderr)
     sys.exit(4)
@@ -413,6 +423,7 @@ result = {
     'gen_tokens': getattr(last, 'generation_tokens', None),
     'decode_tps': getattr(last, 'generation_tps', None),
     'text_only_prompt_tokens': _text_only_tokens,
+    'generated_text': ''.join(_text_parts),
 }
 print('RESULT', json.dumps(result))
 """
@@ -519,6 +530,62 @@ print('RESULT', json.dumps(result))
 """
 
 
+def decode_window(gen_tokens, generation_tps):
+    """Return (decode_ms, decode_tok_s) in mlxcel's decode-window convention.
+
+    mlx-lm's and mlx-vlm's `generation_tps` restart their clock after the
+    first token but count all N tokens, `(n + 1) / (time - tic)`
+    (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py,
+    stream_generate). mlxcel counts only the tokens produced inside the
+    window, so the same run reads N/(N-1) lower there. The window length is
+    `N / generation_tps`; the rate becomes `(N - 1)` over it. Either value is
+    None when the inputs cannot give one.
+    """
+    try:
+        n = int(gen_tokens)
+        tps = float(generation_tps)
+    except (TypeError, ValueError):
+        return None, None
+    if n <= 0 or tps <= 0:
+        return None, None
+    window_s = n / tps
+    return window_s * 1000, (n - 1) / window_s
+
+
+# Phrases a VLM uses when it answers an image prompt without having seen the
+# image. All lowercase with a plain apostrophe; vlm_refusal_reason normalizes
+# the text the same way before matching. A Rust-side check on the mlxcel sweep
+# should reuse this list rather than copy it (lablup/mlxcel#2134).
+VLM_REFUSAL_PHRASES = (
+    "can't see",
+    "cannot see",
+    "unable to view",
+    "don't have the ability to view",
+    "can't provide a description",
+)
+
+
+def vlm_refusal_reason(text: str) -> str | None:
+    """Return the refusal phrase `text` contains, or None.
+
+    A prompt-token count shows that the image reached the prompt, not that the
+    model used it: granite-vision-3.2-2b-4bit took 1485 image tokens and still
+    answered "I can't provide a description of the image as I can't see it"
+    (lablup/mlxcel#1683). This reads the generated text for that class.
+
+    Matching is case-insensitive, treats the typographic apostrophe as a plain
+    one, and looks anywhere in the text, because EOS is suppressed during the
+    measured pass and the refusal is followed by filler. The first phrase of
+    VLM_REFUSAL_PHRASES that matches is returned. Empty text never matches, so
+    a run that produced no text keeps the status it already had.
+    """
+    normalized = text.lower().replace("\u2019", "'")
+    for phrase in VLM_REFUSAL_PHRASES:
+        if phrase in normalized:
+            return phrase
+    return None
+
+
 def resolve_python() -> list[str]:
     """Interpreter that has mlx-lm / mlx-vlm importable.
 
@@ -613,6 +680,17 @@ def bench_one(model_path: Path, vlm: bool, vlm_image: str, max_tokens: int,
                     text_only = data.get("text_only_prompt_tokens")
                     if got is not None and text_only is not None and got <= text_only:
                         return ("FAIL:image_not_applied", None)
+                    # FAIL:image_ignored is the case the length check above
+                    # cannot see: the image expanded the prompt and the model
+                    # still answered that it cannot see one. Checked only for
+                    # VLM runs and only once the image is known to be in the
+                    # prompt, so the two statuses stay distinct. The matched
+                    # phrase goes to stderr so the sweep log says why.
+                    reason = vlm_refusal_reason(data.get("generated_text") or "")
+                    if reason is not None:
+                        print(f"    image_ignored: generated text contains {reason!r}",
+                              file=sys.stderr)
+                        return ("FAIL:image_ignored", None)
                 return ("OK", data)
         return ("FAIL:no_result", None)
 
@@ -814,21 +892,16 @@ def main():
             pt = f.get("prompt_tokens") or ""
             gt = f.get("gen_tokens") or ""
             pre_tps = f.get("prefill_tps")
-            dec_tps = f.get("decode_tps")
             pre_ms = ""
-            dec_ms = ""
             if pre_tps and pt:
                 try:
                     pre_ms = f"{(int(pt) / float(pre_tps)) * 1000:.2f}"
                 except Exception:
                     pass
-            if dec_tps and gt:
-                try:
-                    dec_ms = f"{(int(gt) / float(dec_tps)) * 1000:.2f}"
-                except Exception:
-                    pass
+            dec_ms, dec_tps = decode_window(gt, f.get("decode_tps"))
             pre_tps_s = f"{pre_tps:.2f}" if pre_tps else ""
-            dec_tps_s = f"{dec_tps:.2f}" if dec_tps else ""
+            dec_ms = f"{dec_ms:.2f}" if dec_ms is not None else ""
+            dec_tps_s = f"{dec_tps:.2f}" if dec_tps is not None else ""
             print(f"    decode: {dec_tps_s} tok/s ({elapsed:.1f}s)", file=sys.stderr)
             append_row(
                 f'{name},./{mdir}/,{pt},{gt},{pre_ms},{pre_tps_s},{dec_ms},{dec_tps_s},'

@@ -24,21 +24,23 @@
 
 use super::recurrent_batch::*;
 use crate::models::switch_layers::{
-    SwitchLinear, gather_sort, scatter_unsort, validate_expert_quantization_params,
+    INV_GLOBAL_SCALE_LEAF, SwitchLinear, drain_numbered_expert_planes, gather_sort, scatter_unsort,
+    validate_expert_quantization_params,
 };
 use mlxcel_core::batched_decode::{SplitAttention, SplitAttentionShape, forward_split_attention};
 use mlxcel_core::cache::{BatchedAttentionMetadata, CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
+use mlxcel_core::utils::{relu_squared, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr, concatenate, concatenate_many};
+use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::ssd_scan::{SsdEval, chunked_ssd_scan};
 
 static SSD_PREFILL_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -691,15 +693,13 @@ impl NemotronHMamba2Mixer {
         };
 
         // Update conv cache.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full padded_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // The tail is a fresh buffer, scheduled now on a long prefill so the full
+        // padded_input is not held until the caches are evaluated.
         if let Some(c) = cache.as_deref_mut() {
-            let padded_shape = mlxcel_core::array_shape(&padded_input);
-            let len = padded_shape[1] as usize;
-            let tail = slice_axis(&padded_input, 1, (len - (k - 1)) as i32, len as i32);
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
+                &padded_input,
+                (k - 1) as i32,
+            ));
         }
 
         // Depthwise conv1d
@@ -765,14 +765,18 @@ impl NemotronHMamba2Mixer {
         let y_normed = self.norm.forward(&y, Some(&gate));
         let result = self.out_proj.forward(&y_normed);
 
-        // Materialize at a clean dtype boundary ONLY on M5 Max (Metal GPU
-        // Family 4): there the lazy float32/float16 SSM graph can fuse into NaN
-        // within one Metal command buffer. On every other chip this per-mixer
-        // sync is pure decode-throughput loss (it blocks cross-layer
-        // pipelining), so skip it. Decode never reaches the prefill chunked-eval
-        // path (`needs_chunked_eval` is `seq_len > 1`), so this is the only
-        // per-token eval to gate. CLAUDE.md "Apple Silicon precision".
-        if mlxcel_core::hardware::is_m5_neural_accelerator() {
+        // Materialize at a clean dtype boundary ONLY where MLX dispatches its
+        // NAx GEMM kernels: on M5 Max those kernels can fuse the lazy
+        // float32/float16 SSM graph into NaN within one Metal command buffer.
+        // The gate is MLX's own NAX flag rather than the sysctl brand string
+        // (`is_m5_neural_accelerator`), because the failure belongs to the
+        // kernel MLX picks, and the two views disagree on some hosts (#2806,
+        // #3123); gating on the brand string left the boundary off on hosts
+        // that run NAx. Elsewhere this per-mixer sync is pure decode-throughput
+        // loss (it blocks cross-layer pipelining), so skip it. Decode never
+        // reaches the prefill chunked-eval path (`needs_chunked_eval` is
+        // `seq_len > 1`), so this is the only per-token eval to gate.
+        if mlxcel_core::hardware::mlx_nax_available() {
             mlxcel_core::eval(&result);
         }
 
@@ -977,43 +981,6 @@ impl NemotronHMamba2Mixer {
     }
 }
 
-/// Repeat array along axis by broadcasting (for Nemotron)
-fn repeat_axis_nemotron(x: &MlxArray, repeats: i32, axis: i32) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let ndim = shape.len() as i32;
-    let axis = if axis < 0 { ndim + axis } else { axis };
-
-    let mut new_shape: Vec<i32> = shape.iter().take(axis as usize + 1).copied().collect();
-    new_shape.push(1);
-    new_shape.extend(shape.iter().skip(axis as usize + 1));
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    new_shape[axis as usize + 1] = repeats;
-    let x_broad = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let mut final_shape: Vec<i32> = shape.clone();
-    final_shape[axis as usize] *= repeats;
-    mlxcel_core::reshape(&x_broad, &final_shape)
-}
-
-/// Segmented cumulative sum for SSM attention (for Nemotron)
-fn segsum_nemotron(x: &MlxArray) -> UniquePtr<MlxArray> {
-    let shape = mlxcel_core::array_shape(x);
-    let l = shape[shape.len() - 1];
-
-    let mut new_shape = shape.clone();
-    new_shape.push(1);
-    let x_exp = mlxcel_core::reshape(x, &new_shape);
-
-    let last_idx = new_shape.len() - 1;
-    new_shape[last_idx] = l;
-    let x_rep = mlxcel_core::broadcast_to(&x_exp, &new_shape);
-
-    let x_tril = mlxcel_core::tril(&x_rep, -1);
-    // Inclusive cumsum matching mamba2.rs segsum and Python mx.cumsum default
-    mlxcel_core::cumsum(&x_tril, -2, false, true)
-}
-
 /// Chunked SSD recurrence for Nemotron-H Mamba blocks.
 ///
 /// The surrogate attention matrices are quadratic in their sequence dimension.
@@ -1032,132 +999,20 @@ fn nemotron_h_ssm_attn(
     time_step_limit: (f32, f32),
     chunk_size: usize,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-    assert!(chunk_size > 0, "chunk_size must be greater than zero");
-
-    let input_dtype = mlxcel_core::array_dtype(x);
-    let x_shape = mlxcel_core::array_shape(x);
-    let batch = x_shape[0];
-    let seq_len = x_shape[1] as usize;
-    let num_heads = x_shape[2];
-    let head_dim = x_shape[3];
-
-    let b_shape = mlxcel_core::array_shape(b);
-    let n_groups = b_shape[2];
-    let state_dim = b_shape[3];
-    let repeats = num_heads / n_groups;
-
-    // Preserve the existing float32 precision boundary used to prevent the M5
-    // mixed-dtype and CB-matmul NaNs documented in `ssm_step`.
-    let dt_f32 = mlxcel_core::astype(dt, mlxcel_core::dtype::FLOAT32);
-    let dt_bias_f32 = mlxcel_core::astype(dt_bias, mlxcel_core::dtype::FLOAT32);
-    let dt_biased = mlxcel_core::add(&dt_f32, &dt_bias_f32);
-    let dt_soft = mlxcel_core::softplus(&dt_biased);
-    let min_val = mlxcel_core::full_f32(&[1], time_step_limit.0, mlxcel_core::dtype::FLOAT32);
-    let max_val = mlxcel_core::full_f32(&[1], time_step_limit.1, mlxcel_core::dtype::FLOAT32);
-    let dt = mlxcel_core::clip(&dt_soft, &min_val, &max_val);
-
-    let a = mlxcel_core::negative(&mlxcel_core::exp(a_log));
-    let a = mlxcel_core::astype(&a, mlxcel_core::dtype::FLOAT32);
-    let a_reshaped = mlxcel_core::reshape(&a, &[1, 1, num_heads]);
-    let dt_a = mlxcel_core::multiply(&dt, &a_reshaped);
-
-    let x_f32 = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
-    let dt_exp = mlxcel_core::reshape(&dt, &[batch, seq_len as i32, num_heads, 1]);
-    let dtx = mlxcel_core::multiply(&dt_exp, &x_f32);
-    let b_f32 = mlxcel_core::astype(b, mlxcel_core::dtype::FLOAT32);
-    let c_f32 = mlxcel_core::astype(c, mlxcel_core::dtype::FLOAT32);
-    let d_f32 = mlxcel_core::astype(d, mlxcel_core::dtype::FLOAT32);
-    let d_reshaped = mlxcel_core::reshape(&d_f32, &[1, 1, num_heads, 1]);
-
-    let output_capacity = seq_len / chunk_size + usize::from(!seq_len.is_multiple_of(chunk_size));
-    let mut outputs = Vec::with_capacity(output_capacity);
-    let mut current_state = state.map(mlxcel_core::copy);
-
-    for chunk_start in (0..seq_len).step_by(chunk_size) {
-        let chunk_end = chunk_start.saturating_add(chunk_size).min(seq_len);
-        let chunk_len = (chunk_end - chunk_start) as i32;
-
-        let chunk_x = slice_axis(&x_f32, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_dtx = slice_axis(&dtx, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_dt_a = slice_axis(&dt_a, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_b = slice_axis(&b_f32, 1, chunk_start as i32, chunk_end as i32);
-        let chunk_c = slice_axis(&c_f32, 1, chunk_start as i32, chunk_end as i32);
-
-        let b_t = mlxcel_core::transpose_axes(&chunk_b, &[0, 2, 3, 1]);
-        let c_t = mlxcel_core::swap_axes(&chunk_c, 1, 2);
-        let cb = mlxcel_core::matmul(&c_t, &b_t);
-        let cb = repeat_axis_nemotron(&cb, repeats, 1);
-
-        let dt_a_t = mlxcel_core::swap_axes(&chunk_dt_a, 1, 2);
-        let decay = mlxcel_core::exp(&segsum_nemotron(&dt_a_t));
-        let attn_matrix = mlxcel_core::tril(&mlxcel_core::multiply(&cb, &decay), 0);
-        let dtx_t = mlxcel_core::swap_axes(&chunk_dtx, 1, 2);
-        let mut y_chunk = mlxcel_core::matmul(&attn_matrix, &dtx_t);
-        y_chunk = mlxcel_core::swap_axes(&y_chunk, 1, 2);
-
-        let decay_shape = mlxcel_core::array_shape(&decay);
-        let decay_last = slice_axis(&decay, 2, decay_shape[2] - 1, decay_shape[2]);
-        let decay_for_state = mlxcel_core::transpose_axes(&decay_last, &[0, 3, 1, 2]);
-        let b_rep = repeat_axis_nemotron(&b_t, repeats, 1);
-        let b_sw = mlxcel_core::swap_axes(&b_rep, 2, 3);
-        let dtx_decay = mlxcel_core::multiply(&chunk_dtx, &decay_for_state);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay, 1, 2);
-        let dtx_decay_t = mlxcel_core::swap_axes(&dtx_decay_t, 2, 3);
-        let mut next_state = mlxcel_core::matmul(&dtx_decay_t, &b_sw);
-
-        if let Some(ref previous_state) = current_state {
-            let dta_cumsum = mlxcel_core::cumsum(&chunk_dt_a, -2, false, true);
-            let exp_dta_cumsum = mlxcel_core::exp(&dta_cumsum);
-
-            let exp_shape = mlxcel_core::array_shape(&exp_dta_cumsum);
-            let last_exp = slice_axis(&exp_dta_cumsum, 1, exp_shape[1] - 1, exp_shape[1]);
-            let last_exp = mlxcel_core::reshape(&last_exp, &[batch, num_heads, 1, 1]);
-            let state_contrib = mlxcel_core::multiply(&last_exp, previous_state);
-            next_state = mlxcel_core::add(&next_state, &state_contrib);
-
-            let c_reshaped =
-                mlxcel_core::reshape(&chunk_c, &[batch, chunk_len, n_groups, 1, state_dim, 1]);
-            let state_reshaped = mlxcel_core::reshape(
-                previous_state,
-                &[batch, 1, n_groups, repeats, head_dim, state_dim],
-            );
-            let y_previous = mlxcel_core::matmul(&state_reshaped, &c_reshaped);
-            let y_previous = mlxcel_core::squeeze_axis(&y_previous, -1);
-            let y_previous =
-                mlxcel_core::reshape(&y_previous, &[batch, chunk_len, num_heads, head_dim]);
-            let mut exp_shape_y = mlxcel_core::array_shape(&exp_dta_cumsum);
-            exp_shape_y.push(1);
-            let exp_dta_exp = mlxcel_core::reshape(&exp_dta_cumsum, &exp_shape_y);
-            let y_previous = mlxcel_core::multiply(&exp_dta_exp, &y_previous);
-            y_chunk = mlxcel_core::add(&y_chunk, &y_previous);
-        }
-
-        let d_contrib = mlxcel_core::multiply(&chunk_x, &d_reshaped);
-        y_chunk = mlxcel_core::add(&y_chunk, &d_contrib);
-        y_chunk = mlxcel_core::astype(&y_chunk, input_dtype);
-
-        // Evaluation inside the loop is what releases each quadratic chunk
-        // graph before the next one is constructed. Evaluating only the final
-        // concatenation would retain every chunk's intermediates.
-        mlxcel_core::eval(&y_chunk);
-        mlxcel_core::eval(&next_state);
-        outputs.push(y_chunk);
-        current_state = Some(next_state);
-    }
-
-    let output = if outputs.len() == 1 {
-        outputs.pop().expect("one SSD output chunk")
-    } else {
-        let refs: Vec<&MlxArray> = outputs
-            .iter()
-            .map(|output| output.as_ref().expect("evaluated SSD output chunk"))
-            .collect();
-        concatenate_many(&refs, 1)
-    };
-
-    (
-        output,
-        current_state.expect("Nemotron-H SSM requires a non-empty sequence"),
+    // Each chunk is evaluated synchronously, which releases its quadratic
+    // graph before the next one is built.
+    chunked_ssd_scan(
+        x,
+        a_log,
+        b,
+        c,
+        d,
+        dt,
+        dt_bias,
+        state,
+        time_step_limit,
+        chunk_size,
+        SsdEval::EveryChunk,
     )
 }
 
@@ -1874,6 +1729,31 @@ impl NemotronHModel {
         has_lm_head: bool,
         caches: &mut [NemotronLayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_stage_last_row(
+            inputs,
+            layer_range,
+            has_embedding,
+            has_lm_head,
+            caches,
+            None,
+        )
+    }
+
+    /// [`Self::forward_stage`] for a request that samples only hidden row
+    /// `last_pos` (a prefill): the final stage slices that row before the final
+    /// norm and LM head and returns `[B, 1, vocab]` logits (#3081). `None`
+    /// projects every position; a non-final stage ignores `last_pos`.
+    ///
+    /// Used by: Nemotron-H pipeline stage executor
+    pub fn forward_stage_last_row(
+        &self,
+        inputs: &MlxArray,
+        layer_range: std::ops::Range<usize>,
+        has_embedding: bool,
+        has_lm_head: bool,
+        caches: &mut [NemotronLayerCache],
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let expected_caches: usize = layer_range
             .clone()
             .filter(|&abs| self.layer_needs_cache(abs))
@@ -1892,31 +1772,12 @@ impl NemotronHModel {
             mlxcel_core::copy(inputs)
         };
 
-        // Anchor attention mask on the first attention layer in this stage.
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-        let first_attn_local_cache_idx = {
-            let mut local_cache_idx = 0usize;
-            let mut found = None;
-            for &abs in &layer_range.clone().collect::<Vec<_>>() {
-                if self.layer_needs_cache(abs) {
-                    if self.block_types.get(abs) == Some(&BlockType::Attention) {
-                        found = Some(local_cache_idx);
-                        break;
-                    }
-                    local_cache_idx += 1;
-                }
-            }
-            found
-        };
-        let attn_mask = if seq_len > 1 {
-            let offset = first_attn_local_cache_idx
-                .map(|idx| caches[idx].offset())
-                .unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
+        // No attention mask, the same dispatch as the single-process model
+        // (`hidden_layer_stack`): the prefill mask would be plain bottom-right
+        // causal, so the attention layers take MLX's causal mode for a
+        // multi-token forward (#3072). A stage that built an array mask ran a
+        // different SDPA from the dense model (#2654).
+        let attn_mask: Option<UniquePtr<MlxArray>> = None;
 
         let mut cache_idx = 0usize;
         for abs in layer_range.clone() {
@@ -1940,6 +1801,10 @@ impl NemotronHModel {
         }
 
         if has_lm_head {
+            let h = match last_pos {
+                Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+                None => h,
+            };
             let h = self.norm_f.forward(&h);
             self.lm_head.forward(&h)
         } else {
@@ -2484,7 +2349,7 @@ impl NemotronHModel {
 
         tracing::info!("[NemotronH] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
-        let weights = Self::sanitize_weights(weights, &config);
+        let weights = Self::sanitize_weights(weights, &config)?;
 
         tracing::info!("[NemotronH] Building model...");
         let model = Self::from_weights(config.clone(), weights, block_types)?;
@@ -2493,7 +2358,13 @@ impl NemotronHModel {
         Ok((model, config))
     }
 
-    pub fn sanitize_weights(mut weights: WeightMap, config: &NemotronHConfig) -> WeightMap {
+    /// Returns `Err` when the per-expert planes of one MoE projection disagree
+    /// in shape or dtype, with the message `drain_numbered_expert_planes`
+    /// builds for the offending expert key.
+    pub fn sanitize_weights(
+        mut weights: WeightMap,
+        config: &NemotronHConfig,
+    ) -> Result<WeightMap, String> {
         // Filter out multi-token prediction (mtp.*) weights (NemotronSuper)
         weights.retain(|k, _| !k.starts_with("mtp."));
 
@@ -2511,33 +2382,24 @@ impl NemotronHModel {
             }
         }
 
-        // Stack expert weights
-        let n_routed = config.n_routed_experts.unwrap_or(0);
-        if n_routed > 0 {
-            for l in 0..config.num_hidden_layers {
-                let prefix = format!("backbone.layers.{}.mixer", l);
-
-                for (m, n) in [("down_proj", "fc2"), ("up_proj", "fc1")] {
-                    let first_expert_key = format!("{}.experts.0.{}.weight", prefix, m);
-                    if weights.contains_key(&first_expert_key) {
-                        let mut expert_tensors: Vec<UniquePtr<MlxArray>> = Vec::new();
-                        for e in 0..n_routed {
-                            if let Some(w) =
-                                weights.remove(&format!("{}.experts.{}.{}.weight", prefix, e, m))
-                            {
-                                expert_tensors.push(w);
-                            }
-                        }
-                        if !expert_tensors.is_empty() {
-                            let stacked = stack_arrays(&expert_tensors, 0);
-                            weights.insert(format!("{}.switch_mlp.{}.weight", prefix, n), stacked);
-                        }
-                    }
+        // The ModelOpt repack leaves block scales and a tensor scale beside
+        // each packed weight. Stack them together to preserve the NVFP4 layout.
+        if config.n_routed_experts.unwrap_or(0) > 0 {
+            for layer in 0..config.num_hidden_layers {
+                let mixer = format!("backbone.layers.{layer}.mixer");
+                let experts = format!("{mixer}.experts");
+                for (proj, fc) in [("up_proj", "fc1"), ("down_proj", "fc2")] {
+                    drain_numbered_expert_planes(
+                        &mut weights,
+                        &experts,
+                        proj,
+                        &format!("{mixer}.switch_mlp.{fc}"),
+                    )?;
                 }
             }
         }
 
-        weights
+        Ok(weights)
     }
 
     pub fn from_weights(
@@ -2758,7 +2620,7 @@ impl NemotronHModel {
                     let fc1 = switch_linear("fc1")?;
                     let fc2 = switch_linear("fc2")?;
                     for fc in ["fc1", "fc2"] {
-                        for leaf in ["weight", "scales", "biases"] {
+                        for leaf in ["weight", "scales", "biases", INV_GLOBAL_SCALE_LEAF] {
                             weights.remove(&format!("{mixer_prefix}.switch_mlp.{fc}.{leaf}"));
                         }
                     }
@@ -3263,8 +3125,8 @@ impl LanguageModel for NemotronHModel {
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.config.num_hidden_layers, |idx| {
             match self.block_types.get(idx) {
-                Some(BlockType::Attention) => crate::models::model_owned::LayerKv::Fp16Only,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(BlockType::Attention) => mlxcel_core::cache::LayerStateKind::Full,
+                _ => mlxcel_core::cache::LayerStateKind::None,
             }
         })
     }
@@ -3424,4 +3286,4 @@ impl LanguageModel for NemotronHModel {
 
 #[cfg(test)]
 #[path = "nemotron_h_tests.rs"]
-mod tests;
+pub(crate) mod tests;

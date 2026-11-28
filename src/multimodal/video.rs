@@ -175,7 +175,8 @@ pub struct AdjacentFramePairPlan {
 ///
 /// Odd frame counts conceptually repeat the final frame. The reference keeps
 /// at least two pairs even when the request budget is smaller, so a one-frame
-/// clip produces two identical `[0, 0]` pairs.
+/// clip produces two identical `[0, 0]` pairs. The reference formula's Python
+/// `round` rounds half to even: 12 frames in 5 pairs anchor at 2.5 -> 2.
 pub fn pair_adjacent_frame_indices(
     frame_count: usize,
     max_pairs: usize,
@@ -192,7 +193,8 @@ pub fn pair_adjacent_frame_indices(
     let denominator = pair_count.saturating_sub(1).max(1) as f64;
     let anchors = (0..pair_count)
         .map(|index| {
-            ((index as f64 * last_anchor as f64 / denominator).round() as usize).min(last_anchor)
+            ((index as f64 * last_anchor as f64 / denominator).round_ties_even() as usize)
+                .min(last_anchor)
         })
         .collect::<Vec<_>>();
     let pairs = anchors
@@ -308,6 +310,82 @@ impl Default for FrameSamplingPolicy {
             reject_over_max: false,
             keep_all_without_target_fps: false,
         }
+    }
+}
+
+/// Frame-count knobs shared by every native-video decode path (issue #2399).
+///
+/// `--video-num-frames` replaces `--video-fps` sampling with an exact frame
+/// count; `--video-min-frames` raises the floor the sampler starts from. One
+/// `Copy` bundle keeps every CLI and worker helper that forwards the knobs from
+/// growing two `Option<usize>` parameters each, and centralises the
+/// [`FrameSamplingPolicy`] they imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[must_use]
+pub struct VideoFrameKnobs {
+    /// Exact frame count replacing fps sampling (`--video-num-frames`).
+    pub num_frames: Option<usize>,
+    /// Sampling floor applied before the max-frames cap (`--video-min-frames`).
+    pub min_frames: Option<usize>,
+}
+
+impl VideoFrameKnobs {
+    /// The sampling policy these knobs imply: the requested floor, everything
+    /// else at the historical Gemma/Kimi default.
+    pub fn sampling_policy(self) -> FrameSamplingPolicy {
+        self.apply_to(FrameSamplingPolicy::default())
+    }
+
+    /// Apply these knobs to a checkpoint-provided policy, keeping that
+    /// checkpoint's own bounds and factor.
+    ///
+    /// `--video-min-frames` only ever raises the floor: a lower value than the
+    /// checkpoint's own minimum would let a checkpoint that requires more
+    /// frames receive fewer, so the engine-side minimum wins.
+    pub fn apply_to(self, policy: FrameSamplingPolicy) -> FrameSamplingPolicy {
+        match self.min_frames {
+            Some(min_frames) => FrameSamplingPolicy {
+                min_frames: min_frames.max(policy.min_frames),
+                ..policy
+            },
+            None => policy,
+        }
+    }
+
+    /// Clamp [`Self::num_frames`] to a native-video processor's own frame cap.
+    ///
+    /// A processor that takes no target count (the Gemma 4 VLM's
+    /// `process_videos`, whose cap is `DEFAULT_VIDEO_NUM_FRAMES` = 32 for the
+    /// shipped checkpoint) resamples whatever it is handed down to its own
+    /// `video_num_frames`. A larger `--video-num-frames` therefore cannot be
+    /// honored on that arm: decoding the extra frames only to drop them is
+    /// ffmpeg time and peak memory spent on frames nothing ever encodes.
+    ///
+    /// The clamp lives here rather than at the call site so the resulting
+    /// frame count is assertable without a checkpoint, a GPU or a decoder
+    /// (issue #2399). A request at or below `cap` is returned unchanged, so a
+    /// caller can detect a clamp by comparing [`Self::num_frames`].
+    pub fn clamped_to_processor_cap(self, cap: usize) -> Self {
+        Self {
+            num_frames: self.num_frames.map(|requested| requested.min(cap)),
+            ..self
+        }
+    }
+
+    /// Decode `source` with these knobs, resolving the resource caps from the
+    /// environment exactly as [`load_video_source`] does.
+    pub fn load_source(
+        self,
+        source: &VideoSource,
+        target_fps: Option<f64>,
+    ) -> Result<Vec<DynamicImage>, VideoError> {
+        load_video_source_with_policy(
+            source,
+            target_fps,
+            self.num_frames,
+            self.sampling_policy(),
+            &VideoLimits::from_env(),
+        )
     }
 }
 
@@ -841,11 +919,13 @@ impl From<&Path> for VideoSource {
 // ─── Helper functions ────────────────────────────────────────────────────────
 
 /// Round `value` to the nearest multiple of `factor`. Mirrors
-/// `round_by_factor` from `video_generate.py`.
+/// `round_by_factor` from `video_generate.py` (mlx-vlm `utils.py` `_round`),
+/// whose Python `round` breaks a tie towards the even neighbour: 5 frames at
+/// factor 2 is 2.5 multiples and becomes 4, not 6.
 #[inline]
 fn round_by_factor(value: f64, factor: usize) -> usize {
     let factor_f = factor as f64;
-    ((value / factor_f).round() as usize) * factor
+    ((value / factor_f).round_ties_even() as usize) * factor
 }
 
 /// Floor `value` to the nearest multiple of `factor` from below. Mirrors
@@ -1374,6 +1454,74 @@ pub fn load_video_source_with_policy(
     )
 }
 
+/// Frames sampled from one clip together with the timing needed to place
+/// them on the source timeline (#2402).
+///
+/// `frame_indices[i]` is the source frame index that produced `frames[i]`, and
+/// `source_fps` is the probed frame rate of the container. Frame time in
+/// seconds is `frame_indices[i] / source_fps`, which stays correct when the
+/// sampler resamples a clip at a rate other than the one requested.
+/// `total_frames` is the probed frame count of the source clip.
+pub struct SampledVideo {
+    pub frames: Vec<DynamicImage>,
+    pub frame_indices: Vec<usize>,
+    pub source_fps: f64,
+    pub total_frames: usize,
+}
+
+impl SampledVideo {
+    /// Frame rate of the sampled frames over the source timeline:
+    /// `frame_indices.len() / total_frames * source_fps`.
+    ///
+    /// This is transformers' `VideoMetadata.sampled_fps`, the value the
+    /// Qwen2.5-VL reference processor turns into `second_per_grid_ts`
+    /// (Blaizzy/mlx-vlm#2760). It describes the frames that were encoded, so
+    /// it differs from the requested fps whenever the sampler rounds the frame
+    /// count or a `num_frames` request fixes it.
+    ///
+    /// Errors when no frame was sampled, when the source frame count is zero,
+    /// or when the result is not a positive finite rate.
+    pub fn sampled_fps(&self) -> anyhow::Result<f64> {
+        if self.frame_indices.is_empty() {
+            anyhow::bail!("sampled fps is undefined for a clip with no sampled frames");
+        }
+        if self.total_frames == 0 {
+            anyhow::bail!("sampled fps is undefined for a clip with zero source frames");
+        }
+        let sampled_fps =
+            self.frame_indices.len() as f64 / self.total_frames as f64 * self.source_fps;
+        if !sampled_fps.is_finite() || sampled_fps <= 0.0 {
+            anyhow::bail!(
+                "sampled fps must be positive and finite, got {sampled_fps} from {} sampled \
+                 frame(s) of {} at {} fps",
+                self.frame_indices.len(),
+                self.total_frames,
+                self.source_fps
+            );
+        }
+        Ok(sampled_fps)
+    }
+}
+
+/// Like [`load_video_source_with_policy`], but keeps the source frame indices
+/// and the probed frame rate beside the frames.
+pub fn load_video_source_sampled_with_policy(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+) -> Result<SampledVideo, VideoError> {
+    load_video_source_sampled_with_policy_and_budget(
+        source,
+        target_fps,
+        target_nframes,
+        policy,
+        limits,
+        None,
+    )
+}
+
 /// Like [`load_video_source_with_policy`], with an optional aggregate budget
 /// for decoded frames. The budget uses four bytes per source pixel and is
 /// checked after sampling is planned but before ffmpeg starts decoding.
@@ -1385,6 +1533,27 @@ pub fn load_video_source_with_policy_and_budget(
     limits: &VideoLimits,
     max_decoded_bytes: Option<usize>,
 ) -> Result<Vec<DynamicImage>, VideoError> {
+    load_video_source_sampled_with_policy_and_budget(
+        source,
+        target_fps,
+        target_nframes,
+        policy,
+        limits,
+        max_decoded_bytes,
+    )
+    .map(|sampled| sampled.frames)
+}
+
+/// Like [`load_video_source_with_policy_and_budget`], returning the sampled
+/// frames with their source indices and the probed frame rate.
+pub fn load_video_source_sampled_with_policy_and_budget(
+    source: &VideoSource,
+    target_fps: Option<f64>,
+    target_nframes: Option<usize>,
+    policy: FrameSamplingPolicy,
+    limits: &VideoLimits,
+    max_decoded_bytes: Option<usize>,
+) -> Result<SampledVideo, VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
     }
@@ -1414,13 +1583,21 @@ pub fn load_video_source_with_policy_and_budget(
         )?;
     }
 
-    let indices = frame_indices_with_policy(meta.total_frames, nframes, target_fps, policy);
+    let mut indices = frame_indices_with_policy(meta.total_frames, nframes, target_fps, policy);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
 
     if frames.is_empty() {
         return Err(VideoError::EmptyVideo(canonical));
     }
-    Ok(frames)
+    // ffmpeg's `select` filter emits frames in source order, so a short read
+    // drops the trailing indices rather than interior ones.
+    indices.truncate(frames.len());
+    Ok(SampledVideo {
+        frames,
+        frame_indices: indices,
+        source_fps: meta.fps,
+        total_frames: meta.total_frames,
+    })
 }
 
 fn frame_indices_with_policy(
@@ -1434,6 +1611,66 @@ fn frame_indices_with_policy(
     } else {
         uniform_indices(total_frames, nframes)
     }
+}
+
+/// Decode the frames a caller-side sampler picks from the probed clip.
+///
+/// `sampler` receives the probed total frame count and returns the source
+/// frame indices to decode, in source order. The decoded-bytes budget, when
+/// given, is checked against the source resolution before ffmpeg starts.
+/// Probing applies the same resolution and duration caps as every other
+/// entry point.
+///
+/// Used by: `decision::clef` (Clef samples with upstream's
+/// `linspace(0, total - 1, count).round()` over every source frame, which no
+/// [`FrameSamplingPolicy`] expresses).
+pub fn load_video_source_frames_at<F>(
+    source: &VideoSource,
+    limits: &VideoLimits,
+    max_decoded_bytes: Option<usize>,
+    sampler: F,
+) -> Result<SampledVideo, VideoError>
+where
+    F: FnOnce(usize) -> Result<Vec<usize>, VideoError>,
+{
+    if !ffmpeg_available() {
+        return Err(VideoError::FfmpegMissing);
+    }
+    let canonical = source.canonical_path().to_path_buf();
+    let meta = probe_video(source, limits)?;
+    let mut indices = sampler(meta.total_frames)?;
+    if indices.is_empty()
+        || indices.windows(2).any(|pair| pair[0] > pair[1])
+        || indices
+            .last()
+            .is_some_and(|&last| last >= meta.total_frames)
+    {
+        return Err(VideoError::Extract {
+            path: canonical,
+            message: "sampled frame indices must be in source order and within the clip"
+                .to_string(),
+        });
+    }
+    if let Some(max_decoded_bytes) = max_decoded_bytes {
+        validate_decoded_video_budget(
+            &canonical,
+            meta.width,
+            meta.height,
+            indices.len(),
+            max_decoded_bytes,
+        )?;
+    }
+    let frames = extract_frames_single_pass(source, &indices, meta.fps, limits)?;
+    if frames.is_empty() {
+        return Err(VideoError::EmptyVideo(canonical));
+    }
+    indices.truncate(frames.len());
+    Ok(SampledVideo {
+        frames,
+        frame_indices: indices,
+        source_fps: meta.fps,
+        total_frames: meta.total_frames,
+    })
 }
 
 fn validate_decoded_video_budget(
@@ -1692,7 +1929,8 @@ pub fn load_videos_with_policy(
 /// Indices of the `max_frames` frames [`subsample_evenly`] keeps out of
 /// `len` sampled ones.
 ///
-/// Same `round(i * (len - 1) / (max - 1))` spacing [`uniform_indices`] uses,
+/// Same `round(i * (len - 1) / (max - 1))` spacing [`uniform_indices`] uses
+/// (half to even, as numpy's `round` does),
 /// exposed separately because the fallback subsamples an already-decoded frame
 /// vector rather than choosing what to decode. The result is strictly
 /// increasing whenever `max_frames <= len`, because the step is then at
@@ -1711,7 +1949,7 @@ pub fn evenly_spaced_indices(len: usize, max_frames: usize) -> Vec<usize> {
     let last = (len - 1) as f64;
     let step = last / (max_frames - 1) as f64;
     (0..max_frames)
-        .map(|i| ((i as f64 * step).round() as usize).min(len - 1))
+        .map(|i| ((i as f64 * step).round_ties_even() as usize).min(len - 1))
         .collect()
 }
 
@@ -1803,6 +2041,12 @@ pub fn video_frames_lead_text(frames: usize) -> String {
 /// Returns the kept frames together with the count `target_fps` alone would
 /// have sampled, so the caller can still report "kept of sampled".
 ///
+/// `target_nframes` (#2399) replaces fps sampling with an exact count when set,
+/// and `min_frames` raises the sampling floor; both reach
+/// [`smart_nframes_with_policy`] before anything is decoded, so an
+/// out-of-range `target_nframes` fails here with [`VideoError::Extract`]
+/// against the canonical path.
+///
 /// # Errors
 /// The failures [`load_video_source`] returns: ffmpeg missing, an unprobeable
 /// container, a resource cap exceeded, or no frame decoded.
@@ -1810,6 +2054,8 @@ pub fn load_video_source_frames_fallback(
     source: &VideoSource,
     target_fps: f64,
     max_frames: usize,
+    target_nframes: Option<usize>,
+    min_frames: Option<usize>,
 ) -> Result<(Vec<DynamicImage>, usize), VideoError> {
     if !ffmpeg_available() {
         return Err(VideoError::FfmpegMissing);
@@ -1817,15 +2063,27 @@ pub fn load_video_source_frames_fallback(
     let limits = VideoLimits::from_env();
     let canonical = source.canonical_path().to_path_buf();
     let meta = probe_video(source, &limits)?;
-    let sampled = smart_nframes(meta.total_frames, meta.fps, Some(target_fps), None).map_err(
-        |err| match err {
-            VideoError::Extract { message, .. } => VideoError::Extract {
-                path: canonical.clone(),
-                message,
-            },
-            other => other,
+    // The same knob bundle the native-video families use, so both fronts read
+    // `--video-num-frames`/`--video-min-frames` through one policy resolver.
+    let policy = VideoFrameKnobs {
+        num_frames: target_nframes,
+        min_frames,
+    }
+    .sampling_policy();
+    let sampled = smart_nframes_with_policy(
+        meta.total_frames,
+        meta.fps,
+        Some(target_fps),
+        target_nframes,
+        policy,
+    )
+    .map_err(|err| match err {
+        VideoError::Extract { message, .. } => VideoError::Extract {
+            path: canonical.clone(),
+            message,
         },
-    )?;
+        other => other,
+    })?;
     let decoded = sampled.min(max_frames.max(MIN_FALLBACK_MAX_FRAMES));
     let indices = uniform_indices(meta.total_frames, decoded);
     let frames = extract_frames_single_pass(source, &indices, meta.fps, &limits)?;
@@ -1837,7 +2095,8 @@ pub fn load_video_source_frames_fallback(
 
 /// Compute `nframes` evenly-spaced frame indices across
 /// `[0, total_frames - 1]`. Mirrors the Python `np.linspace(...).round()
-/// .astype(int)` call used in `load_video`.
+/// .astype(int)` call used in `load_video`; numpy's `round` rounds half to
+/// even, so `uniform_indices(6, 3)` is `[0, 2, 5]` (2.5 -> 2).
 fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
     if nframes <= 1 {
         return vec![0];
@@ -1845,7 +2104,7 @@ fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
     let last = total_frames.saturating_sub(1) as f64;
     let step = last / (nframes as f64 - 1.0);
     (0..nframes)
-        .map(|i| (i as f64 * step).round() as usize)
+        .map(|i| (i as f64 * step).round_ties_even() as usize)
         .map(|i| i.min(total_frames.saturating_sub(1)))
         .collect()
 }

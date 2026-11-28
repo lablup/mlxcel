@@ -113,6 +113,17 @@ pub enum SnapshotLookupOutcome {
         /// Token count the restored snapshot covers.
         matched_len: usize,
     },
+    /// No whole snapshot reaches as far as a turn-boundary state checkpoint
+    /// that is a prefix of the request (issue #3047). The caller restores the
+    /// checkpoint's recurrent state over `donor`, a longer whole snapshot of
+    /// the same conversation whose rows over the checkpoint's tokens were
+    /// computed by the same sequences, cut back to `matched_len`.
+    CheckpointHit {
+        checkpoint: Arc<ModelSnapshotEntry>,
+        donor: Arc<ModelSnapshotEntry>,
+        /// Token count the rebuilt state covers: the checkpoint's length.
+        matched_len: usize,
+    },
     /// A same-session candidate existed but diverged from the request.
     Diverged(SnapshotDivergence),
     /// No candidate in this request's session bucket at all: an empty store,
@@ -163,6 +174,20 @@ struct Inner {
     /// counter so operators get one actionable WARN per affected session while
     /// statistics still count every event.
     warned_snapshot_self_evictions: HashSet<SnapshotSelfEvictionKey>,
+    /// Per session, the snapshot its latest turn restored from. With
+    /// [`PromptCacheConfig::keep_previous_turn`] on, the session-chain
+    /// supersede rule skips this entry, so an edit of the last turn still finds
+    /// the point where that turn started (#3035). Unused when the switch is off.
+    restore_sources: HashMap<SnapshotSelfEvictionKey, PromptCacheKeyDigest>,
+    /// Turn-boundary state checkpoints (issue #3047): recurrent state only,
+    /// rebuilt over a longer whole snapshot at lookup. Separate from
+    /// `snapshots` with their own byte budget and LRU, so a conversation's
+    /// whole snapshots never compete with its checkpoints for room.
+    state_checkpoints: HashMap<PromptCacheKeyDigest, SnapshotSlot>,
+    state_checkpoint_bytes: usize,
+    state_checkpoint_inserts: u64,
+    state_checkpoint_hits: u64,
+    state_checkpoint_evictions: u64,
     /// Paged detached sets that an eviction or rejection path removed from
     /// the store but could not release: returning a paged set's pool block
     /// pins requires a `CachePool` handle, which the store does not hold.
@@ -170,6 +195,10 @@ struct Inner {
     /// each set through `CachePool::release_detached_paged`. Held as the
     /// Send/Sync [`DetachedKvSetHolder`] so `Inner` stays `Send + Sync`.
     pending_paged_releases: Vec<DetachedKvSetHolder>,
+    /// Every checkpoint the orphan sweep asked for a donor, so tests can see
+    /// that a sweep stays inside the conversation it was run for.
+    #[cfg(test)]
+    orphan_probes: Vec<PromptCacheKeyDigest>,
 }
 
 impl Inner {
@@ -196,7 +225,15 @@ impl Inner {
             snapshot_supersedes: 0,
             snapshot_self_evictions: 0,
             warned_snapshot_self_evictions: HashSet::new(),
+            restore_sources: HashMap::new(),
+            state_checkpoints: HashMap::new(),
+            state_checkpoint_bytes: 0,
+            state_checkpoint_inserts: 0,
+            state_checkpoint_hits: 0,
+            state_checkpoint_evictions: 0,
             pending_paged_releases: Vec::new(),
+            #[cfg(test)]
+            orphan_probes: Vec::new(),
         }
     }
 
@@ -218,8 +255,8 @@ impl Inner {
 
     fn stats(&self) -> PromptCacheStats {
         PromptCacheStats {
-            entries: self.entries.len() + self.snapshots.len(),
-            bytes: self.total_bytes + self.snapshot_bytes,
+            entries: self.entries.len() + self.snapshots.len() + self.state_checkpoints.len(),
+            bytes: self.total_bytes + self.snapshot_bytes + self.state_checkpoint_bytes,
             inserts: self.inserts,
             rejections_oversized: self.rejections_oversized,
             lookups: self.lookups,
@@ -236,6 +273,11 @@ impl Inner {
             snapshot_evictions_ttl: self.snapshot_evictions_ttl,
             snapshot_supersedes: self.snapshot_supersedes,
             snapshot_self_evictions: self.snapshot_self_evictions,
+            state_checkpoint_entries: self.state_checkpoints.len(),
+            state_checkpoint_bytes: self.state_checkpoint_bytes,
+            state_checkpoint_inserts: self.state_checkpoint_inserts,
+            state_checkpoint_hits: self.state_checkpoint_hits,
+            state_checkpoint_evictions: self.state_checkpoint_evictions,
         }
     }
 
@@ -264,12 +306,38 @@ impl Inner {
         Some((slot.bucket, slot.entry))
     }
 
+    /// Remove a snapshot, then drop the state checkpoints of its conversation
+    /// that it was the last possible donor for (issue #3058), so an orphan
+    /// does not hold its bytes until the next checkpoint insert.
     fn remove_snapshot(
+        &mut self,
+        digest: &PromptCacheKeyDigest,
+    ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
+        let sessionless = self.snapshots.get(digest)?.sessionless.clone();
+        let (bucket, entry) = self.remove_snapshot_unswept(digest)?;
+        self.drop_orphan_state_checkpoints(&sessionless, bucket.session_key.as_deref());
+        Some((bucket, entry))
+    }
+
+    /// [`Self::remove_snapshot`] without the orphan sweep, for a caller that
+    /// is about to store a replacement in the same conversation and sweeps
+    /// once that replacement is in: sweeping in between would drop every
+    /// checkpoint whose only donor is being replaced by a longer one.
+    fn remove_snapshot_unswept(
         &mut self,
         digest: &PromptCacheKeyDigest,
     ) -> Option<(BucketKey, Arc<ModelSnapshotEntry>)> {
         let slot = self.snapshots.remove(digest)?;
         self.snapshot_bytes = self.snapshot_bytes.saturating_sub(slot.entry.size_bytes);
+        if !self.restore_sources.is_empty() {
+            let session = SnapshotSelfEvictionKey {
+                sessionless: slot.sessionless.clone(),
+                session_key: slot.bucket.session_key.clone(),
+            };
+            if self.restore_sources.get(&session) == Some(digest) {
+                self.restore_sources.remove(&session);
+            }
+        }
         Some((slot.bucket, slot.entry))
     }
 
@@ -375,9 +443,28 @@ impl Inner {
         // in `HashMap` order, which `RandomState` randomizes per instance,
         // and without this tie-break component two entries sharing
         // `last_used` would resolve to whichever one hash order placed first.
+        //
+        // System-prompt roots (#2885 Part B) are passed over while they hold
+        // at most half of the snapshot budget and anything else is left to
+        // evict: a root is shared by every chat that opens with that system
+        // block, so it is worth more than any one conversation's entry. Past
+        // half the budget they compete under plain LRU, which bounds how much
+        // of the store a churn of distinct system prompts can pin.
+        let root_bytes: usize = self
+            .snapshots
+            .values()
+            .filter(|slot| slot.entry.origin == SnapshotOrigin::SystemRoot)
+            .map(|slot| slot.entry.size_bytes)
+            .sum();
+        let protect_roots = root_bytes.saturating_mul(2) <= self.config.snapshot_capacity_bytes
+            && self
+                .snapshots
+                .values()
+                .any(|slot| slot.entry.origin != SnapshotOrigin::SystemRoot);
         let oldest = self
             .snapshots
             .iter()
+            .filter(|(_, slot)| !protect_roots || slot.entry.origin != SnapshotOrigin::SystemRoot)
             .min_by_key(|(digest, slot)| (slot.entry.last_used(), *digest.as_bytes()))
             .map(|(d, _)| *d);
         match oldest {
@@ -545,11 +632,12 @@ impl PromptCacheStore {
             .unwrap_or(false)
     }
 
-    /// Number of entries currently stored.
+    /// Number of entries currently stored: KV entries, whole snapshots, and
+    /// turn-boundary state checkpoints.
     pub fn len(&self) -> usize {
         self.inner
             .read()
-            .map(|g| g.entries.len() + g.snapshots.len())
+            .map(|g| g.entries.len() + g.snapshots.len() + g.state_checkpoints.len())
             .unwrap_or(0)
     }
 
@@ -558,11 +646,12 @@ impl PromptCacheStore {
         self.len() == 0
     }
 
-    /// Current cumulative byte footprint of all entries.
+    /// Current cumulative byte footprint of all entries, state checkpoints
+    /// included (issue #3058).
     pub fn bytes(&self) -> usize {
         self.inner
             .read()
-            .map(|g| g.total_bytes + g.snapshot_bytes)
+            .map(|g| g.total_bytes + g.snapshot_bytes + g.state_checkpoint_bytes)
             .unwrap_or(0)
     }
 
@@ -572,6 +661,28 @@ impl PromptCacheStore {
             .read()
             .map(|g| g.config.capacity_bytes)
             .unwrap_or(0)
+    }
+
+    /// Snapshot byte budget as configured.
+    pub fn snapshot_capacity_bytes(&self) -> usize {
+        self.inner
+            .read()
+            .map(|g| g.config.snapshot_capacity_bytes)
+            .unwrap_or(0)
+    }
+
+    /// How many bytes inserting a snapshot of `entry_bytes` would add to the
+    /// store's resident total: the part LRU eviction cannot pay for because
+    /// the store has room to grow into. A store at its budget replaces
+    /// entries and does not grow.
+    pub fn snapshot_growth_bytes(&self, entry_bytes: usize) -> usize {
+        self.inner.read().map_or(0, |g| {
+            entry_bytes.min(
+                g.config
+                    .snapshot_capacity_bytes
+                    .saturating_sub(g.snapshot_bytes),
+            )
+        })
     }
 
     /// Maximum entry count as configured.
@@ -884,14 +995,42 @@ impl PromptCacheStore {
         // of the reply). Chaining per producer keeps both intact while still
         // bounding each chain to one entry: turn N+1's boundary supersedes turn
         // N's boundary, and likewise for completions.
-        if let Some(session_key) = key.session_key {
+        //
+        // Periodic checkpoints (#2885 Part B) are exempt: a conversation keeps
+        // its 16K, 32K, ... checkpoints side by side, since the shallower one
+        // is exactly what a request that edits history between them resumes
+        // from. Their number is bounded by the byte budget's LRU instead.
+        //
+        // With `keep_previous_turn` on (#3035), the snapshot this session's
+        // latest turn restored from is exempt as well. Turn N restores from
+        // turn N-1's snapshot, and turn N's own insert would supersede it,
+        // leaving a request that replaces turn N's user message nothing closer
+        // than the system-prompt root (turn N's boundary ends after the edited
+        // message). The exemption moves with the next restore, so the chain
+        // holds at most one extra entry.
+        let kept_restore_source = guard
+            .config
+            .keep_previous_turn
+            .then(|| {
+                guard.restore_sources.get(&SnapshotSelfEvictionKey {
+                    sessionless: sessionless.clone(),
+                    session_key: bucket.session_key.clone(),
+                })
+            })
+            .flatten()
+            .copied();
+        if let Some(session_key) = key
+            .session_key
+            .filter(|_| entry.origin != SnapshotOrigin::Checkpoint)
+        {
             let new_tokens = entry.tokens.as_slice();
             let new_origin = entry.origin;
             let superseded: Vec<PromptCacheKeyDigest> = guard
                 .snapshots
                 .iter()
-                .filter(|(_, slot)| {
-                    slot.sessionless == sessionless
+                .filter(|(digest, slot)| {
+                    Some(**digest) != kept_restore_source
+                        && slot.sessionless == sessionless
                         && slot.bucket.session_key.as_deref() == Some(session_key)
                         && slot.entry.origin == new_origin
                         && slot.entry.tokens.len() < new_tokens.len()
@@ -900,27 +1039,31 @@ impl PromptCacheStore {
                 .map(|(digest, _)| *digest)
                 .collect();
             for superseded_digest in &superseded {
-                guard.remove_snapshot(superseded_digest);
+                guard.remove_snapshot_unswept(superseded_digest);
             }
             guard.snapshot_supersedes = guard
                 .snapshot_supersedes
                 .saturating_add(superseded.len() as u64);
         }
 
-        if guard.remove_snapshot(&digest).is_some() {
+        if guard.remove_snapshot_unswept(&digest).is_some() {
             guard.snapshot_evictions_lru = guard.snapshot_evictions_lru.saturating_add(1);
         }
 
         guard.snapshot_bytes = guard.snapshot_bytes.saturating_add(entry_bytes);
+        let session_key = bucket.session_key.clone();
         guard.snapshots.insert(
             digest,
             SnapshotSlot {
                 entry: Arc::new(entry),
                 bucket,
-                sessionless,
+                sessionless: sessionless.clone(),
             },
         );
         guard.snapshot_inserts = guard.snapshot_inserts.saturating_add(1);
+        // The supersede and replacement removals above skipped the orphan
+        // sweep so the new entry could take over as donor; sweep now.
+        guard.drop_orphan_state_checkpoints(&sessionless, session_key.as_deref());
 
         let metrics = Arc::clone(&self.metrics);
         metrics.record_snapshot_insert(entry_bytes);
@@ -1134,9 +1277,35 @@ impl PromptCacheStore {
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
     ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
-        match self.lookup_snapshot_outcome(key, tokens, |_, _| false) {
+        Self::exact_snapshot_hit(self.snapshot_lookup(key, tokens, |_, _| false, false, true))
+    }
+
+    /// [`Self::lookup_snapshot_prefix`] without counting the lookup.
+    ///
+    /// For background warm-ups (issue #3294), which look up their base
+    /// snapshot on no request's behalf. Selection is identical: the entry is
+    /// still touched and recorded as the session's restore source, so a
+    /// warm-up orders and protects snapshots exactly as a counted lookup
+    /// does. Only `snapshot_lookups`, `snapshot_hits`, and the metrics sink's
+    /// `record_snapshot_lookup` are skipped, so neither `/v1/cache/stats` nor
+    /// `/metrics` reports a warm-up as a request lookup. Warm-ups have their
+    /// own `snapshot_warmups_run` / `snapshot_warmups_skipped` counters.
+    pub fn peek_snapshot_prefix(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+    ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        Self::exact_snapshot_hit(self.snapshot_lookup(key, tokens, |_, _| false, false, false))
+    }
+
+    fn exact_snapshot_hit(
+        outcome: SnapshotLookupOutcome,
+    ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        match outcome {
             SnapshotLookupOutcome::Hit { entry, matched_len } => Some((entry, matched_len)),
-            SnapshotLookupOutcome::Diverged(_) | SnapshotLookupOutcome::NoCandidate => None,
+            SnapshotLookupOutcome::CheckpointHit { .. }
+            | SnapshotLookupOutcome::Diverged(_)
+            | SnapshotLookupOutcome::NoCandidate => None,
         }
     }
 
@@ -1165,11 +1334,56 @@ impl PromptCacheStore {
     /// restore. Passing `|_, _| false` keeps the exact-prefix behavior, which
     /// is what every family whose recurrent state cannot be rewound must do.
     /// An exact-prefix candidate always wins over a truncating one.
+    ///
+    /// When no whole snapshot reaches as far, a turn-boundary state checkpoint
+    /// that is a prefix of the request and has a donor (a longer whole
+    /// snapshot of the same conversation with the same lineage over the
+    /// checkpoint's tokens) is reported as
+    /// [`SnapshotLookupOutcome::CheckpointHit`] (issue #3047). That outcome is
+    /// not counted as a lookup until the caller rebuilt the state and calls
+    /// [`Self::record_state_checkpoint_hit`]; when the rebuild fails, the
+    /// caller discards the checkpoint with [`Self::discard_state_checkpoint`]
+    /// and looks again with [`Self::lookup_snapshot_outcome_without_checkpoints`],
+    /// which counts itself (issue #3058).
     pub fn lookup_snapshot_outcome<F>(
         &self,
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
         can_truncate: F,
+    ) -> SnapshotLookupOutcome
+    where
+        F: Fn(&ModelStateSnapshot, usize) -> bool,
+    {
+        self.snapshot_lookup(key, tokens, can_truncate, true, true)
+    }
+
+    /// [`Self::lookup_snapshot_outcome`] without turn-boundary state
+    /// checkpoints: never a [`SnapshotLookupOutcome::CheckpointHit`]. The
+    /// scheduler retries with this when rebuilding a checkpoint failed, so
+    /// the request adopts the best shorter whole snapshot instead of starting
+    /// cold (issue #3058).
+    pub fn lookup_snapshot_outcome_without_checkpoints<F>(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+        can_truncate: F,
+    ) -> SnapshotLookupOutcome
+    where
+        F: Fn(&ModelStateSnapshot, usize) -> bool,
+    {
+        self.snapshot_lookup(key, tokens, can_truncate, false, true)
+    }
+
+    /// `count == false` is [`Self::peek_snapshot_prefix`]: the same selection,
+    /// touch, and restore-source bookkeeping, without the lookup and hit
+    /// counters or the metrics sink.
+    fn snapshot_lookup<F>(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+        can_truncate: F,
+        allow_checkpoints: bool,
+        count: bool,
     ) -> SnapshotLookupOutcome
     where
         F: Fn(&ModelStateSnapshot, usize) -> bool,
@@ -1180,13 +1394,14 @@ impl PromptCacheStore {
             if !guard.config.is_enabled() {
                 return SnapshotLookupOutcome::NoCandidate;
             }
-            let (freed, count) = guard.sweep_snapshot_ttl(now);
-            if let Some(per_entry) = freed.checked_div(count) {
+            let (freed, evicted) = guard.sweep_snapshot_ttl(now);
+            if let Some(per_entry) = freed.checked_div(evicted) {
                 let metrics = Arc::clone(&self.metrics);
-                for _ in 0..count {
+                for _ in 0..evicted {
                     metrics.record_snapshot_evict_ttl(per_entry);
                 }
             }
+            guard.sweep_state_checkpoint_ttl(now);
         }
 
         let sessionless = SessionlessBucketKey::from_key(key);
@@ -1273,32 +1488,93 @@ impl PromptCacheStore {
             _ => None,
         };
 
+        // A turn-boundary state checkpoint that reaches further than any
+        // whole snapshot (issue #3047): typically a request that edits an
+        // earlier turn, whose whole snapshot was superseded by later turns.
+        let reach = best
+            .map(|(_, len, _)| len)
+            .or(partial.map(|(_, len)| len))
+            .unwrap_or(0);
+        if allow_checkpoints {
+            let checkpoint = {
+                let guard = self.inner.read().expect("prompt cache inner lock");
+                guard.best_state_checkpoint(&sessionless, key.session_key, tokens, reach)
+            };
+            if let Some((checkpoint, donor, matched_len)) = checkpoint {
+                let guard = self.inner.read().expect("prompt cache inner lock");
+                let found = guard
+                    .state_checkpoints
+                    .get(&checkpoint)
+                    .map(|slot| Arc::clone(&slot.entry))
+                    .zip(
+                        guard
+                            .snapshots
+                            .get(&donor)
+                            .map(|slot| Arc::clone(&slot.entry)),
+                    );
+                // Both entries can have been evicted between the read and
+                // this write lock; the lookup then goes on as if neither
+                // existed.
+                // The lookup is not counted yet: the rebuild can still fail,
+                // and the caller then looks again without checkpoints. The
+                // caller counts it with `record_state_checkpoint_hit` once the
+                // rebuild succeeds (issue #3058).
+                if let Some((checkpoint, donor)) = found {
+                    checkpoint.touch();
+                    donor.touch();
+                    drop(guard);
+                    return SnapshotLookupOutcome::CheckpointHit {
+                        checkpoint,
+                        donor,
+                        matched_len,
+                    };
+                }
+            }
+        }
+
         let (entry, matched_len) = {
             let mut guard = self.inner.write().expect("prompt cache inner lock");
-            guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
+            if count {
+                guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
+            }
             match best.map(|(d, m, _)| (d, m)).or(partial) {
                 Some((digest, matched)) => {
                     let entry = match guard.snapshots.get(&digest) {
                         Some(slot) => Arc::clone(&slot.entry),
                         None => {
                             drop(guard);
-                            let metrics = Arc::clone(&self.metrics);
-                            metrics.record_snapshot_lookup(false, 0);
+                            if count {
+                                let metrics = Arc::clone(&self.metrics);
+                                metrics.record_snapshot_lookup(false, 0);
+                            }
                             return SnapshotLookupOutcome::NoCandidate;
                         }
                     };
-                    guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
+                    if count {
+                        guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
+                    }
                     entry.touch();
+                    if guard.config.keep_previous_turn && key.session_key.is_some() {
+                        guard.restore_sources.insert(
+                            SnapshotSelfEvictionKey {
+                                sessionless: sessionless.clone(),
+                                session_key: key.session_key.map(str::to_owned),
+                            },
+                            digest,
+                        );
+                    }
                     (Some(entry), matched)
                 }
                 None => (None, 0),
             }
         };
 
-        let metrics = Arc::clone(&self.metrics);
-        match &entry {
-            Some(_) => metrics.record_snapshot_lookup(true, matched_len),
-            None => metrics.record_snapshot_lookup(false, 0),
+        if count {
+            let metrics = Arc::clone(&self.metrics);
+            match &entry {
+                Some(_) => metrics.record_snapshot_lookup(true, matched_len),
+                None => metrics.record_snapshot_lookup(false, 0),
+            }
         }
         match entry {
             Some(entry) => SnapshotLookupOutcome::Hit { entry, matched_len },
@@ -1349,7 +1625,13 @@ impl PromptCacheStore {
         }
         let metrics = Arc::clone(&self.metrics);
         let snapshot_cap_freed = guard.enforce_snapshot_caps(metrics.as_ref(), None);
-        drained_freed + ttl_freed + cap_freed + snapshot_ttl_freed + snapshot_cap_freed
+        let checkpoint_freed = guard.sweep_state_checkpoint_ttl(Instant::now());
+        drained_freed
+            + ttl_freed
+            + cap_freed
+            + snapshot_ttl_freed
+            + snapshot_cap_freed
+            + checkpoint_freed
     }
 
     /// Evict the single least-recently-used entry on demand, returning the
@@ -1383,8 +1665,11 @@ impl PromptCacheStore {
         }
         guard.tries.clear();
         guard.snapshots.clear();
+        guard.restore_sources.clear();
+        guard.state_checkpoints.clear();
         guard.total_bytes = 0;
         guard.snapshot_bytes = 0;
+        guard.state_checkpoint_bytes = 0;
     }
 }
 
@@ -1507,6 +1792,9 @@ impl std::fmt::Debug for PromptCacheStore {
             .finish()
     }
 }
+
+#[path = "state_checkpoints.rs"]
+mod state_checkpoints;
 
 #[cfg(test)]
 #[path = "store_tests.rs"]

@@ -32,7 +32,7 @@
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -87,6 +87,29 @@ use super::chat::{
 /// refusal. What the arm buys is that the day that schema gains a video block,
 /// a client-fixable request error does not arrive as a `501` saying the
 /// checkpoint cannot do it. The cost is one status comparison.
+/// The media refusal for a translated Messages request, if any.
+///
+/// Wraps [`crate::server::media_capability_rejection`] and adds the one check
+/// it cannot make from the translated request: an audio block, which the
+/// translator drops, sent to a checkpoint with a stated reason for having no
+/// audio encoder (Inkling 2, issue #3376). Every other checkpoint keeps
+/// ignoring such a block, as before.
+fn anthropic_media_rejection(
+    translated: &AnthropicTranslated,
+    state: &AppState,
+) -> Option<crate::server::types::ErrorResponse> {
+    if translated.has_audio_block
+        && let Some(reason) = state.media_support.audio_refusal
+    {
+        return Some(crate::server::types::ErrorResponse::not_supported(reason));
+    }
+    crate::server::media_capability_rejection(
+        &translated.chat_request,
+        state.media_support,
+        state.display_model_id(),
+    )
+}
+
 fn media_rejection_response(
     rejection: crate::server::types::ErrorResponse,
 ) -> AnthropicErrorResponse {
@@ -146,12 +169,33 @@ fn chat_unavailable_response(state: &AppState) -> Option<Response> {
     })
 }
 
+/// Unwrap a Messages API request body, or answer its rejection in the
+/// Anthropic envelope, with the message and status the OpenAI routes use
+/// ([`super::json_rejection_message`], [`super::json_rejection_status`]).
+/// `/v1/messages` and `/v1/messages/count_tokens` both run it first, so one
+/// body gets one answer from either (issue #2337).
+fn parse_anthropic_request(
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
+) -> Result<AnthropicRequest, AnthropicErrorResponse> {
+    request.map(|Json(request)| request).map_err(|rejection| {
+        AnthropicErrorResponse::new(
+            super::json_rejection_status(&rejection),
+            super::json_rejection_message(&rejection),
+            "invalid_request_error",
+        )
+    })
+}
+
 /// POST /v1/messages
 pub async fn anthropic_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicRequest>,
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_anthropic_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     let live = state.live();
     if let Some(response) = chat_unavailable_response(&state) {
         return response;
@@ -163,11 +207,7 @@ pub async fn anthropic_messages(
     // file is read (issue #1451). Rendered in the Anthropic error envelope this
     // route uses, so a client parsing it does not have to special-case one
     // rejection.
-    if let Some(rejection) = crate::server::media_capability_rejection(
-        &translated.chat_request,
-        state.media_support,
-        state.display_model_id(),
-    ) {
+    if let Some(rejection) = anthropic_media_rejection(&translated, &state) {
         return media_rejection_response(rejection).into_response();
     }
 
@@ -332,6 +372,8 @@ async fn non_stream_messages(
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3's XTML format, #1338) produced the
     // prompt as token ids. Handing them to the provider is what keeps the
     // rendered structure intact: re-tokenizing `prepared.prompt` would have to
@@ -344,6 +386,8 @@ async fn non_stream_messages(
     // `ThinkingState` then counts reasoning from the first token, as on
     // `/v1/chat/completions`.
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     // Forced tool-call grammar (#1319), built at the request boundary.
     options.structured = structured;
     // Wire the cross-request prompt-prefix KV cache (epic #116) into the
@@ -357,7 +401,7 @@ async fn non_stream_messages(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
 
     // Slot accounting (#1440): ties this request to a numbered slot for
@@ -400,9 +444,10 @@ async fn non_stream_messages(
     // Parse tool calls and recover the visible/reasoning split using the
     // shared chat helpers.
     let parsed_tools = if tool_calls::should_parse_tool_calls(&translated.chat_request) {
-        Some(tool_calls::parse_tool_calls(
+        Some(tool_calls::parse_tool_calls_with_context(
             &result.text,
             translated.chat_request.tools.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None
@@ -559,6 +604,8 @@ async fn stream_messages(
     // per-request Gemma 4 image soft-token budget, resolved and validated from
     // the translated `image_url` content parts. `None` when unset.
     options.image_soft_tokens = prepared.image_soft_tokens;
+    // The model-side reasoning effort (#3435); `None` unless the model steers.
+    options.model_reasoning_effort = prepared.model_reasoning_effort.clone();
     // A native chat renderer (Kimi K3's XTML format, #1338) produced the
     // prompt as token ids. Handing them to the provider is what keeps the
     // rendered structure intact: re-tokenizing `prepared.prompt` would have to
@@ -571,6 +618,8 @@ async fn stream_messages(
     // `ThinkingState` then counts reasoning from the first token, as on
     // `/v1/chat/completions`.
     options.thinking_enter_block_on_start = primed_open_thinking;
+    options.thinking_primed_close =
+        super::chat::primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
     // Forced tool-call grammar (#1319), built at the request boundary.
     options.structured = structured;
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Anthropic
@@ -581,7 +630,7 @@ async fn stream_messages(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
+        prepared.boundary_renders(),
     );
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
@@ -816,9 +865,10 @@ async fn stream_messages(
             .map(|g| g.clone())
             .unwrap_or_default();
         let parsed_tools = if parse_tools {
-            Some(tool_calls::parse_tool_calls(
+            Some(tool_calls::parse_tool_calls_with_context(
                 &full_raw,
                 tools_for_parser.as_deref(),
+                primed_open_thinking,
             ))
         } else {
             None
@@ -900,8 +950,12 @@ async fn stream_messages(
 /// same body. Mirrors the upstream `anthropic_count_tokens_endpoint`.
 pub async fn anthropic_count_tokens(
     State(state): State<AppState>,
-    Json(request): Json<AnthropicRequest>,
+    request: Result<Json<AnthropicRequest>, JsonRejection>,
 ) -> Response {
+    let request = match parse_anthropic_request(request) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
     if let Some(response) = chat_unavailable_response(&state) {
         return response;
     }
@@ -914,11 +968,7 @@ pub async fn anthropic_count_tokens(
     // checkpoint with no image tower, and this route never reaches a worker
     // that would refuse it later (issue #1748). Same check, same order and same
     // envelope as `anthropic_messages`, so both routes answer one body alike.
-    if let Some(rejection) = crate::server::media_capability_rejection(
-        &translated.chat_request,
-        state.media_support,
-        state.display_model_id(),
-    ) {
+    if let Some(rejection) = anthropic_media_rejection(&translated, &state) {
         return media_rejection_response(rejection).into_response();
     }
 
@@ -1214,6 +1264,7 @@ mod tests {
             video_native: true,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         };
         let request = chat_request_with_media_parts(serde_json::json!([
             {"type": "video_url", "video_url": {"url": "file:///clip.mp4"}},
@@ -1243,6 +1294,7 @@ mod tests {
             video_native: true,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         };
         let request = chat_request_with_media_parts(serde_json::json!([
             {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "wav"}},

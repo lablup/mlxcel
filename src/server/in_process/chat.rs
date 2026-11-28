@@ -283,7 +283,11 @@ impl InProcessServer {
         let mut finish_reason = result.finish_reason.clone();
         let mut calls = Vec::new();
         if parse_tools {
-            let parsed = tool_calls::parse_tool_calls(&text.raw, request.tools.as_deref());
+            let parsed = tool_calls::parse_tool_calls_with_context(
+                &text.raw,
+                request.tools.as_deref(),
+                primed_open_thinking,
+            );
             if parsed.has_tool_calls() {
                 let specific = request
                     .tool_choice

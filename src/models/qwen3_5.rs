@@ -32,22 +32,28 @@ use crate::models::gated_delta::{
     GatedDeltaCache, QK_L2NORM_EPS, RMSNormGated, gated_delta_update,
     gated_delta_update_chain_parity, normalize_qk,
 };
-use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use crate::models::model_owned::KvCacheLayerModes;
 use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::qwen3_5_layer_state::{self, LentCaches};
 use crate::models::qwen3_next::{
     MLP, Quantization, Qwen3NextAttention, Qwen3NextCache, Qwen3NextConfig, SparseMoeBlock,
 };
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
-use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
+use crate::models::speculative_exactness_draws as draws;
+use mlxcel_core::cache::{
+    KVCacheMode, LayerState, LayerStateEncoding, LayerStateForward, LayerStateKind,
+    LayerStateSnapshotSpec, SequenceId,
+};
 use mlxcel_core::dtype;
-use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode_with_ids};
+use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
+use mlxcel_core::utils::{PrefillAttention, create_causal_mask, prefill_causal_mask, silu};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::path::Path;
 
 /// Prompt length the exactness probe prefills before comparing arms, unless
@@ -69,7 +75,7 @@ use std::path::Path;
 /// Since #2191 the CUDA probe prefills [`CUDA_PROBE_PROMPT_LEN`] tokens and adds
 /// a long draw ([`PROBE_LONG_WALK`] tokens past the prompt) that does catch it.
 ///
-/// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
+/// See `docs/benchmark_results/versions/v0.8.0.md#dflash-width-2-4-residual-qwen35-gb10-2026-09-21`.
 const DEFAULT_PROBE_PROMPT_LEN: usize = 8;
 
 /// The probe's prompt length for this process.
@@ -169,6 +175,11 @@ pub struct Qwen35Config {
     // Rope parameters (dict format)
     #[serde(default)]
     pub rope_parameters: Option<serde_json::Value>,
+    /// The training context. Read for one thing: the YaRN original context
+    /// when `rope_parameters` declares `yarn` without
+    /// `original_max_position_embeddings` (see [`Qwen35Config::yarn`]).
+    #[serde(default)]
+    pub max_position_embeddings: Option<usize>,
 
     #[serde(default = "default_full_attention_interval")]
     pub full_attention_interval: usize,
@@ -196,6 +207,12 @@ pub struct Qwen35Config {
     /// dropping the key and generating silently wrong output.
     #[serde(default)]
     pub output_gate_type: Option<String>,
+
+    /// End-of-sequence token id(s) declared by the checkpoint. IndicOCR's
+    /// Qwen3.5 fine-tune uses 262146 rather than the stock 248046/248044, so
+    /// generation must read this instead of assuming the stock pair.
+    #[serde(default)]
+    pub eos_token_id: Option<serde_json::Value>,
 }
 
 /// Config values a Qwen3.5-family checkpoint can declare that mlxcel has no
@@ -377,6 +394,167 @@ fn default_true() -> bool {
     true
 }
 
+/// The YaRN rotation a Qwen 3.5 `rope_parameters` block declares
+/// (Blaizzy/mlx-vlm#2649, #3215). Built by [`Qwen35Config::yarn`].
+pub(crate) struct Qwen35Yarn {
+    /// Float32 `[rope_dims / 2]` divisor table, the form
+    /// `fast_rope_with_freqs` takes. Its reciprocal is transformers'
+    /// `inv_freq`.
+    pub(crate) freqs: UniquePtr<MlxArray>,
+    /// Multiplies the rotated lanes of Q and K, and only those.
+    pub(crate) attention_factor: f32,
+}
+
+/// The inverse frequencies the cos/sin MRoPE path multiplies positions by:
+/// the reciprocal of a YaRN divisor table ([`Qwen35Yarn::freqs`]).
+pub(crate) fn yarn_inv_freq(freqs: &MlxArray) -> Vec<f32> {
+    mlxcel_core::utils::array_to_vec_f32(freqs)
+        .into_iter()
+        .map(|freq| 1.0 / freq)
+        .collect()
+}
+
+/// The YaRN attention factor by the transformers rules
+/// (`_compute_yarn_parameters`, mirrored by upstream's `_yarn_inv_freq`):
+/// `attention_factor` when the block has one; else
+/// `get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)` only
+/// when both are non-zero; else `get_mscale(factor) = 0.1 * ln(factor) + 1`.
+///
+/// Deliberately not `rope_utils::yarn_rope_setup`'s multiplier, which follows
+/// mlx-lm's `YarnRoPE`: that one ignores `attention_factor` and applies a
+/// lone `mscale`.
+fn qwen35_yarn_attention_factor(block: &serde_json::Value, factor: f64) -> f64 {
+    let number = |key: &str| block.get(key).and_then(|value| value.as_f64());
+    let get_mscale = |mscale: f64| {
+        if factor <= 1.0 {
+            1.0
+        } else {
+            0.1 * mscale * factor.ln() + 1.0
+        }
+    };
+    if let Some(declared) = number("attention_factor") {
+        return declared;
+    }
+    match (number("mscale"), number("mscale_all_dim")) {
+        (Some(mscale), Some(all_dim)) if mscale != 0.0 && all_dim != 0.0 => {
+            get_mscale(mscale) / get_mscale(all_dim)
+        }
+        _ => get_mscale(1.0),
+    }
+}
+
+/// The YaRN frequency table and attention factor, when `rope_parameters`
+/// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
+/// block, which keeps the plain `rope_theta` rotation.
+///
+/// Port of `Qwen3_5RotaryEmbedding` / `_yarn_inv_freq` in
+/// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py>
+/// (Blaizzy/mlx-vlm#2649). The table comes from the shared
+/// [`super::rope_utils::yarn_rope_setup`] over the rotary dims and
+/// `rope_theta`, with `max_position_embeddings` as the original context
+/// when the block names none, so the `--yarn-orig-ctx`, `--yarn-beta-fast`,
+/// `--yarn-beta-slow` and `--yarn-ext-factor` knobs reach it. The
+/// attention factor follows the transformers rules
+/// ([`qwen35_yarn_attention_factor`]), except that with a resolved
+/// extrapolation mix of 0 it is `--yarn-attn-factor`, as on the shared
+/// path.
+///
+/// A block that names `yarn` and cannot build a table is a load error
+/// naming the field, never a fallback to the unscaled rotation.
+///
+/// The inputs are the config's rotary geometry so the Qwen 3.5 MTP
+/// drafter, whose `text_config` mirrors the target's, builds a
+/// bit-identical table through this same code (issue #3479).
+///
+/// Used by: [`Qwen35Config::yarn`] and
+/// `crate::models::drafter_loader::load_drafter` (the `qwen3_5_mtp` arm).
+pub(crate) fn qwen35_yarn(
+    rope_parameters: Option<&serde_json::Value>,
+    rope_dims: i32,
+    rope_theta: f32,
+    max_position_embeddings: Option<usize>,
+) -> Result<Option<Qwen35Yarn>, String> {
+    use super::rope_overrides;
+    use super::rope_utils::{RopeScalingSpec, yarn_rope_setup};
+
+    let Some(block) = rope_parameters else {
+        return Ok(None);
+    };
+    let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
+    if spec.rope_type() != "yarn" {
+        return Ok(None);
+    }
+
+    let wrong_type = |key: &str, value: &serde_json::Value, expected: &str| {
+        format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `{key}` must be {expected}, got {}",
+            truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS)
+        )
+    };
+    for key in [
+        "factor",
+        "original_max_position_embeddings",
+        "beta_fast",
+        "beta_slow",
+        "attention_factor",
+        "mscale",
+        "mscale_all_dim",
+    ] {
+        if let Some(value) = block.get(key)
+            && !value.is_null()
+            && !value.is_number()
+        {
+            return Err(wrong_type(key, value, "a number"));
+        }
+    }
+    if let Some(value) = block.get("truncate")
+        && !value.is_null()
+        && !value.is_boolean()
+    {
+        return Err(wrong_type("truncate", value, "a boolean"));
+    }
+    let Some(factor) = block.get("factor").and_then(|value| value.as_f64()) else {
+        return Err("Qwen3.5 rope_parameters declares YaRN, but `factor` is missing".to_string());
+    };
+
+    let dims = rope_dims.max(0) as usize;
+    let train_ctx = max_position_embeddings.map(|ctx| ctx as f32);
+    let (freqs, shared_multiplier) = yarn_rope_setup(&spec, dims, rope_theta, train_ctx)
+        .map_err(|reason| format!("Qwen3.5 rope_parameters declares YaRN, but {reason}"))?;
+
+    let ext_factor = rope_overrides::installed_yarn_knobs()
+        .and_then(|knobs| knobs.ext_factor)
+        .unwrap_or(1.0);
+    let attention_factor = if ext_factor == 0.0 {
+        shared_multiplier
+    } else {
+        qwen35_yarn_attention_factor(block, factor) as f32
+    };
+    if !(attention_factor.is_finite() && attention_factor > 0.0) {
+        return Err(format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `attention_factor` resolves to \
+             {attention_factor}, which is not a positive finite number"
+        ));
+    }
+
+    // Qwen 3.5 is not on the `--rope-scaling` / `--rope-scale` /
+    // `--rope-freq-scale` / `--rope-freq-base` seam, so an override that
+    // carries any of those must keep failing `verify_applied`. One made
+    // of `--yarn-*` knobs alone has just been consumed by the table.
+    if let Some(over) = rope_overrides::installed()
+        && over.scaling_type().is_none()
+        && over.freq_base().is_none()
+        && over.freq_scale().is_none()
+    {
+        rope_overrides::note_application();
+    }
+
+    Ok(Some(Qwen35Yarn {
+        freqs,
+        attention_factor,
+    }))
+}
+
 impl Qwen35Config {
     pub fn group_size(&self) -> i32 {
         self.quantization
@@ -414,6 +592,25 @@ impl Qwen35Config {
 
     pub fn rope_dims(&self) -> i32 {
         (self.head_dim_resolved() as f32 * self.partial_rotary_factor()) as i32
+    }
+
+    /// The YaRN frequency table and attention factor, when `rope_parameters`
+    /// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
+    /// block, which keeps the plain `rope_theta` rotation. See
+    /// [`qwen35_yarn`], which this delegates to with this config's rotary
+    /// geometry.
+    ///
+    /// Used by: `Qwen35Model::from_weights_impl` and
+    /// `Qwen35StageModel::from_filtered_weights`, and through them every
+    /// Qwen 3.5 loader (text, VLM, MiniCPM-V 4.6, tensor-parallel, pipeline
+    /// stage).
+    pub(crate) fn yarn(&self) -> Result<Option<Qwen35Yarn>, String> {
+        qwen35_yarn(
+            self.rope_parameters.as_ref(),
+            self.rope_dims(),
+            self.rope_theta(),
+            self.max_position_embeddings,
+        )
     }
 
     /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out
@@ -518,7 +715,7 @@ impl Qwen35Config {
             vocab_size: self.vocab_size,
             rope_theta: self.rope_theta(),
             partial_rotary_factor: self.partial_rotary_factor(),
-            max_position_embeddings: None,
+            max_position_embeddings: self.max_position_embeddings,
             norm_topk_prob: self.norm_topk_prob,
             tie_word_embeddings: self.tie_word_embeddings,
             attention_bias: self.attention_bias,
@@ -682,21 +879,15 @@ impl Qwen35GatedDeltaNet {
         // Concatenate with conv state
         let conv_input = concatenate(&conv_state, &qkv, 1);
 
-        // Update cache with new conv state.
-        // Wrap slice in contiguous() to force MLX to materialize a fresh,
-        // independent buffer. Without this, the slice is a lazy view that
-        // retains a reference to the full conv_input allocation, causing a
-        // memory leak proportional to the sequence length.
+        // Update cache with new conv state: a fresh buffer, scheduled now on a
+        // long prefill so this layer's full conv_input is not held until the
+        // caches are evaluated after the forward (see the helper).
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Apply conv1d with SiLU activation
@@ -871,14 +1062,10 @@ impl Qwen35GatedDeltaNet {
         // rollback path will overwrite this with the per-row trimmed window.
         if let Some(c) = cache.as_deref_mut() {
             let n_keep = (self.conv_kernel_size - 1) as i32;
-            let conv_shape = mlxcel_core::array_shape(&conv_input);
-            let conv_len = conv_shape[1];
-            let tail = mlxcel_core::slice(
+            c.conv_state = Some(mlxcel_core::utils::materialized_state_tail(
                 &conv_input,
-                &[0, conv_len - n_keep, 0],
-                &[b, conv_len, self.conv_dim as i32],
-            );
-            c.conv_state = Some(mlxcel_core::contiguous(&tail, false));
+                n_keep,
+            ));
         }
 
         // Conv1d + SiLU.
@@ -1199,6 +1386,15 @@ pub(crate) struct Qwen35DecoderLayer {
     pub(crate) post_attention_layernorm: RMSNorm,
 }
 
+/// The full-attention geometry of `layers`, for the prefill mask choice
+/// (#3051); `None` when the slice holds no full-attention layer.
+pub(crate) fn full_attention_geometry(layers: &[Qwen35DecoderLayer]) -> Option<PrefillAttention> {
+    layers.iter().find_map(|layer| match &layer.attention {
+        Qwen35AttentionVariant::FullAttention(attn) => Some(attn.prefill_attention()),
+        Qwen35AttentionVariant::Linear(_) => None,
+    })
+}
+
 impl Qwen35DecoderLayer {
     fn forward(
         &self,
@@ -1238,6 +1434,7 @@ impl Qwen35DecoderLayer {
     ///
     /// used by `Qwen35Model::forward_speculative` to drive the
     /// DFlash drafter without duplicating the prefill / decode forward path.
+    #[allow(clippy::too_many_arguments)]
     fn forward_with_capture(
         &self,
         layer_idx: usize,
@@ -1246,6 +1443,7 @@ impl Qwen35DecoderLayer {
         cache: &mut Qwen3NextCache,
         position_ids: Option<&MlxArray>,
         snapshot_sink: &mut Vec<GdnRollbackSnapshot>,
+        row_valid_ends: Option<&[i32]>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
 
@@ -1270,9 +1468,15 @@ impl Qwen35DecoderLayer {
             // logits stay bit-aligned with single-token decode. Mirrors
             // upstream `Qwen3_5DecoderLayer.__call__`'s `target_verify=True`
             // propagation into `Qwen3_5Attention`.
-            (Qwen35AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => {
-                attn.forward_with_position_ids_verify(&normed, c, mask, position_ids, true)
-            }
+            (Qwen35AttentionVariant::FullAttention(attn), Qwen3NextCache::Attention(c)) => attn
+                .forward_with_position_ids_verify(
+                    &normed,
+                    c,
+                    mask,
+                    position_ids,
+                    true,
+                    row_valid_ends,
+                ),
             (Qwen35AttentionVariant::FullAttention(attn), _) => {
                 let mut temp_cache = KVCache::new();
                 attn.forward_with_position_ids_verify(
@@ -1281,6 +1485,7 @@ impl Qwen35DecoderLayer {
                     mask,
                     position_ids,
                     true,
+                    row_valid_ends,
                 )
             }
         };
@@ -1298,10 +1503,13 @@ impl Qwen35DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    /// `yarn` is the model's [`Qwen35Config::yarn`], resolved once by the
+    /// caller; each full-attention layer takes its own handle on the table.
     fn from_weights(
         weights: &WeightMap,
         config: &Qwen35Config,
         qn_config: &Qwen3NextConfig,
+        yarn: Option<&Qwen35Yarn>,
         layer_idx: usize,
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
@@ -1314,11 +1522,15 @@ impl Qwen35DecoderLayer {
                 &format!("{}.linear_attn", prefix),
             )?)
         } else {
-            Qwen35AttentionVariant::FullAttention(Qwen3NextAttention::from_weights(
+            let mut attn = Qwen3NextAttention::from_weights(
                 weights,
                 qn_config,
                 &format!("{}.self_attn", prefix),
-            )?)
+            )?;
+            if let Some(yarn) = yarn {
+                attn.set_yarn_rope(mlxcel_core::copy(&yarn.freqs), yarn.attention_factor);
+            }
+            Qwen35AttentionVariant::FullAttention(attn)
         };
 
         let mlp = if config.is_moe_layer(layer_idx) {
@@ -1414,8 +1626,11 @@ pub struct Qwen35Model {
     pub(crate) norm: RMSNorm,
     pub(crate) lm_head: Option<UnifiedLinear>,
     pub(crate) config: Qwen35Config,
-    /// Internal and per-sequence mixed cache state.
-    sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
+    /// Mixed cache state of the id-less single-sequence run (a bare
+    /// `forward`, the CLI speculative targets and benchmarks). A scheduler
+    /// sequence's state is the layer state its pool entry holds (issue
+    /// #3254).
+    fallback: RefCell<Vec<Qwen3NextCache>>,
     kv_cache_layer_modes: KvCacheLayerModes,
     /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
@@ -1431,6 +1646,26 @@ impl Qwen35Model {
         caches: &mut [Qwen3NextCache],
         position_ids: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_internal_at(input_ids, input_embeddings, caches, position_ids, None)
+    }
+
+    /// [`Self::forward_internal`] that, with `last_pos`, projects only that
+    /// position's hidden row through the final norm and the LM head and
+    /// returns `[batch, 1, vocab]` logits.
+    ///
+    /// A prefill samples only the last real position, so the full
+    /// `[batch, seq_len, vocab]` projection is pure transient: at a 28K-token
+    /// prompt and the 248K-entry Qwen 3.5 vocabulary it is about 14 GB in
+    /// bf16, the largest single buffer of the prefill (issue #3045). The
+    /// final norm is per row, so slicing before it gives the same row.
+    fn forward_internal_at(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Qwen3NextCache],
+        position_ids: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -1440,7 +1675,9 @@ impl Qwen35Model {
         let shape = mlxcel_core::array_shape(&h);
         let seq_len = shape[1];
 
-        // Create masks
+        // Create masks. A single-row prefill leaves causality to MLX's causal
+        // mode (`prefill_causal_mask`, #3051), which the full-attention layer
+        // takes for a mask-less multi-token forward.
         let fa_idx = self.config.full_attention_interval - 1;
         let fa_mask = if seq_len > 1 {
             let offset = if fa_idx < caches.len() {
@@ -1448,7 +1685,10 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
         } else {
             None
         };
@@ -1469,6 +1709,10 @@ impl Qwen35Model {
             h = layer.forward(&h, mask, cache, position_ids);
         }
 
+        let h = match last_pos {
+            Some(pos) => mlxcel_core::generate::logits_at_position(&h, pos),
+            None => h,
+        };
         let h = self.norm.forward(&h);
 
         if let Some(ref lm_head) = self.lm_head {
@@ -1478,35 +1722,35 @@ impl Qwen35Model {
         }
     }
 
-    fn validate_cache_row(&self, row_idx: usize, row: &[Qwen3NextCache]) {
-        assert_eq!(
-            row.len(),
-            self.layers.len(),
-            "Qwen 3.5 batched decode cache count mismatch for row {row_idx}"
-        );
-        for (layer_idx, (cache, layer)) in row.iter().zip(&self.layers).enumerate() {
-            assert!(
-                matches!(
-                    (cache, layer.is_linear),
-                    (Qwen3NextCache::Linear(_), true) | (Qwen3NextCache::Attention(_), false)
-                ),
-                "Qwen 3.5 batched decode cache kind mismatch for row {row_idx}, layer {layer_idx}"
-            );
+    /// What a layer keeps per sequence.
+    fn layer_kind(&self, is_linear: bool) -> LayerStateKind {
+        if is_linear {
+            LayerStateKind::Recurrent
+        } else {
+            LayerStateKind::Full
         }
     }
 
-    fn validate_batch_cache_layout(&self, rows: &[Vec<Qwen3NextCache>]) {
-        for (row_idx, row) in rows.iter().enumerate() {
-            self.validate_cache_row(row_idx, row);
+    /// One row's layer state must hold a layer per decoder layer, of the
+    /// kind the layer is, before anything is forwarded over it.
+    fn check_state_row(&self, row_idx: usize, row: &[LayerState]) -> Result<(), String> {
+        if row.len() != self.layers.len() {
+            return Err(format!(
+                "Qwen 3.5 forward: row {row_idx} holds {} layers of state, the model has {}",
+                row.len(),
+                self.layers.len()
+            ));
         }
-    }
-
-    fn validate_prepared_cache_layout(&self, ids: &[SequenceId]) {
-        for (row_idx, &id) in ids.iter().enumerate() {
-            self.sequence_state
-                .with_sequence_state_ref(id, |row| self.validate_cache_row(row_idx, row))
-                .expect("preflighted Qwen 3.5 sequence state");
+        for (layer_idx, (state, layer)) in row.iter().zip(&self.layers).enumerate() {
+            if !state.matches_kind(self.layer_kind(layer.is_linear)) {
+                return Err(format!(
+                    "Qwen 3.5 forward: cache kind mismatch for row {row_idx}, layer {layer_idx}: \
+                     {} storage",
+                    state.storage_name()
+                ));
+            }
         }
+        Ok(())
     }
 
     fn batch_states_uniform(&self, rows: &[Vec<Qwen3NextCache>]) -> bool {
@@ -1885,19 +2129,11 @@ impl Qwen35Model {
     /// Used by: [`Self::mtp_exactness_allows`], and the
     /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
-        if block_size < 2 {
-            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
-        }
-        let vocab = self.config.vocab_size;
-        if vocab < 2 {
-            return BlockChainExactness::NotRun("degenerate vocabulary");
-        }
-
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
+        // No sliding layer in this family, so no long draw of its own.
+        let lengths = draws::prompt_lengths(probe_prompt_len_for_host(), PROBE_DRAWS, None);
+        let verdict = self.probe_block_chain_exactness_at(block_size, &lengths);
+        if !verdict.is_equal() {
+            return verdict;
         }
         // On CUDA a verify block can match the chain right after prefill and
         // still part from it dozens of tokens later: a block-only kernel
@@ -1908,13 +2144,40 @@ impl Qwen35Model {
         // served path diverged, so CUDA also walks blocks and the chain
         // together well past the prompt. Metal keeps the short draws only.
         if mlxcel_core::cuda_is_available() {
-            return self.probe_long_walk(block_size, vocab);
+            return self.probe_long_walk(block_size, self.config.vocab_size);
         }
         BlockChainExactness::Equal
     }
 
+    /// The short draws of [`Self::probe_block_chain_exactness`] at the given
+    /// prompt lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
+        if block_size < 2 {
+            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
+        }
+        let vocab = self.config.vocab_size;
+        if vocab < 2 {
+            return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
+    }
+
     /// One (prompt, block) draw of [`Self::probe_block_chain_exactness`].
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
         // Synthetic ids, varied per draw. Kernel *dispatch* does not
         // depend on the values (it is a function of shape, dtype,
         // quantization mode and `M`), but whether a small last-ulp
@@ -1924,9 +2187,7 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..probe_prompt_len_for_host())
-            .map(|i| wrap(i, 7, 1))
-            .collect();
+        let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
@@ -2026,16 +2287,6 @@ impl Qwen35Model {
         }
     }
 
-    fn visible_len(cache: &Qwen3NextCache) -> usize {
-        match cache {
-            Qwen3NextCache::Attention(kv) => kv.seq_len().max(0) as usize,
-            // Gated-delta state is model-owned recurrence, not external K/V.
-            // Keep its paged-shadow layer empty so accounting does not reserve
-            // blocks that no attention lookup can ever read.
-            Qwen3NextCache::Linear(_) => 0,
-        }
-    }
-
     fn split_batched_cache(cache: &Qwen3NextCache, batch_idx: usize) -> Qwen3NextCache {
         match cache {
             Qwen3NextCache::Attention(kv) => {
@@ -2091,21 +2342,23 @@ impl Qwen35Model {
         }
     }
 
+    /// One padded batched prefill over fresh sequences: a single `[B, L]`
+    /// forward over one batched cache, split per row into each sequence's
+    /// layer state.
     fn forward_batched_prefill(
         &self,
         input_ids: &MlxArray,
-        seq_ids: &[SequenceId],
+        rows: &mut [&mut [LayerState]],
     ) -> UniquePtr<MlxArray> {
         debug_assert!(self.configured_attention_kv_modes_all_fp16());
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
-        for (batch_idx, seq_id) in seq_ids.iter().copied().enumerate() {
-            let split_caches = batched_caches
-                .iter()
-                .map(|cache| Self::split_batched_cache(cache, batch_idx))
-                .collect();
-            self.sequence_state
-                .replace_sequence_state(seq_id, split_caches);
+        for (batch_idx, row) in rows.iter_mut().enumerate() {
+            for (layer, cache) in row.iter_mut().zip(&batched_caches) {
+                *layer = qwen3_5_layer_state::into_layer_state(Self::split_batched_cache(
+                    cache, batch_idx,
+                ));
+            }
         }
         logits
     }
@@ -2120,31 +2373,48 @@ impl Qwen35Model {
         })
     }
 
+    /// The id-less multi-row forward: every row runs on the fallback slot in
+    /// turn, the semantics the `KVCache`-slice entry always had without ids.
     fn forward_batched_rows_sequential(
         &self,
         input_ids: &MlxArray,
-        seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
-        let mut result = self.forward_with_sequence_id(
-            &input_0,
-            seq_ids.and_then(|ids| ids.first().copied()),
-            batch_caches[0],
-            None,
-        );
+        let mut result = self.forward_with_sequence_id(&input_0, None, batch_caches[0], None);
         for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
             let input_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-            let logits_i = self.forward_with_sequence_id(
-                &input_i,
-                seq_ids.and_then(|ids| ids.get(i).copied()),
-                caches,
-                None,
-            );
+            let logits_i = self.forward_with_sequence_id(&input_i, None, caches, None);
             result = mlxcel_core::concatenate(&result, &logits_i, 0);
         }
         result
+    }
+
+    /// Run `f` over one sequence's caches: the layer state the pool holds
+    /// for a scheduler sequence, borrowed for the call, or the fallback slot.
+    fn with_sequence_caches<R>(
+        &self,
+        state: Option<&mut [LayerState]>,
+        f: impl FnOnce(&mut [Qwen3NextCache]) -> R,
+    ) -> R {
+        match state {
+            Some(state) => {
+                let mut caches = LentCaches::take(state).unwrap_or_else(|err| panic!("{err}"));
+                f(&mut caches)
+            }
+            None => f(&mut self.fallback.borrow_mut()),
+        }
+    }
+
+    /// A `KVCache`-slice entry reached with a scheduler sequence id. The
+    /// engine forwards a scheduler-owned sequence through
+    /// `forward_layer_state`, so this is a caller that bypassed the pool.
+    fn refuse_sequence_id(seq_id: SequenceId) -> ! {
+        panic!(
+            "Qwen 3.5 state is scheduler-owned: sequence {seq_id} must be forwarded through \
+             forward_layer_state with its pool layer state"
+        )
     }
 
     fn forward_with_sequence_caches(
@@ -2153,13 +2423,33 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |sequence_caches| {
-                self.forward_with_mrope_state(input_ids, input_embeddings, sequence_caches, seq_id)
-            },
-        )
+        self.forward_with_sequence_caches_at(input_ids, input_embeddings, seq_id, None)
+    }
+
+    /// [`Self::forward_with_sequence_caches`] with the `last_pos` projection
+    /// of [`Self::forward_internal_at`].
+    ///
+    /// Used by: the three `forward_last_logits*` overrides, which the
+    /// engine's prefill (CLI and server) calls for every prompt piece.
+    fn forward_with_sequence_caches_at(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
+        if let Some(seq_id) = seq_id {
+            Self::refuse_sequence_id(seq_id);
+        }
+        self.with_sequence_caches(None, |sequence_caches| {
+            self.forward_with_mrope_state(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                None,
+                last_pos,
+            )
+        })
     }
 
     fn forward_with_mrope_state(
@@ -2168,6 +2458,7 @@ impl Qwen35Model {
         input_embeddings: Option<&MlxArray>,
         caches: &mut [Qwen3NextCache],
         seq_id: Option<SequenceId>,
+        last_pos: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let cache_offset = caches
             .iter()
@@ -2219,12 +2510,50 @@ impl Qwen35Model {
             }
         });
 
-        self.forward_internal(input_ids, input_embeddings, caches, position_ids.as_deref())
+        self.forward_internal_at(
+            input_ids,
+            input_embeddings,
+            caches,
+            position_ids.as_deref(),
+            last_pos,
+        )
     }
 
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Qwen35Config), String> {
-        let model_dir = model_dir.as_ref();
+        Self::load_impl(model_dir.as_ref(), None)
+    }
 
+    /// Load an exported text backbone: a checkpoint saved from the inner
+    /// `Qwen3_5TextModel` (MOSS-Image's prompt conditioner) rather than the
+    /// HF causal-LM wrapper.
+    ///
+    /// Differs from [`Self::load`] in three ways, all scoped to this entry
+    /// point so a normal text checkpoint loads exactly as before:
+    /// - the bare `embed_tokens.*` / `layers.*` / `norm.*` layout gets its
+    ///   `model.` wrapper back;
+    /// - a missing `lm_head.weight` with `tie_word_embeddings=false` is
+    ///   accepted (the caller reads hidden states, never logits);
+    /// - `extra_quantization` (MOSS-Image nests it under
+    ///   `moss_image_mlx.quantization`) is used when `text_config` carries no
+    ///   `quantization` block of its own.
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`.
+    pub(crate) fn load_text_backbone<P: AsRef<Path>>(
+        model_dir: P,
+        extra_quantization: Option<&serde_json::Value>,
+    ) -> Result<(Self, Qwen35Config), String> {
+        Self::load_impl(
+            model_dir.as_ref(),
+            Some(TextBackbone {
+                quantization: extra_quantization,
+            }),
+        )
+    }
+
+    fn load_impl(
+        model_dir: &Path,
+        backbone: Option<TextBackbone<'_>>,
+    ) -> Result<(Self, Qwen35Config), String> {
         tracing::info!("[Qwen3.5] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
@@ -2246,16 +2575,36 @@ impl Qwen35Model {
                 .unwrap()
                 .insert("quantization".to_string(), v["quantization"].clone());
         }
-
-        // Vendor fine-grained FP8 releases carry no `quantization` block at
-        // all: they declare `quantization_config: {quant_method: "fp8", ...}`
-        // and ship raw E4M3 bytes with a per-128x128-block inverse scale. The
-        // weights are converted to MLX-native mxfp8 below, so the config has
-        // to declare that layout before the model constructor reads it.
-        let fp8_block = crate::models::qwen_fp8_block_quantization(&v)?;
-        if let Some(detected) = fp8_block {
-            crate::models::merge_fp8_block_quantization(&mut text_config_val, detected)?;
+        // …or from an exported backbone's own metadata.
+        if text_config_val.get("quantization").is_none()
+            && let Some(quantization) = backbone.as_ref().and_then(|b| b.quantization)
+        {
+            text_config_val
+                .as_object_mut()
+                .ok_or_else(|| "config.json text_config must be an object".to_string())?
+                .insert("quantization".to_string(), quantization.clone());
         }
+
+        // FP8 releases carry no `quantization` block at all. The vendor layout
+        // declares `quantization_config: {quant_method: "fp8", ...}` with raw
+        // E4M3 bytes and a per-128x128-block inverse scale; the compressed-
+        // tensors layout declares `quant_method: "compressed-tensors"` with
+        // `format: "float-quantized"` and a per-channel or per-block
+        // `.weight_scale`. Both are converted to MLX-native mxfp8 below, so the
+        // config has to declare that layout before the model constructor reads
+        // it.
+        let fp8 = crate::models::fp8_checkpoint_quantization(&v)?;
+        if let Some(detected) = fp8 {
+            crate::models::merge_fp8_quantization(&mut text_config_val, detected)?;
+        }
+        // An NVFP4 export from ModelOpt or compressed-tensors has no
+        // `quantization` block either; its linears are repacked to MLX native
+        // NVFP4 by `load_text_weights` below.
+        crate::models::merge_modelopt_nvfp4_quantization(
+            &mut text_config_val,
+            &v,
+            Some(model_dir),
+        )?;
 
         let config: Qwen35Config = serde_json::from_value(text_config_val)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
@@ -2275,37 +2624,56 @@ impl Qwen35Model {
         tracing::info!("[Qwen3.5] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
-        // Reconstruct block-scaled FP8 tensors before any other sanitization:
-        // the sidecars are keyed off the original tensor names, and the pass
-        // replaces `<name>.weight` with a packed plane plus `<name>.scales`.
-        let weights = match fp8_block {
-            Some(detected) => {
-                crate::models::requantize_block_fp8_weights(weights, detected.block_rows)?
-            }
-            None => weights,
+        // An exported backbone carries the bare layout (`embed_tokens.*`,
+        // `layers.*`, `norm.*`) where every HF checkpoint wraps those under
+        // `model.`. The loader reads the wrapped names, so restore the wrapper
+        // before anything else looks at a key.
+        let weights = if backbone.is_some() {
+            restore_text_model_prefix(weights)
+        } else {
+            weights
         };
 
+        // Reconstruct FP8 tensors before any other sanitization: the sidecars
+        // are keyed off the original tensor names, and the pass replaces
+        // `<name>.weight` with a packed plane plus `<name>.scales`.
+        let weights = crate::models::requantize_fp8_weights(weights, fp8)?;
+
         // Strip language_model. prefix and sanitize
-        let weights = sanitize_moe_weights(weights, &config);
+        let weights = sanitize_moe_weights(weights, &config)?;
 
         tracing::info!("[Qwen3.5] Building model...");
-        let model = Self::from_weights(&weights, &config)?;
+        let model = Self::from_weights_impl(&weights, &config, backbone.is_some())?;
 
         tracing::info!("[Qwen3.5] Model loaded successfully");
         Ok((model, config))
     }
 
     pub fn from_weights(weights: &WeightMap, config: &Qwen35Config) -> Result<Self, String> {
+        Self::from_weights_impl(weights, config, false)
+    }
+
+    /// [`Self::from_weights`]; `allow_missing_head` accepts a head-free
+    /// checkpoint with `tie_word_embeddings=false` (see
+    /// [`Self::load_text_backbone`]). Every other caller keeps the strict
+    /// "missing `lm_head.weight`" error.
+    pub(crate) fn from_weights_impl(
+        weights: &WeightMap,
+        config: &Qwen35Config,
+        allow_missing_head: bool,
+    ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
         let qn_config = config.to_qwen3next_config();
+        let yarn = config.yarn()?;
 
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
-            let layer = Qwen35DecoderLayer::from_weights(weights, config, &qn_config, i)?;
+            let layer =
+                Qwen35DecoderLayer::from_weights(weights, config, &qn_config, yarn.as_ref(), i)?;
             layers.push(layer);
         }
 
@@ -2315,6 +2683,13 @@ impl Qwen35Model {
             .ok_or_else(|| "Missing model.norm.weight".to_string())?;
 
         let lm_head = if config.tie_word_embeddings {
+            None
+        } else if allow_missing_head && !weights.contains_key("lm_head.weight") {
+            // An exported text backbone (MOSS-Image's conditioner) keeps the
+            // language model and drops the vocabulary projection. Its caller
+            // reads hidden states only; logits, if ever asked for, fall back to
+            // the tied path.
+            tracing::info!("[Qwen3.5] text backbone has no lm_head.weight; loading head-free");
             None
         } else {
             Some(UnifiedLinear::from_weights(
@@ -2339,7 +2714,7 @@ impl Qwen35Model {
             norm: RMSNorm::new(norm_weight, config.rms_norm_eps),
             lm_head,
             config: config_clone,
-            sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            fallback: RefCell::new(internal_caches),
             mrope_state: MRopeState::new(),
             kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
@@ -2454,15 +2829,33 @@ impl Qwen35Model {
         self.layers.len()
     }
 
-    /// Set MRoPE on all full-attention layers
+    /// Set MRoPE on all full-attention layers.
+    ///
+    /// A layer built from a YaRN `rope_parameters` block
+    /// ([`Qwen35Config::yarn`]) gets an MRoPE over the same table and
+    /// attention factor its text rotation uses, so image and text positions
+    /// rotate with one set of frequencies; `rope_theta` is already folded
+    /// into that table.
     pub fn set_mrope(&mut self, mrope_section: Vec<i32>, rope_theta: f32, rope_dims: usize) {
         for layer in &mut self.layers {
             if let Qwen35AttentionVariant::FullAttention(ref mut attn) = layer.attention {
-                attn.mrope = Some(super::qwen3_vl::InterleavedMRoPE::new(
-                    rope_dims, // dim = rope_dims (MRoPE sections sum to dim/2)
-                    rope_theta,
-                    mrope_section.clone(),
-                ));
+                let yarn = attn
+                    .yarn_rope()
+                    .map(|(freqs, attention_factor)| (yarn_inv_freq(freqs), attention_factor));
+                attn.mrope = Some(match yarn {
+                    Some((inv_freq, attention_factor)) => {
+                        super::qwen3_vl::InterleavedMRoPE::with_inv_freq(
+                            inv_freq,
+                            mrope_section.clone(),
+                            attention_factor,
+                        )
+                    }
+                    None => super::qwen3_vl::InterleavedMRoPE::new(
+                        rope_dims, // dim = rope_dims (MRoPE sections sum to dim/2)
+                        rope_theta,
+                        mrope_section.clone(),
+                    ),
+                });
             }
         }
     }
@@ -2492,6 +2885,33 @@ impl Qwen35Model {
         input_ids: &MlxArray,
         caches: &mut [Qwen3NextCache],
         capture_layer_ids: &[usize],
+    ) -> VerifyOutput {
+        self.forward_speculative_inner(input_ids, caches, capture_layer_ids, None)
+    }
+
+    /// Per-row variant of [`Self::forward_speculative`] for a ragged batched
+    /// verify round (issue #2442).
+    ///
+    /// `row_valid_ends[r]` is row `r`'s contiguous valid cache prefix length;
+    /// rows below the shared physical offset rotate and attend at their own
+    /// logical positions and skip their stale gap. With every row at the
+    /// shared offset this is byte-identical to [`Self::forward_speculative`].
+    pub(crate) fn forward_speculative_rows(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> VerifyOutput {
+        self.forward_speculative_inner(input_ids, caches, capture_layer_ids, Some(row_valid_ends))
+    }
+
+    fn forward_speculative_inner(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: Option<&[i32]>,
     ) -> VerifyOutput {
         let h0 = self.embed_tokens.forward(input_ids);
 
@@ -2526,7 +2946,15 @@ impl Qwen35Model {
             } else {
                 fa_mask.as_deref()
             };
-            h = layer.forward_with_capture(i, &h, mask, cache, None, &mut gdn_states);
+            h = layer.forward_with_capture(
+                i,
+                &h,
+                mask,
+                cache,
+                None,
+                &mut gdn_states,
+                row_valid_ends,
+            );
 
             // Capture the post-block hidden state for any requested layer index.
             // The check is O(capture_layer_ids.len()) per layer; for DFlash's
@@ -2620,7 +3048,10 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
         } else {
             None
         };
@@ -2681,30 +3112,30 @@ impl Qwen35Model {
     ///   * `gdn_states` — the `gdn_states` field of [`VerifyOutput`] from the
     ///     SAME verify pass. Ordered by linear-attention layer index.
     ///   * `accepted` — per-row accepted count `a_i` (i.e. the prefix
-    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice;
-    ///     for `B > 1` every element must be equal (see below).
+    ///     `[0..a_i]` is kept). For `B == 1` this is a single-element slice.
+    ///     For `B > 1` the entries may be ragged (issue #2442), in which case
+    ///     [`Self::rollback_speculative_cache_rows`] also needs each row's
+    ///     pre-round valid end.
     ///   * `block_size` — the verify-block length (typically the drafter's
-    ///     `block_size` config). Used to compute the trim amount:
-    ///     `trim = block_size - (max(accepted) + 1)`.
+    ///     `block_size` config). Used to compute the trim amount.
     ///
-    /// Uniform acceptance for `B > 1` (issue #2353): the attention caches
-    /// are rectangular, with one shared offset and no per-row valid end, so
-    /// a batched rollback can only keep the same number of positions in
-    /// every row. Zeroing a shorter row's rejected tail is not a substitute:
-    /// a zero key still scores `q . 0 = 0`, takes `exp(0)` weight in the
-    /// softmax and dilutes that row's attention on every later step. The
-    /// batched DFlash round loop clamps each round to a uniform accept
-    /// before it emits anything
-    /// (`mlxcel_core::drafter::dflash::round_loop_batched::clamp_uniform_acceptance`),
-    /// and a ragged slice reaching this method panics instead of corrupting
-    /// the cache.
+    /// Uniform acceptance (issues #2353, #2442): when every row accepted the
+    /// same count and every row's prefix ended at the shared physical offset,
+    /// the rollback trims by `block_size - (accepted + 1)` and replays one
+    /// uniform GDN prefix. A ragged accept cannot be represented that way: a
+    /// zero key still scores `q . 0 = 0` and takes `exp(0)` weight in the
+    /// softmax. [`Self::rollback_speculative_cache_rows`] instead compacts
+    /// every row's accepted block back to its own logical end, so each row's
+    /// cache content is again a contiguous prefix, and replays each row's GDN
+    /// state over that row's own prefix.
     ///
     /// Apple Silicon precision (`docs/apple-silicon-precision.md`):
     /// GDN replay re-uses the captured `q/k/v/a/b` and `init_state` tensors
     /// at their original dtype (bf16/f16/float32 as captured). Do not promote
     /// to f32 — the drafter's reference forward stays in the activation dtype.
     ///
-    /// Used by: DFlash drafter round loop (sub-12).
+    /// Used by: DFlash drafter round loop (sub-12), and the B = 1 path of the
+    /// per-row round loop.
     pub fn rollback_speculative_cache(
         &self,
         caches: &mut [Qwen3NextCache],
@@ -2712,13 +3143,72 @@ impl Qwen35Model {
         accepted: &[i32],
         block_size: i32,
     ) -> i32 {
+        self.rollback_speculative_cache_rows(caches, gdn_states, accepted, None, block_size)
+    }
+
+    /// Ragged-aware rollback (issue #2442).
+    ///
+    /// `row_valid_ends_pre[r]` is row `r`'s contiguous valid prefix length
+    /// before the verify block. When it is absent every row is assumed to have
+    /// ended at the shared physical offset (the uniform and B = 1 contracts).
+    /// Returns `max(accepted)`.
+    pub(crate) fn rollback_speculative_cache_rows(
+        &self,
+        caches: &mut [Qwen3NextCache],
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        row_valid_ends_pre: Option<&[i32]>,
+        block_size: i32,
+    ) -> i32 {
         if accepted.is_empty() {
             return 0;
         }
-        assert_uniform_batched_accepts(accepted);
+        let offset = caches
+            .iter()
+            .find_map(|cache| match cache {
+                Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                Qwen3NextCache::Linear(_) => None,
+            })
+            .or_else(|| caches.first().map(Qwen3NextCache::offset))
+            .unwrap_or(0);
+        let o_pre = offset - block_size;
+        let ve_pre: Vec<i32> = match row_valid_ends_pre {
+            Some(ends) => {
+                assert_eq!(
+                    ends.len(),
+                    accepted.len(),
+                    "rollback_speculative_cache_rows: one valid end per accepted row"
+                );
+                ends.to_vec()
+            }
+            None => vec![o_pre; accepted.len()],
+        };
+        let uniform =
+            accepted.iter().all(|&a| a == accepted[0]) && ve_pre.iter().all(|&ve| ve == o_pre);
+
         let max_a = accepted[0];
         let n = max_a + 1;
         let trim = block_size - n;
+
+        if !uniform {
+            let o_post = ve_pre
+                .iter()
+                .zip(accepted)
+                .map(|(&ve, &a)| ve + a + 1)
+                .max()
+                .expect("non-empty accepted");
+            for cache in caches.iter_mut() {
+                if let Qwen3NextCache::Attention(kv) = cache {
+                    compact_attention_rows(kv, &ve_pre, accepted, o_pre, o_post);
+                    let roll_back = o_pre + block_size - o_post;
+                    if roll_back > 0 {
+                        kv.trim(roll_back);
+                    }
+                }
+            }
+            self.replay_gdn_rows(caches, gdn_states, accepted, o_post);
+            return accepted.iter().copied().max().unwrap_or(0);
+        }
 
         // Attention caches: trim by `trim`, the same in every row.
         for cache in caches.iter_mut() {
@@ -2729,8 +3219,6 @@ impl Qwen35Model {
             }
         }
 
-        // GDN caches: replay the captured block over `[:, :n]` so the
-        // post-block state matches the accepted-prefix position.
         let mut snapshot_iter = gdn_states.iter();
         for (layer_idx, cache) in caches.iter_mut().enumerate() {
             let Qwen3NextCache::Linear(linear_cache) = cache else {
@@ -2821,14 +3309,16 @@ impl Qwen35Model {
 
             // Recover conv_state from the captured conv_input:
             // cache = conv_input[:, a+1 : a+K]  (K = conv_kernel_size), one
-            // window for every row because the accept is uniform.
+            // window for every row because the accept is uniform. The window
+            // length is `kernel - 1`, the same contract
+            // `forward_hidden_internal_with_capture` maintains.
             let k_kernel = layer.conv_kernel_size as i32;
             let conv_shape = mlxcel_core::array_shape(&snap.conv_input);
             let conv_dim = conv_shape[2];
             let window = mlxcel_core::slice(
                 &snap.conv_input,
-                &[0, max_a + 1, 0],
-                &[conv_shape[0], max_a + k_kernel, conv_dim],
+                &[0, n, 0],
+                &[conv_shape[0], n + k_kernel - 1, conv_dim],
             );
             linear_cache.conv_state = Some(mlxcel_core::contiguous(&window, false));
 
@@ -2842,13 +3332,114 @@ impl Qwen35Model {
         max_a
     }
 
+    /// Replay every linear-attention layer's GDN state over each row's own
+    /// accepted prefix (issue #2442).
+    ///
+    /// The conv and recurrent states are per-row already, but their valid
+    /// lengths are not: one batched replay over `max(accepted)` would advance
+    /// a short row through positions it rejected. Each row is therefore
+    /// sliced and replayed with the chain-parity kernel at its own length, and
+    /// the results are stacked back into the `[B, ...]` cache tensors.
+    fn replay_gdn_rows(
+        &self,
+        caches: &mut [Qwen3NextCache],
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        o_post: i32,
+    ) {
+        let mut snapshot_iter = gdn_states.iter();
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
+            let Qwen3NextCache::Linear(linear_cache) = cache else {
+                continue;
+            };
+            let snap = match snapshot_iter.next() {
+                Some(s) => s,
+                None => continue,
+            };
+            debug_assert_eq!(snap.layer_idx, layer_idx);
+            let layer = match &self.layers[layer_idx].attention {
+                Qwen35AttentionVariant::Linear(linear) => linear,
+                _ => continue,
+            };
+            let k_kernel = layer.conv_kernel_size as i32;
+            let q_shape = mlxcel_core::array_shape(&snap.q);
+            let v_shape = mlxcel_core::array_shape(&snap.v);
+            let a_shape = mlxcel_core::array_shape(&snap.a);
+            let conv_shape = mlxcel_core::array_shape(&snap.conv_input);
+            let conv_dim = conv_shape[2];
+
+            let mut state_acc: Option<UniquePtr<MlxArray>> = None;
+            let mut conv_acc: Option<UniquePtr<MlxArray>> = None;
+            for (r, &a) in accepted.iter().enumerate() {
+                let n = a + 1;
+                let bi = r as i32;
+                let q_n = mlxcel_core::slice(
+                    &snap.q,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, q_shape[2], q_shape[3]],
+                );
+                let k_n = mlxcel_core::slice(
+                    &snap.k,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, q_shape[2], q_shape[3]],
+                );
+                let v_n = mlxcel_core::slice(
+                    &snap.v,
+                    &[bi, 0, 0, 0],
+                    &[bi + 1, n, v_shape[2], v_shape[3]],
+                );
+                let a_n = mlxcel_core::slice(&snap.a, &[bi, 0, 0], &[bi + 1, n, a_shape[2]]);
+                let b_n = mlxcel_core::slice(&snap.b, &[bi, 0, 0], &[bi + 1, n, a_shape[2]]);
+                let init_row = snap.init_state.as_ref().map(|state| {
+                    let s = mlxcel_core::array_shape(state);
+                    mlxcel_core::copy(&mlxcel_core::slice(
+                        state,
+                        &[bi, 0, 0, 0],
+                        &[bi + 1, s[1], s[2], s[3]],
+                    ))
+                });
+                let (_y, state_row) = gated_delta_update_chain_parity(
+                    &q_n,
+                    &k_n,
+                    &v_n,
+                    &a_n,
+                    &b_n,
+                    &layer.a_log,
+                    &layer.dt_bias,
+                    init_row.as_deref(),
+                    None,
+                );
+                state_acc = Some(match state_acc {
+                    None => state_row,
+                    Some(prev) => mlxcel_core::concatenate(&prev, &state_row, 0),
+                });
+
+                let conv_row = mlxcel_core::contiguous(
+                    &mlxcel_core::slice(
+                        &snap.conv_input,
+                        &[bi, n, 0],
+                        &[bi + 1, n + k_kernel - 1, conv_dim],
+                    ),
+                    false,
+                );
+                conv_acc = Some(match conv_acc {
+                    None => conv_row,
+                    Some(prev) => mlxcel_core::concatenate(&prev, &conv_row, 0),
+                });
+            }
+            linear_cache.state_cache = state_acc;
+            linear_cache.conv_state = conv_acc;
+            linear_cache.offset = o_post;
+        }
+    }
+
     // === Sequence-routed speculative hooks (MTP target adapter) ============
     //
-    // The MtpTarget trait is `&self`-only with no cache parameter: the target
-    // resolves its own per-sequence cache. These wrappers route the existing
-    // caller-owned-slice speculative hooks above through
-    // `ModelOwnedSequenceState`, exactly like `forward_with_sequence_caches`
-    // does for the classic path, so the MTP adapter
+    // The MtpTarget trait is `&self`-only with no cache parameter. These
+    // wrappers route the caller-owned-slice speculative hooks above over one
+    // sequence's caches: the layer state the scheduler's pool holds, which
+    // the adapter carries for the tick, or the fallback slot (`None`), so the
+    // MTP adapter
     // (`crate::models::qwen3_5_mtp_target`) stays a stateless view over the
     // model — the shape the tick-cooperative slice path requires (it
     // reconstructs the adapter every scheduler tick).
@@ -2896,7 +3487,10 @@ impl Qwen35Model {
             } else {
                 0
             };
-            Some(create_causal_mask(seq_len, offset))
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
         } else {
             None
         };
@@ -2940,13 +3534,149 @@ impl Qwen35Model {
     pub(crate) fn forward_prefill_with_last_hidden_for_sequence(
         &self,
         input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |caches| self.forward_prefill_with_last_hidden(input_ids, caches),
+        self.with_sequence_caches(state, |caches| {
+            self.forward_prefill_with_last_hidden(input_ids, caches)
+        })
+    }
+
+    /// Post-final-norm hidden states of one standalone prompt, with no LM head.
+    ///
+    /// The MOSS-Image prompt conditioner consumes `Qwen3_5Model`'s
+    /// `last_hidden_state`, which is the final block output after the model's
+    /// RMSNorm. Reusing [`Self::forward_prefill_with_last_hidden`] would also
+    /// project the full `[B, L, vocab]` logits (about 2 GB at 4096 tokens)
+    /// for a result nobody reads, so this runs the same loop and stops at the
+    /// norm.
+    ///
+    /// Every call runs on fresh caches: each prompt is encoded from position 0
+    /// and leaves no state behind, so the positive and negative prompts of one
+    /// request (and consecutive requests) cannot see each other's tokens.
+    ///
+    /// Rows of a `[B, L]` batch are independent and causal, so a right-padded
+    /// batch reads the same hidden at each row's last real position as a
+    /// one-row call would (the Decider-2b scorer relies on this).
+    ///
+    /// Used by: `imagegen::moss_image::text_encoder::TextEncoder`,
+    /// `decision::decider2::Decider2Model`.
+    pub(crate) fn forward_prefill_hidden(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
+        let mut caches = self.make_internal_caches();
+        self.prefill_hidden(input_ids, &mut caches)
+    }
+
+    /// The body of [`Self::forward_prefill_hidden`]: the token embedding,
+    /// then [`Self::hidden_from_embeddings`].
+    fn prefill_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> UniquePtr<MlxArray> {
+        let h = self.embed_tokens.forward(input_ids);
+        self.hidden_from_embeddings(h, caches, None)
+    }
+
+    /// Post-final-norm hidden states of one standalone `inputs_embeds`
+    /// forward, with no LM head, honoring the stored MRoPE state.
+    ///
+    /// `inputs_embeds` is `[B, L, hidden]`, typically the output of
+    /// `Qwen35VLModel::get_input_embeddings`, which stores the request's
+    /// MRoPE `position_ids` and `rope_deltas` in the fallback slot. Positions
+    /// resolve exactly as a generation prefill resolves them
+    /// ([`mrope_position_source`] at cache offset 0); with nothing stored
+    /// (a text-only request) the positions are `0..L` on all three MRoPE
+    /// axes and still go through the MRoPE path, as upstream's
+    /// `get_rope_index` hands them to the layers (the cache-offset rope path
+    /// is the same function but rounds differently in bf16). The fallback
+    /// slot is cleared before returning, so one request's positions never
+    /// reach the next.
+    ///
+    /// Runs on fresh caches, like [`Self::forward_prefill_hidden`].
+    ///
+    /// Used by: `decision::clef::ClefModel` (the Clef joint schema head reads
+    /// the backbone's post-norm hidden over the whole sequence).
+    pub(crate) fn forward_final_hidden_with_embeddings(
+        &self,
+        inputs_embeds: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(inputs_embeds);
+        let (batch, seq_len) = (shape[0], shape[1]);
+        let position_ids = self.mrope_state.with_entry(None, |entry| {
+            let stored_shape = entry
+                .position_ids
+                .as_ref()
+                .map(|stored| mlxcel_core::array_shape(stored));
+            match mrope_position_source(stored_shape.as_deref(), batch, seq_len, 0) {
+                MRopePositionSource::SliceStored { start, end } => {
+                    match (entry.position_ids.as_ref(), stored_shape.as_ref()) {
+                        (Some(stored), Some(shape)) => Some(mlxcel_core::slice(
+                            stored,
+                            &[0, 0, start],
+                            &[shape[0], shape[1], end],
+                        )),
+                        _ => None,
+                    }
+                }
+                // Nothing stored (text only): MRoPE positions `0..L` on every
+                // axis, as upstream's `get_rope_index` gives text tokens.
+                MRopePositionSource::Recompute => Self::compute_decode_position_ids_with_delta(
+                    Some(entry.rope_deltas.unwrap_or(0)),
+                    batch,
+                    seq_len,
+                    0,
+                ),
+            }
+        });
+        self.mrope_state.clear_fallback();
+        let mut caches = self.make_internal_caches();
+        self.hidden_from_embeddings(
+            mlxcel_core::copy(inputs_embeds),
+            &mut caches,
+            position_ids.as_deref(),
         )
+    }
+
+    /// The layer loop and final norm behind every hidden-state entry point,
+    /// in lockstep with [`Self::forward_prefill_with_last_hidden`] minus the
+    /// head. It starts from embeddings rather than ids so an entry point that
+    /// splices its own `inputs_embeds` (with explicit `position_ids`, such as
+    /// MRoPE positions) shares this loop instead of copying it; the token
+    /// entry point passes `None` and the layers derive positions from the
+    /// cache offset.
+    ///
+    /// Used by: [`Self::prefill_hidden`] (MOSS-Image, Decider-2b) and
+    /// [`Self::forward_final_hidden_with_embeddings`] (Clef).
+    fn hidden_from_embeddings(
+        &self,
+        mut h: UniquePtr<MlxArray>,
+        caches: &mut [Qwen3NextCache],
+        position_ids: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(&h);
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
+        } else {
+            None
+        };
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, position_ids);
+        }
+        self.norm.forward(&h)
     }
 
     /// Sequence-routed [`Self::forward_speculative`].
@@ -2955,14 +3685,12 @@ impl Qwen35Model {
     pub(crate) fn forward_speculative_for_sequence(
         &self,
         input_ids: &MlxArray,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
         capture_layer_ids: &[usize],
     ) -> VerifyOutput {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_internal_caches(),
-            |caches| self.forward_speculative(input_ids, caches, capture_layer_ids),
-        )
+        self.with_sequence_caches(state, |caches| {
+            self.forward_speculative(input_ids, caches, capture_layer_ids)
+        })
     }
 
     /// Sequence-routed [`Self::rollback_speculative_cache`].
@@ -2970,12 +3698,12 @@ impl Qwen35Model {
     /// Used by: `Qwen35MtpTargetAdapter::verify_finalize`.
     pub(crate) fn rollback_speculative_cache_for_sequence(
         &self,
-        seq_id: Option<SequenceId>,
+        state: Option<&mut [LayerState]>,
         gdn_states: &[GdnRollbackSnapshot],
         accepted: &[i32],
         block_size: i32,
     ) -> i32 {
-        self.sequence_state.with_sequence_state(seq_id, |caches| {
+        self.with_sequence_caches(state, |caches| {
             self.rollback_speculative_cache(caches, gdn_states, accepted, block_size)
         })
     }
@@ -2985,16 +3713,25 @@ impl Qwen35Model {
     /// the drafter after a rollback).
     ///
     /// Used by: `Qwen35MtpTargetAdapter::{prefill_and_seed, verify_finalize}`.
-    pub(crate) fn speculative_cache_offset_for_sequence(&self, seq_id: Option<SequenceId>) -> i32 {
-        self.sequence_state.with_sequence_state(seq_id, |caches| {
-            caches
+    pub(crate) fn speculative_cache_offset_for_sequence(
+        &self,
+        state: Option<&mut [LayerState]>,
+    ) -> i32 {
+        match state {
+            Some(state) => state
+                .iter()
+                .find_map(|layer| layer.as_kv().map(|kv| kv.offset))
+                .unwrap_or(0),
+            None => self
+                .fallback
+                .borrow()
                 .iter()
                 .find_map(|c| match c {
                     Qwen3NextCache::Attention(kv) => Some(kv.offset),
                     _ => None,
                 })
-                .unwrap_or(0)
-        })
+                .unwrap_or(0),
+        }
     }
 }
 
@@ -3116,16 +3853,76 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
         accepted: &[i32],
         block_size: i32,
     ) {
-        // For B > 1 the rollback path uses the same `rollback_speculative_cache`
-        // entrypoint with a multi-element `accepted` slice, which the batched
-        // round loop guarantees is uniform (issue #2353); the method asserts
-        // it.
+        // Uniform batched rollback (issue #2353). The per-row arm (issue
+        // #2442) comes through `rollback_partial_batched_rows` below instead.
         //
         // Apple Silicon precision (`docs/apple-silicon-precision.md`):
         // the GDN replay tensors keep their captured dtype (bf16/f16
         // activations + float32 init_state); no f32 promotion.
         let _ =
             self.rollback_speculative_cache(caches, &verify_out.gdn_states, accepted, block_size);
+    }
+
+    /// Qwen 3.5 can commit per-row accepts (issue #2442): its attention KV is
+    /// compacted per row and its GDN state replayed per row.
+    fn supports_per_row_accepts(&self) -> bool {
+        true
+    }
+
+    /// The per-row rollback compacts dense Fp16 attention caches. A quantized
+    /// or paged KV mode keeps its own sidecars and head trim, so such a burst
+    /// stays on the uniform clamp rather than corrupting the cache.
+    fn row_layout_supported(&self, caches: &[Self::Cache]) -> bool {
+        caches.iter().all(|cache| match cache {
+            Qwen3NextCache::Attention(kv) => {
+                kv.mode == KVCacheMode::Fp16
+                    && !kv.is_paged_backed()
+                    && kv.offset - kv.live_len() == 0
+            }
+            Qwen3NextCache::Linear(_) => true,
+        })
+    }
+
+    fn batch_cache_offset(caches: &[Self::Cache]) -> i32 {
+        caches
+            .iter()
+            .find_map(|cache| match cache {
+                Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                Qwen3NextCache::Linear(_) => None,
+            })
+            .unwrap_or(0)
+    }
+
+    fn verify_forward_with_row_layout(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+        row_valid_ends: &[i32],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.forward_speculative_rows(verify_input, caches, capture_layer_ids, row_valid_ends)
+    }
+
+    fn rollback_partial_batched_rows(
+        &self,
+        caches: &mut [Self::Cache],
+        verify_out: &Self::VerifyOut,
+        accepted: &[i32],
+        row_valid_ends_pre: &[i32],
+        block_size: i32,
+    ) {
+        let _ = self.rollback_speculative_cache_rows(
+            caches,
+            &verify_out.gdn_states,
+            accepted,
+            Some(row_valid_ends_pre),
+            block_size,
+        );
     }
 
     fn concat_hidden_for_drafter(&self, verify_out: &Self::VerifyOut) -> UniquePtr<MlxArray> {
@@ -3154,24 +3951,113 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
     }
 }
 
-/// Panic unless every row of a batched speculative rollback accepted the same
-/// count (issue #2353).
+/// Move each row's accepted verify block back to that row's own logical valid
+/// end, restoring a contiguous `[0, valid_end)` prefix in a shared,
+/// rectangular attention cache (issue #2442).
 ///
-/// The Qwen 3.5 attention caches are rectangular (one shared offset, no
-/// per-row valid end), so a ragged accept could only be represented by
-/// zeroing the shorter rows' rejected tails, and a zero key is still
-/// attended. The batched DFlash round loop clamps every round to a uniform
-/// accept; reaching here with a ragged slice is a round-loop bug, and failing
-/// loudly beats emitting fluent, wrong text.
+/// The block arrived at the shared physical offset `o_pre`; row `r` accepted
+/// `accepted[r] + 1` of its positions, which move to
+/// `[row_valid_ends_pre[r], row_valid_ends_pre[r] + accepted[r] + 1)`. The
+/// vacated gap up to `o_post` (the maximum new valid end) is zeroed so a
+/// maskless fallback cannot read stale keys. The caller trims the cache
+/// offset to `o_post` afterwards.
 ///
-/// Used by: [`Qwen35Model::rollback_speculative_cache`].
-pub(crate) fn assert_uniform_batched_accepts(accepted: &[i32]) {
-    assert!(
-        accepted.iter().all(|&a| a == accepted[0]),
-        "Qwen 3.5 batched speculative rollback requires uniform per-row acceptance: \
-         the attention caches are rectangular and cannot exclude a shorter row's \
-         rejected tail; got ragged accepts {accepted:?}"
+/// The DFlash batched path only ever builds plain Fp16 caches, so there are
+/// no quantization sidecars to move; a cache that is paged or head-trimmed is
+/// a caller bug on this path and panics rather than silently corrupting.
+///
+/// Used by: [`Qwen35Model::rollback_speculative_cache_rows`].
+pub(crate) fn compact_attention_rows(
+    kv: &mut KVCache,
+    row_valid_ends_pre: &[i32],
+    accepted: &[i32],
+    o_pre: i32,
+    o_post: i32,
+) {
+    assert_eq!(
+        row_valid_ends_pre.len(),
+        accepted.len(),
+        "compact_attention_rows: one valid end per accepted row"
     );
+    assert_eq!(
+        kv.mode,
+        KVCacheMode::Fp16,
+        "per-row DFlash rollback requires a plain Fp16 attention cache; got {:?}",
+        kv.mode
+    );
+    assert!(
+        !kv.is_paged_backed(),
+        "per-row DFlash rollback requires a dense attention cache, not a paged one"
+    );
+    assert_eq!(
+        kv.offset - kv.live_len(),
+        0,
+        "per-row DFlash rollback requires an uncompacted (non head-trimmed) cache"
+    );
+    let (Some(keys), Some(values)) = (kv.keys.as_ref(), kv.values.as_ref()) else {
+        return;
+    };
+    let k_shape = mlxcel_core::array_shape(keys);
+    let v_shape = mlxcel_core::array_shape(values);
+    if k_shape[0] as usize != accepted.len() {
+        return;
+    }
+    let k_dtype = mlxcel_core::array_dtype(keys);
+    let v_dtype = mlxcel_core::array_dtype(values);
+
+    let mut new_keys = mlxcel_core::copy(keys);
+    let mut new_values = mlxcel_core::copy(values);
+    for (r, (&ve, &a)) in row_valid_ends_pre.iter().zip(accepted).enumerate() {
+        let n = a + 1;
+        let bi = r as i32;
+        if ve < o_pre {
+            // Materialize the source before the update: `slice_update` may
+            // donate the buffer, and an overlapping move would then read
+            // already-overwritten rows.
+            let src_k = mlxcel_core::copy(&mlxcel_core::slice(
+                &new_keys,
+                &[bi, 0, o_pre, 0],
+                &[bi + 1, k_shape[1], o_pre + n, k_shape[3]],
+            ));
+            new_keys = mlxcel_core::slice_update(
+                &new_keys,
+                &src_k,
+                &[bi, 0, ve, 0],
+                &[bi + 1, k_shape[1], ve + n, k_shape[3]],
+            );
+            let src_v = mlxcel_core::copy(&mlxcel_core::slice(
+                &new_values,
+                &[bi, 0, o_pre, 0],
+                &[bi + 1, v_shape[1], o_pre + n, v_shape[3]],
+            ));
+            new_values = mlxcel_core::slice_update(
+                &new_values,
+                &src_v,
+                &[bi, 0, ve, 0],
+                &[bi + 1, v_shape[1], ve + n, v_shape[3]],
+            );
+        }
+        let z_start = ve + n;
+        if z_start < o_post {
+            let span = o_post - z_start;
+            let k_zero = mlxcel_core::zeros(&[1, k_shape[1], span, k_shape[3]], k_dtype);
+            let v_zero = mlxcel_core::zeros(&[1, v_shape[1], span, v_shape[3]], v_dtype);
+            new_keys = mlxcel_core::slice_update(
+                &new_keys,
+                &k_zero,
+                &[bi, 0, z_start, 0],
+                &[bi + 1, k_shape[1], o_post, k_shape[3]],
+            );
+            new_values = mlxcel_core::slice_update(
+                &new_values,
+                &v_zero,
+                &[bi, 0, z_start, 0],
+                &[bi + 1, v_shape[1], o_post, v_shape[3]],
+            );
+        }
+    }
+    kv.keys = Some(new_keys);
+    kv.values = Some(new_values);
 }
 
 pub(crate) struct Qwen35StageModel {
@@ -3210,7 +4096,7 @@ impl Qwen35StageModel {
         config.validate_supported().map_err(|e| e.to_string())?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
-        weights = sanitize_moe_weights(weights, &config);
+        weights = sanitize_moe_weights(weights, &config)?;
         let mut effective_filter = filter.clone();
         if config.tie_word_embeddings && filter.has_lm_head {
             effective_filter.has_embedding = true;
@@ -3219,7 +4105,7 @@ impl Qwen35StageModel {
         Self::from_filtered_weights(&weights, &config, filter, stage_index)
     }
 
-    fn from_filtered_weights(
+    pub(crate) fn from_filtered_weights(
         weights: &WeightMap,
         config: &Qwen35Config,
         filter: &LayerFilter,
@@ -3228,6 +4114,7 @@ impl Qwen35StageModel {
         let group_size = config.group_size();
         let bits = config.bits();
         let qn_config = config.to_qwen3next_config();
+        let yarn = config.yarn()?;
 
         let load_embeddings =
             filter.has_embedding || (config.tie_word_embeddings && filter.has_lm_head);
@@ -3245,7 +4132,11 @@ impl Qwen35StageModel {
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
             layers.push(Qwen35DecoderLayer::from_weights(
-                weights, config, &qn_config, layer_idx,
+                weights,
+                config,
+                &qn_config,
+                yarn.as_ref(),
+                layer_idx,
             )?);
         }
 
@@ -3306,6 +4197,7 @@ impl Qwen35StageModel {
         &self,
         input_ids: &MlxArray,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         let hidden = self
             .embed_tokens
@@ -3314,24 +4206,28 @@ impl Qwen35StageModel {
                 "stage does not host embeddings; hidden-state input required".to_string()
             })?
             .forward(input_ids);
-        self.execute_hidden(hidden, caches)
+        self.execute_hidden(hidden, caches, last_pos)
     }
 
     pub(crate) fn execute_from_hidden_states(
         &self,
         hidden_states: UniquePtr<MlxArray>,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if self.filter.has_embedding {
             return Err("entry stage expects token IDs, not hidden states".to_string());
         }
-        self.execute_hidden(hidden_states, caches)
+        self.execute_hidden(hidden_states, caches, last_pos)
     }
 
+    /// `last_pos` asks the final stage to project only that hidden row through
+    /// the norm and LM head (#3081); a non-final stage ignores it.
     fn execute_hidden(
         &self,
         mut hidden: UniquePtr<MlxArray>,
         caches: &mut [Qwen3NextCache],
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput, String> {
         if caches.len() != self.layers.len() {
             return Err(format!(
@@ -3355,7 +4251,10 @@ impl Qwen35StageModel {
                     })
                 })
                 .unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
+            full_attention_geometry(&self.layers).and_then(|attention| {
+                let dtype = mlxcel_core::array_dtype(hidden.as_ref().unwrap());
+                prefill_causal_mask(seq_len, offset, shape[0], attention, dtype)
+            })
         } else {
             None
         };
@@ -3369,6 +4268,14 @@ impl Qwen35StageModel {
             hidden = layer.forward(hidden.as_ref().unwrap(), mask, cache, None);
         }
 
+        // Norm and head act per position, so slicing first yields the row the
+        // full projection would have (#3081).
+        let hidden = match (self.filter.has_lm_head, last_pos) {
+            (true, Some(pos)) => {
+                mlxcel_core::generate::logits_at_position(hidden.as_ref().unwrap(), pos)
+            }
+            _ => hidden,
+        };
         let hidden = if let Some(norm) = &self.norm {
             norm.forward(hidden.as_ref().unwrap())
         } else {
@@ -3406,7 +4313,51 @@ fn is_raw_conv1d_layout(shape: &[i32]) -> bool {
     shape.len() >= 3 && shape[shape.len() - 1] != 1
 }
 
-pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> WeightMap {
+/// Options of [`Qwen35Model::load_text_backbone`].
+struct TextBackbone<'a> {
+    /// Quantization block declared outside `text_config`.
+    quantization: Option<&'a serde_json::Value>,
+}
+
+/// Restore the `model.` wrapper on a bare text-model layout.
+///
+/// MOSS-Image's prompt conditioner (and any checkpoint exported from the inner
+/// `Qwen3_5TextModel` rather than the `Qwen3_5ForConditionalGeneration` wrapper)
+/// stores `embed_tokens.*`, `layers.*` and `norm.*` at the top level. `from_weights`
+/// reads the HF spelling (`model.embed_tokens`, `model.layers.N`, `model.norm`),
+/// so the bare layout has to be wrapped first. `lm_head.*` is top-level in BOTH
+/// layouts and is deliberately left alone, as is anything already wrapped.
+pub(crate) fn restore_text_model_prefix(weights: WeightMap) -> WeightMap {
+    const WRAPPED: [&str; 3] = ["embed_tokens.", "layers.", "norm."];
+    let bare = weights
+        .keys()
+        .any(|key| WRAPPED.iter().any(|prefix| key.starts_with(prefix)));
+    let already_wrapped = weights.keys().any(|key| key.starts_with("model."));
+    if !bare || already_wrapped {
+        return weights;
+    }
+    tracing::info!(
+        "[Qwen3.5] checkpoint carries the bare text-model layout; restoring the `model.` prefix"
+    );
+    weights
+        .into_iter()
+        .map(|(key, value)| {
+            if WRAPPED.iter().any(|prefix| key.starts_with(prefix)) {
+                (format!("model.{key}"), value)
+            } else {
+                (key, value)
+            }
+        })
+        .collect()
+}
+
+///
+/// Returns `Err` when the per-expert MoE planes disagree in shape or dtype
+/// ([`crate::models::switch_layers::drain_numbered_expert_planes`]).
+pub fn sanitize_weights(
+    mut weights: WeightMap,
+    config: &Qwen35Config,
+) -> Result<WeightMap, String> {
     // 1. Detect sanitization needs.
     //
     // The conv1d weight layout is the only reliable raw-vs-converted signal: a raw
@@ -3483,101 +4434,31 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         // (gate_proj/up_proj/down_proj since #588); w1->gate, w3->up, w2->down
         // (issue #670: stacking into the legacy w1/w2/w3 slots left every
         // qwen3.5-MoE checkpoint failing with "Missing weight: ...gate_proj").
+        let experts = format!("model.layers.{l}.mlp.experts");
         for (src_proj, dst_proj) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
-            let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-            let mut e = 0;
-            while let Some(w) = weights.remove(&format!(
-                "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, src_proj
-            )) {
-                expert_weights.push(w);
-                if let Some(s) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, src_proj
-                )) {
-                    expert_scales.push(s);
-                }
-                if let Some(b) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, src_proj
-                )) {
-                    expert_biases.push(b);
-                }
-                e += 1;
-            }
-
-            if !expert_weights.is_empty() {
-                let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
-
-                if !expert_scales.is_empty() {
-                    let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
-                }
-
-                if !expert_biases.is_empty() {
-                    let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
-                }
-            }
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                &mut weights,
+                &experts,
+                src_proj,
+                &format!("{base}.{dst_proj}"),
+            )?;
         }
 
         // Handle per-expert gate_proj/up_proj/down_proj naming variant.
         // Checkpoints that store experts under `experts.{e}.gate_proj.weight`
         // instead of `experts.{e}.w1.weight` use this layout; the names map
         // straight onto the block's own gate/up/down slots (issue #670).
-        for (src_proj, dst_proj) in [
-            ("gate_proj", "gate_proj"),
-            ("up_proj", "up_proj"),
-            ("down_proj", "down_proj"),
-        ] {
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
             // Skip if this target slot is already populated by the w1/w2/w3 pass above.
-            if weights.contains_key(format!("{}.{}.weight", base, dst_proj).as_str()) {
+            if weights.contains_key(format!("{}.{}.weight", base, proj).as_str()) {
                 continue;
             }
-
-            let mut expert_weights: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_scales: Vec<UniquePtr<MlxArray>> = Vec::new();
-            let mut expert_biases: Vec<UniquePtr<MlxArray>> = Vec::new();
-
-            let mut e = 0;
-            while let Some(w) = weights.remove(&format!(
-                "model.layers.{}.mlp.experts.{}.{}.weight",
-                l, e, src_proj
-            )) {
-                expert_weights.push(w);
-                if let Some(s) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.scales",
-                    l, e, src_proj
-                )) {
-                    expert_scales.push(s);
-                }
-                if let Some(b) = weights.remove(&format!(
-                    "model.layers.{}.mlp.experts.{}.{}.biases",
-                    l, e, src_proj
-                )) {
-                    expert_biases.push(b);
-                }
-                e += 1;
-            }
-
-            if !expert_weights.is_empty() {
-                let stacked = stack_arrays(&expert_weights, 0);
-                weights.insert(format!("{}.{}.weight", base, dst_proj), stacked);
-
-                if !expert_scales.is_empty() {
-                    let stacked = stack_arrays(&expert_scales, 0);
-                    weights.insert(format!("{}.{}.scales", base, dst_proj), stacked);
-                }
-
-                if !expert_biases.is_empty() {
-                    let stacked = stack_arrays(&expert_biases, 0);
-                    weights.insert(format!("{}.{}.biases", base, dst_proj), stacked);
-                }
-            }
+            crate::models::switch_layers::drain_numbered_expert_planes(
+                &mut weights,
+                &experts,
+                proj,
+                &format!("{base}.{proj}"),
+            )?;
         }
     }
 
@@ -3642,12 +4523,15 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &Qwen35Config) -> Weight
         }
     }
 
-    weights
+    Ok(weights)
 }
 
 /// Sanitize weights for MoE wrapper variant (qwen3_5_moe)
 /// Handles language_model prefix stripping and gate_up_proj splitting
-pub fn sanitize_moe_weights(weights: WeightMap, config: &Qwen35Config) -> WeightMap {
+pub fn sanitize_moe_weights(
+    weights: WeightMap,
+    config: &Qwen35Config,
+) -> Result<WeightMap, String> {
     let mut sanitized = WeightMap::new();
 
     for (key, value) in weights {
@@ -3761,8 +4645,32 @@ impl LanguageModel for Qwen35Model {
         self.layers.len()
     }
 
-    fn sequence_state_layout(&self) -> SequenceStateLayout {
-        SequenceStateLayout::model_owned(self.layers.len())
+    /// Full attention on the attention layers, GatedDeltaNet recurrent state
+    /// on the linear ones (issue #3254). The default
+    /// `sequence_state_layout()` reads this and answers scheduler-owned.
+    fn layer_state_kinds(&self) -> Option<Vec<LayerStateKind>> {
+        Some(
+            self.layers
+                .iter()
+                .map(|layer| self.layer_kind(layer.is_linear))
+                .collect(),
+        )
+    }
+
+    /// State for one scheduler sequence: the pool form of
+    /// `make_internal_caches`, so an attention layer takes its injected mode
+    /// and a linear layer declares the GatedDeltaNet slots.
+    fn make_layer_state(&self) -> Option<Vec<LayerState>> {
+        Some(
+            self.make_internal_caches()
+                .into_iter()
+                .map(qwen3_5_layer_state::into_layer_state)
+                .collect(),
+        )
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<LayerStateSnapshotSpec> {
+        Some(QWEN35_LAYER_STATE_SNAPSHOT)
     }
 
     fn supports_batching(&self) -> bool {
@@ -3789,86 +4697,120 @@ impl LanguageModel for Qwen35Model {
         true
     }
 
-    fn prepare_sequence_state(&self, seq_id: SequenceId) {
-        self.sequence_state
-            .prepare_sequence_state(seq_id, self.make_internal_caches());
-    }
-
     fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
         self.kv_cache_layer_modes.set(modes);
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        *self.fallback.borrow_mut() = self.make_internal_caches();
     }
 
     fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
         self.kv_cache_layer_modes.clone_modes()
     }
 
-    /// Gated-delta linear layers hold no KV (issue #2790).
+    /// Gated-delta linear layers hold no KV (issue #2790). Derived from the
+    /// same table the pool allocates from.
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<KVCacheMode>>> {
         self.kv_cache_layer_modes
             .storage_modes(|layer_idx| match self.layers.get(layer_idx) {
-                Some(layer) if !layer.is_linear => crate::models::model_owned::LayerKv::Full,
-                _ => crate::models::model_owned::LayerKv::None,
+                Some(layer) => self.layer_kind(layer.is_linear),
+                None => LayerStateKind::None,
             })
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: bare single-row runs outside an engine sequence (the engine
-        // resets through prepare_sequence_state / release_sequence_state_by_id). Qwen 3.5 Next
-        // owns mixed attention / GatedDelta cache state in
-        // `ModelOwnedSequenceState`; reset the fallback cache slot for fresh
-        // CLI / benchmark runs without touching scheduler-owned sequence
-        // entries. Do not clear the MRoPE fallback here: VLM callers populate
-        // it during embedding preparation immediately before generation.
-        self.sequence_state
-            .replace_internal(self.make_internal_caches());
+        // Used by: bare single-row runs outside an engine sequence. Reset
+        // the fallback cache slot for fresh CLI / benchmark runs. Do not
+        // clear the MRoPE fallback here: VLM callers populate it during
+        // embedding preparation immediately before generation.
+        *self.fallback.borrow_mut() = self.make_internal_caches();
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
-        self.sequence_state.release_sequence_state(seq_id);
-        // drop the per-sequence MRoPE entry alongside the
-        // cache state so the map cannot grow as sequences cycle through.
+        // The cache state is the pool's. Drop the per-sequence MRoPE entry so
+        // the map cannot grow as sequences cycle through.
         self.release_mrope_sequence(seq_id);
     }
 
-    fn snapshot_sequence_state(
+    fn forward_layer_state(
         &self,
-        seq_id: SequenceId,
-        token_len: usize,
-    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
-        self.sequence_state
-            .with_sequence_state_ref(seq_id, |state| {
-                let mut snapshot =
-                    mlxcel_core::generate::ModelStateSnapshot::new("qwen3_5", token_len);
-                for (idx, cache) in state.iter().enumerate() {
-                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
-                        tracing::warn!("Qwen 3.5 prompt-cache snapshot skipped: {err}");
-                        return None;
-                    }
-                }
-                Some(snapshot)
-            })
-            .flatten()
-    }
-
-    fn restore_sequence_state(
-        &self,
-        seq_id: SequenceId,
-        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
-    ) -> Result<(), String> {
-        if snapshot.family() != "qwen3_5" {
+        request: &LayerStateForward<'_>,
+        rows: &mut [&mut [LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let shape = mlxcel_core::array_shape(request.input_ids);
+        if shape.len() != 2 || shape[0] as usize != rows.len() {
             return Err(format!(
-                "cannot restore {} snapshot into Qwen 3.5",
-                snapshot.family()
+                "Qwen 3.5 forward: input shape {shape:?} does not match {} state rows",
+                rows.len()
             ));
         }
-        let mut state = self.make_internal_caches();
-        for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        for (row_idx, row) in rows.iter().enumerate() {
+            self.check_state_row(row_idx, row)?;
         }
-        self.sequence_state.replace_sequence_state(seq_id, state);
-        Ok(())
+        if let [state] = rows {
+            let mut caches = LentCaches::take(state)?;
+            return Ok(self.forward_with_mrope_state(
+                request.input_ids,
+                request.input_embeddings,
+                &mut caches,
+                request.seq_id(0),
+                request.last_pos,
+            ));
+        }
+        if request.input_embeddings.is_some() || request.last_pos.is_some() {
+            return Err(
+                "Qwen 3.5 forward: a multi-row batch takes token ids and returns every position"
+                    .to_string(),
+            );
+        }
+        let Some(ids) = request.seq_ids else {
+            return Err("Qwen 3.5 forward: a multi-row batch needs sequence ids".to_string());
+        };
+        if ids.len() != rows.len() {
+            return Err("Qwen 3.5 requires one sequence id per batch row".to_string());
+        }
+
+        // A masked batch, and a batched prefill under a quantized KV mode
+        // (row-split sidecars are not supported), run row by row.
+        let row_by_row = request.mask.is_some()
+            || (shape[1] != 1 && !self.configured_attention_kv_modes_all_fp16());
+        if row_by_row {
+            let mut result: Option<UniquePtr<MlxArray>> = None;
+            for (row_idx, state) in rows.iter_mut().enumerate() {
+                let input = mlxcel_core::slice(
+                    request.input_ids,
+                    &[row_idx as i32, 0],
+                    &[row_idx as i32 + 1, shape[1]],
+                );
+                let mut caches = LentCaches::take(state)?;
+                let logits = self.forward_with_mrope_state(
+                    &input,
+                    None,
+                    &mut caches,
+                    Some(ids[row_idx]),
+                    None,
+                );
+                result = Some(match result {
+                    Some(acc) => mlxcel_core::concatenate(&acc, &logits, 0),
+                    None => logits,
+                });
+            }
+            return result.ok_or_else(|| "Qwen 3.5 forward: empty batch".to_string());
+        }
+        if shape[1] != 1 {
+            return Ok(self.forward_batched_prefill(request.input_ids, rows));
+        }
+
+        // Batched decode: one `[B, 1]` step over every row's caches.
+        let mut lent: Vec<LentCaches<'_>> = rows
+            .iter_mut()
+            .map(|state| LentCaches::take(state))
+            .collect::<Result<_, _>>()?;
+        let mut typed: Vec<Vec<Qwen3NextCache>> =
+            lent.iter_mut().map(LentCaches::take_vec).collect();
+        let logits = self.forward_batched_decode_with_caches(request.input_ids, ids, &mut typed);
+        for (row, caches) in lent.iter_mut().zip(typed) {
+            row.replace(caches);
+        }
+        Ok(logits)
     }
 
     fn forward_with_sequence_id(
@@ -3881,6 +4823,41 @@ impl LanguageModel for Qwen35Model {
         self.forward_with_sequence_caches(input_ids, None, seq_id)
     }
 
+    // The prefill entry points: project only the sampled row through the LM
+    // head instead of slicing it out of the full-sequence logits (#3045).
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, None, None, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, None, seq_id, Some(last_pos))
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_sequence_caches_at(input_ids, input_embeddings, seq_id, Some(last_pos))
+    }
+
     fn forward_with_embeddings_and_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -3890,19 +4867,6 @@ impl LanguageModel for Qwen35Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_sequence_caches(input_ids, input_embeddings, seq_id)
-    }
-
-    fn sync_sequence_storage(
-        &self,
-        seq_id: SequenceId,
-        cache_pool: &mut CachePool,
-    ) -> Result<(), String> {
-        self.sequence_state
-            .with_sequence_state(Some(seq_id), |sequence_caches| {
-                let visible_lens: Vec<usize> =
-                    sequence_caches.iter().map(Self::visible_len).collect();
-                cache_pool.sync_paged_state_with_lengths(seq_id, &visible_lens)
-            })
     }
 
     fn forward_batched(
@@ -3919,7 +4883,7 @@ impl LanguageModel for Qwen35Model {
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
+        _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         assert_eq!(shape.len(), 2, "Qwen 3.5 batched input must be rank 2");
@@ -3943,56 +4907,52 @@ impl LanguageModel for Qwen35Model {
             }
         }
 
-        route_batched_decode_with_ids(self, input_ids, seq_ids, batch_caches, |batch_caches| {
-            if let Some(ids) = seq_ids {
-                self.sequence_state
-                    .validate_sequence_states(ids)
-                    .unwrap_or_else(|err| panic!("Qwen 3.5 batched decode: {err}"));
-                self.validate_prepared_cache_layout(ids);
-            }
-            if shape[1] == 1 {
-                let Some(ids) = seq_ids else {
-                    // Preserve the legacy no-id fallback-slot semantics.
-                    return self.forward_batched_rows_sequential(input_ids, None, batch_caches);
-                };
-                if mask.is_some() {
-                    return self.forward_batched_rows_sequential(
-                        input_ids,
-                        Some(ids),
-                        batch_caches,
-                    );
-                }
-                return self
-                    .sequence_state
-                    .with_batched_sequence_states(ids, |rows| {
-                        self.validate_batch_cache_layout(rows);
-                        self.forward_batched_decode_with_caches(input_ids, ids, rows)
-                    })
-                    .unwrap_or_else(|err| panic!("Qwen 3.5 batched decode: {err}"));
-            }
-
-            if mask.is_some() {
-                return self.forward_batched_rows_sequential(input_ids, seq_ids, batch_caches);
-            }
-            if let Some(ids) = seq_ids {
-                if !self.configured_attention_kv_modes_all_fp16() {
-                    tracing::debug!(
-                        "Qwen 3.5 batched prefill is disabled for non-FP16 model-owned KV modes until row-split sidecars are supported"
-                    );
-                    return self.forward_batched_rows_sequential(
-                        input_ids,
-                        Some(ids),
-                        batch_caches,
-                    );
-                }
-                return self.forward_batched_prefill(input_ids, ids);
-            }
-            self.forward_batched_rows_sequential(input_ids, None, batch_caches)
-        })
+        // Scheduler rows carry their state through `forward_layer_state`.
+        if let Some(&seq_id) = seq_ids.and_then(|ids| ids.first()) {
+            Self::refuse_sequence_id(seq_id);
+        }
+        match batch_caches.len() {
+            0 => mlxcel_core::zeros(&[0, 1, 1], dtype::FLOAT32),
+            1 => self.forward_with_sequence_id(input_ids, None, batch_caches[0], None),
+            // Preserve the legacy no-id fallback-slot semantics.
+            _ => self.forward_batched_rows_sequential(input_ids, batch_caches),
+        }
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {
-        vec![248046, 248044] // Qwen 3.5 EOS tokens
+        eos_token_ids_from_config(&self.config)
+    }
+}
+
+/// The `qwen3_5` family tag and the hybrid tensor names its layers are
+/// stored under, as the scheduler's generic snapshot code reads them (issue
+/// #3254).
+pub(crate) const QWEN35_LAYER_STATE_SNAPSHOT: LayerStateSnapshotSpec = LayerStateSnapshotSpec {
+    family: "qwen3_5",
+    label: "Qwen 3.5",
+    encoding: LayerStateEncoding::Hybrid,
+};
+
+/// EOS ids declared by a Qwen3.5 config, falling back to the stock pair.
+pub(crate) fn eos_token_ids_from_config(config: &Qwen35Config) -> Vec<i32> {
+    match &config.eos_token_id {
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .and_then(|id| i32::try_from(id).ok())
+            .map_or_else(|| vec![248046, 248044], |id| vec![id]),
+        Some(serde_json::Value::Array(values)) => {
+            let declared: Vec<i32> = values
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .filter_map(|id| i32::try_from(id).ok())
+                .collect();
+            if declared.is_empty() {
+                vec![248046, 248044]
+            } else {
+                declared
+            }
+        }
+        _ => vec![248046, 248044], // stock Qwen 3.5 EOS tokens
     }
 }
 
@@ -4042,7 +5002,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         // Each projection must be stacked into the slots the block loads.
         for dst in ["gate_proj", "up_proj", "down_proj"] {
@@ -4071,6 +5031,31 @@ mod sanitize_tests {
     }
 
     #[test]
+    fn sanitize_weights_refuses_mismatched_expert_shapes() {
+        // Expert 1's w1 has another shape: the load must fail with the key
+        // instead of `stack` aborting the process (issue #3297).
+        let config = moe_config(1, 3);
+        for (src_proj, dst_proj) in [("w1", "gate_proj"), ("up_proj", "up_proj")] {
+            let mut weights = WeightMap::new();
+            for e in 0..3 {
+                let cols = if e == 1 { 6 } else { 8 };
+                weights.insert(
+                    format!("model.layers.0.mlp.experts.{e}.{src_proj}.weight"),
+                    mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols], &[4, cols as i32]),
+                );
+            }
+            let Err(err) = sanitize_weights(weights, &config) else {
+                panic!("a mismatched expert must fail the sanitize");
+            };
+            assert!(
+                err.contains(&format!("model.layers.0.mlp.experts.1.{src_proj}.weight")),
+                "{dst_proj}: {err}"
+            );
+            assert!(err.contains("[4, 6]") && err.contains("[4, 8]"), "{err}");
+        }
+    }
+
+    #[test]
     fn sanitize_weights_preserves_per_expert_gate_up_down_stack_order() {
         let num_experts: usize = 2;
         let out = 2i32;
@@ -4095,7 +5080,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         for (proj, base) in [
             ("gate_proj", 10.0_f32),
@@ -4169,7 +5154,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         for (dst, suffix) in [
             ("gate_proj", "weight"),
@@ -4227,7 +5212,7 @@ mod sanitize_tests {
             }
         }
 
-        let result = sanitize_weights(weights, &config);
+        let result = sanitize_weights(weights, &config).unwrap();
 
         // The stacked gate/up/down slots must exist (from the w1/w2/w3 source,
         // which runs first and wins the slot).
@@ -4343,9 +5328,86 @@ mod sanitize_tests {
 
         let config = moe_config(1, num_experts);
         for (label, weights) in variants {
-            let sanitized = sanitize_weights(weights, &config);
+            let sanitized = sanitize_weights(weights, &config).unwrap();
             SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
                 .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
+        }
+    }
+
+    /// An NVFP4 export from NVIDIA ModelOpt or compressed-tensors
+    /// (`RedHatAI/Qwen3.6-35B-A3B-NVFP4`) stores each expert as its own
+    /// linear, and the repack leaves that expert's tensor scale beside its
+    /// plane. The stacking pass took `weight` / `scales` / `biases` only, so
+    /// the scales stayed behind and the expert loader refused the plane
+    /// (`... was left unstacked`). They are now stacked into the
+    /// `[num_experts]` output multiplier, under both per-expert namings.
+    #[test]
+    fn sanitize_weights_stacks_per_expert_nvfp4_tensor_scales() {
+        use crate::models::qwen3_next::SwitchGLU;
+        use crate::models::switch_layers::{
+            expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
+        };
+
+        let num_experts: usize = 2;
+        let config: Qwen35Config = serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 64,
+            "num_hidden_layers": 1,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_experts": num_experts,
+            "num_experts_per_tok": 2,
+            "decoder_sparse_step": 1,
+            "moe_intermediate_size": 32,
+            "shared_expert_intermediate_size": 0,
+            "full_attention_interval": 4,
+            "vocab_size": 100
+        }))
+        .expect("minimal qwen3.5-moe test config");
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        // (source names, in the gate / up / down order of the block's slots)
+        for names in [["gate_proj", "up_proj", "down_proj"], ["w1", "w3", "w2"]] {
+            let mut weights = WeightMap::new();
+            for e in 0..num_experts {
+                for (j, (src, (out, input))) in names
+                    .into_iter()
+                    .zip([(32, 64), (32, 64), (64, 32)])
+                    .enumerate()
+                {
+                    insert_modelopt_expert_plane(
+                        &mut weights,
+                        &format!("model.layers.0.mlp.experts.{e}.{src}"),
+                        out,
+                        input,
+                        (1 + e + j) as f32 * 0.5,
+                        (e * 3 + j) as u32,
+                    );
+                }
+            }
+
+            let weights = sanitize_weights(weights, &config).unwrap();
+
+            for (j, proj) in ["gate_proj", "up_proj", "down_proj"]
+                .into_iter()
+                .enumerate()
+            {
+                let want: Vec<f32> = (0..num_experts).map(|e| (1 + e + j) as f32 * 0.5).collect();
+                assert_eq!(
+                    stacked_inv_global_scale(&weights, &format!("{prefix}.{proj}")),
+                    want,
+                    "{names:?}"
+                );
+            }
+            assert!(
+                !weights.keys().any(|k| k.contains(".experts.")),
+                "{names:?}: no per-expert key is left behind"
+            );
+            expect_native_nvfp4_load(
+                SwitchGLU::from_weights(&weights, &config.to_qwen3next_config(), prefix),
+                prefix,
+                "the stacked planes load through the Qwen3.5 expert block",
+            );
         }
     }
 }
@@ -4411,3 +5473,7 @@ mod qwen3_5_dflash_probe_tests;
 #[cfg(test)]
 #[path = "qwen3_5_rope_attribution_tests.rs"]
 mod qwen3_5_rope_attribution_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_prefill_memory_tests.rs"]
+mod qwen3_5_prefill_memory_tests;

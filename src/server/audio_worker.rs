@@ -429,6 +429,7 @@ mod tests {
                 text: format!("ok:{}", input.audio.len()),
                 language: input.language,
                 duration_seconds: None,
+                segments: Vec::new(),
             })
         }
     }
@@ -523,6 +524,7 @@ mod tests {
                 text: format!("ok:{}", input.audio.len()),
                 language: input.language,
                 duration_seconds: None,
+                segments: Vec::new(),
             })
         }
     }
@@ -598,6 +600,7 @@ mod tests {
                     text: format!("ok:{}", input.audio.len()),
                     language: input.language,
                     duration_seconds: None,
+                    segments: Vec::new(),
                 })
             }
         }
@@ -674,6 +677,7 @@ mod tests {
                     text: format!("ok:{}", input.audio.len()),
                     language: input.language,
                     duration_seconds: None,
+                    segments: Vec::new(),
                 })
             }
         }

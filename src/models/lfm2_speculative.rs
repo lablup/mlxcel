@@ -44,6 +44,7 @@ use super::{Lfm2LayerCache, Lfm2Model};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
+use crate::models::speculative_exactness_draws as draws;
 
 /// Independent synthetic inputs the exactness probe compares before it
 /// reports equality; see `models::qwen3_5::PROBE_DRAWS` for why one is not
@@ -126,6 +127,28 @@ impl Lfm2Model {
         capture_layer_ids: &[usize],
         capture_conv_rollback: bool,
     ) -> VerifyOutput {
+        self.forward_speculative_with(
+            input_ids,
+            caches,
+            capture_layer_ids,
+            capture_conv_rollback,
+            false,
+        )
+    }
+
+    /// [`Self::forward_speculative`], with `prefill` set for a prompt prefill.
+    /// Only a prefill may leave its causal mask to MLX's causal mode
+    /// ([`Lfm2Model::prefill_attn_mask`], #3072), as the generation prefill
+    /// does: a verify block and the exactness probe keep the array mask, so the
+    /// probe still measures the kernels the verify forward runs.
+    fn forward_speculative_with(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Lfm2LayerCache],
+        capture_layer_ids: &[usize],
+        capture_conv_rollback: bool,
+        prefill: bool,
+    ) -> VerifyOutput {
         let h0 = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(&h0);
         let seq_len = shape[1];
@@ -135,7 +158,9 @@ impl Lfm2Model {
             .find(|c| matches!(c, Lfm2LayerCache::Attention(_)))
             .map(|c| c.offset())
             .unwrap_or(0);
-        let attn_mask = if seq_len > 1 {
+        let attn_mask = if prefill {
+            self.prefill_attn_mask(seq_len, attn_offset, shape[0], &h0)
+        } else if seq_len > 1 {
             Some(create_causal_mask(seq_len, attn_offset))
         } else {
             None
@@ -238,9 +263,7 @@ impl Lfm2Model {
                             mlxcel_core::concatenate(&zeros, &committed, 1)
                         }
                     };
-                    let plen = n_keep + n;
-                    let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-                    *state = Some(mlxcel_core::contiguous(&tail, false));
+                    *state = Some(mlxcel_core::utils::materialized_state_tail(&padded, n_keep));
                 }
             }
         }
@@ -271,6 +294,19 @@ impl Lfm2Model {
     /// contract's reference; on a MoE checkpoint it also takes the fused
     /// single-row expert kernel that the block arm cannot.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        let lengths = draws::prompt_lengths(PROBE_PROMPT_LEN, PROBE_DRAWS, None);
+        self.probe_block_chain_exactness_at(block_size, &lengths)
+    }
+
+    /// [`Self::probe_block_chain_exactness`] over draws of the given prompt
+    /// lengths, one draw per entry.
+    ///
+    /// Used by: [`Self::probe_block_chain_exactness`] and the exactness survey test.
+    pub fn probe_block_chain_exactness_at(
+        &self,
+        block_size: usize,
+        prompt_lengths: &[usize],
+    ) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
@@ -278,20 +314,22 @@ impl Lfm2Model {
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
-        for draw in 0..PROBE_DRAWS {
-            let verdict = self.probe_one_draw(block_size, vocab, draw);
-            if !verdict.is_equal() {
-                return verdict;
-            }
-        }
-        BlockChainExactness::Equal
+        draws::run_draws(prompt_lengths, |draw, prompt_len| {
+            self.probe_one_draw(block_size, vocab, draw, prompt_len)
+        })
     }
 
-    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+    fn probe_one_draw(
+        &self,
+        block_size: usize,
+        vocab: usize,
+        draw: usize,
+        prompt_len: usize,
+    ) -> BlockChainExactness {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
@@ -359,7 +397,7 @@ impl SpeculativeTarget for Lfm2Model {
         caches: &mut [Self::Cache],
         capture_layer_ids: &[usize],
     ) -> Self::VerifyOut {
-        self.forward_speculative(verify_input, caches, capture_layer_ids, false)
+        self.forward_speculative_with(verify_input, caches, capture_layer_ids, false, true)
     }
 
     fn rollback_partial(

@@ -1,0 +1,5 @@
+shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,ppl_reference,ppl_candidate,mla_paths_candidate
+decode1k,decompressed,absorbed fused,512,4,209,0,14.6514,14.6903,absorbed_fused=13824 decompressed=216
+decode1k,decompressed,absorbed composed,512,8,209,0,14.6514,14.6692,absorbed_composed=13824 decompressed=216
+decode4k,decompressed,absorbed fused,256,0,106,0,12.9935,12.9915,absorbed_fused=6912 decompressed=108
+decode8k,decompressed,absorbed (composed above 8192 keys),128,1,78,0,4.5824,4.5829,absorbed_composed=3456 decompressed=54

@@ -62,7 +62,11 @@ pub(crate) struct EmbedArgs {
     /// Embedding normalization, b10621's `--embd-normalize` domain: `-1` none,
     /// `0` max absolute int16, `1` taxicab, `2` euclidean, above 2 that p-norm.
     /// Unset uses the checkpoint's own `normalize` flag (#1452).
-    #[arg(long = "embd-normalize", value_name = "N")]
+    #[arg(
+        long = "embd-normalize",
+        value_name = "N",
+        allow_negative_numbers = true
+    )]
     pub(crate) embd_normalize: Option<i32>,
 
     /// Print one JSON object instead of the text layout.
@@ -206,7 +210,7 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
     for path in &args.images {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        let image = image::load_from_memory(&bytes)
+        let image = mlxcel::multimodal::image_orientation::load_upright_from_memory(&bytes)
             .with_context(|| format!("failed to decode {}", path.display()))?;
         let reply = engine
             .embed_image(ImageInput { image }, &options)

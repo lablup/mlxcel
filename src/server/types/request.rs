@@ -229,6 +229,12 @@ pub enum ContentPart {
     /// Audio input content (base64-encoded audio data)
     #[serde(rename = "input_audio")]
     InputAudio { input_audio: InputAudio },
+    /// Audio by URL (`audio_url`), a part name some clients and chat templates
+    /// use. Accepted at parse time only so the HTTP boundary can answer it with
+    /// the same capability refusal as `input_audio` rather than a body-shape
+    /// error; no checkpoint consumes it (issue #3376).
+    #[serde(rename = "audio_url")]
+    AudioUrl { audio_url: AudioUrl },
 }
 
 /// Image URL reference.
@@ -354,6 +360,43 @@ pub fn resolve_request_image_soft_tokens(parts: &[ImageUrl]) -> Result<Option<us
     Ok(resolved)
 }
 
+/// Request fields that set an image's preprocessed geometry per request in
+/// mlx-vlm's server schema (`ImageProcessingRequest`, Neywa-Labs/mlx-vlm#2529).
+///
+/// mlxcel does not take them: its per-request image budget is
+/// `max_soft_tokens` / `detail` on the `image_url` part, and the operator
+/// bounds are `--image-min-tokens` / `--image-max-tokens`. A request that
+/// carries image or video input and one of these fields is refused rather than
+/// served at the server's geometry as if the field had been read (#3265).
+pub(crate) const IMAGE_GEOMETRY_FIELDS: [&str; 5] = [
+    "min_pixels",
+    "max_pixels",
+    "resize_shape",
+    "resized_height",
+    "resized_width",
+];
+
+/// The [`IMAGE_GEOMETRY_FIELDS`] present in a route's unrecognized-field
+/// capture, at its root or inside a nested `extra_body` object (the root wins),
+/// for a translator to carry into the chat request so the shared refusal in
+/// `prepare_chat_request_with_cache_and_video_allowlist` sees them.
+pub(crate) fn image_geometry_fields(
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let nested = extra
+        .get("extra_body")
+        .and_then(serde_json::Value::as_object);
+    IMAGE_GEOMETRY_FIELDS
+        .iter()
+        .filter_map(|field| {
+            extra
+                .get(*field)
+                .or_else(|| nested.and_then(|nested| nested.get(*field)))
+                .map(|value| ((*field).to_string(), value.clone()))
+        })
+        .collect()
+}
+
 /// Video URL reference. Same wire shape as [`ImageUrl`] for
 /// symmetry with the OpenAI vision content blocks.
 ///
@@ -377,6 +420,14 @@ pub struct InputAudio {
     /// Audio format: "wav", "mp3", etc.
     #[serde(default = "default_audio_format")]
     pub format: String,
+}
+
+/// `audio_url` content part payload. Only the presence of the part matters:
+/// it is refused before the URL is read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioUrl {
+    /// URL or path of the clip.
+    pub url: String,
 }
 
 fn default_audio_format() -> String {
@@ -521,6 +572,16 @@ impl MessageContent {
                     _ => None,
                 })
                 .collect(),
+        }
+    }
+
+    /// Whether this content carries an `audio_url` part.
+    pub fn has_audio_urls(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::AudioUrl { .. })),
         }
     }
 
@@ -1317,12 +1378,61 @@ impl ChatCompletionRequest {
         resolve_request_image_soft_tokens(&self.image_parts())
     }
 
+    /// Refuse a per-request image geometry field ([`IMAGE_GEOMETRY_FIELDS`]) on
+    /// a request that carries image or video input.
+    ///
+    /// Checks the merged extra-body map (flattened root keys and the nested
+    /// `extra_body`). A text-only request is not refused, so a client that
+    /// sends these keys on every request keeps working for text. A JSON `null`
+    /// counts as absent.
+    ///
+    /// # Errors
+    /// Returns `Err` naming every such field present. Routes surface this as a
+    /// 400.
+    pub fn reject_unsupported_image_geometry_fields(&self) -> Result<(), String> {
+        let carries_visual_input = self.messages.iter().any(|message| {
+            matches!(
+                &message.content,
+                MessageContent::Parts(parts) if parts.iter().any(|part| matches!(
+                    part,
+                    ContentPart::ImageUrl { .. } | ContentPart::VideoUrl { .. }
+                ))
+            )
+        });
+        if !carries_visual_input {
+            return Ok(());
+        }
+        let Some(extra) = self.merged_extra_body() else {
+            return Ok(());
+        };
+        let present: Vec<&str> = IMAGE_GEOMETRY_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| extra.get(*field).is_some_and(|value| !value.is_null()))
+            .collect();
+        if present.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "unsupported image geometry field(s): {}. mlxcel does not take a per-request \
+             pixel bound or resize; set the per-request image budget with `max_soft_tokens` \
+             or `detail` on the image_url part, or start the server with \
+             `--image-min-tokens` / `--image-max-tokens`",
+            present.join(", ")
+        ))
+    }
+
     /// Extract all audio inputs from messages
     pub fn audio_inputs(&self) -> Vec<InputAudio> {
         self.messages
             .iter()
             .flat_map(|m| m.content.audio_inputs())
             .collect()
+    }
+
+    /// Whether any message carries an `audio_url` part.
+    pub fn has_audio_urls(&self) -> bool {
+        self.messages.iter().any(|m| m.content.has_audio_urls())
     }
 
     /// Extract all video URL references from messages.

@@ -28,6 +28,11 @@
 //!
 //! Each test reads the stored entry back and compares its token count with
 //! the `offset` the snapshot itself carries.
+//!
+//! Since #3040 a request that goes on to decode stores its completion
+//! snapshot at the prompt boundary when the prefill finishes, so the
+//! decode-written reply never reaches the store; the #1754 accounting of the
+//! end-of-generation snapshot is pinned under `MLXCEL_PROMPT_CACHE_DECODED_TAIL`.
 
 use super::scheduler_model_owned_cache_tests::{cache_ctx, options, prompt, scheduler, test_store};
 use super::*;
@@ -45,10 +50,25 @@ fn run_request(
     ignore_eos: bool,
     max_tokens: usize,
 ) -> Vec<i32> {
+    run_chat_request(sched, first, None, ignore_eos, max_tokens).0
+}
+
+/// [`run_request`] for a chat turn whose history boundary is `history`;
+/// also returns how many prompt tokens the request adopted.
+fn run_chat_request(
+    sched: &mut BatchScheduler,
+    first: &[i32],
+    history: Option<&[i32]>,
+    ignore_eos: bool,
+    max_tokens: usize,
+) -> (Vec<i32>, usize) {
     let (tx, rx) = mpsc::channel();
     let mut opts = options();
     opts.ignore_eos = ignore_eos;
     opts.max_tokens = max_tokens;
+    let mut ctx = cache_ctx();
+    ctx.history_prefix_tokens = history.map(<[i32]>::to_vec);
+    opts.prompt_cache_ctx = Some(ctx);
     sched.enqueue_request(
         "prompt".to_string(),
         Some(first.to_vec()),
@@ -63,7 +83,7 @@ fn run_request(
     let result = drive(sched, &rx);
     let mut seen = first.to_vec();
     seen.extend_from_slice(&result.generated_token_ids);
-    seen
+    (seen, result.cached_tokens)
 }
 
 /// Drive the scheduler until `rx` reports the request done. Unlike the
@@ -127,6 +147,7 @@ fn stored_len_and_offset(
 /// request saw, and must equal the offset the state holds.
 #[test]
 fn length_finish_snapshot_claims_only_forwarded_tokens() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(true);
     let store = test_store();
     let mut sched = scheduler(store.clone());
     let first = prompt(40);
@@ -226,4 +247,192 @@ fn model_owned_sequence_primes_the_decode_lookahead_only_with_a_rewind() {
         sched.lookahead_params(&[seq_id]).is_some(),
         "Gemma 3 rewinds its own state, so it pipelines"
     );
+}
+
+/// Default since #3040: a request that decodes stores the prompt-boundary
+/// state taken when its prefill finished, and the finish adds no entry with
+/// the decode-written reply.
+#[test]
+fn a_decoded_request_stores_only_its_prompt_boundary() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(false);
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+    assert_eq!(seen.len(), first.len() + 4, "four tokens generated");
+
+    let (stored, offset) = stored_len_and_offset(&sched, &store, &seen);
+    assert_eq!(stored, first.len(), "the entry ends at the prompt boundary");
+    assert_eq!(
+        stored as i32, offset,
+        "and its state holds exactly the prompt"
+    );
+    assert_eq!(store.stats().snapshot_entries, 1, "no decode-written entry");
+    assert!(
+        sched.prompt_cache_prompt_end_stored.is_empty(),
+        "the finish clears the record"
+    );
+}
+
+/// The opt-out keeps the end-of-generation entry and takes no
+/// prompt-boundary copy.
+#[test]
+fn the_decoded_tail_switch_keeps_the_end_of_generation_entry() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(true);
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+    let (stored, _) = stored_len_and_offset(&sched, &store, &seen);
+    assert_eq!(stored, seen.len() - 1);
+    assert_eq!(store.stats().snapshot_entries, 1);
+}
+
+/// A chat turn with a history boundary stores no completion snapshot at all
+/// (#3040): its prompt end is only the generation prompt past the boundary,
+/// written by a small last piece no cold run of the next turn forwards. The
+/// next turn adopts the boundary, so its plan is the tail of its cold plan,
+/// and it decodes what a cold run of the same request decodes.
+#[test]
+fn a_chat_turn_with_a_history_boundary_resumes_the_next_turn_from_it() {
+    let _tail = crate::server::prompt_cache::decoded_tail::override_decoded_tail_for_test(false);
+    let history = prompt(36);
+    let mut turn_1 = history.clone();
+    turn_1.extend([3, 4, 5]);
+
+    let store = test_store();
+    let mut sched = scheduler(store.clone());
+    let (seen, adopted) = run_chat_request(&mut sched, &turn_1, Some(&history), true, 4);
+    assert_eq!(adopted, 0);
+    assert_eq!(
+        store.stats().snapshot_entries,
+        1,
+        "the boundary entry alone, no completion entry"
+    );
+
+    // The next turn re-renders the reply into its history.
+    let mut history_2 = seen.clone();
+    history_2.extend([1, 2]);
+    let mut turn_2 = history_2.clone();
+    turn_2.extend([3, 4, 5]);
+    let (served, adopted) = run_chat_request(&mut sched, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(
+        adopted,
+        history.len(),
+        "the next turn resumes at the boundary"
+    );
+
+    // A regenerated turn 2 adopts the boundary turn 2 stored and captures
+    // nothing itself; it must not store a prompt-end entry either, or the
+    // next turn would adopt that instead of the boundary.
+    let entries = store.stats().snapshot_entries;
+    let (_, adopted) = run_chat_request(&mut sched, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(
+        adopted,
+        history_2.len(),
+        "the regenerate adopts the boundary"
+    );
+    assert_eq!(
+        store.stats().snapshot_entries,
+        entries,
+        "and stores no prompt-end entry"
+    );
+
+    let mut cold = scheduler(test_store());
+    let (cold_seen, cold_adopted) = run_chat_request(&mut cold, &turn_2, Some(&history_2), true, 4);
+    assert_eq!(cold_adopted, 0);
+    assert_eq!(
+        served, cold_seen,
+        "the hit decodes what the cold run decodes"
+    );
+}
+
+/// A gate over a fixed host reading, for simulating a machine's memory.
+fn gate_reporting(
+    status: mlxcel_core::host_memory::HostMemoryStatus,
+) -> Arc<mlxcel_core::host_memory::AvailabilityGate> {
+    Arc::new(mlxcel_core::host_memory::AvailabilityGate::with_probe(
+        std::time::Duration::from_secs(3600),
+        move || Some(status),
+    ))
+}
+
+/// A 16 GB host with 4 GiB available now: below the 7 GiB macOS reserve, so
+/// the guardrail must refuse every growth step (the CI Mac mini of #3146).
+fn host_below_the_reserve() -> mlxcel_core::host_memory::HostMemoryStatus {
+    const GIB: u64 = 1 << 30;
+    mlxcel_core::host_memory::HostMemoryStatus {
+        total_bytes: 16 * GIB,
+        available_now_bytes: 4 * GIB,
+        reserve_bytes: mlxcel_core::host_memory::memory_reserve_bytes(16 * GIB),
+        wired_bytes: 0,
+    }
+}
+
+/// Issue #3146: on a host below its memory reserve the guardrail declines
+/// the donation, and the decline is counted under its own reason instead of
+/// leaving the store empty with nothing to say why. Before the fix the
+/// scheduler read the real host through a process-wide gate, so the nightly
+/// tests on a 16 GB runner stored nothing and failed with `0 inserts`.
+#[test]
+fn a_host_below_the_memory_reserve_declines_the_snapshot_and_says_why() {
+    let store = test_store();
+    let mut sched = scheduler(store.clone())
+        .with_snapshot_growth_gate(gate_reporting(host_below_the_reserve()));
+    let first = prompt(40);
+    let seen = run_request(&mut sched, &first, true, 4);
+
+    let ctx = cache_ctx();
+    let key =
+        BatchScheduler::compose_prompt_cache_key(&ctx, &seen, sched.rope_regime_for(seen.len()));
+    assert!(
+        store.lookup_snapshot_prefix(&key, &seen).is_none(),
+        "the guardrail kept the snapshot out of the store"
+    );
+    assert_eq!(store.stats().snapshot_entries, 0);
+    let obs = sched.batch_observability.snapshot();
+    assert!(
+        obs.prompt_cache_reject_memory_reserve >= 1,
+        "the decline is counted, not silent"
+    );
+    assert_eq!(
+        obs.prompt_cache_last_reject.map(|r| r.reason),
+        Some("memory_reserve"),
+        "last_reject names the guardrail"
+    );
+}
+
+/// The other half of #3146: the scheduler a unit test builds does not read
+/// the host, so the same request stores its snapshot whatever the machine's
+/// memory, and a host with room to spare stores it through a real gate too.
+#[test]
+fn a_test_scheduler_stores_snapshots_whatever_the_host_memory() {
+    const GIB: u64 = 1 << 30;
+    let roomy = mlxcel_core::host_memory::HostMemoryStatus {
+        total_bytes: 16 * GIB,
+        available_now_bytes: 12 * GIB,
+        reserve_bytes: mlxcel_core::host_memory::memory_reserve_bytes(16 * GIB),
+        wired_bytes: 0,
+    };
+    for gate in [None, Some(gate_reporting(roomy))] {
+        let store = test_store();
+        let mut sched = scheduler(store.clone());
+        if let Some(gate) = gate {
+            sched = sched.with_snapshot_growth_gate(gate);
+        }
+        let first = prompt(40);
+        run_request(&mut sched, &first, true, 4);
+        assert_eq!(
+            store.stats().snapshot_entries,
+            1,
+            "the prompt boundary was stored"
+        );
+        assert_eq!(
+            sched
+                .batch_observability
+                .snapshot()
+                .prompt_cache_reject_memory_reserve,
+            0
+        );
+    }
 }

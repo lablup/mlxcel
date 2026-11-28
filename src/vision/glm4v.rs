@@ -161,6 +161,10 @@ impl Glm4vModel {
 }
 
 impl LanguageModel for Glm4vModel {
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        self.text_model.supports_maskless_padded_prefill()
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -206,6 +210,22 @@ impl LanguageModel for Glm4vModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
+    }
+
+    // The text model's last-row forward is its `forward_for_sequence` with
+    // only the sampled row projected, so text and embedding prefills both
+    // skip the `[B, L, vocab]` logits (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.text_model
+            .last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

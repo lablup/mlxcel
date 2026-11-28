@@ -65,11 +65,17 @@ pub mod granite4_vision;
 pub mod granite_vision;
 pub mod hunyuan_vl;
 pub mod idefics2;
+pub mod indic_ocr;
+pub mod inkling2_vl;
 pub mod inkling_vl;
 pub mod internvl;
 pub mod jina_vlm;
 pub mod kimi_k3_vl;
 pub mod kimi_vl;
+#[cfg(test)]
+mod last_row_logits_vlm2_tests;
+#[cfg(test)]
+mod last_row_logits_vlm_tests;
 pub mod lfm2_vl;
 pub mod llmjp_vl;
 #[cfg(test)]
@@ -78,7 +84,8 @@ pub mod llmjp_vl_text;
 pub mod locateanything;
 pub mod mage_vl;
 pub mod mage_vl_config;
-pub mod minicpmo_vl;
+pub mod mimo_v2_vl;
+mod minicpmo_vl;
 pub mod minicpmv4_6_vl;
 pub mod minimax_m3_vl;
 pub mod mllama_image_state;
@@ -94,6 +101,8 @@ pub mod paddleocr_vl;
 pub mod phi3_vl;
 pub mod phi4_siglip_vl;
 pub mod phi4mm_vl;
+pub mod plamo2_vl;
+pub mod plamo2_vl_config;
 pub mod qwen2_5_vl;
 pub mod qwen2_vl;
 pub mod qwen3_5_vl;
@@ -132,6 +141,7 @@ pub use granite4_vision::Granite4VisionVLModel;
 pub use hunyuan_vl::HunyuanVlModel;
 pub use idefics2::Idefics2Model;
 pub use inkling_vl::InklingVlModel;
+pub use inkling2_vl::Inkling2VlModel;
 pub use internvl::InternVLChatVLM;
 pub use jina_vlm::JinaVlmModel;
 pub use kimi_k3_vl::{KimiK3Projector, KimiK3VLModel};
@@ -141,6 +151,7 @@ pub use llmjp_vl::LlmJpVlModel;
 pub use llmjp_vl_text::LlmJpTextModel;
 pub use locateanything::{LocateAnythingConnector, LocateAnythingVLM};
 pub use mage_vl::MageVlModel;
+pub use mimo_v2_vl::MimoV2VlModel;
 pub use minicpmo_vl::MiniCPMOVLModel;
 pub use minicpmv4_6_vl::MiniCPMV46VLModel;
 pub use minimax_m3_vl::MiniMaxM3VlModel;
@@ -156,6 +167,7 @@ pub use paddleocr_vl::PaddleOcrVlModel;
 pub use phi3_vl::Phi3VLModel;
 pub use phi4_siglip_vl::Phi4SigLipVLModel;
 pub use phi4mm_vl::Phi4MMVLModel;
+pub use plamo2_vl::Plamo2VlModel;
 pub use qwen2_5_vl::Qwen25VLModel;
 pub use qwen2_vl::Qwen2VLModel;
 pub use qwen3_5_vl::Qwen35VLModel;
@@ -427,6 +439,10 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.supports_decode_lookahead_rewind()
     }
 
+    fn supports_speculative_verify_rewind(&self) -> bool {
+        self.text_model.supports_speculative_verify_rewind()
+    }
+
     fn kv_cache_captures_sequence_state(&self) -> bool {
         self.text_model.kv_cache_captures_sequence_state()
     }
@@ -505,8 +521,50 @@ impl LanguageModel for VisionLanguageModel {
             .restore_sequence_state_truncated(seq_id, snapshot, target_len)
     }
 
+    /// Turn-boundary state checkpoints are the text backbone's too (issues
+    /// #3047, #3255), for the same reason.
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.state_checkpoint_from_snapshot(snapshot)
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model
+            .restore_sequence_state_from_checkpoint(seq_id, checkpoint, donor)
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         self.text_model.sequence_state_layout()
+    }
+
+    // A scheduler-owned text model keeps its state in the pool entry
+    // (issue #3254), so the wrapper forwards the whole surface: the table,
+    // the state builder, the snapshot vocabulary and the forward.
+    fn layer_state_kinds(&self) -> Option<Vec<mlxcel_core::cache::LayerStateKind>> {
+        self.text_model.layer_state_kinds()
+    }
+
+    fn make_layer_state(&self) -> Option<Vec<mlxcel_core::cache::LayerState>> {
+        self.text_model.make_layer_state()
+    }
+
+    fn layer_state_snapshot_spec(&self) -> Option<mlxcel_core::cache::LayerStateSnapshotSpec> {
+        self.text_model.layer_state_snapshot_spec()
+    }
+
+    fn forward_layer_state(
+        &self,
+        request: &mlxcel_core::cache::LayerStateForward<'_>,
+        rows: &mut [&mut [mlxcel_core::cache::LayerState]],
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        self.text_model.forward_layer_state(request, rows)
     }
 
     fn supports_padded_prefill(&self) -> bool {
@@ -570,6 +628,19 @@ impl LanguageModel for VisionLanguageModel {
     ) -> UniquePtr<MlxArray> {
         self.text_model
             .forward_last_logits(input_ids, caches, mask, last_pos)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.text_model
+            .last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
     }
 
     fn forward_last_logits_with_sequence_id(

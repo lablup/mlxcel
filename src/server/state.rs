@@ -28,6 +28,7 @@ use crate::tokenizer::MlxcelTokenizer;
 use super::audio_model::AudioModelProvider;
 use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
+use super::decision_model::DecisionModelProvider;
 use super::embedding_model::EmbeddingModelProvider;
 use super::image_model::ImageModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
@@ -103,13 +104,17 @@ pub struct BatchMetrics {
     /// stores this first and then release-publishes the context size, allowing
     /// route readers to acquire a coherent geometry pair.
     runtime_max_kv_size: AtomicUsize,
+    /// The per-slot KV bound the live scheduler refuses prompts against; `0`
+    /// until a scheduler publishes one, or when the bound is unset (#2877).
+    prompt_admission_bound: AtomicUsize,
 
     // -- prompt-prefix cache Prometheus counters --
     /// Cumulative successful prompt-cache adoptions (hits). Incremented by the
     /// scheduler's `try_adopt_cached_prefix` when an entry is adopted.
     pub prompt_cache_hits_total: AtomicU64,
-    /// Cumulative prompt-cache misses. Incremented in the scheduler when no
-    /// matching prefix is found and a cold allocate is used.
+    /// Cumulative prompt-cache misses. Incremented in the scheduler when a
+    /// dense KV lookup ran and no prefix was adopted (including a store hit
+    /// the scheduler declined).
     pub prompt_cache_misses_total: AtomicU64,
     /// Cumulative prefix tokens reused across all hits. Σ matched-prefix
     /// lengths from `try_adopt_cached_prefix`.
@@ -152,6 +157,7 @@ impl BatchMetrics {
             preemptions_total: AtomicU64::new(0),
             runtime_context_size: AtomicUsize::new(0),
             runtime_max_kv_size: AtomicUsize::new(0),
+            prompt_admission_bound: AtomicUsize::new(0),
             prompt_cache_hits_total: AtomicU64::new(0),
             prompt_cache_misses_total: AtomicU64::new(0),
             prompt_cache_prefix_tokens_reused_total: AtomicU64::new(0),
@@ -244,6 +250,18 @@ impl BatchMetrics {
             .store(context_size, Ordering::Release);
     }
 
+    /// Publish the per-slot KV bound the scheduler enforces at admission.
+    pub fn publish_prompt_admission_bound(&self, max_kv_size: Option<usize>) {
+        self.prompt_admission_bound
+            .store(max_kv_size.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// The per-slot KV bound a text prompt must fit, when one is in force.
+    pub fn prompt_admission_bound(&self) -> Option<usize> {
+        let value = self.prompt_admission_bound.load(Ordering::Relaxed);
+        (value > 0).then_some(value)
+    }
+
     /// Return the post-load context override, when the worker published one.
     pub fn runtime_context_size(&self) -> Option<usize> {
         let value = self.runtime_context_size.load(Ordering::Acquire);
@@ -268,7 +286,8 @@ impl BatchMetrics {
             .fetch_add(matched_tokens as u64, Ordering::Relaxed);
     }
 
-    /// Record a prompt-cache miss (cold allocate path).
+    /// Record a prompt-cache miss: a dense lookup ran and no prefix was adopted
+    /// (including a declined hit).
     pub fn record_prompt_cache_miss(&self) {
         self.prompt_cache_misses_total
             .fetch_add(1, Ordering::Relaxed);
@@ -336,6 +355,11 @@ impl BatchMetrics {
 /// and the metrics reader so the single `BatchMetrics` instance stays as the
 /// source of truth for all Prometheus output.
 ///
+/// Each counter has one writer. The adapter forwards evictions and snapshot
+/// misses; dense hits, dense misses, snapshot hits, and both reused-token
+/// totals are written by the scheduler, which knows whether a lookup was
+/// actually adopted and how many tokens it reused (#3246).
+///
 /// Used by: startup.rs (PromptCacheStore::with_metrics call site)
 pub struct BatchMetricsCacheAdapter {
     inner: Arc<BatchMetrics>,
@@ -358,12 +382,14 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         // `BatchObservability::prompt_cache_insert_rejects` covers this.
     }
 
-    fn record_lookup(&self, hit: bool, matched_len: usize) {
-        if hit {
-            self.inner.record_prompt_cache_hit(matched_len);
-        } else {
-            self.inner.record_prompt_cache_miss();
-        }
+    fn record_lookup(&self, _hit: bool, _matched_len: usize) {
+        // The scheduler is the only writer of the dense hit, miss, and
+        // reused-token counters (#3246): `finish_prompt_cache_adopt` records a
+        // hit with the adopted length that becomes `cached_tokens`, and
+        // admission records a miss when a dense lookup ran and adopted no
+        // prefix (`PrefixAdoptOutcome::DenseMiss`, #3294), so a family that
+        // never runs a dense lookup records none. Forwarding the store's raw
+        // lookup here as well counted every lookup twice.
     }
 
     fn record_evict_lru(&self, _bytes: usize) {
@@ -374,10 +400,13 @@ impl PromptCacheMetrics for BatchMetricsCacheAdapter {
         self.inner.record_prompt_cache_eviction_ttl();
     }
 
-    fn record_snapshot_lookup(&self, hit: bool, matched_len: usize) {
-        if hit {
-            self.inner.record_prompt_cache_snapshot_hit(matched_len);
-        } else {
+    fn record_snapshot_lookup(&self, hit: bool, _matched_len: usize) {
+        // Snapshot hits and their token total come from the scheduler's
+        // restore-success sites (`try_adopt_cached_prefix`, and
+        // `adopt_state_checkpoint` for a rebuilt checkpoint), with the
+        // restored length it reports as `cached_tokens` (#3246). The store is
+        // the only place a snapshot miss is known, so only misses pass here.
+        if !hit {
             self.inner.record_prompt_cache_snapshot_miss();
         }
     }
@@ -442,6 +471,16 @@ pub struct ModelMediaSupport {
     /// is the worker-side sibling and the backstop for routes that skip the
     /// boundary.
     pub video_with_audio: bool,
+    /// The refusal text for an `input_audio` part when this checkpoint is a
+    /// multimodal family that is known to have no audio encoder at all
+    /// (Inkling 2, issue #3376). `None` for every other checkpoint, which keeps
+    /// the generic per-kind wording. Always paired with `audio: false`: the
+    /// field only chooses what the refusal says, never whether audio is
+    /// admitted.
+    ///
+    /// Carried here, rather than recovered from the model id string, so each
+    /// route that reads `ModelMediaSupport` answers with the same sentence.
+    pub audio_refusal: Option<&'static str>,
 }
 
 impl ModelMediaSupport {
@@ -460,6 +499,7 @@ impl ModelMediaSupport {
             video_native: false,
             video_frames_fallback: false,
             video_with_audio: false,
+            audio_refusal: None,
         }
     }
 
@@ -548,6 +588,10 @@ pub struct AppState {
     /// `conversation` field in Responses-API requests. `None` when the
     /// store is disabled.
     pub conversation_store: Option<Arc<ConversationStore>>,
+    /// MCP servers behind the server-side tool loop on `/v1/responses`
+    /// (issue #1457). `None` unless the operator passed `--mcp-tools`; while
+    /// it is `None` an `mcp` tool in a request is refused.
+    pub(crate) mcp: Option<Arc<super::mcp::McpRuntime>>,
     /// Audio-model provider serving the `/audio/*` endpoints. `None` until a
     /// speech-to-text or text-to-speech model is wired in; while it is `None`
     /// the audio routes return a structured `501 Not Implemented`.
@@ -567,6 +611,10 @@ pub struct AppState {
     /// `--reranker-model`); while it is `None` the route returns a structured
     /// `501 Not Implemented`.
     pub rerank_model: Option<Arc<dyn RerankModelProvider>>,
+    /// Decision-model provider serving `POST /v1/decisions`. `None` until
+    /// `--decision-model` loads a checkpoint; while it is `None` the route
+    /// returns a structured `501 Not Implemented` naming the flag.
+    pub decision_model: Option<Arc<dyn DecisionModelProvider>>,
     /// Realtime VoiceChat engine serving the `/v1/realtime` WebSocket
     /// (#1376). `Some` only when `-m` is a Nemotron VoiceChat checkpoint;
     /// the route is mounted only then.
@@ -703,6 +751,14 @@ pub(crate) fn attach_native_chat_renderer_for_model(
     model_dir: Option<&std::path::Path>,
 ) -> (Arc<MlxcelTokenizer>, ChatTemplateProcessor) {
     let tokenizer = Arc::new(tokenizer);
+    // An operator template override (`--chat-template`) builds the processor
+    // without the model directory; the steering block is the model's, so it
+    // is attached from the directory either way (#3435).
+    if let Some(dir) = model_dir
+        && chat_template.reasoning_effort_steering().is_none()
+    {
+        chat_template.attach_reasoning_effort_steering_from(dir);
+    }
     if let Some(renderer) = super::kimi_k3_chat::KimiK3Renderer::new(Arc::clone(&tokenizer)) {
         tracing::info!("Kimi K3 tiktoken vocabulary detected; using the native XTML chat renderer");
         let renderer = match model_dir
@@ -769,6 +825,8 @@ impl AppState {
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
         let (tokenizer, chat_template) =
             attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -776,7 +834,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
-            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
+            thinking_markers: Arc::new(thinking_markers),
             tokenizer,
             model_path,
             effective_context_size,
@@ -791,10 +849,12 @@ impl AppState {
             reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
+            mcp: None,
             audio_model: None,
             embedding_model: None,
             image_model: None,
             rerank_model: None,
+            decision_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
@@ -803,7 +863,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
@@ -841,6 +901,8 @@ impl AppState {
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
         let (tokenizer, chat_template) =
             attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -848,7 +910,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
-            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
+            thinking_markers: Arc::new(thinking_markers),
             tokenizer,
             model_path,
             effective_context_size,
@@ -863,10 +925,12 @@ impl AppState {
             reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
+            mcp: None,
             audio_model: None,
             embedding_model: None,
             image_model: None,
             rerank_model: None,
+            decision_model: None,
             realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
@@ -875,7 +939,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
@@ -926,6 +990,14 @@ impl AppState {
     #[must_use]
     pub fn with_responses_store(mut self, store: Option<Arc<ResponsesStore>>) -> Self {
         self.responses_store = store;
+        self
+    }
+
+    /// Attach the MCP runtime of the server-side tool loop (issue #1457).
+    /// `None` keeps the loop off.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Option<Arc<super::mcp::McpRuntime>>) -> Self {
+        self.mcp = mcp;
         self
     }
 
@@ -996,6 +1068,14 @@ impl AppState {
     #[must_use]
     pub fn with_rerank_model(mut self, provider: Option<Arc<dyn RerankModelProvider>>) -> Self {
         self.rerank_model = provider;
+        self
+    }
+
+    /// Attach a decision-model provider serving `POST /v1/decisions`.
+    /// Pass `None` to leave the route returning a structured `501`.
+    #[must_use]
+    pub fn with_decision_model(mut self, provider: Option<Arc<dyn DecisionModelProvider>>) -> Self {
+        self.decision_model = provider;
         self
     }
 

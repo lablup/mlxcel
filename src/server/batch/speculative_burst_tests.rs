@@ -181,13 +181,14 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
     second.seq_id = SequenceId::from_raw(43);
     let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
     let ctx = super::speculative_burst::BurstContext {
+        layer_state: None,
         model: &model,
         tokenizer: &tokenizer,
         drafter_slot: &mut slot,
         dispatch: &dispatch,
         profile_probe_rounds: 0,
         prefill_chunk_size: 512,
-        prefill_boundary: None,
+        prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
         context_bound: Default::default(),
         prefill_boundaries: Vec::new(),
     };
@@ -260,13 +261,14 @@ fn qwen35_batched_dflash_declines_a_failing_exactness_verdict_before_drafter_io(
     second.seq_id = SequenceId::from_raw(43);
     let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
     let ctx = super::speculative_burst::BurstContext {
+        layer_state: None,
         model: &model,
         tokenizer: &tokenizer,
         drafter_slot: &mut slot,
         dispatch: &dispatch,
         profile_probe_rounds: 0,
         prefill_chunk_size: 512,
-        prefill_boundary: None,
+        prefill_boundary: mlxcel_core::prefill_plan::PrefillSplits::NONE,
         context_bound: Default::default(),
         prefill_boundaries: Vec::new(),
     };
@@ -668,10 +670,7 @@ fn burst_allowed_when_thinking_state_active() {
     // ThinkingState is "active" (= not disabled) when both token_ids
     // and budget are set. `from_raw_i32(256)` yields a
     // `ThinkingBudget::Limited(256)`.
-    let token_ids = ThinkingTokenIds {
-        open: 100,
-        close: 101,
-    };
+    let token_ids = ThinkingTokenIds::new(100, 101);
     let budget = ThinkingBudget::from_raw_i32(256)
         .expect("valid budget")
         .expect("256 > 0 yields Some");
@@ -1527,10 +1526,7 @@ fn apply_burst_thinking_budget_injects_close_at_budget_boundary() {
     // Budget = 2 in-block tokens. `enter_block_on_start = true` so the
     // first emitted token is already inside the `<think>` block (the
     // Qwen3 default where the chat template primes `<think>\n`).
-    let token_ids = ThinkingTokenIds {
-        open: 100,
-        close: 101,
-    };
+    let token_ids = ThinkingTokenIds::new(100, 101);
     let budget = ThinkingBudget::from_raw_i32(2)
         .expect("valid budget")
         .expect("2 > 0 yields Some");
@@ -1584,10 +1580,7 @@ fn apply_burst_thinking_budget_respects_natural_close_before_budget() {
     // `</think>` token) well before the cap. The burst must NOT inject
     // a second `</think>` — the natural close passes through and the
     // block transitions to Closed.
-    let token_ids = ThinkingTokenIds {
-        open: 100,
-        close: 101,
-    };
+    let token_ids = ThinkingTokenIds::new(100, 101);
     let budget = ThinkingBudget::from_raw_i32(1000)
         .expect("valid budget")
         .expect("1000 > 0 yields Some");
@@ -2269,6 +2262,29 @@ fn mtp_capable_target_names_both_inkling_variants() {
             "mtp_capable_target must accept LoadedModel::{expected}; found {variants:?}"
         );
     }
+}
+
+/// Inkling targets consult the measured block-vs-chain gate instead of being
+/// admitted unconditionally (issue #1549): on an M3 Ultra the 4-bit
+/// Inkling-Small checkpoint diverged from classic decode at verify widths 2
+/// and 3 under the default `qmv_wide` dispatch. Seeds the memoized verdict at
+/// widths no other test uses, since the verdict cache is process-wide.
+#[test]
+fn mtp_capable_target_gates_inkling_on_the_exactness_verdict() {
+    let text = crate::models::inkling::tiny_model();
+    let key = |block_size: u32| crate::models::speculative_exactness::ProbeKey {
+        block_size,
+        hidden_size: 4,
+        num_hidden_layers: text.num_layers() as u32,
+    };
+    crate::models::speculative_exactness::seed_decision_for_test(key(1549), false);
+    crate::models::speculative_exactness::seed_decision_for_test(key(1550), true);
+    let model = crate::LoadedModel::Inkling(text);
+    assert!(
+        !super::speculative_burst::mtp_capable_target(&model, 1549),
+        "an Inkling target whose verify block diverges from the chain must decline MTP"
+    );
+    assert!(super::speculative_burst::mtp_capable_target(&model, 1550));
 }
 
 #[test]

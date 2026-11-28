@@ -112,7 +112,20 @@ impl FamilyStageExecutor for JambaStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Result<StageExecutionOutput> {
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    /// The final stage slices the hidden state at `last_pos` before the final
+    /// norm and LM head, so the head runs on one row (#3081). A non-final
+    /// stage ignores `last_pos`.
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
     ) -> Result<StageExecutionOutput> {
         ensure!(
             caches.len() == self.filter.num_layers(),
@@ -156,12 +169,13 @@ impl FamilyStageExecutor for JambaStageExecutor {
             }
         };
 
-        let out = self.model.forward_stage(
+        let out = self.model.forward_stage_last_row(
             raw_input,
             self.filter.layer_range.clone(),
             self.filter.has_embedding,
             self.filter.has_lm_head,
             &mut internal_caches,
+            last_pos,
         );
 
         // Propagate the sequence offset from the first attention cache slot
@@ -178,5 +192,30 @@ impl FamilyStageExecutor for JambaStageExecutor {
         } else {
             Ok(StageExecutionOutput::HiddenStates(out))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::pipeline::stage_executor::last_row_test_support::assert_last_row_matches_full;
+    use crate::models::jamba::tests::{TINY_LAYERS, tiny_model};
+
+    /// The final stage slices the hidden row before the final norm and head
+    /// and returns the full forward's row (#3081).
+    #[test]
+    fn last_row_matches_the_full_forward_row() {
+        assert_last_row_matches_full(
+            |filter| {
+                Box::new(JambaStageExecutor {
+                    model: tiny_model(),
+                    filter: filter.clone(),
+                    cache_store: PointerOwnedCacheStore::default(),
+                })
+            },
+            TINY_LAYERS,
+            16,
+            1e-4,
+        );
     }
 }

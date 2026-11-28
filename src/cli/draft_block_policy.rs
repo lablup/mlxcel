@@ -19,7 +19,7 @@
 //! device or quantization input, so on GB10 a Qwen 3.5 DFlash pairing served
 //! at the effective default of 16 runs 41.88 to 41.97 tok/s against classic
 //! decode's 57.98 to 58.71, while the same pairing at width 4 runs 67.22 to
-//! 67.91 (`docs/benchmark_results/draft-block-width-default-gb10-2026-09-20.md`,
+//! 67.91 (`docs/benchmark_results/versions/v0.8.0.md#draft-block-width-default-gb10-2026-09-20`,
 //! following `dflash-verify-fixed-cost-gb10-2026-09-11.md`). The throughput
 //! was there, it was just unreachable without the operator passing
 //! `--draft-block-size` by hand.

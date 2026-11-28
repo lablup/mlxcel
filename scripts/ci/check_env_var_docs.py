@@ -125,6 +125,11 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_BRIDGE_METAL_BACKEND",
         "MLXCEL_BRIDGE_ROCM_BACKEND",
     )),
+    ("build-internal: a C preprocessor macro the mlxcel-xla build script "
+     "defines for the IREE shim (build.define) when the crate's test-support "
+     "feature is on, not an environment variable", (
+        "MLXCEL_XLA_TEST_SUPPORT",
+    )),
     (_RUSTC_ENV, (
         "MLXCEL_CUDA_ARCHITECTURES",
         "MLXCEL_MLX_COMMIT",
@@ -140,10 +145,44 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
      "override", (
         "MLXCEL_XLA_IREE_DIST",
     )),
+    ("build-internal: set by the mlxcel-xla build script through "
+     "cargo:rustc-env to the SHA-256 of the linked IREE runtime archive, "
+     "read with option_env! into the auxiliary artifact identity", (
+        "MLXCEL_XLA_IREE_RUNTIME_SHA256",
+    )),
     ("fixture-authoring: makes a #[cfg(test)] test in "
      "mlxcel-xla/src/validation.rs rewrite the committed StableHLO goldens", (
         "MLXCEL_FREEZE_GOLDENS",
+        "MLXCEL_FREEZE_MAMBA1",
         "MLXCEL_FREEZE_MOE",
+    )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/nemotron_h_tests.rs rewrite the committed "
+     "Nemotron-H StableHLO goldens", (
+        "MLXCEL_FREEZE_NEMOTRON_H",
+    )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/falcon_h1_tests.rs rewrite the committed "
+     "Falcon-H1 StableHLO goldens", (
+        "MLXCEL_FREEZE_FALCON_H1",
+    )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/jamba_tests.rs rewrite the committed "
+     "Jamba StableHLO goldens", (
+        "MLXCEL_FREEZE_JAMBA",
+    )),
+    ("test-only: original checkpoint path for the ignored Falcon-H1 "
+     "shape-validation test in mlxcel-xla/src/emitter/falcon_h1_tests.rs", (
+        "MLXCEL_FALCON_H1_MODEL",
+    )),
+    ("fixture-authoring: makes a #[cfg(test)] test in "
+     "mlxcel-xla/src/emitter/plamo2_tests.rs rewrite the committed "
+     "PLaMo 2 StableHLO goldens", (
+        "MLXCEL_FREEZE_PLAMO2",
+    )),
+    ("test-only: original checkpoint path for the ignored PLaMo 2 "
+     "shape-validation test in mlxcel-xla/src/emitter/plamo2_tests.rs", (
+        "MLXCEL_PLAMO2_MODEL",
     )),
     ("fixture-authoring: input or output of the opt-in #[ignore] StableHLO "
      "graph-dump tests in mlxcel-xla/src/emitter/mod.rs", (
@@ -151,6 +190,8 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_DUMP_DIR",
         "MLXCEL_DUMP_OUT",
         "MLXCEL_MOE_N",
+        "MLXCEL_SSM_MODE",
+        "MLXCEL_SSM_T",
     )),
     ("internal diagnostic: layer window of the xla-diagnostics #[ignore] "
      "Gemma3n all-layer trace test", (
@@ -182,6 +223,18 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_WEBUI_ROUTER_KEY_FILE",
         "MLXCEL_WEBUI_ROUTER_MODELS_DIR",
         "MLXCEL_WEBUI_ROUTER_URL",
+    )),
+    ("test-only: shape of the ignored Metal SDPA chunk peak-memory probe in "
+     "layers_metal_chunk_tests.rs (#3033)", (
+        "MLXCEL_SDPA_PROBE_DIM",
+        "MLXCEL_SDPA_PROBE_HEADS",
+        "MLXCEL_SDPA_PROBE_KV_HEADS",
+        "MLXCEL_SDPA_PROBE_LEN",
+    )),
+    ("test-only: checkpoint and prompt length of the ignored Qwen 3.5 prefill "
+     "stage peak-memory probe in qwen3_5_prefill_memory_tests.rs (#3045)", (
+        "MLXCEL_PREFILL_PROBE_LEN",
+        "MLXCEL_PREFILL_PROBE_MODEL",
     )),
     ("test-only: sample count of a statistical sampler test", (
         "MLXCEL_SPEC_DIST_SAMPLES",
@@ -327,6 +380,7 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_LLAMA3_MODEL",
         "MLXCEL_QWEN3_MODEL",
         "MLXCEL_TEST_GRANITE_VISION_DIR",
+        "MLXCEL_TEST_INDIC_LAYOUT_DIR",
         "MLXCEL_TEST_JAGLE_VL_DIR",
         "MLXCEL_TEST_LLMJP_4VL_9B_DIR",
         "MLXCEL_TEST_MOLMO_IMAGE",

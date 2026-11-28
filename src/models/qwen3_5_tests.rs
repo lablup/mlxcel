@@ -14,19 +14,22 @@
 
 //! Unit tests for the Qwen 3.5 DFlash speculative-decoding hooks.
 //!
-//! These tests cover the *standalone* helpers (the uniform-accept guard of the
-//! batched rollback, and `sanitize_weights`'s MTP-stripping path) without
-//! requiring a real model checkpoint, plus a one-layer synthetic model for the
-//! batched `rollback_speculative_cache` contract. The end-to-end real-checkpoint
-//! `forward_speculative` + `rollback_speculative_cache` round trip is exercised
-//! by integration tests gated behind hardware availability.
+//! These tests cover the *standalone* helpers (the per-row attention-cache
+//! compaction of the ragged batched rollback, and `sanitize_weights`'s
+//! MTP-stripping path) without requiring a real model checkpoint, plus a
+//! one-layer synthetic model for the batched `rollback_speculative_cache`
+//! contract. The end-to-end real-checkpoint `forward_speculative` +
+//! `rollback_speculative_cache` round trip is exercised by integration tests
+//! gated behind hardware availability.
 
+use super::pooled_model::Pooled;
 use super::qwen3_5::{
-    MRopePositionSource, Qwen35Config, Qwen35Model, Qwen35UnsupportedConfig,
-    assert_uniform_batched_accepts, mrope_position_source, sanitize_weights,
-    validate_qwen35_wrapper_config,
+    MRopePositionSource, Qwen35AttentionVariant, Qwen35Config, Qwen35Model,
+    Qwen35UnsupportedConfig, compact_attention_rows, eos_token_ids_from_config,
+    mrope_position_source, restore_text_model_prefix, sanitize_weights,
+    validate_qwen35_wrapper_config, yarn_inv_freq,
 };
-use super::qwen3_next::Qwen3NextCache;
+use super::qwen3_next::{Qwen3NextAttention, Qwen3NextCache};
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
@@ -64,6 +67,7 @@ fn make_tiny_config() -> Qwen35Config {
         shared_expert_intermediate_size: 0,
         norm_topk_prob: true,
         rope_parameters: None,
+        max_position_embeddings: None,
         full_attention_interval: 4,
         rms_norm_eps: 1e-6,
         tie_word_embeddings: false,
@@ -72,49 +76,140 @@ fn make_tiny_config() -> Qwen35Config {
         quantization: None,
         mlp_only_layers: vec![],
         output_gate_type: None,
+        eos_token_id: None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Batched speculative rollback requires a uniform accept (issue #2353). The
-// rectangular attention caches cannot exclude a shorter row's rejected tail,
-// so the batched DFlash round loop clamps every round, and a ragged slice that
-// still reaches the rollback panics.
+// Ragged batched rollback (issue #2442). The uniform clamp of #2353 is no
+// longer the only accept policy: the per-row rollback compacts each row's
+// accepted verify block back to that row's own logical end, so the rectangular
+// attention cache again holds a contiguous prefix per row.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn uniform_batched_accepts_pass_the_guard() {
-    assert_uniform_batched_accepts(&[]);
-    assert_uniform_batched_accepts(&[5]);
-    assert_uniform_batched_accepts(&[2, 2, 2, 2]);
+/// One `[B=2, H=1, bs=4, D=2]` attention cache whose row `r` holds the value
+/// `10 * r + position`, so a moved block is identifiable per row.
+fn synthetic_attention_cache() -> mlxcel_core::cache::KVCache {
+    use mlxcel_core::cache::KVCache;
+    let mut cache = KVCache::new();
+    // Two prefill positions, then a 4-token verify block.
+    let mut data = Vec::new();
+    for r in 0..2 {
+        for pos in 0..6 {
+            for d in 0..2 {
+                data.push((10 * r + pos) as f32 * 10.0 + d as f32);
+            }
+        }
+    }
+    let all = mlxcel_core::from_slice_f32(&data, &[2, 1, 6, 2]);
+    let prefill = mlxcel_core::slice(&all, &[0, 0, 0, 0], &[2, 1, 2, 2]);
+    let block = mlxcel_core::slice(&all, &[0, 0, 2, 0], &[2, 1, 6, 2]);
+    let prefill_v = mlxcel_core::copy(&prefill);
+    let _ = cache.update_and_fetch(prefill, prefill_v);
+    let block_v = mlxcel_core::copy(&block);
+    let _ = cache.update_and_fetch(block, block_v);
+    cache
 }
 
 #[test]
-#[should_panic(expected = "requires uniform per-row acceptance")]
-fn ragged_batched_accepts_fail_the_guard() {
-    assert_uniform_batched_accepts(&[3, 1, 2]);
+fn compact_attention_rows_moves_each_row_block_to_its_own_valid_end() {
+    let mut cache = synthetic_attention_cache();
+    // Before: physical offset 6, block at [2, 6).
+    // Row 0 accepted 3 of the 4 block tokens; row 1 accepted all 4.
+    // Both rows' pre-round valid end was the prefill offset 2.
+    compact_attention_rows(&mut cache, &[2, 2], &[2, 3], 2, 6);
+    let keys = cache.keys.as_ref().expect("keys");
+    let shape = mlxcel_core::array_shape(keys);
+    // The Fp16 buffer is allocated in 256-slot steps, so read each row by its
+    // own buffer stride.
+    let stride = (shape[1] * shape[2] * shape[3]) as usize;
+    let bytes = mlxcel_core::array_to_raw_bytes(keys);
+    let vals: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // Row 0: positions 0..5 = prefill 0,10 then block 20,30,40; the stale
+    // tail (position 5) is zeroed.
+    let row0: Vec<f32> = vals[0..12].iter().step_by(2).copied().collect();
+    assert_eq!(row0, vec![0.0, 10.0, 20.0, 30.0, 40.0, 0.0]);
+    // Row 1: positions 0..6 = prefill 100,110 then block 120,130,140,150.
+    let row1: Vec<f32> = vals[stride..stride + 12]
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    assert_eq!(row1, vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0]);
+}
+
+#[test]
+fn compact_attention_rows_is_a_no_op_when_every_row_ends_at_the_offset() {
+    let mut cache = synthetic_attention_cache();
+    compact_attention_rows(&mut cache, &[2, 2], &[3, 3], 2, 6);
+    let keys = cache.keys.as_ref().expect("keys");
+    let shape = mlxcel_core::array_shape(keys);
+    let stride = (shape[1] * shape[2] * shape[3]) as usize;
+    let bytes = mlxcel_core::array_to_raw_bytes(keys);
+    let vals: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // Every position keeps its original value: no row lagged the offset.
+    let row0: Vec<f32> = vals[0..12].iter().step_by(2).copied().collect();
+    let row1: Vec<f32> = vals[stride..stride + 12]
+        .iter()
+        .step_by(2)
+        .copied()
+        .collect();
+    assert_eq!(row0, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
+    assert_eq!(row1, vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0]);
 }
 
 /// A gated-delta layer followed by a full-attention layer, the smallest shape
 /// `Qwen35Model::from_weights` accepts that has both cache kinds.
-fn two_layer_config() -> Qwen35Config {
+fn two_layer_config_with_vocab(vocab_size: usize) -> Qwen35Config {
     Qwen35Config {
         num_hidden_layers: 2,
         intermediate_size: 8,
         linear_key_head_dim: 2,
         linear_value_head_dim: 2,
         full_attention_interval: 2,
-        vocab_size: 8,
+        vocab_size,
         rope_parameters: Some(serde_json::json!({ "partial_rotary_factor": 0.5 })),
         ..make_tiny_config()
     }
 }
 
-/// The two-layer synthetic model of [`two_layer_config`].
+/// The two-layer synthetic model of [`two_layer_config_with_vocab`], vocab 8.
 ///
 /// Also used by the server DFlash burst and scheduler routing tests (#2442),
 /// which need a real `LoadedModel::Qwen35` without a checkpoint.
 pub(crate) fn two_layer_model() -> Qwen35Model {
+    two_layer_model_with_vocab(8)
+}
+
+/// [`two_layer_model`] behind a pool, for tests that drive scheduler
+/// sequences by id: Qwen 3.5 keeps no per-sequence state in the model
+/// (issue #3254).
+pub(crate) fn pooled_two_layer_model() -> Pooled<Qwen35Model> {
+    Pooled::new(two_layer_model())
+}
+
+/// [`two_layer_model_with_vocab`] behind a pool.
+pub(crate) fn pooled_two_layer_model_with_vocab(vocab: usize) -> Pooled<Qwen35Model> {
+    Pooled::new(two_layer_model_with_vocab(vocab))
+}
+
+/// [`two_layer_model`] with a `vocab`-entry embedding table and LM head, for
+/// tests that need the logits to dominate memory (#3045).
+pub(crate) fn two_layer_model_with_vocab(vocab: usize) -> Qwen35Model {
+    let (weights, config) = two_layer_weights_and_config(vocab);
+    Qwen35Model::from_weights(&weights, &config).expect("two-layer synthetic Qwen 3.5 must build")
+}
+
+/// The synthetic weights and config behind [`two_layer_model_with_vocab`], for
+/// stage-model tests that load the same tensors through a layer filter.
+pub(crate) fn two_layer_weights_and_config(vocab: usize) -> (WeightMap, Qwen35Config) {
+    let vocab = vocab as i32;
     let mut weights = WeightMap::new();
     let mut put = |name: &str, shape: &[i32]| {
         let len: i32 = shape.iter().product();
@@ -124,7 +219,7 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
             mlxcel_core::from_slice_f32(&values, shape),
         );
     };
-    put("model.embed_tokens.weight", &[8, 8]);
+    put("model.embed_tokens.weight", &[vocab, 8]);
     put("model.layers.0.linear_attn.in_proj_qkv.weight", &[12, 8]);
     put("model.layers.0.linear_attn.in_proj_z.weight", &[4, 8]);
     put("model.layers.0.linear_attn.in_proj_b.weight", &[2, 8]);
@@ -161,19 +256,20 @@ pub(crate) fn two_layer_model() -> Qwen35Model {
         );
     }
     put("model.norm.weight", &[8]);
-    put("lm_head.weight", &[8, 8]);
-    Qwen35Model::from_weights(&weights, &two_layer_config())
-        .expect("two-layer synthetic Qwen 3.5 must build")
+    put("lm_head.weight", &[vocab, 8]);
+    (weights, two_layer_config_with_vocab(vocab as usize))
 }
 
 #[test]
 fn issue_2572_qwen35_native_batched_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
     crate::models::batched_decode_harness::assert_model_owned_multistep_allowing_no_ids(
-        two_layer_model,
+        pooled_two_layer_model,
         &[0, 3],
     );
-    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(two_layer_model);
+    crate::models::batched_decode_harness::assert_model_owned_fresh_and_mixed(
+        pooled_two_layer_model,
+    );
 }
 
 fn mrope_positions(len: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
@@ -204,7 +300,7 @@ fn assert_decode_row_close(
 #[test]
 fn issue_2572_qwen35_mixed_mrope_and_text_rows_match_solo_decode() {
     let _guard = crate::models::embedding_test_support::mlx_test_guard();
-    let mut model = two_layer_model();
+    let mut model = pooled_two_layer_model();
     model.set_mrope(vec![1, 0, 0], 10_000.0, 2);
 
     let actual_ids = [SequenceId::from_raw(257_200), SequenceId::from_raw(257_201)];
@@ -271,7 +367,7 @@ fn verify_and_rollback(
     let input = mlxcel_core::from_slice_i32(tokens, &[batch, 4]);
     let out = model.forward_speculative(&input, &mut caches, &[]);
     let kept = model.rollback_speculative_cache(&mut caches, &out.gdn_states, accepted, 4);
-    assert_eq!(kept, accepted[0]);
+    assert_eq!(kept, *accepted.iter().max().expect("at least one row"));
     caches
 }
 
@@ -283,12 +379,43 @@ fn row(tensor: &mlxcel_core::MlxArray, r: i32) -> mlxcel_core::UniquePtr<mlxcel_
     mlxcel_core::slice(tensor, &start, &stop)
 }
 
+/// A ragged batched accept (issue #2442) compacts each row to its own
+/// logical end instead of panicking: every row's gated-delta state and conv
+/// window match a B = 1 verify of that row rolled back to that row's accept,
+/// and the shared attention offset lands at `max(accepted) + 1`.
 #[test]
 #[ignore = "requires serial MLX execution"]
-#[should_panic(expected = "requires uniform per-row acceptance")]
-fn rollback_speculative_cache_panics_on_ragged_batched_accepts() {
+fn rollback_speculative_cache_compacts_ragged_batched_accepts() {
     let model = two_layer_model();
-    verify_and_rollback(&model, &[1, 2, 3, 4, 5, 6, 7, 0], &[3, 1]);
+    let rows = [[1, 2, 3, 4], [5, 6, 7, 0]];
+    let accepted = [3, 1];
+    let batched = verify_and_rollback(&model, rows.as_flattened(), &accepted);
+
+    let Qwen3NextCache::Attention(kv) = &batched[1] else {
+        panic!("layer 1 of the synthetic model is a full-attention layer");
+    };
+    assert_eq!(kv.offset, 4, "attention offset is max(accepted) + 1");
+    let Qwen3NextCache::Linear(linear) = &batched[0] else {
+        panic!("layer 0 of the synthetic model is a gated-delta layer");
+    };
+    let conv = linear.conv_state.as_ref().expect("conv state");
+    assert_eq!(mlxcel_core::array_shape(conv)[0], 2);
+    let state = linear.state_cache.as_ref().expect("gated-delta state");
+
+    for (r, tokens) in rows.iter().enumerate() {
+        let single = verify_and_rollback(&model, tokens, &[accepted[r]]);
+        let Qwen3NextCache::Linear(want) = &single[0] else {
+            unreachable!()
+        };
+        assert_allclose(
+            &row(conv, r as i32),
+            want.conv_state.as_ref().expect("B = 1 conv state"),
+        );
+        assert_allclose(
+            &row(state, r as i32),
+            want.state_cache.as_ref().expect("B = 1 gated-delta state"),
+        );
+    }
 }
 
 /// A uniform batched accept rolls every row back to the same position, and
@@ -367,7 +494,7 @@ fn sanitize_weights_drops_mtp_keys() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must be absent; legitimate keys must remain.
     assert!(
@@ -400,7 +527,7 @@ fn sanitize_weights_drops_lm_head_when_tied_embeddings() {
 
     let mut config = make_tiny_config();
     config.tie_word_embeddings = true;
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(
         !sanitized.contains_key("lm_head.weight"),
@@ -447,7 +574,7 @@ fn sanitize_weights_is_idempotent_on_already_converted_checkpoint_with_stray_mtp
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     // mtp.* must still be stripped.
     assert!(sanitized.keys().all(|k| !k.starts_with("mtp.")));
@@ -504,7 +631,7 @@ fn sanitize_weights_shifts_norms_exactly_once_on_raw_layout() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert!(sanitized.keys().all(|k| !k.contains("mtp.")));
 
@@ -553,7 +680,7 @@ fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
     );
 
     let config = make_tiny_config();
-    let sanitized = sanitize_weights(weights, &config);
+    let sanitized = sanitize_weights(weights, &config).unwrap();
 
     assert_allclose(
         sanitized.get("model.norm.weight").unwrap(),
@@ -576,7 +703,7 @@ fn sanitize_weights_does_not_shift_norms_on_a_degenerate_conv1d_shape() {
 /// 16 GB checkpoint. Trimmed only of the 64-entry `layer_types` array, which
 /// mlxcel ignores in favour of the positional
 /// `!(i + 1).is_multiple_of(full_attention_interval)` rule.
-fn qwen3_8_27b_text_config() -> serde_json::Value {
+pub(crate) fn qwen3_8_27b_text_config() -> serde_json::Value {
     serde_json::json!({
         "attention_bias": false,
         "attention_dropout": 0.0,
@@ -1136,5 +1263,511 @@ fn mrope_position_source_recomputes_when_nothing_is_stored() {
     assert_eq!(
         mrope_position_source(None, 1, 8, 0),
         MRopePositionSource::Recompute
+    );
+}
+
+#[test]
+fn eos_ids_come_from_the_config_when_declared() {
+    // IndicOCR's Qwen3.5 fine-tune declares 262146, not the stock pair.
+    let config = config_with(serde_json::json!({ "eos_token_id": 262146 }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![262146]);
+    let config = config_with(serde_json::json!({ "eos_token_id": [248046, 248044] }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![248046, 248044]);
+    // An absent or unusable value keeps the stock pair.
+    let config = config_with(serde_json::json!({ "eos_token_id": null }));
+    assert_eq!(eos_token_ids_from_config(&config), vec![248046, 248044]);
+}
+
+#[test]
+fn a_normal_checkpoint_without_lm_head_still_fails_to_load() {
+    // PR #3107 lets the MOSS-Image conditioner load head-free; the ordinary
+    // text path must keep refusing a checkpoint that lost its head.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let (mut weights, config) = two_layer_weights_and_config(8);
+    assert!(!config.tie_word_embeddings);
+    weights.remove("lm_head.weight");
+    assert!(Qwen35Model::from_weights(&weights, &config).is_err());
+    assert!(Qwen35Model::from_weights_impl(&weights, &config, true).is_ok());
+}
+
+#[test]
+fn the_bare_text_backbone_layout_gets_its_model_prefix_back() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let tensor = || mlxcel_core::from_slice_f32(&[0.0], &[1]);
+    let mut bare = WeightMap::new();
+    for key in [
+        "embed_tokens.weight",
+        "layers.0.mlp.up_proj.weight",
+        "norm.weight",
+        "lm_head.weight",
+    ] {
+        bare.insert(key.to_string(), tensor());
+    }
+    let restored = restore_text_model_prefix(bare);
+    let mut keys: Vec<_> = restored.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "lm_head.weight",
+            "model.embed_tokens.weight",
+            "model.layers.0.mlp.up_proj.weight",
+            "model.norm.weight",
+        ]
+    );
+
+    // An already wrapped checkpoint is left alone.
+    let mut wrapped = WeightMap::new();
+    wrapped.insert("model.norm.weight".to_string(), tensor());
+    wrapped.insert("layers.extra".to_string(), tensor());
+    let kept = restore_text_model_prefix(wrapped);
+    assert!(kept.contains_key("layers.extra"));
+    assert!(kept.contains_key("model.norm.weight"));
+}
+
+#[test]
+fn prefill_hidden_encodes_every_prompt_from_a_fresh_state() {
+    // The MOSS-Image conditioner encodes the positive and then the negative
+    // prompt with one model; the second encode must not see the first's
+    // tokens through a persistent cache.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let model = two_layer_model();
+    let first = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    let other = mlxcel_core::from_slice_i32(&[4, 5], &[1, 2]);
+    let alone = model.forward_prefill_hidden(&first);
+    mlxcel_core::eval(&alone);
+    let _ = model.forward_prefill_hidden(&other);
+    let again = model.forward_prefill_hidden(&first);
+    assert_eq!(mlxcel_core::array_shape(&again), vec![1, 3, 8]);
+    assert_allclose(&again, &alone);
+}
+
+// ---------------------------------------------------------------------------
+// YaRN from `rope_parameters` (#3215, Blaizzy/mlx-vlm#2649).
+// ---------------------------------------------------------------------------
+
+/// `rope_parameters` of the `sensenova/SenseNova-6.8-Code2Video` text config
+/// (Qwen3.5-27B: head_dim 256, partial rotary 0.25, so 64 rotary dims),
+/// upstream's `QWEN3_5_YARN_PARAMETERS`.
+pub(crate) fn sensenova_yarn_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "yarn",
+        "factor": 2.0,
+        "original_max_position_embeddings": 262144,
+        "rope_theta": 10000000,
+        "mrope_section": [11, 11, 10],
+        "partial_rotary_factor": 0.25
+    })
+}
+
+/// transformers 5.22.1 `ROPE_INIT_FUNCTIONS["yarn"]` on that config:
+/// upstream's `QWEN3_5_YARN_HF_INV_FREQ`, digit for digit (hence `f64`).
+const QWEN3_5_YARN_HF_INV_FREQ: [f64; 32] = [
+    1.0,
+    0.604296386,
+    0.365174145,
+    0.220673397,
+    0.133352146,
+    0.0805842131,
+    0.0486967526,
+    0.0294272732,
+    0.0177827943,
+    0.0107460786,
+    0.00649381662,
+    0.0039241896,
+    0.00237137382,
+    0.00143301266,
+    0.000865964335,
+    0.000490592909,
+    0.000276699313,
+    0.000155264934,
+    8.66086484e-05,
+    4.79758528e-05,
+    2.63560341e-05,
+    1.43341686e-05,
+    7.69963208e-06,
+    4.6528603e-06,
+    2.81170674e-06,
+    1.69910413e-06,
+    1.02676245e-06,
+    6.20468882e-07,
+    3.7494712e-07,
+    2.26579189e-07,
+    1.36920988e-07,
+    8.27408542e-08,
+];
+
+/// Upstream's `QWEN3_5_YARN_HF_ATTENTION_FACTOR`.
+const QWEN3_5_YARN_HF_ATTENTION_FACTOR: f64 = 1.0693147180559945;
+
+/// The Qwen3.5-27B text geometry with `rope_parameters` replaced.
+pub(crate) fn yarn_config(rope_parameters: serde_json::Value) -> Qwen35Config {
+    config_with(serde_json::json!({ "rope_parameters": rope_parameters }))
+}
+
+/// [`sensenova_yarn_parameters`] with keys overridden, or removed by `null`.
+pub(crate) fn yarn_parameters_with(overrides: serde_json::Value) -> serde_json::Value {
+    let mut parameters = sensenova_yarn_parameters();
+    let object = parameters.as_object_mut().expect("object");
+    for (key, value) in overrides.as_object().expect("overrides object") {
+        if value.is_null() {
+            object.remove(key);
+        } else {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    parameters
+}
+
+pub(crate) fn assert_matches_hf_inv_freq(inv_freq: &[f32]) {
+    assert_eq!(inv_freq.len(), QWEN3_5_YARN_HF_INV_FREQ.len());
+    for (pair, (actual, expected)) in inv_freq.iter().zip(QWEN3_5_YARN_HF_INV_FREQ).enumerate() {
+        assert!(
+            (f64::from(*actual) - expected).abs() <= 1e-5 * expected.abs(),
+            "inv_freq[{pair}] = {actual}, transformers has {expected}"
+        );
+    }
+}
+
+#[test]
+fn yarn_matches_transformers_inv_freq() {
+    let yarn = yarn_config(sensenova_yarn_parameters())
+        .yarn()
+        .expect("the block is valid")
+        .expect("the block names yarn");
+    assert_matches_hf_inv_freq(&yarn_inv_freq(&yarn.freqs));
+    assert!(
+        (f64::from(yarn.attention_factor) - QWEN3_5_YARN_HF_ATTENTION_FACTOR).abs() < 1e-6,
+        "attention factor {}",
+        yarn.attention_factor
+    );
+
+    // `rope_type` is read as well as `type`.
+    let rope_type = yarn_parameters_with(serde_json::json!({"type": null, "rope_type": "yarn"}));
+    let yarn = yarn_config(rope_type).yarn().expect("valid").expect("yarn");
+    assert_matches_hf_inv_freq(&yarn_inv_freq(&yarn.freqs));
+}
+
+#[test]
+fn yarn_original_context_defaults_to_max_position_embeddings() {
+    // The fixture's `max_position_embeddings` is 262144, the value the block
+    // would have named.
+    let omitted =
+        yarn_parameters_with(serde_json::json!({"original_max_position_embeddings": null}));
+    let config = yarn_config(omitted.clone());
+    assert_eq!(config.max_position_embeddings, Some(262144));
+    let yarn = config.yarn().expect("valid").expect("yarn");
+    assert_matches_hf_inv_freq(&yarn_inv_freq(&yarn.freqs));
+
+    // A different training context moves the correction band, so the default
+    // is read from that field and not from a constant.
+    let shorter = config_with(serde_json::json!({
+        "rope_parameters": omitted,
+        "max_position_embeddings": 4096
+    }));
+    let shorter = yarn_inv_freq(&shorter.yarn().expect("valid").expect("yarn").freqs);
+    let longest_wavelength_moved = shorter
+        .iter()
+        .zip(QWEN3_5_YARN_HF_INV_FREQ)
+        .any(|(short, long)| (f64::from(*short) - long).abs() > 1e-3 * long.abs());
+    assert!(longest_wavelength_moved);
+}
+
+#[test]
+fn yarn_attention_factor_rules() {
+    let factor_of = |overrides: serde_json::Value| {
+        f64::from(
+            yarn_config(yarn_parameters_with(overrides))
+                .yarn()
+                .expect("valid")
+                .expect("yarn")
+                .attention_factor,
+        )
+    };
+    let default = QWEN3_5_YARN_HF_ATTENTION_FACTOR;
+
+    // A declared `attention_factor` wins, over the derivation and over the
+    // mscale keys.
+    assert!((factor_of(serde_json::json!({"attention_factor": 1.25})) - 1.25).abs() < 1e-6);
+    assert!(
+        (factor_of(serde_json::json!({
+            "attention_factor": 1.25, "mscale": 0.707, "mscale_all_dim": 0.707
+        })) - 1.25)
+            .abs()
+            < 1e-6
+    );
+    // A lone `mscale` is ignored (mlx-lm's `YarnRoPE` would apply it).
+    assert!((factor_of(serde_json::json!({"mscale": 0.707})) - default).abs() < 1e-6);
+    assert!((factor_of(serde_json::json!({"mscale_all_dim": 0.707})) - default).abs() < 1e-6);
+    assert!(
+        (factor_of(serde_json::json!({"mscale": 0.707, "mscale_all_dim": 0.0})) - default).abs()
+            < 1e-6
+    );
+    // Both: the ratio of the two `get_mscale` values.
+    let ln2 = 2.0f64.ln();
+    let ratio = (0.1 * 1.0 * ln2 + 1.0) / (0.1 * 0.5 * ln2 + 1.0);
+    assert!(
+        (factor_of(serde_json::json!({"mscale": 1.0, "mscale_all_dim": 0.5})) - ratio).abs() < 1e-6
+    );
+    // At or below unit factor there is no magnitude correction.
+    assert!((factor_of(serde_json::json!({"factor": 1.0})) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn yarn_block_that_cannot_build_a_table_is_a_named_load_error() {
+    let error_of =
+        |overrides: serde_json::Value| match yarn_config(yarn_parameters_with(overrides)).yarn() {
+            Ok(_) => panic!("an invalid YaRN block must not resolve"),
+            Err(error) => error,
+        };
+    for (overrides, field) in [
+        (serde_json::json!({"factor": "2.0"}), "`factor`"),
+        (serde_json::json!({"factor": null}), "`factor`"),
+        (serde_json::json!({"factor": 0.0}), "factor"),
+        (serde_json::json!({"beta_fast": "32"}), "`beta_fast`"),
+        (serde_json::json!({"beta_slow": -1.0}), "beta_slow"),
+        (
+            serde_json::json!({"original_max_position_embeddings": [262144]}),
+            "`original_max_position_embeddings`",
+        ),
+        (
+            serde_json::json!({"attention_factor": "1.0"}),
+            "`attention_factor`",
+        ),
+        (
+            serde_json::json!({"attention_factor": 0.0}),
+            "`attention_factor`",
+        ),
+        (serde_json::json!({"truncate": "false"}), "`truncate`"),
+    ] {
+        let error = error_of(overrides);
+        assert!(
+            error.starts_with("Qwen3.5 rope_parameters declares YaRN, but ")
+                && error.contains(field),
+            "{error}"
+        );
+    }
+
+    // The error reaches the loader instead of a silent unscaled rotation.
+    let (weights, mut config) = two_layer_weights_and_config(8);
+    config.rope_parameters = Some(serde_json::json!({
+        "type": "yarn", "partial_rotary_factor": 0.5
+    }));
+    let error = match Qwen35Model::from_weights(&weights, &config) {
+        Ok(_) => panic!("a YaRN block with no factor must not load"),
+        Err(error) => error,
+    };
+    assert!(error.contains("`factor` is missing"), "{error}");
+}
+
+/// A gated-delta layer and a full-attention layer with the Qwen3.5-27B
+/// rotary geometry: `head_dim` 256 and a partial rotary factor of 0.25, so
+/// 64 rotary lanes and 192 pass-through lanes.
+fn rotary_geometry_model(rope_parameters: serde_json::Value) -> Qwen35Model {
+    let (mut weights, mut config) = two_layer_weights_and_config(8);
+    config.head_dim = Some(256);
+    config.rope_parameters = Some(rope_parameters);
+    config.max_position_embeddings = Some(262144);
+    let mut put = |name: &str, shape: &[i32]| {
+        let len: i32 = shape.iter().product();
+        let values: Vec<f32> = (0..len).map(|i| 0.01 + (i % 17) as f32 * 0.003).collect();
+        weights.insert(
+            format!("model.layers.1.self_attn.{name}"),
+            mlxcel_core::from_slice_f32(&values, shape),
+        );
+    };
+    // Two heads of 256 dims; q_proj also carries the output gate.
+    put("q_proj.weight", &[2 * 2 * 256, 8]);
+    put("k_proj.weight", &[2 * 256, 8]);
+    put("v_proj.weight", &[2 * 256, 8]);
+    put("o_proj.weight", &[8, 2 * 256]);
+    put("q_norm.weight", &[256]);
+    put("k_norm.weight", &[256]);
+    Qwen35Model::from_weights(&weights, &config).expect("rotary-geometry model must build")
+}
+
+fn full_attention(model: &Qwen35Model) -> &Qwen3NextAttention {
+    match &model.layers[1].attention {
+        Qwen35AttentionVariant::FullAttention(attention) => attention,
+        Qwen35AttentionVariant::Linear(_) => panic!("layer 1 is the full-attention layer"),
+    }
+}
+
+/// A `[batch, 2, len, 256]` block with no zero and no repeated lane value.
+fn rotary_block(batch: i32, len: i32, seed: f32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
+    let count = batch * 2 * len * 256;
+    let values: Vec<f32> = (0..count)
+        .map(|i| seed + 0.25 + (i % 251) as f32 * 0.0078125)
+        .collect();
+    mlxcel_core::from_slice_f32(&values, &[batch, 2, len, 256])
+}
+
+fn flat(array: &mlxcel_core::MlxArray) -> Vec<f32> {
+    mlxcel_core::eval(array);
+    mlxcel_core::utils::array_to_vec_f32(array)
+}
+
+/// Lanes `0..64` of every row are `input * factor`; lanes `64..256` are the
+/// input, bit for bit.
+fn assert_only_rotary_lanes_scaled(
+    path: &str,
+    input: &mlxcel_core::MlxArray,
+    output: &mlxcel_core::MlxArray,
+    factor: f32,
+) {
+    assert_eq!(
+        mlxcel_core::array_shape(output),
+        mlxcel_core::array_shape(input),
+        "{path}"
+    );
+    let (input, output) = (flat(input), flat(output));
+    for (index, (before, after)) in input.iter().zip(&output).enumerate() {
+        let lane = index % 256;
+        if lane < 64 {
+            let expected = before * factor;
+            assert!(
+                (after - expected).abs() <= 1e-6 * expected.abs(),
+                "{path}: rotary lane {lane} is {after}, expected {expected}"
+            );
+        } else {
+            assert_eq!(
+                after.to_bits(),
+                before.to_bits(),
+                "{path}: pass-through lane {lane} changed"
+            );
+        }
+    }
+}
+
+#[test]
+fn yarn_scales_only_rotary_lanes() {
+    use mlxcel_core::batched_decode::SplitAttention;
+
+    let mut model = rotary_geometry_model(sensenova_yarn_parameters());
+    let factor = QWEN3_5_YARN_HF_ATTENTION_FACTOR as f32;
+    {
+        let attention = full_attention(&model);
+        let (freqs, attention_factor) = attention.yarn_rope().expect("YaRN reached the layer");
+        assert_matches_hf_inv_freq(&yarn_inv_freq(freqs));
+        assert!((attention_factor - factor).abs() < 1e-6);
+
+        // Position 0 is a zero rotation, so what is left is the factor.
+        let q = rotary_block(1, 1, 0.0);
+        assert_only_rotary_lanes_scaled("standard", &q, &attention.rope(&q, 0), factor);
+        assert_only_rotary_lanes_scaled(
+            "verify rows",
+            &q,
+            &attention.rope_rows_like_decode(&q, 0),
+            factor,
+        );
+
+        let (q, k) = (rotary_block(2, 1, 0.0), rotary_block(2, 1, 1.0));
+        let (q_rotated, k_rotated) = attention.rope_batched(&q, &k, &[0, 0]);
+        assert_only_rotary_lanes_scaled("batched q", &q, &q_rotated, factor);
+        assert_only_rotary_lanes_scaled("batched k", &k, &k_rotated, factor);
+    }
+
+    model.set_mrope(vec![11, 11, 10], 10_000_000.0, 64);
+    let attention = full_attention(&model);
+    let mrope = attention.mrope.as_ref().expect("MRoPE attached");
+    let positions = mlxcel_core::from_slice_i32(&[0, 0, 0], &[3, 1, 1]);
+    let (q, k) = (rotary_block(1, 1, 0.0), rotary_block(1, 1, 1.0));
+    let (q_rotated, k_rotated) = attention.apply_mrope(mrope, &positions, &q, &k);
+    assert_only_rotary_lanes_scaled("mrope q", &q, &q_rotated, factor);
+    assert_only_rotary_lanes_scaled("mrope k", &k, &k_rotated, factor);
+}
+
+fn assert_bit_identical(
+    path: &str,
+    actual: &mlxcel_core::MlxArray,
+    expected: &mlxcel_core::MlxArray,
+) {
+    let (actual, expected) = (flat(actual), flat(expected));
+    assert_eq!(actual.len(), expected.len(), "{path}");
+    for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(a.to_bits(), e.to_bits(), "{path}: element {index}");
+    }
+}
+
+#[test]
+fn default_rope_unchanged() {
+    use mlxcel_core::batched_decode::SplitAttention;
+
+    // A block that is not YaRN resolves to nothing, whatever else it carries.
+    let default_parameters = yarn_parameters_with(serde_json::json!({"type": "default"}));
+    assert!(
+        yarn_config(default_parameters.clone())
+            .yarn()
+            .expect("valid")
+            .is_none()
+    );
+    assert!(
+        config_with(serde_json::json!({"rope_parameters": null}))
+            .yarn()
+            .expect("valid")
+            .is_none()
+    );
+
+    // The rotation is the plain `rope_theta` one, call for call what this
+    // attention ran before YaRN was read.
+    let mut model = rotary_geometry_model(default_parameters);
+    let (dims, base) = (64, 10_000_000.0);
+    {
+        let attention = full_attention(&model);
+        assert!(attention.yarn_rope().is_none());
+
+        for offset in [0, 1, 4097] {
+            let q = rotary_block(1, 3, 0.5);
+            assert_bit_identical(
+                "standard",
+                &attention.rope(&q, offset),
+                &mlxcel_core::fast_rope(&q, dims, false, base, 1.0, offset),
+            );
+            assert_bit_identical(
+                "verify rows",
+                &attention.rope_rows_like_decode(&q, offset),
+                &super::qwen3_next::verify_rope::fast_rope_rows_like_decode(&q, dims, base, offset),
+            );
+        }
+
+        let (q, k) = (rotary_block(2, 1, 0.5), rotary_block(2, 1, 1.5));
+        let offsets = [7, 4099];
+        let (q_rotated, k_rotated) = attention.rope_batched(&q, &k, &offsets);
+        assert_bit_identical(
+            "batched q",
+            &q_rotated,
+            &mlxcel_core::fast_rope_batched(&q, dims, false, base, 1.0, &offsets),
+        );
+        assert_bit_identical(
+            "batched k",
+            &k_rotated,
+            &mlxcel_core::fast_rope_batched(&k, dims, false, base, 1.0, &offsets),
+        );
+    }
+
+    // MRoPE: the same cos and sin as the plain constructor, applied to the
+    // rotary slice only.
+    model.set_mrope(vec![11, 11, 10], base, 64);
+    let attention = full_attention(&model);
+    let mrope = attention.mrope.as_ref().expect("MRoPE attached");
+    let positions = mlxcel_core::from_slice_i32(&[5, 6, 2, 2, 3, 3], &[3, 1, 2]);
+    let (q, k) = (rotary_block(1, 2, 0.5), rotary_block(1, 2, 1.5));
+    let (q_rotated, k_rotated) = attention.apply_mrope(mrope, &positions, &q, &k);
+
+    let plain = super::qwen3_vl::InterleavedMRoPE::new(64, base, vec![11, 11, 10]);
+    let (cos, sin) = plain.forward(&positions);
+    let rotary = |x: &mlxcel_core::MlxArray| mlxcel_core::slice(x, &[0, 0, 0, 0], &[1, 2, 2, 64]);
+    let pass = |x: &mlxcel_core::MlxArray| mlxcel_core::slice(x, &[0, 0, 0, 64], &[1, 2, 2, 256]);
+    let (q_embed, k_embed) =
+        super::qwen3_vl::apply_multimodal_rotary_pos_emb(&rotary(&q), &rotary(&k), &cos, &sin);
+    assert_bit_identical(
+        "mrope q",
+        &q_rotated,
+        &mlxcel_core::concatenate(&q_embed, &pass(&q), -1),
+    );
+    assert_bit_identical(
+        "mrope k",
+        &k_rotated,
+        &mlxcel_core::concatenate(&k_embed, &pass(&k), -1),
     );
 }

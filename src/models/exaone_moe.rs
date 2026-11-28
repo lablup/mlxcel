@@ -529,8 +529,16 @@ impl ExaoneMoeAttention {
 
         // Scaled dot-product attention
         let attn_out = if l > 1 && mask.is_none() {
-            // Prefill: use causal masking
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, self.window_size)
+            // Prefill whose model left the mask to MLX's causal mode or its
+            // native `window_size` route (#3072). Within the window this asks
+            // for causal mode instead of building a windowed mask per layer.
+            mlxcel_core::maskless_prefill_attention(
+                &q,
+                &cache_k,
+                &cache_v,
+                self.scale,
+                self.window_size,
+            )
         } else {
             // Single token or explicit mask
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
@@ -720,6 +728,17 @@ pub struct ExaoneMoeModel {
 }
 
 impl ExaoneMoeModel {
+    /// Head counts and head dim for the prefill mask choice (#3072); every
+    /// layer shares them.
+    fn prefill_attention(&self) -> Option<utils::PrefillAttention> {
+        let attn = &self.layers.first()?.self_attn;
+        Some(utils::PrefillAttention::new(
+            attn.n_heads as usize,
+            attn.n_kv_heads as usize,
+            attn.head_dim as usize,
+        ))
+    }
+
     pub fn forward(
         &self,
         input_ids: &MlxArray,
@@ -751,7 +770,14 @@ impl ExaoneMoeModel {
                 .find(|c| matches!(c, AnyKVCache::Standard(_)))
                 .map(|c| c.live_len())
                 .unwrap_or(0);
-            let global_mask = Some(utils::create_causal_mask(seq_len, ga_live_len));
+            let attention = self.prefill_attention();
+            let dtype = mlxcel_core::array_dtype(&h);
+            let batch = mlxcel_core::array_shape(&h)[0];
+            // Each mask is `None` where a single row can take MLX's causal
+            // mode or native window route instead and MLX fuses it (#3072).
+            let global_mask = attention.and_then(|attention| {
+                utils::prefill_causal_mask(seq_len, ga_live_len, batch, attention, dtype)
+            });
 
             // Create sliding window mask if applicable
             let swa_live_len = caches
@@ -763,11 +789,17 @@ impl ExaoneMoeModel {
             // exceeds the window (RotatingKVCache keeps all prefill keys),
             // clamped mask otherwise. See issue #408.
             let max_cache = self.window_size;
-            let swa_mask = Some(utils::create_sliding_window_prefill_mask(
-                seq_len,
-                swa_live_len,
-                max_cache,
-            ));
+            let swa_mask = attention.and_then(|attention| {
+                utils::prefill_sliding_window_mask(
+                    seq_len,
+                    swa_live_len,
+                    max_cache,
+                    batch,
+                    attention,
+                    dtype,
+                    utils::SlidingPrefillKeys::Rotating,
+                )
+            });
 
             (global_mask, swa_mask)
         } else {
@@ -812,11 +844,15 @@ impl ExaoneMoeModel {
     /// caches on every call. Sliding layers keep the full standard K/V history
     /// but pass the same window to attention, so outputs match the rotating
     /// cache path while prompt K/V remains available to the next decode step.
+    /// The trait-level single-sequence forward, projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070).
     fn forward_standard_caches(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
+        row: Option<usize>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         let seq_len = mlxcel_core::array_shape(&h)[1];
@@ -835,14 +871,30 @@ impl ExaoneMoeModel {
                 .find(|(_, layer)| layer.is_sliding_window)
                 .map(|(idx, _)| caches[idx].live_len())
                 .unwrap_or(0);
-            (
-                Some(utils::create_causal_mask(seq_len, ga_live_len)),
-                Some(utils::create_sliding_window_prefill_mask(
-                    seq_len,
-                    swa_live_len,
-                    self.window_size,
-                )),
-            )
+            let dtype = mlxcel_core::array_dtype(&h);
+            let batch = mlxcel_core::array_shape(&h)[0];
+            // Each mask is `None` where a single row can take MLX's causal
+            // mode or native window route instead and MLX fuses it (#3072).
+            match self.prefill_attention() {
+                Some(attention) => (
+                    utils::prefill_causal_mask(seq_len, ga_live_len, batch, attention, dtype),
+                    // Dense caches keep every key, so the window is enforced
+                    // by the mask over all of them. The rotating-cache variant
+                    // sizes the key axis to `window - 1 + seq_len`, which
+                    // stops matching the keys once the prior offset reaches
+                    // the window (#3093).
+                    utils::prefill_sliding_window_mask(
+                        seq_len,
+                        swa_live_len,
+                        self.window_size,
+                        batch,
+                        attention,
+                        dtype,
+                        utils::SlidingPrefillKeys::Dense,
+                    ),
+                ),
+                None => (None, None),
+            }
         } else {
             (None, None)
         };
@@ -855,6 +907,7 @@ impl ExaoneMoeModel {
             };
             h = layer.forward(&h, &mut caches[idx], mask.or(generated_mask));
         }
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         if let Some(head) = &self.lm_head {
             head.forward(&h)
@@ -1253,6 +1306,15 @@ impl mlxcel_core::batched_decode::SplitAttention for ExaoneMoeAttention {
 }
 
 impl LanguageModel for ExaoneMoeModel {
+    /// A tile-aligned padded prefill needs no padding mask: the pad tokens
+    /// follow the real ones, so a causal forward (MLX's causal mode, or the
+    /// shared causal or windowed array where MLX does not fuse it) already
+    /// hides them from every real row, and the caches the engine trims are
+    /// the caller's dense ones (#3101).
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        true
+    }
+
     fn batched_decode_kind(&self) -> BatchedDecodeKind {
         BatchedDecodeKind::Native
     }
@@ -1263,7 +1325,23 @@ impl LanguageModel for ExaoneMoeModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_standard_caches(input_ids, caches, mask)
+        self.forward_standard_caches(input_ids, caches, mask, None)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        Some(self.forward_standard_caches(input_ids, caches, mask, Some(last_pos)))
     }
 
     fn make_caches(&self) -> Vec<KVCache> {

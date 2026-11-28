@@ -19,7 +19,7 @@
 use super::feature_cache::{CacheKey, SingleArrayFeatures, VisionFeatureCache};
 use super::{encoders, merge, processors};
 use crate::LanguageModel;
-use crate::multimodal::qwen_vl::compute_qwen_vl_mrope_position_ids;
+use crate::multimodal::qwen_vl::compute_qwen_vl_mrope_position_ids_with_video_timing;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::BatchedDecodeKind;
 use mlxcel_core::layers::KVCache;
@@ -42,6 +42,9 @@ pub struct Qwen25VLModel {
     pub video_token_id: i32,
     pub vision_start_token_id: i32,
     pub spatial_merge_size: usize,
+    /// `vision_config.tokens_per_second`: temporal MRoPE positions per second
+    /// of video (Blaizzy/mlx-vlm#2760). The HF default is 2.
+    pub video_tokens_per_second: f32,
 }
 
 impl Qwen25VLModel {
@@ -60,9 +63,12 @@ impl Qwen25VLModel {
     /// Qwen2.5-VL's vision tower takes a single concatenated `pixel_values`
     /// tensor covering every image in the prompt together with a matching
     /// `grid_thw` layout, so the cache key is derived per-request rather than
-    /// per-image. In a multi-turn conversation where the same image-set is
-    /// reused across turns, this still short-circuits the vision tower +
-    /// merger on subsequent turns.
+    /// per-image, and it must cover every image of the request in order: the
+    /// runtime derives it from all per-image keys when the caller supplied one
+    /// for every image, and otherwise from the pixel tensor itself. In a
+    /// multi-turn conversation where the same image-set is reused across
+    /// turns, this still short-circuits the vision tower + merger on
+    /// subsequent turns.
     ///
     /// MRoPE state depends on `input_ids` and therefore must be recomputed on
     /// every call — only the post-merger hidden states are cached.
@@ -74,6 +80,37 @@ impl Qwen25VLModel {
         cache_key: Option<&CacheKey>,
         vision_cache: Option<&std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>>,
     ) -> merge::InputEmbeddings {
+        self.get_input_embeddings_with_video_timing(
+            input_ids,
+            pixel_values,
+            grid_thw,
+            &[],
+            cache_key,
+            vision_cache,
+        )
+        .expect("Qwen-VL visual placeholders must be cardinality-validated before MRoPE")
+    }
+
+    /// [`get_input_embeddings_with_cache`] with each video's temporal MRoPE
+    /// axis spaced by real time (Blaizzy/mlx-vlm#2760).
+    ///
+    /// `video_second_per_grid` holds `temporal_patch_size / sampled fps` for
+    /// each video grid in prompt order, the reference processor's
+    /// `second_per_grid_ts`. Temporal index `t` of a video then sits
+    /// `trunc(t * video_tokens_per_second * second_per_grid)` positions into
+    /// its run. An empty slice keeps unit spacing, which is what an
+    /// images-only request passes.
+    ///
+    /// [`get_input_embeddings_with_cache`]: Self::get_input_embeddings_with_cache
+    pub fn get_input_embeddings_with_video_timing(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        video_second_per_grid: &[f32],
+        cache_key: Option<&CacheKey>,
+        vision_cache: Option<&std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>>,
+    ) -> anyhow::Result<merge::InputEmbeddings> {
         let inputs_embeds = self.text_model.get_embed_tokens(input_ids);
 
         // Cache lookup: reuse the post-merger hidden states when the same
@@ -121,12 +158,18 @@ impl Qwen25VLModel {
             input_ids,
         );
 
-        // Compute MRoPE position IDs (same logic as Qwen2-VL)
-        let (position_ids, rope_deltas) = self.compute_rope_state(input_ids, grid_thw);
+        // Compute MRoPE position IDs (same logic as Qwen2-VL, plus the
+        // time-scaled video axis)
+        let video_time_intervals = video_second_per_grid
+            .iter()
+            .map(|second_per_grid| self.video_tokens_per_second * second_per_grid)
+            .collect::<Vec<_>>();
+        let (position_ids, rope_deltas) =
+            self.compute_rope_state(input_ids, grid_thw, &video_time_intervals)?;
 
         self.text_model.set_mrope_state(position_ids, rope_deltas);
 
-        merged
+        Ok(merged)
     }
 
     #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -135,37 +178,44 @@ impl Qwen25VLModel {
         input_ids: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
     ) -> (UniquePtr<MlxArray>, i32) {
-        self.compute_rope_state(input_ids, grid_thw)
+        self.compute_rope_state(input_ids, grid_thw, &[])
+            .expect("Qwen-VL visual placeholders must be cardinality-validated before MRoPE")
     }
 
+    /// MRoPE position IDs and the rope delta (`max position + 1 - seq_len`)
+    /// for one prompt. `video_time_intervals` is one
+    /// `tokens_per_second * second_per_grid` per video grid, or empty.
     fn compute_rope_state(
         &self,
         input_ids: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
-    ) -> (UniquePtr<MlxArray>, i32) {
-        let position_ids = self.compute_rope_index(input_ids, grid_thw);
+        video_time_intervals: &[f32],
+    ) -> anyhow::Result<(UniquePtr<MlxArray>, i32)> {
+        let position_ids = self.compute_rope_index(input_ids, grid_thw, video_time_intervals)?;
         let ids_shape = mlxcel_core::array_shape(input_ids);
         let seq_len = ids_shape[1];
         mlxcel_core::eval(&position_ids);
         let max_pos = mlxcel_core::max_all(&position_ids);
         mlxcel_core::eval(&max_pos);
         let max_pos_val = mlxcel_core::item_i32(&max_pos);
-        (position_ids, max_pos_val + 1 - seq_len)
+        Ok((position_ids, max_pos_val + 1 - seq_len))
     }
 
     /// Compute 3D position IDs [T, H, W] for mixed text+image sequences
-    /// (Same algorithm as Qwen2-VL)
+    /// (Same algorithm as Qwen2-VL, plus the time-scaled video axis)
     fn compute_rope_index(
         &self,
         input_ids: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
-    ) -> UniquePtr<MlxArray> {
-        compute_qwen_vl_mrope_position_ids(
+        video_time_intervals: &[f32],
+    ) -> anyhow::Result<UniquePtr<MlxArray>> {
+        compute_qwen_vl_mrope_position_ids_with_video_timing(
             input_ids,
             grid_thw,
             self.spatial_merge_size,
             self.image_token_id,
             self.video_token_id,
+            video_time_intervals,
         )
     }
 }
@@ -220,6 +270,22 @@ impl LanguageModel for Qwen25VLModel {
             .forward_for_sequence(input_ids, input_embeddings, caches, mask, seq_id)
     }
 
+    // The text model's last-row forward is its `forward_for_sequence` with
+    // only the sampled row projected, so text and embedding prefills both
+    // skip the `[B, L, vocab]` logits (#3070).
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        self.text_model
+            .last_row_logits(input_ids, input_embeddings, seq_id, caches, mask, last_pos)
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.text_model.release_mrope_sequence(seq_id);
     }
@@ -253,3 +319,7 @@ impl LanguageModel for Qwen25VLModel {
         mlxcel_core::generate::LanguageModel::eos_token_ids(&self.text_model)
     }
 }
+
+#[cfg(test)]
+#[path = "qwen2_5_vl_tests.rs"]
+mod tests;

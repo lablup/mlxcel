@@ -41,7 +41,9 @@ use crate::server::audio_model::{
     AudioModelError, AudioModelKind, AudioSynthesizeInput, AudioTranscribeInput,
     AudioTranscribeOutput,
 };
-use crate::server::types::{AudioSpeechRequest, AudioTranscriptionResponse, ErrorResponse};
+use crate::server::types::{
+    AudioSpeechRequest, AudioTranscriptionResponse, ErrorResponse, TranscriptionSegment,
+};
 
 /// Resolved output container for a synthesized-audio response.
 #[derive(Debug)]
@@ -159,7 +161,14 @@ async fn compat_transcribe(
         .clone()
         .filter(|provider| provider.supports(AudioModelKind::Stt));
     if !chat_can_transcribe && stt_provider.is_none() {
-        return ErrorResponse::not_supported(NO_AUDIO_SUPPORT_MESSAGE).into_response();
+        // A checkpoint with a stated reason for having no audio encoder
+        // (Inkling 2, issue #3376) gives that reason instead of upstream's
+        // generic sentence, so every audio surface says the same thing.
+        let message = state
+            .media_support
+            .audio_refusal
+            .unwrap_or(NO_AUDIO_SUPPORT_MESSAGE);
+        return ErrorResponse::not_supported(message).into_response();
     }
 
     let Some(file) = form.file.clone() else {
@@ -515,6 +524,7 @@ fn build_transcription_response(
             text: output.text,
             language: None,
             duration: None,
+            segments: None,
         })
         .into_response(),
         Some("text") => (StatusCode::OK, output.text).into_response(),
@@ -522,6 +532,19 @@ fn build_transcription_response(
             text: output.text,
             language: output.language,
             duration: output.duration_seconds,
+            segments: Some(
+                output
+                    .segments
+                    .into_iter()
+                    .map(|segment| TranscriptionSegment {
+                        id: segment.id,
+                        seek: segment.seek,
+                        start: segment.start,
+                        end: segment.end,
+                        text: segment.text,
+                    })
+                    .collect(),
+            ),
         })
         .into_response(),
         Some(other) => ErrorResponse::new(
@@ -564,6 +587,7 @@ fn audio_model_error_response(err: AudioModelError) -> ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::audio_model::TranscriptSegment as ModelSegment;
     use axum::extract::FromRequest;
     use axum::http::Request;
 
@@ -646,6 +670,7 @@ mod tests {
             text: "hello".to_string(),
             language: Some("en".to_string()),
             duration_seconds: Some(1.5),
+            ..Default::default()
         };
 
         let json = build_transcription_response(make(), None);
@@ -672,6 +697,7 @@ mod tests {
             text: "hello".to_string(),
             language: Some("en".to_string()),
             duration_seconds: Some(1.5),
+            ..Default::default()
         };
         for format in ["srt", "vtt"] {
             let response = build_transcription_response(make(), Some(format));
@@ -689,6 +715,7 @@ mod tests {
             text: "hello".to_string(),
             language: Some("en".to_string()),
             duration_seconds: Some(1.5),
+            ..Default::default()
         };
         for fmt in [None, Some("json")] {
             let response = build_transcription_response(make(), fmt);
@@ -711,6 +738,7 @@ mod tests {
             text: "bonjour".to_string(),
             language: Some("fr".to_string()),
             duration_seconds: Some(2.0),
+            ..Default::default()
         };
         let response = build_transcription_response(output, Some("verbose_json"));
         assert_eq!(response.status(), StatusCode::OK);
@@ -725,12 +753,111 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn verbose_json_serializes_segments_while_json_and_text_stay_unchanged() {
+        let make = || AudioTranscribeOutput {
+            text: "hello world".to_string(),
+            language: Some("en".to_string()),
+            duration_seconds: Some(42.0),
+            segments: vec![
+                ModelSegment {
+                    id: 0,
+                    seek: 0,
+                    start: 0.0,
+                    end: 12.5,
+                    text: "hello".to_string(),
+                },
+                ModelSegment {
+                    id: 1,
+                    seek: 200_000,
+                    start: 12.5,
+                    end: 42.0,
+                    text: "world".to_string(),
+                },
+            ],
+        };
+
+        let response = build_transcription_response(make(), Some("verbose_json"));
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("verbose_json body collects");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("verbose_json body is JSON");
+        assert_eq!(
+            body["segments"],
+            serde_json::json!([
+                { "id": 0, "seek": 0, "start": 0.0, "end": 12.5, "text": "hello" },
+                { "id": 1, "seek": 200_000, "start": 12.5, "end": 42.0, "text": "world" },
+            ])
+        );
+
+        // The default `json` arm must stay byte-identical to the pre-segments body.
+        let json_response = build_transcription_response(make(), None);
+        let json_bytes = axum::body::to_bytes(json_response.into_body(), 1 << 20)
+            .await
+            .expect("json body collects");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json_bytes).expect("json body is JSON"),
+            serde_json::json!({ "text": "hello world" })
+        );
+
+        // The `text` arm must stay the bare transcript.
+        let text_response = build_transcription_response(make(), Some("text"));
+        let text_bytes = axum::body::to_bytes(text_response.into_body(), 1 << 20)
+            .await
+            .expect("text body collects");
+        assert_eq!(&text_bytes[..], b"hello world");
+    }
+
+    #[test]
+    fn segment_windows_cover_a_sixty_five_second_clip() {
+        // A 65 s clip spans three 30 s windows; the third is clamped to the real
+        // duration rather than reporting the silent padding as transcript time.
+        let duration_seconds = 65.0_f32;
+        let window_seconds = (crate::audio::whisper_mel::WHISPER_N_FRAMES
+            * crate::audio::whisper_mel::WHISPER_HOP_LENGTH) as f32
+            / crate::audio::whisper_mel::WHISPER_SAMPLE_RATE as f32;
+        let windows = (duration_seconds / window_seconds).ceil() as usize;
+        assert_eq!(
+            windows, 3,
+            "65 s spans three windows at {window_seconds} s each"
+        );
+
+        let segments: Vec<TranscriptionSegment> = (0..windows)
+            .map(|id| {
+                // `seek` is the OpenAI mel-frame offset, not a sample offset.
+                let seek = id * crate::audio::whisper_mel::WHISPER_N_FRAMES;
+                let start = (seek * crate::audio::whisper_mel::WHISPER_HOP_LENGTH) as f32
+                    / crate::audio::whisper_mel::WHISPER_SAMPLE_RATE as f32;
+                TranscriptionSegment {
+                    id,
+                    seek,
+                    start,
+                    end: (start + window_seconds).min(duration_seconds),
+                    text: format!("window {id}"),
+                }
+            })
+            .collect();
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].start, 0.0);
+        assert_eq!(segments[1].start, 30.0);
+        assert_eq!(segments[2].start, 60.0);
+        assert_eq!(
+            segments[2].end, duration_seconds,
+            "the last segment must end at the real duration, not at padded 90 s"
+        );
+        assert!(segments[2].end < 90.0);
+    }
+
     #[test]
     fn minimal_transcription_serializes_to_text_only() {
         let body = AudioTranscriptionResponse {
             text: "hi".to_string(),
             language: None,
             duration: None,
+            segments: None,
         };
         let json = serde_json::to_value(&body).expect("serializes");
         assert_eq!(json, serde_json::json!({ "text": "hi" }));

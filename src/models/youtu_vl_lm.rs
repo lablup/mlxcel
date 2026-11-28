@@ -51,6 +51,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use std::path::Path;
 
 use super::deepseek_v3::DeepSeekV3Attention;
+use super::mla_rope::MlaRope;
 
 #[path = "youtu_vl_lm_config.rs"]
 mod youtu_vl_lm_config;
@@ -165,9 +166,18 @@ impl YoutuDecoderLayer {
         // The shared MLA attention defaults to the interleaved pair layout that
         // every DeepSeek backbone uses; Youtu carries the choice in its config,
         // so the flag has to reach the rope call rather than being assumed.
-        let self_attn =
-            DeepSeekV3Attention::from_weights(weights, &ds_cfg, &format!("{}.self_attn", prefix))?
-                .with_rope_traditional(config.rope_is_interleaved());
+        //
+        // The rotation stays plain `fast_rope` at `rope_theta`:
+        // `validate_rope_scaling` only admits a block that reduces to the
+        // identity, so the YaRN table the shared attention would resolve from
+        // it is not built (#3295).
+        let self_attn = DeepSeekV3Attention::from_weights_with_rope(
+            weights,
+            &ds_cfg,
+            &format!("{}.self_attn", prefix),
+            MlaRope::plain(ds_cfg.qk_rope_head_dim, ds_cfg.rope_theta),
+        )?
+        .with_rope_traditional(config.rope_is_interleaved());
 
         let mlp = YoutuMLP::from_weights(weights, config, &format!("{}.mlp", prefix))?;
 
@@ -257,6 +267,20 @@ impl YoutuLanguageModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// [`Self::forward_impl`] projecting every position (`row == None`) or
+    /// only position `row` (`[B, 1, vocab]`, the prefill's sampled row,
+    /// #3070).
+    pub(crate) fn forward_rows(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -272,6 +296,7 @@ impl YoutuLanguageModel {
             h = layer.forward(&h, &mut caches[i], mask_array.as_deref());
         }
 
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
 
         match &self.lm_head {
@@ -339,6 +364,18 @@ impl LanguageModel for YoutuLanguageModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        Some(self.forward_rows(input_ids, input_embeddings, caches, mask, Some(last_pos)))
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

@@ -44,16 +44,32 @@
 //! decompressed rows, `nbytes` measures the real (now much smaller) buffers,
 //! and speculative decode's `can_trim_prompt_cache` still reports trimmable.
 //!
+//! ## Quantized latent (issue #3155)
+//!
+//! Under `KVCacheMode::Int8` the latent is stored as an MLX affine group-64
+//! triple and `k_pe` stays FP16; the slot layout is in
+//! [`crate::cache::latent_quant`]. This is a different codec from per-head
+//! INT8, whose single absmax scale per row is too coarse for a row hundreds of
+//! elements wide that every query head reads. [`MlaLatentCache::update_and_fetch`]
+//! returns a [`LatentWindow`] so a reader sees which form it was handed.
+//!
+//! The width is 8 bits unless `--mla-latent-quant int4` is in force
+//! ([`crate::mla::latent_option`], issue #3179), which packs the latent at 4
+//! in the same `Int8` storage; a cache that already holds rows keeps their
+//! width. A DSA key slot then stores its indexer key at 8 bits beside the
+//! 4-bit latent (`mla::latent_keys`, "Split slot").
+//!
 //! ## Modes this declines
 //!
-//! Only `KVCacheMode::Fp16` and non-paged backing. The INT8 and Turbo3/Turbo4
-//! modes quantize along the head dimension with a per-token scale, which is
-//! calibrated for a per-head K/V row, not for a shared latent hundreds of
-//! elements wide whose reconstruction error is amplified by every one of the
-//! `num_heads` query heads that read it. The paged pool allocates
-//! `[num_blocks, page_size, Hkv, head_dim]` tensors with one head dim for both
-//! sides, which the asymmetric `(512, 64)` split cannot fill. Both are declined
-//! at wrap time with a message rather than silently mis-served.
+//! Every Turbo mode, and paged backing. The Turbo3/Turbo4 modes calibrate a
+//! per-token codebook from one head dimension, which fits a per-head K/V row
+//! and not a shared latent (see [`latent_layout_supports_mode`]). A Turbo-4
+//! codec applied to the rotated latent itself avoids that mismatch, and was
+//! measured and not adopted for quality (#3157, `mla::turbo_latent`). The paged
+//! pool allocates `[num_blocks, page_size, Hkv, head_dim]` tensors with one
+//! head dim for both sides, which the asymmetric `(512, 64)` split cannot
+//! fill. Both are declined at wrap time with a message rather than silently
+//! mis-served.
 
 use cxx::UniquePtr;
 
@@ -63,6 +79,11 @@ use crate::mla::MlaGeometry;
 use crate::mla::MlaSplitPlan;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::decode::{absorb_queries, absorbed_attention, unabsorb_output};
+use crate::mla::latent_keys::{
+    check_stored_key_width, quantize_key_slot_rows, quantized_key_slot_bytes_per_token,
+};
+use crate::mla::latent_option::latent_cache_bits;
+use crate::mla::quant_latent::{LatentWindow, check_quantizable, quantized_absorbed_attention};
 use crate::mla::split_kv::absorbed_attention_split_kv;
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
@@ -98,19 +119,20 @@ pub const fn decompressed_bytes_per_token(
 ///
 /// The "K" slot is not one fixed width across the list. `kv_lora_rank` is 512
 /// in the shipping checkpoints of every family here, and it is the serde
-/// default wherever one is declared. On top of that, `deepseek_v32`,
-/// `deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
-/// indexer key onto the same slot before caching it
-/// (`src/models/deepseek_v32.rs`), which makes it 640 wide at the default
-/// `index_head_dim` of 128. A codebook and a sign vector calibrated from the
+/// default wherever one is declared. On top of that, the DSA families
+/// ([`crate::mla::DSA_INDEXER_KEY_FAMILIES`]) concatenate the
+/// `index_head_dim`-wide indexer key onto the same slot before caching it,
+/// which makes it 640 wide at the default `index_head_dim` of 128. A codebook and a sign vector calibrated from the
 /// 64-wide "V" slot are wrong for any of those widths.
 ///
-/// `deepseek_v2` is deliberately **absent**. It asks
-/// [`MlaLatentCache::supports`] first and falls back to the decompressed
-/// per-head K/V layout when the cache is not FP16 (`src/models/deepseek_v2.rs`),
-/// so a quantized mode there is applied to ordinary per-head rows and needs no
-/// family-level override. Adding it here would take away a working
-/// configuration rather than fixing a broken one.
+/// `deepseek_v2` is deliberately **absent**. It goes through
+/// [`MlaLatentCache`], which stores the latent quantized under `int8`
+/// (issue #3155), and it falls back to the decompressed per-head K/V layout
+/// when [`MlaLatentCache::supports`] declines (`src/models/deepseek_v2.rs`).
+/// The families in [`crate::mla::QUANTIZED_LATENT_FAMILIES`] write their
+/// pair through the view and hold FP16 or the affine `int8` latent (#3160);
+/// the rest call `KVCache::update_and_fetch` directly and hold FP16 only
+/// until each is moved onto it (#3161-#3163).
 ///
 /// Used by: [`caches_mla_latent_pair`].
 pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
@@ -120,27 +142,63 @@ pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
     // that detection routes to `DeepSeekV3Model` (#2384).
     "kimi_k2",
     "joyai_llm_flash",
+    // `kimi_vl` and `kimi_k25` wrap `DeepSeekV3Model` as the text decoder
+    // (`src/vision/kimi_vl.rs`), so every layer runs `DeepSeekV3Attention`,
+    // which always caches `(kv_latent, k_pe)` (#3159).
+    "kimi_vl",
+    "kimi_k25",
+    // `youtu` and `youtu_llm` load `YoutuLanguageModel`
+    // (`src/loading/nonstandard.rs`) and `youtu_vl` loads the Youtu VLM text
+    // decoder; both hold `self_attn: DeepSeekV3Attention` per layer
+    // (`src/models/youtu_vl_lm.rs`), so the same latent pair is cached (#3159).
+    "youtu",
+    "youtu_llm",
+    "youtu_vl",
     // `deepseek_v32` and the `deepseek_v3.2` spelling of the same
     // `config.json` value both resolve to `DeepSeekV32Model`
     // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model
     // wholesale (`src/models/glm_moe_dsa.rs`). All three share the single
-    // unconditional `cache.update_and_fetch(cache_keys, k_pe)` in
-    // `src/models/deepseek_v32.rs` and consult neither
-    // [`MlaLatentCache::supports`] nor the cache's mode, so they have no
-    // decompressed fallback to land on.
+    // unconditional `[kv_latent | indexer key]` write in
+    // `src/models/deepseek_v32.rs`, with no decompressed fallback.
     "deepseek_v32",
     "deepseek_v3.2",
     "glm_moe_dsa",
+    // Hy4 reuses the DeepSeek V3.2 MLA and writes the same pair through
+    // `store_latent_step` in `src/models/hy_v4_attention.rs`: `[kv_latent |
+    // indexer key]` on its `full` indexer layers, the latent alone on its
+    // `shared` ones (#2354). It is not in `QUANTIZED_LATENT_FAMILIES`, like
+    // the other DSA families: on Hy4-preview-4bit behind a 512-token context
+    // the int8 latent had 0 of 124 decided-position disagreements against
+    // fp16 (98.0% top-1 agreement, perplexity +1.00%) and the int4 latent 0
+    // of 124 (95.7%, +0.68%), but at that length `kv_len <= index_topk`, so
+    // the indexer's top-k overlap over a quantized key slot, the gate
+    // DeepSeek-V3.2 missed (#3163), was never exercised. `auto` keeps fp16;
+    // an explicit `--mla-latent-quant int8` / `int4` is accepted.
+    "hy_v4",
+    // Kimi Linear and Kimi K3 (which reuses Kimi Linear's absorbed MLA)
+    // cache the pair in model-owned MLA layers and write it through the
+    // latent view (#3162).
     "kimi_linear",
-    // Kimi K3 reuses Kimi Linear's absorbed MLA and the same unconditional
-    // `update_and_fetch(kv_latent, k_pe)` (`src/models/kimi_k3.rs`).
     "kimi_k3",
+    // Raon-1 mini borrows the Kimi K3 MLA for its seven NoPE MLA layers and
+    // caches the same pair there (`src/models/raon1_mini.rs`). It is not in
+    // `QUANTIZED_LATENT_FAMILIES`: no int8 latent trace has been run on it,
+    // so it keeps fp16 by default.
+    "raon1_mini",
     // Both LongCat `model_type`s load `LongcatFlashNgramModel`, whose MLA
     // stores `update_and_fetch(kv_latent, k_pe)` on every step
     // (`src/models/longcat_flash_ngram.rs`); the plain variant only swaps
     // the n-gram embedding for a token embedding.
     "longcat_flash",
     "longcat_flash_ngram",
+    // Xing4.0 holds `self_attn: DeepSeekV3Attention` in every hyper-connection
+    // layer (`src/models/xing4_0.rs`, #2356), so it caches the same pair. It is
+    // not in `QUANTIZED_LATENT_FAMILIES`: no int8 latent trace has been run on
+    // it, so it keeps fp16 by default.
+    "xing4_0",
+    // LongCat-Flash-Lite-Sparse composes the same MLA (`src/models/longcat_flash_sparse.rs`,
+    // #2362); its indexer keys sit in a separate fp16 cache.
+    "longcat_flash_sparse",
 ];
 
 /// Whether `model_type` names a family that always caches an MLA latent pair.
@@ -160,12 +218,31 @@ pub fn caches_mla_latent_pair(model_type: &str) -> bool {
         .any(|&family| needle == family)
 }
 
-/// The rule: an MLA latent cache holds FP16 and nothing else.
+/// Whether the decoder `model_type` names a family that stores its latent
+/// through [`MlaLatentCache`], and can therefore hold an affine-quantized
+/// latent.
 ///
-/// Every quantized [`KVCacheMode`] calibrates a per-token codebook from one
-/// head dimension and applies it to both stored streams. A latent cache has two
-/// different widths in those two slots (`kv_lora_rank` and
-/// `qk_rope_head_dim`), and neither slot is a per-head K/V row:
+/// `deepseek_v2` only. A wrapper whose decoder is that model (DeepSeek-VL2) is
+/// resolved to its decoder type by the caller
+/// (`mlxcel::execution::config_fields::kv_decoder_model_type`), not listed
+/// here. Exact match, for the reason [`caches_mla_latent_pair`] gives.
+///
+/// Used by: `mlxcel::cli::turbo_args` (mode resolution, the `--kv-group-size`
+/// check and the `generate` banner).
+#[must_use]
+pub fn stores_latent_through_view(model_type: &str) -> bool {
+    model_type.trim().eq_ignore_ascii_case("deepseek_v2")
+}
+
+/// The rule: an MLA latent cache holds FP16, or the latent affine-quantized
+/// at 8 bits, and no Turbo mode.
+///
+/// `Int8` stores the latent as an MLX affine group-64 triple and leaves `k_pe`
+/// FP16 (issue #3155). Every Turbo [`KVCacheMode`] calibrates a
+/// per-token codebook from one head dimension and applies it to both stored
+/// streams. A latent cache has two different widths in those two slots
+/// (`kv_lora_rank` and `qk_rope_head_dim`), and neither slot is a per-head K/V
+/// row:
 ///
 /// * Symmetric `Turbo4` derives its sign vectors and codebook from the "V"
 ///   width and then applies them to the "K" slot as well, which is
@@ -178,15 +255,19 @@ pub fn caches_mla_latent_pair(model_type: &str) -> bool {
 /// Stated once here so [`MlaLatentCache::supports`] and the model-level mode
 /// resolver cannot drift apart. Returns the operator-facing reason on refusal.
 ///
+/// This is the rule for a cache read through [`MlaLatentCache`]. A
+/// latent-pair family that does not use the view yet holds FP16 only;
+/// [`crate::mla::latent_pair_supports_mode`] applies that narrower rule.
+///
 /// Used by: [`MlaLatentCache::supports`],
 /// `cache::turbo::allowlist::resolve_kv_cache_mode_for_model`.
 pub fn latent_layout_supports_mode(mode: KVCacheMode) -> Result<(), String> {
-    if mode == KVCacheMode::Fp16 {
+    if mode == KVCacheMode::Fp16 || mode.latent_affine_bits().is_some() {
         return Ok(());
     }
     Err(format!(
-        "mla: absorbed decode needs an FP16 KV cache; this cache is {mode} and its per-token \
-         quantization is calibrated for per-head K/V rows, not a shared latent"
+        "mla: absorbed decode needs an fp16 or int8 latent cache; this cache is {mode} and \
+         its per-token quantization is calibrated for per-head K/V rows, not a shared latent"
     ))
 }
 
@@ -197,6 +278,12 @@ pub fn latent_layout_supports_mode(mode: KVCacheMode) -> Result<(), String> {
 pub struct MlaLatentCache<'a> {
     inner: &'a mut KVCache,
     geometry: MlaGeometry,
+    /// "K" slot width: `kv_lora_rank` plus any DSA sidecar (issue #3163).
+    key_width: usize,
+    /// Width the latent is packed at, `None` on an fp16 cache: the width of
+    /// the rows the cache already holds, else
+    /// [`latent_cache_bits`] for its mode (issue #3179).
+    latent_bits: Option<i32>,
 }
 
 impl<'a> MlaLatentCache<'a> {
@@ -213,8 +300,24 @@ impl<'a> MlaLatentCache<'a> {
     /// it on every step, and the cache never ends up holding a mix of latent
     /// and decompressed rows.
     pub fn supports(cache: &KVCache, geometry: MlaGeometry) -> Result<(), String> {
+        Self::supports_with_key_width(cache, geometry, geometry.kv_lora_rank)
+    }
+
+    /// [`Self::supports`] for a "K" slot `stored_key_width` wide whose first
+    /// `kv_lora_rank` elements are the latent: the DSA families cache the
+    /// indexer key beside it (`mla::latent_keys`, issue #3163), and an `int8`
+    /// cache needs that width to be whole groups too.
+    ///
+    /// Used by: `mlxcel::models::mla_batched::store_latent_step`.
+    pub fn supports_with_key_width(
+        cache: &KVCache,
+        geometry: MlaGeometry,
+        stored_key_width: usize,
+    ) -> Result<(), String> {
         geometry.check()?;
         latent_layout_supports_mode(cache.mode)?;
+        check_quantizable(&geometry, cache.mode)?;
+        check_stored_key_width(geometry.kv_lora_rank, stored_key_width, cache.mode)?;
         if cache.is_paged_backed() {
             return Err(
                 "mla: absorbed decode cannot use a paged-backed cache; the pool's \
@@ -228,10 +331,27 @@ impl<'a> MlaLatentCache<'a> {
 
     /// View `cache` as a latent cache, or explain why it cannot be.
     pub fn wrap(cache: &'a mut KVCache, geometry: MlaGeometry) -> Result<Self, String> {
-        Self::supports(cache, geometry)?;
+        Self::wrap_with_key_width(cache, geometry, geometry.kv_lora_rank)
+    }
+
+    /// [`Self::wrap`] for a "K" slot `stored_key_width` wide
+    /// ([`Self::supports_with_key_width`]). [`Self::update_and_fetch`] takes
+    /// and returns rows of that width; the `attend` entries read the whole
+    /// slot as the latent, so a caller with a sidecar reads the window itself.
+    pub fn wrap_with_key_width(
+        cache: &'a mut KVCache,
+        geometry: MlaGeometry,
+        stored_key_width: usize,
+    ) -> Result<Self, String> {
+        Self::supports_with_key_width(cache, geometry, stored_key_width)?;
+        let latent_bits = cache
+            .stored_latent_bits()
+            .or_else(|| latent_cache_bits(cache.mode));
         Ok(Self {
             inner: cache,
             geometry,
+            key_width: stored_key_width,
+            latent_bits,
         })
     }
 
@@ -256,15 +376,28 @@ impl<'a> MlaLatentCache<'a> {
     /// Append one step's latent and rope rows, and read the whole live window
     /// back.
     ///
-    /// `ckv` is `[B, 1, L, kv_lora_rank]` and `kpe` is `[B, 1, L,
-    /// qk_rope_head_dim]`, both already normalized and rotated respectively by
-    /// the caller. Returns `(ckv_all, kpe_all)` over the live window.
+    /// `ckv` is `[B, 1, L, kv_lora_rank]` (the wrapped key width, with a
+    /// sidecar) and `kpe` is `[B, 1, L, qk_rope_head_dim]`, both already
+    /// normalized and rotated respectively by the caller. On an `int8` cache the fresh rows are quantized
+    /// before anything reads them, so a prefill and the decode steps after it
+    /// see the same stored values.
     pub fn update_and_fetch(
         &mut self,
         ckv: UniquePtr<MlxArray>,
         kpe: UniquePtr<MlxArray>,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        self.inner.update_and_fetch(ckv, kpe)
+    ) -> LatentWindow {
+        let Some(bits) = self.latent_bits else {
+            let (ckv, kpe) = self.inner.update_and_fetch(ckv, kpe);
+            return LatentWindow::Dense { ckv, kpe };
+        };
+        let rank = i32::try_from(self.geometry.kv_lora_rank).unwrap_or(i32::MAX);
+        self.inner
+            .update_latent_quantized(quantize_key_slot_rows(&ckv, kpe, rank, bits));
+        let rows = self
+            .inner
+            .latent_quantized_window()
+            .expect("the update above stored quantized latent rows");
+        LatentWindow::from_rows(rows, bits)
     }
 
     /// Append one latent step and attend after the query-side folded
@@ -275,6 +408,12 @@ impl<'a> MlaLatentCache<'a> {
     /// entering the per-row cache loop, concatenate the returned latent rows,
     /// and batch [`crate::mla::unabsorb_output`] afterward. Stage 2 split-KV
     /// selection remains identical to [`Self::attend`].
+    ///
+    /// A quantized window takes [`quantized_absorbed_attention`] for one
+    /// query (the fused kernel's quantized variant where it applies, #3156)
+    /// and is dequantized once for a multi-token step. The dense fused kernel
+    /// and split-KV read an FP16 latent, so the match below keeps both away
+    /// from a quantized window before either looks at it.
     ///
     /// `q_absorbed` is `[B, H, 1, kv_lora_rank]`; the returned tensor has the
     /// same shape.
@@ -291,10 +430,41 @@ impl<'a> MlaLatentCache<'a> {
         scale: f32,
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
         let q_shape = crate::ffi::array_shape(q_absorbed);
-        if mask.is_none() && q_shape.len() == 4 && q_shape[2] == 1 && crate::mla::split_kv_enabled()
-        {
+        let single_query = q_shape.len() == 4 && q_shape[2] == 1;
+        let (ckv_all, kpe_all) = match self.update_and_fetch(ckv, kpe) {
+            LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+            LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if single_query => {
+                return quantized_absorbed_attention(
+                    q_absorbed, q_pe, &ckv_q, &scales, &biases, &kpe, bits, group_size, scale, mask,
+                );
+            }
+            // More than one query: dequantize once and run the dense folded
+            // attention, which never takes the fused kernel. The dequantized
+            // window is FP16; it is cast to the query dtype so a bf16
+            // checkpoint's step is not promoted to float32 (#3177).
+            window @ LatentWindow::Quantized { .. } => {
+                let (ckv_all, kpe_all) = window.into_dense();
+                let dtype = crate::ffi::array_dtype(q_pe);
+                let cast = |a: UniquePtr<MlxArray>| {
+                    if crate::ffi::array_dtype(&a) == dtype {
+                        a
+                    } else {
+                        crate::ffi::astype(&a, dtype)
+                    }
+                };
+                let (ckv_all, kpe_all) = (cast(ckv_all), cast(kpe_all));
+                return absorbed_attention(q_absorbed, q_pe, &ckv_all, &kpe_all, scale, mask);
+            }
+        };
+        if mask.is_none() && single_query && crate::mla::split_kv_enabled() {
             let plan = MlaSplitPlan::heuristic(
                 q_shape[0].max(0) as usize,
                 q_shape[1].max(0) as usize,
@@ -352,10 +522,27 @@ impl<'a> MlaLatentCache<'a> {
         unabsorb_output(&o_latent, proj)
     }
 
-    /// Bytes per token this cache costs, at the element size it stores.
+    /// The width this view packs the latent at, `None` on an fp16 cache.
+    #[must_use]
+    pub const fn latent_bits(&self) -> Option<i32> {
+        self.latent_bits
+    }
+
+    /// Bytes per token this cache costs: the affine-quantized rate on an
+    /// `int8` cache (at the width it packs the latent, with any sidecar at 8
+    /// bits), else `bytes_per_element` per latent and rope element.
     #[must_use]
     pub const fn bytes_per_token(&self, bytes_per_element: usize) -> usize {
-        latent_bytes_per_token(&self.geometry, bytes_per_element)
+        match self.latent_bits {
+            Some(bits) => quantized_key_slot_bytes_per_token(
+                self.geometry.kv_lora_rank,
+                self.key_width.saturating_sub(self.geometry.kv_lora_rank),
+                self.geometry.qk_rope_head_dim,
+                bits as usize,
+                crate::cache::latent_quant::LATENT_QUANT_GROUP_SIZE as usize,
+            ),
+            None => (self.key_width + self.geometry.qk_rope_head_dim) * bytes_per_element,
+        }
     }
 }
 
@@ -369,177 +556,5 @@ impl std::fmt::Debug for MlaLatentCache<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const LITE: MlaGeometry = MlaGeometry {
-        num_heads: 16,
-        kv_lora_rank: 512,
-        qk_nope_head_dim: 128,
-        qk_rope_head_dim: 64,
-        v_head_dim: 128,
-    };
-
-    /// DeepSeek-V3 geometry: 128 heads make the decompressed layout eight times
-    /// worse again while the latent side does not move at all, which is the
-    /// whole point of the accounting.
-    const V3: MlaGeometry = MlaGeometry {
-        num_heads: 128,
-        kv_lora_rank: 512,
-        qk_nope_head_dim: 128,
-        qk_rope_head_dim: 64,
-        v_head_dim: 128,
-    };
-
-    #[test]
-    fn latent_bytes_per_token_is_the_issue_s_576_floats() {
-        assert_eq!(latent_bytes_per_token(&LITE, 1), 576);
-        assert_eq!(latent_bytes_per_token(&LITE, 2), 1152);
-        // Independent of head count, unlike the decompressed layout.
-        assert_eq!(
-            latent_bytes_per_token(&V3, 2),
-            latent_bytes_per_token(&LITE, 2)
-        );
-    }
-
-    #[test]
-    fn decompressed_bytes_per_token_scales_with_head_count() {
-        // 16 heads * (192 key + 128 value) = 5120 elements.
-        assert_eq!(decompressed_bytes_per_token(&LITE, 1), 5120);
-        assert_eq!(decompressed_bytes_per_token(&V3, 1), 40960);
-    }
-
-    #[test]
-    fn absorption_reduces_the_per_token_cache_by_the_head_count_ratio() {
-        let before = decompressed_bytes_per_token(&LITE, 2) as f64;
-        let after = latent_bytes_per_token(&LITE, 2) as f64;
-        assert!(
-            (before / after - 8.888).abs() < 0.01,
-            "DeepSeek-V2-Lite ratio was {}",
-            before / after
-        );
-        let before_v3 = decompressed_bytes_per_token(&V3, 2) as f64;
-        let after_v3 = latent_bytes_per_token(&V3, 2) as f64;
-        assert!(
-            (before_v3 / after_v3 - 71.1).abs() < 0.1,
-            "DeepSeek-V3 ratio was {}",
-            before_v3 / after_v3
-        );
-    }
-
-    #[test]
-    fn wrap_declines_a_quantized_kv_cache() {
-        let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
-        let err = MlaLatentCache::wrap(&mut cache, LITE).unwrap_err();
-        assert!(err.contains("FP16"), "{err}");
-        // `supports` must give the same answer, since the fallback branch in a
-        // family reads it instead of `wrap`.
-        assert!(MlaLatentCache::supports(&cache, LITE).is_err());
-    }
-
-    #[test]
-    fn a_latent_cache_stays_trimmable_for_speculative_decode() {
-        // Speculative decode gates on `can_trim_prompt_cache` and then rejects
-        // the tokens the draft got wrong with `trim`. Both operate on the
-        // sequence axis, which is axis 2 in the latent layout exactly as in the
-        // decompressed one, so a rejected draft token removes one latent row.
-        // If that were not true, a rejection would silently corrupt the cache.
-        const G: MlaGeometry = MlaGeometry {
-            num_heads: 4,
-            kv_lora_rank: 32,
-            qk_nope_head_dim: 16,
-            qk_rope_head_dim: 8,
-            v_head_dim: 12,
-        };
-        let mut cache = KVCache::new();
-        {
-            let mut view = MlaLatentCache::wrap(&mut cache, G).unwrap();
-            let ckv = crate::ffi::zeros(&[1, 1, 6, 32], crate::dtype::FLOAT16);
-            let kpe = crate::ffi::zeros(&[1, 1, 6, 8], crate::dtype::FLOAT16);
-            view.update_and_fetch(ckv, kpe);
-            assert_eq!(view.seq_len(), 6);
-        }
-        assert!(crate::cache::can_trim_prompt_cache(std::slice::from_ref(
-            &cache
-        )));
-        assert_eq!(cache.trim(2), 2);
-        let view = MlaLatentCache::wrap(&mut cache, G).unwrap();
-        assert_eq!(view.seq_len(), 4);
-    }
-
-    /// The four families that always cache a latent pair, and the one that
-    /// does not. `deepseek_v2` has a decompressed fallback, so a quantized
-    /// mode there lands on ordinary per-head K/V rows and must keep working.
-    #[test]
-    fn only_the_fallback_less_families_are_latent_families() {
-        for family in [
-            "glm4_moe_lite",
-            "deepseek_v3",
-            "deepseek_v32",
-            "deepseek_v3.2",
-            "glm_moe_dsa",
-            "kimi_linear",
-            "kimi_k3",
-            "longcat_flash",
-            "longcat_flash_ngram",
-        ] {
-            assert!(caches_mla_latent_pair(family), "{family}");
-        }
-        assert!(!caches_mla_latent_pair("deepseek_v2"));
-        assert!(!caches_mla_latent_pair("llama"));
-        assert!(!caches_mla_latent_pair(""));
-    }
-
-    /// The DSA trio needs its own entries, not coverage inherited from
-    /// `deepseek_v3`. `caches_mla_latent_pair` matches exactly, so a family
-    /// whose `model_type` merely extends an entry is not covered by it, and
-    /// `glm_moe_dsa` shares nothing textual with the model it wraps.
-    #[test]
-    fn the_dsa_families_are_listed_in_their_own_right() {
-        for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
-            assert!(
-                MLA_LATENT_CACHE_FAMILIES.contains(&family),
-                "{family} must be listed explicitly; `deepseek_v3` does not cover it"
-            );
-        }
-    }
-
-    /// Exact match, not a prefix walk: the latent packing belongs to one
-    /// concrete attention implementation, and a neighbouring `model_type` that
-    /// happens to share a prefix must not inherit the answer.
-    #[test]
-    fn latent_family_lookup_is_exact_and_case_insensitive() {
-        assert!(caches_mla_latent_pair("  GLM4_MoE_Lite  "));
-        assert!(caches_mla_latent_pair("  DeepSeek_V3.2  "));
-        assert!(!caches_mla_latent_pair("glm4_moe_lite_vl"));
-        assert!(!caches_mla_latent_pair("glm4_moe"));
-        assert!(!caches_mla_latent_pair("glm_moe"));
-        assert!(!caches_mla_latent_pair("deepseek_v32_vl"));
-    }
-
-    /// The rule `MlaLatentCache::supports` has always applied, now callable on
-    /// its own so the model-level resolver states it once rather than twice.
-    #[test]
-    fn latent_layout_accepts_fp16_and_nothing_else() {
-        assert!(latent_layout_supports_mode(KVCacheMode::Fp16).is_ok());
-        for mode in [
-            KVCacheMode::Int8,
-            KVCacheMode::Turbo4Asym,
-            KVCacheMode::Turbo3Asym,
-            KVCacheMode::Turbo4,
-            KVCacheMode::Turbo4Delegated,
-        ] {
-            let err = latent_layout_supports_mode(mode).unwrap_err();
-            assert!(err.contains("FP16"), "{err}");
-            assert!(err.contains(&mode.to_string()), "{err}");
-        }
-    }
-
-    #[test]
-    fn wrap_accepts_the_default_fp16_cache() {
-        let mut cache = KVCache::new();
-        let view = MlaLatentCache::wrap(&mut cache, LITE).unwrap();
-        assert_eq!(view.seq_len(), 0);
-        assert_eq!(view.bytes_per_token(2), 1152);
-    }
-}
+#[path = "cache_tests.rs"]
+mod tests;

@@ -131,6 +131,10 @@ impl BatchScheduler {
                 .model()
                 .take_mllama_image_state_entry(victim.seq_id);
 
+            // The victim's reasoning effort (#3435) moves to the new id too:
+            // the re-prefill must be steered at the level it was admitted at.
+            let reasoning_effort = self.engine.model().sequence_reasoning_effort(victim.seq_id);
+
             // Drop the victim's prompt-cache context. Preemption reallocates
             // the sequence under a fresh `SequenceId` below, and the context
             // map is keyed by the old one — so an entry left here is
@@ -197,6 +201,15 @@ impl BatchScheduler {
                     self.engine
                         .model()
                         .install_mllama_image_state_entry(new_id, mllama_snapshot);
+                    if let Err(err) = self
+                        .engine
+                        .model()
+                        .set_sequence_reasoning_effort(Some(new_id), reasoning_effort.as_deref())
+                    {
+                        // Unreachable for a level the model accepted at
+                        // admission; logged rather than failing the victim.
+                        tracing::warn!("preemption: reasoning effort not carried over: {err}");
+                    }
                     if let Err(err) = victim.state.transition_to(SequenceState::Queued) {
                         tracing::error!("Eviction state transition error: {err}");
                         self.release_sequence_caches(new_id);
@@ -1189,6 +1202,7 @@ impl BatchScheduler {
                     result.prompt_eval_ms,
                     result.generation_only_ms,
                     result.completion_tokens,
+                    result.decode_window_tokens,
                 );
                 tracing::info!(
                     prompt_tokens = seq.prompt_tokens.len(),

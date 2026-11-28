@@ -29,6 +29,7 @@
 //! Phase 1 emits the following events:
 //! - `response.created`, `response.in_progress`, `response.completed`,
 //!   `response.failed`, `response.incomplete`, `response.error`
+//! - `response.queued`, only on a streamed background response (issue #2900)
 //! - `response.output_item.added`, `response.output_item.done`
 //! - `response.content_part.added`, `response.content_part.done`
 //! - `response.output_text.delta`, `response.output_text.done`
@@ -36,7 +37,12 @@
 //!   `response.function_call_arguments.done`
 //! - `response.reasoning_text.delta`, `response.reasoning_text.done`
 //!
-//! Reserved-for-Phase-2/3 events (audio, refusal, MCP, web/file search,
+//! - `response.mcp_list_tools.in_progress` / `.completed` / `.failed`,
+//!   `response.mcp_call.in_progress` / `.completed` / `.failed`,
+//!   `response.mcp_call_arguments.delta` / `.done`, only on a response the
+//!   server-side MCP tool loop produces (issue #1457)
+//!
+//! Reserved-for-Phase-2/3 events (audio, refusal, web/file search,
 //! code interpreter, image gen, custom tool) are not emitted.
 
 use serde::Serialize;
@@ -51,6 +57,13 @@ use super::responses_response::{ResponseObject, ResponseOutputContent, ResponseO
 pub enum ResponseStreamEvent {
     #[serde(rename = "response.created")]
     Created {
+        sequence_number: u64,
+        response: ResponseObject,
+    },
+    /// A streamed background response was accepted and waits for a slot
+    /// (issue #2900). Follows `response.created`; the foreground never sends it.
+    #[serde(rename = "response.queued")]
+    Queued {
         sequence_number: u64,
         response: ResponseObject,
     },
@@ -172,6 +185,58 @@ pub enum ResponseStreamEvent {
         content_index: usize,
         text: String,
     },
+    // MCP tool loop events (issue #1457). Each names the `mcp_list_tools` or
+    // `mcp_call` output item it reports on.
+    #[serde(rename = "response.mcp_list_tools.in_progress")]
+    McpListToolsInProgress {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_list_tools.completed")]
+    McpListToolsCompleted {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_list_tools.failed")]
+    McpListToolsFailed {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.in_progress")]
+    McpCallInProgress {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.completed")]
+    McpCallCompleted {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call.failed")]
+    McpCallFailed {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+    },
+    #[serde(rename = "response.mcp_call_arguments.delta")]
+    McpCallArgumentsDelta {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "response.mcp_call_arguments.done")]
+    McpCallArgumentsDone {
+        sequence_number: u64,
+        item_id: String,
+        output_index: usize,
+        arguments: String,
+    },
 }
 
 impl ResponseStreamEvent {
@@ -179,6 +244,7 @@ impl ResponseStreamEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
             ResponseStreamEvent::Created { .. } => "response.created",
+            ResponseStreamEvent::Queued { .. } => "response.queued",
             ResponseStreamEvent::InProgress { .. } => "response.in_progress",
             ResponseStreamEvent::Completed { .. } => "response.completed",
             ResponseStreamEvent::Failed { .. } => "response.failed",
@@ -200,6 +266,20 @@ impl ResponseStreamEvent {
             }
             ResponseStreamEvent::ReasoningTextDelta { .. } => "response.reasoning_text.delta",
             ResponseStreamEvent::ReasoningTextDone { .. } => "response.reasoning_text.done",
+            ResponseStreamEvent::McpListToolsInProgress { .. } => {
+                "response.mcp_list_tools.in_progress"
+            }
+            ResponseStreamEvent::McpListToolsCompleted { .. } => {
+                "response.mcp_list_tools.completed"
+            }
+            ResponseStreamEvent::McpListToolsFailed { .. } => "response.mcp_list_tools.failed",
+            ResponseStreamEvent::McpCallInProgress { .. } => "response.mcp_call.in_progress",
+            ResponseStreamEvent::McpCallCompleted { .. } => "response.mcp_call.completed",
+            ResponseStreamEvent::McpCallFailed { .. } => "response.mcp_call.failed",
+            ResponseStreamEvent::McpCallArgumentsDelta { .. } => {
+                "response.mcp_call_arguments.delta"
+            }
+            ResponseStreamEvent::McpCallArgumentsDone { .. } => "response.mcp_call_arguments.done",
         }
     }
 
@@ -207,6 +287,9 @@ impl ResponseStreamEvent {
     pub fn sequence_number(&self) -> u64 {
         match self {
             ResponseStreamEvent::Created {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Queued {
                 sequence_number, ..
             }
             | ResponseStreamEvent::InProgress {
@@ -259,7 +342,119 @@ impl ResponseStreamEvent {
             }
             | ResponseStreamEvent::ReasoningTextDone {
                 sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDone {
+                sequence_number, ..
             } => *sequence_number,
+        }
+    }
+
+    /// The event's `sequence_number`, writable: a log that numbers events
+    /// itself restamps an event whose number disagrees (issue #2900).
+    pub(crate) fn sequence_number_mut(&mut self) -> &mut u64 {
+        match self {
+            ResponseStreamEvent::Created {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Queued {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::InProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Completed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Failed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Incomplete {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::Error {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionStarted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::CompactionCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputItemAdded {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputItemDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ContentPartAdded {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ContentPartDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputTextDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::OutputTextDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::FunctionCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::FunctionCallArgumentsDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ReasoningTextDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::ReasoningTextDone {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpListToolsFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallInProgress {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallCompleted {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallFailed {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDelta {
+                sequence_number, ..
+            }
+            | ResponseStreamEvent::McpCallArgumentsDone {
+                sequence_number, ..
+            } => sequence_number,
         }
     }
 }
@@ -274,6 +469,11 @@ pub struct SequenceCounter {
 impl SequenceCounter {
     pub fn new() -> Self {
         Self { next: 0 }
+    }
+
+    /// A counter whose first value is `first`.
+    pub fn starting_at(first: u64) -> Self {
+        Self { next: first }
     }
 
     pub fn next(&mut self) -> u64 {
@@ -308,6 +508,7 @@ mod tests {
                 total_tokens: 0,
                 input_tokens_details: None,
                 output_tokens_details: None,
+                mcp: None,
             },
             error: None,
             incomplete_details: None,
@@ -330,6 +531,7 @@ mod tests {
             service_tier: None,
             user: None,
             store: None,
+            background: None,
         }
     }
 

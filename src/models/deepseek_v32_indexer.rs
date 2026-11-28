@@ -31,6 +31,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::ModelArgs;
+use super::rope::DsaRope;
 
 /// nn.LayerNorm default epsilon (mlx `nn.LayerNorm(dims, eps=1e-5)`).
 const LAYER_NORM_EPS: f32 = 1e-5;
@@ -48,10 +49,11 @@ pub(super) struct Indexer {
     weights_proj: UnifiedLinear,
     n_heads: i32,
     head_dim: i32,
-    rope_head_dim: i32,
     index_topk: i32,
     softmax_scale: f32,
-    rope_base: f32,
+    /// The model's RoPE (YaRN for the DeepSeek-V3.2 checkpoints, #3178), the
+    /// same table the MLA attention rotates with, as upstream.
+    rope: DsaRope,
     /// `traditional` flag threaded into the indexer RoPE. This is the
     /// per-model `indexer_rope_interleave` value: `false` (non-interleaved)
     /// for deepseek_v32, `true` (interleaved) for glm_moe_dsa. Getting it
@@ -62,11 +64,23 @@ pub(super) struct Indexer {
 impl Indexer {
     /// Load the indexer for `{attn_prefix}.indexer.*`. Returns `Ok(None)` when
     /// the checkpoint carries no indexer weights (so the dense fallback is
-    /// preserved) or when [`DENSE_FALLBACK_ENV`] is set.
+    /// preserved) or when [`DENSE_FALLBACK_ENV`] is set. Resolves its own RoPE
+    /// from `args`; the model loader shares one through [`Self::load_with_rope`].
+    #[cfg(test)]
     pub(super) fn load(
         weights: &WeightMap,
         args: &ModelArgs,
         attn_prefix: &str,
+    ) -> Result<Option<Self>, String> {
+        Self::load_with_rope(weights, args, attn_prefix, &DsaRope::from_args(args)?)
+    }
+
+    /// [`Self::load`] with the model's already-resolved RoPE.
+    pub(super) fn load_with_rope(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        attn_prefix: &str,
+        rope: &DsaRope,
     ) -> Result<Option<Self>, String> {
         let prefix = format!("{}.indexer", attn_prefix);
         let wk_key = format!("{}.wk.weight", prefix);
@@ -104,10 +118,9 @@ impl Indexer {
             weights_proj,
             n_heads: args.index_n_heads as i32,
             head_dim,
-            rope_head_dim: args.qk_rope_head_dim as i32,
             index_topk: args.index_topk as i32,
             softmax_scale: (head_dim as f32).powf(-0.5),
-            rope_base: args.rope_theta,
+            rope: rope.duplicate(),
             rope_traditional: args.indexer_rope_interleave,
         }))
     }
@@ -120,17 +133,10 @@ impl Indexer {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let s = shape[1];
-        let k = self.wk.forward(x);
+        let k = mlxcel_core::row_invariant::linear_whole_block(&self.wk, x);
         let k = self.k_norm.forward(&k);
         let k = mlxcel_core::reshape(&k, &[b, 1, s, self.head_dim]);
-        mlxcel_core::fast_rope(
-            &k,
-            self.rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        )
+        self.rope.apply(&k, self.rope_traditional, offset)
     }
 
     /// Indexer query: `rope(reshape(wq_b(qr)))`, where `qr` is the LoRA-reduced
@@ -140,24 +146,17 @@ impl Indexer {
         let shape = mlxcel_core::array_shape(qr);
         let b = shape[0];
         let s = shape[1];
-        let q = self.wq_b.forward(qr);
+        let q = mlxcel_core::row_invariant::linear_whole_block(&self.wq_b, qr);
         let q = mlxcel_core::reshape(&q, &[b, s, self.n_heads, self.head_dim]);
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
-        mlxcel_core::fast_rope(
-            &q,
-            self.rope_head_dim,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            offset,
-        )
+        self.rope.apply(&q, self.rope_traditional, offset)
     }
 
     /// Raw per-head combination weights `weights_proj(x)`, shape `[b, s, n_heads]`.
     /// The `n_heads**-0.5 * head_dim**-0.5` scaling is applied inside
     /// [`indexer_top_indices`].
     pub(super) fn weights(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.weights_proj.forward(x)
+        mlxcel_core::row_invariant::linear_whole_block(&self.weights_proj, x)
     }
 
     /// Select the top-`index_topk` key positions for each query. Returns `None`

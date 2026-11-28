@@ -175,6 +175,33 @@ pub struct PromptCacheRequestContext {
     /// tokenizer was available on the dispatch thread, or when the clipped
     /// prefix turned out too short to be worth a snapshot.
     pub history_prefix_tokens: Option<Vec<i32>>,
+
+    /// The system-prompt root render (#2885 Part B): the request's leading
+    /// system messages and tool list followed by the first user turn's header,
+    /// cut where that turn's content starts. Same two-stage life as
+    /// [`Self::history_prompt`] / [`Self::history_prefix_tokens`]. `None`
+    /// unless `MLXCEL_PROMPT_CACHE_SYSTEM_ROOT` is on and the render is a text
+    /// prefix of the prompt.
+    pub root_prompt: Option<String>,
+
+    /// Tokenization of [`Self::root_prompt`], clipped by the scheduler to a
+    /// stable prefix of the live prompt tokens that ends strictly before the
+    /// history boundary. `None` when no root snapshot applies to this request.
+    pub root_prefix_tokens: Option<Vec<i32>>,
+
+    /// Which sequences computed the rows this request's sequence adopted
+    /// from the prompt cache (issue #3047). Empty at the route; the scheduler
+    /// sets it when the request restores a snapshot, and every snapshot the
+    /// sequence stores extends it with the sequence's own id. A turn-boundary
+    /// state checkpoint is only rebuilt over a snapshot whose lineage agrees
+    /// with its own.
+    pub snapshot_lineage: crate::server::prompt_cache::SnapshotLineage,
+
+    /// The model-side reasoning effort this request's prefix was computed at
+    /// (#3435), already folded into [`Self::template_sig`]. Carried so a
+    /// next-turn warm-up, which prefills under this context alone, steers its
+    /// sequence at the same level. `None` for a model that does not steer.
+    pub model_reasoning_effort: Option<String>,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.
@@ -252,6 +279,15 @@ pub struct ServerGenerateOptions {
     /// reasoning tokens.
     pub thinking_enter_block_on_start: bool,
 
+    /// The close marker of the thinking block the rendered prompt primed, as
+    /// [`crate::server::routes::chat::primed_open_thinking_close_marker`]
+    /// returns it; `None` when the prompt primed no block. The scheduler
+    /// resolves it to a token id so a forced budget close uses the tag that
+    /// matches the primed open: K2-Horizon primes `<ifm|think_fast>` for
+    /// `reasoning_effort: "medium"` and must be closed with
+    /// `</ifm|think_fast>`, not `</ifm|think>` (#3321).
+    pub thinking_primed_close: Option<String>,
+
     /// b10621 `reasoning_control` (#1444): when the request armed realtime
     /// reasoning control, this is the shared "end reasoning now" flag the
     /// sequence's [`crate::server::thinking_budget::ThinkingState`] polls at
@@ -271,6 +307,13 @@ pub struct ServerGenerateOptions {
     /// off) or when the request does not participate in prefix reuse (e.g.
     /// raw text-completion endpoints that do not render a chat template).
     pub prompt_cache_ctx: Option<PromptCacheRequestContext>,
+
+    /// The reasoning effort the model itself runs this request at (#3435):
+    /// the scheduler hands it to `LanguageModel::set_sequence_reasoning_effort`
+    /// for the request's sequence before prefill. `None` runs at the model's
+    /// default (the config's `default` level for a steering model) and is the
+    /// value for every model that does not steer.
+    pub model_reasoning_effort: Option<String>,
 
     /// optional structured-output constraint produced by
     /// [`crate::server::structured::build_constraint_from_response_format`].
@@ -327,6 +370,20 @@ pub struct ServerGenerateOptions {
     /// so by the time the scheduler sees this field it is already known to be
     /// on the supported ladder. Ignored by every non-Gemma-4 model.
     pub image_soft_tokens: Option<usize>,
+
+    /// Server-wide `--video-num-frames` (issue #2399), copied from
+    /// [`ServerConfig::video_num_frames`].
+    ///
+    /// Not a per-request override: this is the operator's startup knob carried
+    /// in the request envelope so the admission-time media preparation can
+    /// hand it to the video decoders without reaching back for the live
+    /// config. `None` keeps `--video-fps` sampling.
+    pub video_num_frames: Option<usize>,
+
+    /// Server-wide `--video-min-frames` (issue #2399), copied from
+    /// [`ServerConfig::video_min_frames`]. Same carriage as
+    /// [`Self::video_num_frames`]; `None` keeps the built-in sampling floor.
+    pub video_min_frames: Option<usize>,
 
     /// Prompt token ids produced by a native (non-Jinja) chat renderer,
     /// bypassing tokenization of the prompt string (#1338).
@@ -970,6 +1027,18 @@ pub struct ServerConfig {
     /// Read only on the fallback path, for the same reason as
     /// [`Self::video_max_frames`].
     pub video_fps: f64,
+    /// Exact frame count that replaces fps sampling (issue #2399). `None` keeps
+    /// the `--video-fps` sampling behavior.
+    ///
+    /// Unlike [`Self::video_max_frames`], this is read on both fronts: the
+    /// frame fallback passes it to the sampling helper, and the native video
+    /// families pass it as their processor's `target_nframes`.
+    pub video_num_frames: Option<usize>,
+    /// Sampling floor applied before the frame cap (issue #2399). `None` keeps
+    /// the built-in floor.
+    ///
+    /// Read on both fronts, for the same reason as [`Self::video_num_frames`].
+    pub video_min_frames: Option<usize>,
     /// Axis B (B8): server-wide language bias configuration, if
     /// resolved at startup from CLI flags or the `LLAMA_ARG_LANG_BIAS` env
     /// var. Every batch sequence inherits this same policy (Phase 1 single
@@ -1270,6 +1339,8 @@ impl Default for ServerConfig {
             vision_cache_size: crate::vision::feature_cache::DEFAULT_VISION_CACHE_SIZE,
             video_max_frames: crate::multimodal::video::DEFAULT_FALLBACK_MAX_FRAMES,
             video_fps: crate::multimodal::video::DEFAULT_FPS,
+            video_num_frames: None,
+            video_min_frames: None,
             lang_bias_config: None,
             reasoning_budget: None,
             chat_template_kwargs: None,

@@ -1287,10 +1287,16 @@ pub(super) fn xml_param_keeps_raw_string(schema: Option<&serde_json::Value>) -> 
         && !schema_type_admits_null(schema)
 }
 
-/// Whether a schema's `type` explicitly admits JSON null, as a nullable
-/// declaration such as `{"type": ["string", "null"]}` does.
-// Used by: coerce_xml_param
+/// Whether a schema explicitly admits JSON null: a `type` array naming
+/// `"null"` (`{"type": ["string", "null"]}`), or the OpenAPI 3.0 spelling
+/// `"nullable": true` (mlx-vlm#2588). `nullable: false`, a non-boolean
+/// `nullable` and a schema without it admit no null.
+// Used by: coerce_xml_param, xml_param_keeps_raw_string (try_minimax_m2,
+// try_qwen3_coder and tool_calls::incremental through those two)
 fn schema_type_admits_null(schema: &serde_json::Value) -> bool {
+    if schema.get("nullable") == Some(&serde_json::Value::Bool(true)) {
+        return true;
+    }
     match schema.get("type") {
         Some(serde_json::Value::Array(items)) => items.iter().any(|v| v.as_str() == Some("null")),
         _ => false,
@@ -5906,6 +5912,64 @@ mod tests {
         assert_eq!(args["text"], "NULL");
         assert_eq!(args["maybe_text"], serde_json::Value::Null);
         assert_eq!(args["n"], serde_json::Value::Null);
+    }
+
+    // ----- OpenAPI 3.0 `nullable: true` (#3209 item c, mlx-vlm#2588) -----
+
+    fn note_tool(note: serde_json::Value) -> Vec<Tool> {
+        vec![m3_tool(
+            "f",
+            serde_json::json!({"type": "object", "properties": {"note": note}}),
+        )]
+    }
+
+    #[test]
+    fn qwen3_coder_nullable_string_null_is_json_null() {
+        let tools = note_tool(serde_json::json!({"type": "string", "nullable": true}));
+        for written in ["null", "NULL", "Null"] {
+            let output = qwen_block("f", &[("note", written)]);
+            let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+            assert_eq!(args["note"], serde_json::Value::Null, "{written}");
+            // MiniMax M2 shares the coercion.
+            let m2 = try_minimax_m2(&m2_block("f", &[("note", written)]), Some(&tools)).unwrap();
+            assert_eq!(
+                xml_args(&m2, 0)["note"],
+                serde_json::Value::Null,
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen3_coder_plain_string_null_stays_text() {
+        // No `nullable`, `nullable: false`, or a non-boolean `nullable`: the
+        // declaration says text, and `null` is the text the model wrote.
+        for note in [
+            serde_json::json!({"type": "string"}),
+            serde_json::json!({"type": "string", "nullable": false}),
+            serde_json::json!({"type": "string", "nullable": "true"}),
+        ] {
+            let tools = note_tool(note.clone());
+            let output = qwen_block("f", &[("note", "null")]);
+            let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+            assert_eq!(args["note"], "null", "{note}");
+            assert!(args["note"].is_string(), "{note}");
+        }
+    }
+
+    #[test]
+    fn qwen3_coder_nullable_string_text_is_verbatim() {
+        let tools = note_tool(serde_json::json!({"type": "string", "nullable": true}));
+        let output = qwen_block("f", &[("note", "hello"), ("other", "02134")]);
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["note"], "hello");
+        assert!(args["note"].is_string());
+        // A nullable string is no longer streamed raw, but it is still a
+        // string: numeric-looking text keeps its spelling.
+        let output = qwen_block("f", &[("note", "02134")]);
+        let args = xml_args(&try_qwen3_coder(&output, Some(&tools)).unwrap(), 0);
+        assert_eq!(args["note"], "02134");
+        assert!(args["note"].is_string());
     }
 
     #[test]

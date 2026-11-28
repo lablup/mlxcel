@@ -86,7 +86,9 @@ use std::path::Path;
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::create_sliding_window_prefill_mask;
+use mlxcel_core::utils::{
+    SlidingPrefillKeys, create_sliding_window_prefill_mask, prefill_sliding_window_mask,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -860,6 +862,19 @@ impl DeepSeekV4Model {
         input_ids: &MlxArray,
         caches: &mut [V4LayerCache],
     ) -> UniquePtr<MlxArray> {
+        self.forward_rows_with_caches(input_ids, caches, None)
+    }
+
+    /// [`Self::forward_with_caches`] projecting every position
+    /// (`row == None`) or only position `row` (`[B, 1, vocab]`, the prefill's
+    /// sampled row, #3070). The row is taken after `hc_head` collapses the
+    /// hyper-connection streams, which it does per position.
+    fn forward_rows_with_caches(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [V4LayerCache],
+        row: Option<usize>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let (b, l) = (shape[0], shape[1]);
 
@@ -873,14 +888,30 @@ impl DeepSeekV4Model {
         // layer's rotating cache sizes the shared sliding prefill mask, the
         // same way `create_attention_mask(..., window_size=sliding_window)`
         // reads `cache[0]` in the reference. Decode needs no mask: the
-        // rotating cache returns only its window.
+        // rotating cache returns only its window. A stack of local layers
+        // only may leave the band to MLX's causal mode and `window_size`
+        // with the sinks (#3098); compressed and sparse layers extend the
+        // local mask with their pooled rows, so any of them keeps it.
         let mask = if l > 1 {
             let local_offset = caches.first().map(|c| c.local.offset).unwrap_or(0);
-            Some(create_sliding_window_prefill_mask(
-                l,
-                local_offset,
-                self.sliding_window,
-            ))
+            match self.layers.first() {
+                Some(first) if self.compress_ratios.iter().all(|&r| r == 0) => {
+                    prefill_sliding_window_mask(
+                        l,
+                        local_offset,
+                        self.sliding_window,
+                        b,
+                        first.attn.prefill_attention(),
+                        mlxcel_core::array_dtype(&h),
+                        SlidingPrefillKeys::Rotating,
+                    )
+                }
+                _ => Some(create_sliding_window_prefill_mask(
+                    l,
+                    local_offset,
+                    self.sliding_window,
+                )),
+            }
         } else {
             None
         };
@@ -907,6 +938,7 @@ impl DeepSeekV4Model {
         }
 
         let h = self.hc_head.forward(&h);
+        let h = mlxcel_core::generate::select_row(h, row);
         let h = self.norm.forward(&h);
         match &self.lm_head {
             Some(head) => head.forward(&h),
@@ -1012,6 +1044,23 @@ impl LanguageModel for DeepSeekV4Model {
         self.forward_for_sequence(input_ids, seq_id)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // Text-only family: the embeddings entry runs the text forward too.
+        Some(self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_rows_with_caches(input_ids, caches, Some(last_pos)),
+        ))
+    }
+
     fn reset_runtime_state(&self) {
         self.sequence_state
             .replace_internal(self.make_internal_caches());
@@ -1067,7 +1116,7 @@ impl LanguageModel for DeepSeekV4Model {
     /// table (issue #2790). Every layer keeps an FP16 local `RotatingKVCache` (plus pooling).
     fn kv_cache_storage_modes(&self) -> Option<Vec<Option<mlxcel_core::cache::KVCacheMode>>> {
         crate::models::model_owned::table_less_storage_modes(self.layers.len(), |_| {
-            crate::models::model_owned::LayerKv::Fp16Only
+            mlxcel_core::cache::LayerStateKind::Full
         })
     }
 

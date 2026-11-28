@@ -1,0 +1,58 @@
+run,order,arm,model,prefill_chunk,prompt_tokens,prefill_ms,peak_footprint_bytes,exit,output_md5
+"qwen, fix first",1,eager,qwen3.5-4b-4bit,0,28707,9725.01,14534740848,0,352708390b444790ab07e57e85ecc22f
+"qwen, fix first",2,main,qwen3.5-4b-4bit,0,28707,9368.11,25352129368,0,352708390b444790ab07e57e85ecc22f
+"qwen, fix first",3,eager,qwen3.5-4b-4bit,2048,28707,6549.59,6060068008,0,352708390b444790ab07e57e85ecc22f
+"qwen, fix first",4,main,qwen3.5-4b-4bit,2048,28707,6678.21,6816664720,0,352708390b444790ab07e57e85ecc22f
+"qwen, fix first",5,eager,qwen3.8-27b-4bit,0,28749,52655.93,31826669280,0,b82f177b0298f83cce5570988e312674
+"qwen, fix first",6,main,qwen3.8-27b-4bit,0,28749,53104.80,59499556576,0,b82f177b0298f83cce5570988e312674
+"qwen, fix first",7,main,qwen3.8-27b-4bit,2048,28749,40992.90,22710497184,0,b82f177b0298f83cce5570988e312674
+"qwen, fix first",8,eager,qwen3.8-27b-4bit,2048,28749,41259.33,20691709760,0,b82f177b0298f83cce5570988e312674
+"families, fix first",1,eager,granite-4.0-h-tiny-4bit,0,,,156677230144,134,c56bf5eaf9219c387fb48017565db0bd
+"families, fix first",2,main,granite-4.0-h-tiny-4bit,0,,,156376813168,1,c56bf5eaf9219c387fb48017565db0bd
+"families, fix first",3,eager,granite-4.0-h-tiny-4bit,2048,19715,8776.15,9854816216,0,6be92eada7d84521e458b500277824f6
+"families, fix first",4,main,granite-4.0-h-tiny-4bit,2048,19715,8171.08,50097131528,0,6be92eada7d84521e458b500277824f6
+"families, fix first",5,eager,falcon-h1-tiny-90m-instruct-4bit,0,,,163121513360,134,c56bf5eaf9219c387fb48017565db0bd
+"families, fix first",6,main,falcon-h1-tiny-90m-instruct-4bit,0,,,163075277616,1,c56bf5eaf9219c387fb48017565db0bd
+"families, fix first",7,eager,falcon-h1-tiny-90m-instruct-4bit,2048,28707,4360.23,3988374440,0,07e9b3688b0e8e26d1ab020bf8675db0
+"families, fix first",8,main,falcon-h1-tiny-90m-instruct-4bit,2048,28707,3951.69,13478593544,0,07e9b3688b0e8e26d1ab020bf8675db0
+"families, fix first",9,eager,falcon-mamba-7b-4bit-instruct,0,20758,9426.17,11402104528,0,655149030d090216098d2e711e2ee22c
+"families, fix first",10,main,falcon-mamba-7b-4bit-instruct,0,20758,9158.56,32827494144,0,655149030d090216098d2e711e2ee22c
+"families, fix first",11,eager,falcon-mamba-7b-4bit-instruct,2048,20758,8403.72,7151145976,0,655149030d090216098d2e711e2ee22c
+"families, fix first",12,main,falcon-mamba-7b-4bit-instruct,2048,20758,8413.84,8118407344,0,655149030d090216098d2e711e2ee22c
+"families, fix first",13,eager,lfm2.5-2.6b-8bit,0,19717,2485.79,13467995376,0,a4f21e889c335aeb1e5892851e21a949
+"families, fix first",14,main,lfm2.5-2.6b-8bit,0,19717,2461.64,15082622192,0,a4f21e889c335aeb1e5892851e21a949
+"families, fix first",15,eager,lfm2.5-2.6b-8bit,2048,19717,2186.57,6143725000,0,a4f21e889c335aeb1e5892851e21a949
+"families, fix first",16,main,lfm2.5-2.6b-8bit,2048,19717,2204.73,6415027584,0,a4f21e889c335aeb1e5892851e21a949
+"families, fix first",17,eager,ai21-jamba-reasoning-3b-4bit,0,28734,4446.83,6448810288,0,20b6b7e96d0f3b3118a98f45d9fd97f8
+"families, fix first",18,main,ai21-jamba-reasoning-3b-4bit,0,28734,4186.21,13805095072,0,20b6b7e96d0f3b3118a98f45d9fd97f8
+"families, fix first",19,eager,ai21-jamba-reasoning-3b-4bit,2048,28734,4253.96,3253488064,0,f670cc1a8167921bb0a04d9045acbba6
+"families, fix first",20,main,ai21-jamba-reasoning-3b-4bit,2048,28734,4062.56,3564849624,0,f670cc1a8167921bb0a04d9045acbba6
+"families, fix first",21,eager,mamba2-1.3b-4bit,0,17686,5718.57,18263361480,0,a50aa71596284ee6415402f52fae8097
+"families, fix first",22,main,mamba2-1.3b-4bit,0,17686,5635.61,46382040888,0,a50aa71596284ee6415402f52fae8097
+"families, fix first",23,eager,mamba2-1.3b-4bit,2048,17686,3724.47,3378677368,0,a50aa71596284ee6415402f52fae8097
+"families, fix first",24,main,mamba2-1.3b-4bit,2048,17686,3870.61,9447098144,0,a50aa71596284ee6415402f52fae8097
+"families, fix first",25,eager,qwen3-next-80b-a3b-instruct-4bit,0,27668,12358.23,62011638256,0,7959805951fa9d233129fd1dccdb429c
+"families, fix first",26,main,qwen3-next-80b-a3b-instruct-4bit,0,27668,11894.81,77879869984,0,7959805951fa9d233129fd1dccdb429c
+"families, fix first",27,main,qwen3.5-4b-4bit,0,28707,8915.10,25351506800,0,352708390b444790ab07e57e85ecc22f
+"families, fix first",28,eager,qwen3.5-4b-4bit,0,28707,9047.54,14533675864,0,352708390b444790ab07e57e85ecc22f
+"order-reversed control, main first",1,main,granite-4.0-h-tiny-4bit,2048,19715,8165.67,50129457208,0,6be92eada7d84521e458b500277824f6
+"order-reversed control, main first",2,eager,granite-4.0-h-tiny-4bit,2048,19715,8056.99,9854308240,0,6be92eada7d84521e458b500277824f6
+"order-reversed control, main first",3,main,falcon-h1-tiny-90m-instruct-4bit,2048,28707,3913.33,13477872576,0,07e9b3688b0e8e26d1ab020bf8675db0
+"order-reversed control, main first",4,eager,falcon-h1-tiny-90m-instruct-4bit,2048,28707,3961.38,3987637184,0,07e9b3688b0e8e26d1ab020bf8675db0
+"order-reversed control, main first",5,main,ai21-jamba-reasoning-3b-4bit,0,28734,4189.71,13804931136,0,20b6b7e96d0f3b3118a98f45d9fd97f8
+"order-reversed control, main first",6,eager,ai21-jamba-reasoning-3b-4bit,0,28734,4139.22,6448826456,0,20b6b7e96d0f3b3118a98f45d9fd97f8
+"order-reversed control, main first",7,main,ai21-jamba-reasoning-3b-4bit,2048,28734,4059.06,3563849936,0,f670cc1a8167921bb0a04d9045acbba6
+"order-reversed control, main first",8,eager,ai21-jamba-reasoning-3b-4bit,2048,28734,4070.07,3253356776,0,f670cc1a8167921bb0a04d9045acbba6
+"order-reversed control, main first",9,main,falcon-mamba-7b-4bit-instruct,0,20758,9393.28,32827412248,0,655149030d090216098d2e711e2ee22c
+"order-reversed control, main first",10,eager,falcon-mamba-7b-4bit-instruct,0,20758,9061.59,11400843032,0,655149030d090216098d2e711e2ee22c
+"order-reversed control, main first",11,main,qwen3-next-80b-a3b-instruct-4bit,0,27668,11996.41,77880099264,0,7959805951fa9d233129fd1dccdb429c
+"order-reversed control, main first",12,eager,qwen3-next-80b-a3b-instruct-4bit,0,27668,12120.73,62010720632,0,7959805951fa9d233129fd1dccdb429c
+"order-reversed control, main first",13,main,qwen3.5-4b-4bit,0,28707,8992.12,25347722120,0,352708390b444790ab07e57e85ecc22f
+"order-reversed control, main first",14,eager,qwen3.5-4b-4bit,0,28707,8950.15,14533462872,0,352708390b444790ab07e57e85ecc22f
+"OOM path, final build",1,eager,granite-4.0-h-tiny-4bit,0,,,162909834864,1,c56bf5eaf9219c387fb48017565db0bd
+"OOM path, final build",2,eager,falcon-h1-tiny-90m-instruct-4bit,0,,,167848280928,1,c56bf5eaf9219c387fb48017565db0bd
+gemma sliding-window experiment,1,main,gemma-4-12b-it-4bit,0,28710,20269.00,27295728104,0,23c1e400fc27066dd61b7cec021e9297
+gemma sliding-window experiment,2,main,gemma-4-12b-it-4bit,2048,28710,18413.33,14087619048,0,23c1e400fc27066dd61b7cec021e9297
+gemma sliding-window experiment,3,window_trim_experiment,gemma-4-12b-it-4bit,0,28710,19941.17,18575802832,0,23c1e400fc27066dd61b7cec021e9297
+gemma sliding-window experiment,4,window_trim_experiment,gemma-4-12b-it-4bit,2048,28710,18453.58,14087684776,0,23c1e400fc27066dd61b7cec021e9297
+gemma sliding-window experiment,5,window_trim_experiment_cache_limit_1M,gemma-4-12b-it-4bit,0,28710,20375.81,16545202664,0,23c1e400fc27066dd61b7cec021e9297

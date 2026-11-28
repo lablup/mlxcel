@@ -1,0 +1,33 @@
+round,arm,model,prompt_tokens,flags,decode_ms,decode_tok_s,prefill_tok_s,measured_phase_peak_gb,mla_paths
+1,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",785.07,161.77,1376.13,9.70,decompressed=54 absorbed_fused=3834
+1,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",946.54,134.17,1368.84,9.71,decompressed=54 absorbed_composed=3834
+2,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",787.22,161.33,1374.88,9.70,decompressed=54 absorbed_fused=3834
+2,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",941.79,134.85,1372.57,9.71,decompressed=54 absorbed_composed=3834
+3,fp16-latent,Kimi-VL-A3B-Thinking-4bit,512,"",782.21,162.36,1377.54,9.70,decompressed=54 absorbed_fused=3834
+3,int8-latent,Kimi-VL-A3B-Thinking-4bit,512,"--kv-cache-mode int8",950.09,133.67,1369.85,9.71,decompressed=54 absorbed_composed=3834
+1,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",879.15,144.46,1375.61,10.02,decompressed=54 absorbed_fused=3834
+1,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1029.54,123.36,1373.40,9.82,decompressed=54 absorbed_composed=3834
+2,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",877.46,144.74,1376.04,10.02,decompressed=54 absorbed_fused=3834
+2,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1030.11,123.29,1373.07,9.82,decompressed=54 absorbed_composed=3834
+3,fp16-latent,Kimi-VL-A3B-Thinking-4bit,2048,"",876.11,144.96,1376.11,10.02,decompressed=54 absorbed_fused=3834
+3,int8-latent,Kimi-VL-A3B-Thinking-4bit,2048,"--kv-cache-mode int8",1028.10,123.53,1373.48,9.82,decompressed=54 absorbed_composed=3834
+1,fp16-latent,Kimi-VL-A3B-Thinking-4bit,16384,"",1179.45,107.68,1126.75,11.52,decompressed=432 absorbed_composed=3834
+1,int8-latent,Kimi-VL-A3B-Thinking-4bit,16384,"--kv-cache-mode int8",1839.74,69.03,1124.63,11.31,decompressed=432 absorbed_composed=3834
+2,fp16-latent,Kimi-VL-A3B-Thinking-4bit,16384,"",1181.40,107.50,1123.90,11.52,decompressed=432 absorbed_composed=3834
+2,int8-latent,Kimi-VL-A3B-Thinking-4bit,16384,"--kv-cache-mode int8",1838.93,69.06,1125.78,11.31,decompressed=432 absorbed_composed=3834
+1,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",786.23,161.53,1376.27,9.70,decompressed=54 absorbed_fused=3834
+1,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",947.23,134.08,1372.09,9.71,decompressed=54 absorbed_composed=3834
+2,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",783.07,162.18,1379.13,9.70,decompressed=54 absorbed_fused=3834
+2,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",942.06,134.81,1371.64,9.71,decompressed=54 absorbed_composed=3834
+3,fp16-latent,moonlight-16b-a3b-instruct-4bit,512,"",784.27,161.93,1379.62,9.70,decompressed=54 absorbed_fused=3834
+3,int8-latent,moonlight-16b-a3b-instruct-4bit,512,"--kv-cache-mode int8",939.20,135.22,1372.12,9.71,decompressed=54 absorbed_composed=3834
+1,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",878.22,144.61,1376.41,10.02,decompressed=54 absorbed_fused=3834
+1,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1030.99,123.18,1373.87,9.82,decompressed=54 absorbed_composed=3834
+2,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",884.30,143.62,1376.45,10.02,decompressed=54 absorbed_fused=3834
+2,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1026.44,123.73,1374.06,9.82,decompressed=54 absorbed_composed=3834
+3,fp16-latent,moonlight-16b-a3b-instruct-4bit,2048,"",874.57,145.21,1376.46,10.02,decompressed=54 absorbed_fused=3834
+3,int8-latent,moonlight-16b-a3b-instruct-4bit,2048,"--kv-cache-mode int8",1033.22,122.92,1373.68,9.82,decompressed=54 absorbed_composed=3834
+1,fp16-latent,moonlight-16b-a3b-instruct-4bit,8064,"",1235.39,102.80,1264.88,10.83,decompressed=216 absorbed_fused=3834
+1,int8-latent,moonlight-16b-a3b-instruct-4bit,8064,"--kv-cache-mode int8",1340.04,94.77,1265.32,10.52,decompressed=216 absorbed_composed=3834
+2,fp16-latent,moonlight-16b-a3b-instruct-4bit,8064,"",1233.05,103.00,1264.69,10.83,decompressed=216 absorbed_fused=3834
+2,int8-latent,moonlight-16b-a3b-instruct-4bit,8064,"--kv-cache-mode int8",1338.58,94.88,1265.36,10.52,decompressed=216 absorbed_composed=3834

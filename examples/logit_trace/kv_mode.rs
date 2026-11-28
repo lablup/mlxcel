@@ -19,20 +19,36 @@
 //! resolved per layer with the same boundary rule
 //! (`MLXCEL_KV_BOUNDARY_V_LAYERS`) and injected into the model's own caches, so it
 //! reaches the model-owned families (Gemma 3, Gemma 4) whose caches the
-//! harness's `make_caches()` does not hold.
+//! harness's `make_caches()` does not hold. A family that reads the caches the
+//! harness hands it (DeepSeek V2, whose `int8` mode stores the MLA
+//! latent quantized, issue #3155) gets the same table through
+//! [`KvArm::make_caches`], the way the engine sets it on its pool caches;
+//! every model gets it there, since a model-owned family ignores those caches.
+//!
+//! `MLXCEL_TRACE_PREFILL_CHUNK=N` runs the context pass as consecutive
+//! forwards of at most `N` tokens, the way the generator prefills a long
+//! prompt (`prefill_plan`), instead of one forward over the whole context. A
+//! single forward scores `heads * context^2` pairs, which at 16384 tokens on
+//! a 128-head model (DeepSeek V3.2) is tens of gigabytes per temporary; both
+//! arms of a comparison must use the same value (#3163).
 //!
 //! `MLXCEL_TRACE_DECODE_STEP=1` feeds the last context token through its own
 //! single-token forward. A decode step is what grows a sliding
 //! `RotatingKVCache` ahead of `offset`, the state the next multi-token append
 //! must read through `visible_len()`; a context pass alone never reaches it.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use mlxcel::{LanguageModel, LoadedModel};
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::layers::KVCache;
 
 /// The storage arm selected by the environment.
 pub struct KvArm {
     pub mode: Option<KVCacheMode>,
     pub decode_step: bool,
+    /// Largest context forward, in tokens; `None` is one forward.
+    context_chunk: Option<usize>,
+    /// Per-layer modes for the harness's own caches, set by [`Self::install`].
+    external_modes: Option<Vec<KVCacheMode>>,
 }
 
 impl KvArm {
@@ -50,11 +66,23 @@ impl KvArm {
             Ok("1") => true,
             _ => anyhow::bail!("MLXCEL_TRACE_DECODE_STEP must be 0 or 1"),
         };
-        Ok(Self { mode, decode_step })
+        let context_chunk = match std::env::var("MLXCEL_TRACE_PREFILL_CHUNK") {
+            Err(_) => None,
+            Ok(value) => match value.parse::<usize>() {
+                Ok(tokens) if tokens > 0 => Some(tokens),
+                _ => anyhow::bail!("MLXCEL_TRACE_PREFILL_CHUNK must be a positive integer"),
+            },
+        };
+        Ok(Self {
+            mode,
+            decode_step,
+            context_chunk,
+            external_modes: None,
+        })
     }
 
     /// Inject the resolved per-layer modes into the model's own caches.
-    pub fn install(&self, model: &LoadedModel) -> Result<()> {
+    pub fn install(&mut self, model: &LoadedModel) -> Result<()> {
         let Some(mode) = self.mode else {
             return Ok(());
         };
@@ -63,9 +91,16 @@ impl KvArm {
         let requested = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
         let modes = mlxcel_core::cache::turbo::resolve_layer_modes(mode, n_layers, requested);
         model.set_kv_cache_layer_modes(modes.clone());
-        let applied = model.kv_cache_layer_modes().context(
-            "this model does not own its KV caches, so the storage mode cannot reach them",
-        )?;
+        // The harness's own caches take the same table, as `DirectEngine`
+        // sets it on its pool caches whatever the model holds: a model that
+        // reads the caches it is handed needs it, and a model-owned family
+        // ignores them. GLM-4.7-Flash does both (its table feeds the MTP slot
+        // while decode reads the handed caches), so gating this on the model
+        // reporting no table traced it on FP16 caches (#3161).
+        self.external_modes = Some(modes.clone());
+        let Some(applied) = model.kv_cache_layer_modes() else {
+            return Ok(());
+        };
         ensure!(
             applied == modes,
             "the model kept KV cache modes {applied:?}, not the requested {modes:?}"
@@ -97,6 +132,24 @@ impl KvArm {
             );
         }
         Ok(())
+    }
+
+    /// Fresh caches for one sequence, in the installed storage modes when the
+    /// model reads external caches.
+    pub fn make_caches(&self, model: &LoadedModel) -> Vec<KVCache> {
+        let mut caches = model.make_caches();
+        if let Some(modes) = &self.external_modes {
+            for (cache, mode) in caches.iter_mut().zip(modes) {
+                cache.mode = *mode;
+            }
+        }
+        caches
+    }
+
+    /// The context pass's multi-token part as the forwards to run, in order:
+    /// one piece, or `MLXCEL_TRACE_PREFILL_CHUNK`-token pieces.
+    pub fn context_pieces<'a>(&self, context: &'a [i32]) -> std::slice::Chunks<'a, i32> {
+        context.chunks(self.context_chunk.unwrap_or(context.len()).max(1))
     }
 
     /// Where the context pass splits: everything before is one forward, the

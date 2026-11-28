@@ -110,6 +110,13 @@ fn default_layout() -> PagedKvLayout {
 /// `cache.rs`, so it may touch the private `paged_pool` / `active` fields)
 /// because the live forward/scheduler wiring of `write_prefill` is #121 and is
 /// out of scope for #120. `k`/`v` are `[1, n_kv_heads, n_new, head_dim]`.
+///
+/// It also advances the layer's cache `offset` by the written token count,
+/// as `KVCache::write_paged` does when a model's `update_and_fetch` appends
+/// to a pool-backed cache. Without that, a detached handle keeps `offset == 0`
+/// while its pages hold `seq_len` tokens, a state production never builds
+/// (#1390 keeps KV-less shadow sets out of the prompt cache), and
+/// `trim_detached_paged_to`'s `offset >= target_tokens` invariant fails (#3140).
 fn write_prefill_for(
     pool: &mut CachePool,
     id: SequenceId,
@@ -117,20 +124,31 @@ fn write_prefill_for(
     k: &MlxArray,
     v: &MlxArray,
 ) -> Result<(), String> {
-    let block_pool = pool
-        .paged_pool
-        .as_ref()
-        .ok_or_else(|| "paged backend not initialized".to_string())?;
-    let state = pool
+    {
+        let block_pool = pool
+            .paged_pool
+            .as_ref()
+            .ok_or_else(|| "paged backend not initialized".to_string())?;
+        let state = pool
+            .active
+            .get(&id)
+            .ok_or_else(|| format!("sequence {id} not found"))?
+            .paged
+            .as_ref()
+            .ok_or_else(|| format!("sequence {id} is not paged"))?;
+        block_pool
+            .borrow_mut()
+            .write_prefill(&mut state.borrow_mut(), layer_idx, k, v)?;
+    }
+    let n_new = crate::ffi::array_shape(k)[2];
+    if let Some(cache) = pool
         .active
-        .get(&id)
-        .ok_or_else(|| format!("sequence {id} not found"))?
-        .paged
-        .as_ref()
-        .ok_or_else(|| format!("sequence {id} is not paged"))?;
-    block_pool
-        .borrow_mut()
-        .write_prefill(&mut state.borrow_mut(), layer_idx, k, v)
+        .get_mut(&id)
+        .and_then(|set| set.caches.get_mut(layer_idx))
+    {
+        cache.offset += n_new;
+    }
+    Ok(())
 }
 
 /// Deterministic `[1, H, n_tokens, D]` FP32 prefill block whose per-token
@@ -1914,6 +1932,46 @@ fn detached_paged_set_accounts_real_pool_bytes() {
     let stats = pool.paged_stats().unwrap();
     assert_eq!(stats.bytes_in_use, 0);
     assert!(stats.bytes_reserved > 0);
+}
+
+/// The invariant `trim_detached_paged_to` asserts, on the path production
+/// takes (#3140): a pool-backed sequence filled through `update_and_fetch`
+/// detaches with `offset == seq_len` on every handle, and the trim clamps each
+/// handle to the kept prefix.
+#[test]
+fn trim_detached_paged_to_clamps_pool_backed_handle_offsets() {
+    let n_kv_heads = 2i32;
+    let head_dim = 3i32;
+    let block_size = 4usize;
+    let layout = fp16_pool_layout(block_size, n_kv_heads, head_dim);
+    let model = DenseNaturalStubModel::new(1);
+    let mut pool = CachePool::new(4);
+    let seq = pool
+        .allocate_with_layout(&model, Some(SequenceStateLayout::paged_kv_cache(layout)))
+        .unwrap();
+    assert!(pool.get_caches_mut(seq).unwrap()[0].is_paged_backed());
+
+    // 12 tokens = 3 whole blocks, through the model-facing write path.
+    let full_len = 12i32;
+    let k = prefill_block(1000.0, n_kv_heads, full_len, head_dim);
+    let v = prefill_block(5000.0, n_kv_heads, full_len, head_dim);
+    let _ = pool.get_caches_mut(seq).unwrap()[0].update_and_fetch(k, v);
+
+    let mut set = pool.detach_paged(seq).unwrap();
+    assert_eq!(set.seq_len(), full_len as usize);
+    for handle in &set.caches {
+        assert_eq!(handle.offset, full_len, "a detached handle carries seq_len");
+    }
+
+    pool.trim_detached_paged_to(&mut set, 8).unwrap();
+    assert_eq!(set.seq_len(), 8);
+    for handle in &set.caches {
+        assert_eq!(
+            handle.offset, 8,
+            "the trim clamps every handle to the prefix"
+        );
+    }
+    pool.release_detached_paged(set);
 }
 
 #[test]

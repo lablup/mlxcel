@@ -16,7 +16,6 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow, ensure};
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::create_causal_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, copy};
 use serde::de::DeserializeOwned;
@@ -120,6 +119,16 @@ impl FamilyStageExecutor for Glm4StageExecutor {
     ) -> Result<StageExecutionOutput> {
         self.model.execute(input, caches, mask)
     }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_last_row(input, caches, mask, last_pos)
+    }
 }
 
 impl FamilyStageExecutor for Glm4MoeStageExecutor {
@@ -135,6 +144,16 @@ impl FamilyStageExecutor for Glm4MoeStageExecutor {
     ) -> Result<StageExecutionOutput> {
         self.model.execute(input, caches, mask)
     }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        self.model.execute_last_row(input, caches, mask, last_pos)
+    }
 }
 
 impl FamilyStageExecutor for Glm4MoeLiteStageExecutor {
@@ -146,19 +165,23 @@ impl FamilyStageExecutor for Glm4MoeLiteStageExecutor {
         &self,
         input: StageExecutionInput<'_>,
         caches: &mut [KVCache],
-        _mask: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
     ) -> Result<StageExecutionOutput> {
-        self.model
-            .execute_with_computed_mask(input, caches, |hidden, caches| {
-                let shape = mlxcel_core::array_shape(hidden);
-                let seq_len = shape[1];
-                if seq_len > 1 {
-                    let offset = caches.first().map(|cache| cache.seq_len()).unwrap_or(0);
-                    Some(create_causal_mask(seq_len, offset))
-                } else {
-                    None
-                }
-            })
+        self.execute_last_row(input, caches, mask, None)
+    }
+
+    fn execute_last_row(
+        &self,
+        input: StageExecutionInput<'_>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<StageExecutionOutput> {
+        // Same contract as `Glm4MoeLiteModel::hidden_pre_norm`: no mask
+        // array, and the MLA attention runs a multi-token step through MLX's
+        // causal mode over the live window (#3099). The incoming mask is
+        // ignored, as the single-process model ignores its `_mask`.
+        self.model.execute_last_row(input, caches, None, last_pos)
     }
 }
 
@@ -315,4 +338,130 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .get(name)
         .map(|weight| copy(weight))
         .ok_or_else(|| anyhow!("weight not found: {}", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::pipeline::stage_executor::last_row_test_support::assert_last_row_matches_full;
+    use crate::models::glm4_moe_lite::tests::tiny_random_weights_and_args;
+    use crate::models::glm4_moe_lite::{Glm4MoeLiteModel, ModelArgs};
+
+    /// The stage executor over in-memory fixture weights, built the way
+    /// `load_glm4_family_stage_model` builds it from disk.
+    fn stage(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        filter: &LayerFilter,
+    ) -> Glm4MoeLiteStageExecutor {
+        let (gs, bits) = (args.group_size(), args.bits());
+        let embed = filter.has_embedding.then(|| {
+            UnifiedEmbedding::from_weights(weights, "model.embed_tokens", gs, bits)
+                .expect("fixture embedding loads")
+        });
+        let layers = filter
+            .layer_range
+            .clone()
+            .map(|i| {
+                Glm4MoeLiteStageLayer(
+                    models::glm4_moe_lite::TransformerBlock::from_weights(weights, args, i)
+                        .expect("fixture layer loads"),
+                )
+            })
+            .collect();
+        let (norm, lm_head) = if filter.has_lm_head {
+            (
+                Some(RMSNorm::new(
+                    get_weight_copy(weights, "model.norm.weight").expect("fixture norm"),
+                    args.rms_norm_eps,
+                )),
+                Some(
+                    UnifiedLinear::from_weights(weights, "lm_head", gs, bits)
+                        .expect("fixture head loads"),
+                ),
+            )
+        } else {
+            (None, None)
+        };
+        Glm4MoeLiteStageExecutor {
+            model: TransformerStageModel::new(filter.clone(), embed, layers, norm, lm_head)
+                .expect("fixture stage builds"),
+        }
+    }
+
+    fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+        assert_eq!(mlxcel_core::array_shape(a), mlxcel_core::array_shape(b));
+        let d = mlxcel_core::max_all(&mlxcel_core::abs(&mlxcel_core::subtract(a, b)));
+        mlxcel_core::eval(&d);
+        mlxcel_core::item_f32(&d)
+    }
+
+    /// A two-stage split over the rope-folded causal-mode prefill (#3099)
+    /// reproduces the single-process model's logits for a prompt, a warm
+    /// multi-token chunk and a decode step.
+    #[test]
+    fn two_stage_split_matches_the_single_process_model() {
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
+        let (weights, args) = tiny_random_weights_and_args(2);
+        let model = Glm4MoeLiteModel::from_weights(&weights, &args).expect("tiny model loads");
+        let first = stage(
+            &weights,
+            &args,
+            &LayerFilter {
+                layer_range: 0..1,
+                has_embedding: true,
+                has_lm_head: false,
+            },
+        );
+        let last = stage(
+            &weights,
+            &args,
+            &LayerFilter {
+                layer_range: 1..2,
+                has_embedding: false,
+                has_lm_head: true,
+            },
+        );
+
+        let mut model_caches = model.make_caches();
+        let mut first_caches = first.make_caches();
+        let mut last_caches = last.make_caches();
+        for piece in [&[3u32, 7, 11, 5, 1][..], &[9, 14, 2], &[6]] {
+            let ids = mlxcel_core::from_slice_u32(piece, &[1, piece.len() as i32]);
+            let want = model.forward(&ids, &mut model_caches, None);
+            let hidden = first
+                .execute(StageExecutionInput::TokenIds(&ids), &mut first_caches, None)
+                .expect("first stage runs")
+                .into_hidden_states()
+                .expect("first stage returns hidden states");
+            let got = last
+                .execute(
+                    StageExecutionInput::HiddenStates(&hidden),
+                    &mut last_caches,
+                    None,
+                )
+                .expect("last stage runs")
+                .into_logits()
+                .expect("last stage returns logits");
+            let diff = max_abs_diff(&got, &want);
+            assert!(
+                diff < 1e-5,
+                "{}-token piece: stage split vs model {diff}",
+                piece.len()
+            );
+        }
+    }
+
+    /// The final stage slices the hidden row before the norm and head and
+    /// returns the full forward's row (#3081).
+    #[test]
+    fn last_row_matches_the_full_forward_row() {
+        let (weights, args) = tiny_random_weights_and_args(2);
+        assert_last_row_matches_full(
+            |filter| Box::new(stage(&weights, &args, filter)),
+            2,
+            16,
+            1e-4,
+        );
+    }
 }

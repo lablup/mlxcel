@@ -1184,6 +1184,15 @@ fn vlm_prefix_sharing_gate_pins_safety_conditions() {
     assert!(!vlm_prefix_sharing_allowed(false, false, false, false));
     // Video is excluded because its bytes are not folded into the digest.
     assert!(!vlm_prefix_sharing_allowed(true, true, true, false));
+    // Nor is per-clip timing: Qwen2.5-VL places video tokens by each clip's
+    // `second_per_grid` (Blaizzy/mlx-vlm#2760), so the same frames at another
+    // sampled fps are a different prefix. An opted-in multimodal video request
+    // stays ineligible until the digest carries that timing.
+    let video_with_per_clip_timing = vlm_prefix_sharing_allowed(true, true, true, false);
+    assert!(
+        !video_with_per_clip_timing,
+        "video prefix sharing must stay off while second_per_grid is not in the digest"
+    );
     // Phi4MM's request-scoped adapter mode is not part of cache snapshots yet.
     assert!(!vlm_prefix_sharing_allowed(true, true, false, true));
     // The one eligible case: opted in, multimodal, no video.
@@ -1212,6 +1221,10 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
+        model_reasoning_effort: None,
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
@@ -1734,6 +1747,83 @@ fn dense_detached_kv_mode_validation_declines_named_mismatch() {
     );
 }
 
+/// A detached set whose one layer holds a quantized MLA latent written under
+/// `option` (three rows at rank 64).
+fn detached_latent_set(
+    option: mlxcel_core::mla::MlaLatentQuant,
+) -> mlxcel_core::cache::DetachedCacheSet {
+    let geometry = mlxcel_core::mla::MlaGeometry {
+        num_heads: 2,
+        kv_lora_rank: 64,
+        qk_nope_head_dim: 8,
+        qk_rope_head_dim: 8,
+        v_head_dim: 8,
+    };
+    let ramp = |n: usize| -> Vec<f32> { (0..n).map(|i| (i as f32 * 0.37).sin()).collect() };
+    let mut cache =
+        mlxcel_core::cache::KVCache::new_with_mode(mlxcel_core::cache::KVCacheMode::Int8);
+    mlxcel_core::mla::with_mla_latent_quant(option, || {
+        let window = mlxcel_core::mla::MlaLatentCache::wrap(&mut cache, geometry)
+            .expect("an int8 cache at rank 64 holds a latent")
+            .update_and_fetch(
+                mlxcel_core::from_slice_f32(&ramp(3 * 64), &[1, 1, 3, 64]),
+                mlxcel_core::from_slice_f32(&ramp(3 * 8), &[1, 1, 3, 8]),
+            );
+        assert!(window.is_quantized());
+    });
+    let mut set = detached_set_with_modes(&[]);
+    set.caches.push(cache.clone_handle());
+    set
+}
+
+/// Issue #3179: a prompt-cache entry saved at one MLA latent precision is not
+/// adopted by a server that stores another. `int8` and `int4` share the
+/// `int8` storage mode, so the mode table alone cannot tell them apart; the
+/// entry's own buffers can.
+#[test]
+fn dense_detached_latent_precision_mismatch_is_declined() {
+    use mlxcel_core::mla::MlaLatentQuant::{Auto, Fp16, Int4, Int8};
+    use mlxcel_core::mla::with_mla_latent_quant;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let validate = |saved, restoring| {
+        let dense = detached_latent_set(saved);
+        assert_eq!(
+            dense.caches[0].stored_latent_bits(),
+            Some(if saved == Int4 { 4 } else { 8 })
+        );
+        with_mla_latent_quant(restoring, || {
+            super::validate_dense_detached_kv_modes_against_table(
+                &dense,
+                &[mlxcel_core::cache::KVCacheMode::Int8],
+            )
+        })
+    };
+    // The same precision on both sides adopts, under either spelling of 8 bits.
+    validate(Int8, Int8).expect("an int8 entry restores on an int8 server");
+    validate(Auto, Int8).expect("the default int8 latent is the forced int8 latent");
+    validate(Int4, Int4).expect("an int4 entry restores on an int4 server");
+
+    let err = validate(Int8, Int4).expect_err("an int8 entry must not restore as int4");
+    assert!(
+        err.contains("layer 0") && err.contains("8-bit") && err.contains("4-bit"),
+        "the error names the layer and both widths: {err}"
+    );
+    let err = validate(Int4, Auto).expect_err("an int4 entry must not restore as int8");
+    assert!(err.contains("4-bit") && err.contains("8-bit"), "{err}");
+
+    // An fp16 latent differs in storage mode, which the mode table catches.
+    let dense = detached_latent_set(Int4);
+    let err = with_mla_latent_quant(Fp16, || {
+        super::validate_dense_detached_kv_modes_against_table(
+            &dense,
+            &[mlxcel_core::cache::KVCacheMode::Fp16],
+        )
+    })
+    .expect_err("a quantized entry must not restore on an fp16 server");
+    assert!(err.contains("int8") && err.contains("fp16"), "{err}");
+}
+
 // -------------------------------------------------------------------
 // Lookahead async_eval pipeline invalidation logic (issue #632)
 // -------------------------------------------------------------------
@@ -2073,10 +2163,7 @@ fn boundary_capture_applies_respects_adopted_prefix() {
 
 #[test]
 fn handoff_thinking_state_replays_generated_tokens_before_decode() {
-    let token_ids = ThinkingTokenIds {
-        open: 10,
-        close: 11,
-    };
+    let token_ids = ThinkingTokenIds::new(10, 11);
     let state =
         build_handoff_thinking_state(Some(token_ids), 2, 16, false, &[token_ids.open, 101, 102])
             .expect("valid handoff thinking state");
@@ -2090,10 +2177,7 @@ fn handoff_thinking_state_replays_generated_tokens_before_decode() {
 
 #[test]
 fn handoff_thinking_state_replays_primed_first_token_and_validates_raw_budget() {
-    let token_ids = ThinkingTokenIds {
-        open: 10,
-        close: 11,
-    };
+    let token_ids = ThinkingTokenIds::new(10, 11);
     let state = build_handoff_thinking_state(Some(token_ids), 1, 8, true, &[101])
         .expect("valid primed handoff thinking state");
     assert_eq!(state.in_block_count, 1);
@@ -2301,4 +2385,54 @@ fn a_string_stop_outranks_a_fired_generation_bound() {
         seq.state,
         SequenceState::Finished(FinishReason::StopSequence)
     ));
+}
+
+#[test]
+fn system_root_len_drops_the_seam_token_and_stays_before_the_history_boundary() {
+    use super::system_root_len;
+
+    let prompt: Vec<i32> = (0..100).collect();
+    // The root render tokenizes to the first 21 prompt tokens; the last one is
+    // the user-header seam and is dropped.
+    let root: Vec<i32> = (0..21).collect();
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 0), Some(20));
+    // A seam that merged differently: the common prefix is shorter, minus one.
+    let mut merged = root.clone();
+    merged[20] = 9999;
+    assert_eq!(system_root_len(&merged, &prompt, Some(60), 4, 0), Some(19));
+    // The opt-in prompt-length threshold.
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 101), None);
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 4, 100), Some(20));
+    // Below the store minimum.
+    assert_eq!(system_root_len(&root, &prompt, Some(60), 21, 0), None);
+    // Must end strictly before the history boundary (or the prompt end).
+    assert_eq!(system_root_len(&root, &prompt, Some(20), 4, 0), None);
+    assert_eq!(system_root_len(&root, &prompt, Some(21), 4, 0), Some(20));
+    assert_eq!(system_root_len(&root, &prompt[..20], None, 4, 0), Some(19));
+    assert_eq!(system_root_len(&root, &prompt[..5], None, 5, 0), None);
+    assert_eq!(system_root_len(&root, &prompt[..21], None, 4, 0), Some(20));
+    // Nothing in common.
+    assert_eq!(system_root_len(&[500], &prompt, None, 0, 0), None);
+    assert_eq!(system_root_len(&[], &prompt, None, 0, 0), None);
+}
+
+/// #2885 Part B: checkpoints are absolute multiples of the interval between
+/// the adopted prefix and the history boundary (both exclusive), at or above
+/// the store's minimum prefix, and the deepest ones win the cap.
+#[test]
+fn checkpoint_points_are_absolute_multiples_inside_the_unadopted_span() {
+    use super::checkpoint_points;
+
+    assert_eq!(checkpoint_points(8, 0, 30, 0, 16), vec![8, 16, 24]);
+    // Exclusive at both ends.
+    assert_eq!(checkpoint_points(8, 8, 24, 0, 16), vec![16]);
+    // An adopted prefix inside an interval does not shift the grid.
+    assert_eq!(checkpoint_points(8, 11, 40, 0, 16), vec![16, 24, 32]);
+    // The store's minimum prefix drops shallow points.
+    assert_eq!(checkpoint_points(8, 0, 30, 10, 16), vec![16, 24]);
+    // The cap keeps the deepest points.
+    assert_eq!(checkpoint_points(8, 0, 50, 0, 2), vec![40, 48]);
+    assert!(checkpoint_points(8, 0, 8, 0, 16).is_empty());
+    assert!(checkpoint_points(0, 0, 100, 0, 16).is_empty());
+    assert!(checkpoint_points(8, 0, 100, 0, 0).is_empty());
 }

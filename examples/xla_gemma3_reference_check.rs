@@ -27,6 +27,9 @@
 //!   --device local-task
 //! ```
 
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
+
 use std::path::PathBuf;
 
 fn argument(flag: &str) -> Option<String> {
@@ -45,6 +48,7 @@ fn required_path(flag: &str, variable: &str) -> PathBuf {
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model = required_path("--model", "MLXCEL_GEMMA3_FIXTURE");
     let image = argument("--image")
         .or_else(|| std::env::var("MLXCEL_GEMMA3_IMAGE").ok())

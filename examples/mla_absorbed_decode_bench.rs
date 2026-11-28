@@ -66,8 +66,9 @@
 use clap::Parser;
 use mlxcel_core::cache::KVCache;
 use mlxcel_core::mla::{
-    MlaAbsorbedProjections, MlaGeometry, MlaLatentCache, MlaSplitPlan, absorbed_decode,
-    absorbed_decode_split_kv, decompressed_bytes_per_token, latent_bytes_per_token, stats,
+    LatentWindow, MlaAbsorbedProjections, MlaGeometry, MlaLatentCache, MlaSplitPlan,
+    absorbed_decode, absorbed_decode_split_kv, decompressed_bytes_per_token,
+    latent_bytes_per_token, stats,
 };
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -244,11 +245,14 @@ enum Arm<'a> {
 }
 
 impl Arm<'_> {
-    fn expected_path(&self) -> &'static str {
+    /// The path this arm's steps must record. Stage 1 runs on the fused
+    /// kernel (issue #3121) wherever it applies and composed otherwise, so its
+    /// arm accepts either, and the printed `paths=` field says which.
+    fn expected_paths(&self) -> &'static [&'static str] {
         match self {
-            Arm::Decompressed { .. } => "decompressed",
-            Arm::Absorbed { .. } => "absorbed_composed",
-            Arm::SplitKv { .. } => "absorbed_split_kv",
+            Arm::Decompressed { .. } => &["decompressed"],
+            Arm::Absorbed { .. } => &["absorbed_fused", "absorbed_composed"],
+            Arm::SplitKv { .. } => &["absorbed_split_kv"],
         }
     }
 }
@@ -319,14 +323,20 @@ fn run_arm(
             }
             Arm::Absorbed { proj } => {
                 let mut view = MlaLatentCache::wrap(cache, geometry).expect("fp16 non-paged cache");
-                let (ckv, kpe) = view
-                    .update_and_fetch(mlxcel_core::copy(&new_latent), mlxcel_core::copy(&new_kpe));
+                let (ckv, kpe) =
+                    dense_window(view.update_and_fetch(
+                        mlxcel_core::copy(&new_latent),
+                        mlxcel_core::copy(&new_kpe),
+                    ));
                 absorbed_decode(&q_nope, &q_pe, &ckv, &kpe, proj, scale, None)
             }
             Arm::SplitKv { proj } => {
                 let mut view = MlaLatentCache::wrap(cache, geometry).expect("fp16 non-paged cache");
-                let (ckv, kpe) = view
-                    .update_and_fetch(mlxcel_core::copy(&new_latent), mlxcel_core::copy(&new_kpe));
+                let (ckv, kpe) =
+                    dense_window(view.update_and_fetch(
+                        mlxcel_core::copy(&new_latent),
+                        mlxcel_core::copy(&new_kpe),
+                    ));
                 let kv_len = view.seq_len();
                 let plan = MlaSplitPlan::heuristic(
                     batch as usize,
@@ -367,10 +377,12 @@ fn run_arm(
         kv_mib,
         counts.summary()
     );
-    let expected = arm.expected_path();
-    if !counts
-        .summary()
-        .contains(&format!("{expected}={}", args.steps))
+    let expected = arm.expected_paths().join(" or ");
+    let summary = counts.summary();
+    if !arm
+        .expected_paths()
+        .iter()
+        .any(|path| summary.contains(&format!("{path}={}", args.steps)))
     {
         println!(
             "  WARNING: arm \"{label}\" expected {expected}={} but recorded {}. \
@@ -378,6 +390,19 @@ fn run_arm(
             args.steps,
             counts.summary()
         );
+    }
+}
+
+/// The FP16 latent window this bench builds its caches for.
+///
+/// Every arm wraps an FP16 cache, so a quantized window means the cache was
+/// built in the wrong mode and the measurement would not be what it claims.
+fn dense_window(window: LatentWindow) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    match window {
+        LatentWindow::Dense { ckv, kpe } => (ckv, kpe),
+        LatentWindow::Quantized { bits, .. } => {
+            panic!("mla_absorbed_decode_bench expects an fp16 latent cache, got a {bits}-bit one")
+        }
     }
 }
 

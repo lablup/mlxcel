@@ -14,6 +14,7 @@
 
 //! OpenAI/llama-server compatible HTTP server for mlxcel
 
+pub mod anthropic_billing_stamp;
 pub mod anthropic_translator;
 pub mod app;
 pub(crate) mod assistant_prefill;
@@ -27,10 +28,13 @@ pub mod chat_template;
 pub mod chat_template_json;
 pub mod chat_template_kwargs;
 pub mod cli_input;
+pub(crate) mod clock;
 pub(crate) mod completion_control;
 mod config;
 pub mod conversation_store;
 mod cors;
+pub mod decision_model;
+pub mod decision_worker;
 pub(crate) mod diffusion_worker;
 pub(crate) mod dry_breakers;
 pub mod embedding_model;
@@ -50,7 +54,9 @@ pub mod kokoro_tts;
 mod listen;
 pub mod local_media;
 pub mod logging;
-mod media;
+pub mod mcp;
+// `pub(crate)` so `crate::decision::media` reuses the guarded fetchers.
+pub(crate) mod media;
 mod media_net;
 pub mod media_root;
 pub mod model_meta;
@@ -64,10 +70,15 @@ pub mod realtime_protocol;
 mod realtime_session;
 pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
+pub(crate) mod reasoning_steering;
+mod reasoning_steering_startup_guard;
 mod request_options;
+pub mod rerank_maxsim;
 pub mod rerank_model;
 pub mod rerank_worker;
+pub mod responses_background_events;
 pub(crate) mod responses_compaction;
+pub(crate) mod responses_mcp_lowering;
 pub mod responses_store;
 pub mod responses_translator;
 pub mod router_cache;
@@ -100,6 +111,8 @@ pub mod types;
 #[cfg(feature = "webui")]
 pub mod webui;
 pub mod whisper_stt;
+#[cfg(feature = "xla-iree")]
+pub(crate) mod xla_prompt_cache_guard;
 
 pub use app::create_app;
 pub use audio_model::{
@@ -113,20 +126,21 @@ pub use chat_template_kwargs::{
     env_fallback_chat_template_kwargs,
 };
 pub use cli_input::{
-    ServerStartupInput, apply_bool_pair_env_bindings, env_fallback_allowed_origins,
-    env_fallback_apc_block_size, env_fallback_apc_enabled, env_fallback_apc_hash,
-    env_fallback_apc_num_blocks, env_fallback_api_key_files, env_fallback_api_keys,
-    env_fallback_batch_size, env_fallback_cache_type_k, env_fallback_cache_type_v,
-    env_fallback_cors_credentials, env_fallback_cors_origins, env_fallback_draft_model,
-    env_fallback_embedding_model, env_fallback_endpoint_slots, env_fallback_kv_bits,
-    env_fallback_kv_group_size, env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer,
-    env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    ServerStartupInput, apply_bool_pair_env_bindings, effective_serve_kv_cache_mode,
+    env_fallback_allowed_origins, env_fallback_apc_block_size, env_fallback_apc_enabled,
+    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
+    env_fallback_api_keys, env_fallback_batch_size, env_fallback_cache_type_k,
+    env_fallback_cache_type_v, env_fallback_cors_credentials, env_fallback_cors_origins,
+    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
+    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
+    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
     env_fallback_models_autoload, env_fallback_prompt_cache_capacity_bytes,
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_settings_endpoint, env_fallback_ubatch_size, long_cli_flag_in,
+    env_fallback_settings_endpoint, env_fallback_ubatch_size, kv_mode_for_batch, long_cli_flag_in,
     long_cli_flag_was_set, resolve_batch_kv_quant_config, resolve_compat_toggle,
     resolve_kv_cache_mode, resolve_n_parallel,
 };
@@ -141,8 +155,8 @@ pub use config::{
 pub use cors::{CorsPolicy, OriginPolicy};
 pub use media::{
     DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES, DEFAULT_MAX_IMAGE_HEIGHT, DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
-    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
-    configure_media_admission, media_admission_disabled,
+    DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, INKLING2_AUDIO_REFUSAL,
+    ImageInputLimits, configure_media_admission, media_admission_disabled,
 };
 pub(crate) use media::{
     current_image_input_limits, is_combined_video_audio_rejection, media_capability_rejection,
@@ -178,7 +192,16 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 mod got_chat_template_tests;
 
 #[cfg(test)]
+mod plamo2_vl_chat_template_tests;
+
+#[cfg(test)]
+mod unlimited_ocr_chat_template_tests;
+
+#[cfg(test)]
 mod minicpm_chat_template_tests;
+
+#[cfg(test)]
+mod image_geometry_route_tests;
 
 #[cfg(test)]
 mod llama_compat_tests;
@@ -194,6 +217,12 @@ mod muse_glimmer_template_tests;
 
 #[cfg(test)]
 mod reasoning_effort_tests;
+
+#[cfg(test)]
+mod k2_horizon_reasoning_tests;
+
+#[cfg(test)]
+mod hy_v4_reasoning_tests;
 
 #[cfg(test)]
 mod store_budget_tests;

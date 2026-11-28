@@ -107,11 +107,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/store_guard.sh"
 BENCHMARKS_DIR="./benchmarks"
 DATE=$(date '+%Y-%m-%d')
 
-# Same 15-column header bench_decode.sh writes (its CSV_HEADER constant), so
-# aggregate rows -- whether they come from a real cell, a synthesized fake-OOM
-# cell, or a backstop/record skip row emitted directly by this script -- share
-# one schema. Trailing SKIP:*/FAIL:* tokens are an unnamed 16th field.
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlx_version,build_type,max_tokens,prompt,prompt_target_len"
+# Same header bench_decode.sh writes (its CSV_HEADER constant, without the
+# ROCm-only extras), so aggregate rows -- whether they come from a real cell,
+# a synthesized fake-OOM cell, or a backstop/record skip row emitted directly
+# by this script -- share one schema. A trailing SKIP:*/FAIL:* token follows
+# decode_path as an unnamed 20th field. Rows written before 2026-11-04 predate
+# the backend column and have no value there.
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit,backend,decode_path"
 
 # Representative subset: mix of dense (llama, qwen2.5), MoE (qwen3-a3b,
 # mixtral), and a large multimodal-capable text model (gemma-4).
@@ -208,6 +210,31 @@ detect_backend() {
   fi
 }
 
+# Versioned label for the CSV `backend` column, matching bench_decode.sh.
+# MLXCEL_BENCH_BACKEND overrides the probe for cuda-rust, Vulkan, OpenXLA and
+# other builds the platform probe cannot name.
+detect_backend_label() {
+  if [[ -n "${MLXCEL_BENCH_BACKEND:-}" ]]; then
+    printf '%s\n' "$MLXCEL_BENCH_BACKEND"
+    return
+  fi
+  local backend nvcc_bin="" ver=""
+  backend=$(detect_backend)
+  if [[ "$backend" == "cuda" ]]; then
+    nvcc_bin=$(command -v nvcc 2>/dev/null || true)
+    if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
+      nvcc_bin=/usr/local/cuda/bin/nvcc
+    fi
+    if [[ -n "$nvcc_bin" ]]; then
+      ver=$("$nvcc_bin" --version 2>/dev/null \
+        | sed -n 's/.*release \([0-9][0-9.]*\).*/\1/p' | head -1)
+    fi
+    if [[ -n "$ver" ]]; then echo "cuda-${ver}"; else echo "cuda"; fi
+    return
+  fi
+  echo "$backend"
+}
+
 detect_hardware_short() {
   local chip=""
   if [[ "$(uname)" == "Darwin" ]]; then
@@ -248,20 +275,20 @@ cell_classification() {
   fi
 }
 
-# Append a schema-compatible 16-field skip row for a cell that was never
-# launched (monotonic backstop or persistent-record pre-skip). Writes the
-# shared CSV header first if this is the first row of the aggregate output.
-# This script does not compute `hardware`/`mlx_version`/`build_type` (only
-# bench_decode.sh does), so those three fields are left blank; downstream
-# consumers filter on the SKIP: prefix and treat these rows as capacity
-# exclusions regardless.
+# Append a schema-compatible 19-field skip row (plus the trailing status) for a
+# cell that was never launched (monotonic backstop or persistent-record
+# pre-skip). Writes the shared CSV header first if this is the first row of the
+# aggregate output. This script does not compute `hardware`/`mlxcel_version`/
+# `build_type`/commit fields (only bench_decode.sh does), so those are left
+# blank; downstream consumers filter on the SKIP: prefix and treat these rows
+# as capacity exclusions regardless.
 emit_skip_row() {
   local model_name="$1" model_path="$2" len="$3" classification="$4"
   if [[ "$header_written" -eq 0 ]]; then
     echo "$CSV_HEADER" >> "$OUTPUT"
     header_written=1
   fi
-  echo "${model_name},${model_path},,,,,,,${DATE},,,,${MAX_TOKENS},\"\",${len},${classification}" >> "$OUTPUT"
+  echo "${model_name},${model_path},,,,,,,${DATE},,,,${MAX_TOKENS},\"\",${len},,,${BACKEND_LABEL},,${classification}" >> "$OUTPUT"
 }
 
 # Append a true-OOM cell to the persistent record file. peak_bytes is always
@@ -328,7 +355,7 @@ synthesize_fake_oom_cell() {
   local model_name="$1" model_path="$2" len="$3"
   {
     echo "$CSV_HEADER"
-    echo "${model_name},${model_path},,,,,,,${DATE},,,,${MAX_TOKENS},\"(faked via MLXCEL_BENCH_FAKE_OOM)\",${len},SKIP:oom"
+    echo "${model_name},${model_path},,,,,,,${DATE},,,,${MAX_TOKENS},\"(faked via MLXCEL_BENCH_FAKE_OOM)\",${len},,,${BACKEND_LABEL},,SKIP:oom"
   } > "$TMP_CELL"
 }
 
@@ -373,6 +400,8 @@ done
 # placed at the model loop would refuse only after an --output naming an
 # existing CSV had already lost its contents.
 require_named_checkpoints "$MODELS_DIR" "long-prompt sweep" $MODELS
+
+BACKEND_LABEL=$(detect_backend_label)
 
 if [[ -z "$OUTPUT" ]]; then
   BACKEND=$(detect_backend)

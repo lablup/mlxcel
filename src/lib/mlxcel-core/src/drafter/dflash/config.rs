@@ -430,6 +430,7 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
                     Some(DFLASH_DRAFT_ARCHITECTURE)
                         | Some(DSPARK_DRAFT_ARCHITECTURE)
                         | Some(crate::drafter::laguna_dflash::LAGUNA_DFLASH_ARCHITECTURE)
+                        | Some(crate::drafter::raon_dflash2::RAON_DFLASH2_ARCHITECTURE)
                 )
             })
         })
@@ -444,6 +445,12 @@ pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
 /// that refuses without loading the checkpoint must report the unreadable case
 /// itself.
 pub fn is_dflash_drafter_dir(path: &Path) -> bool {
+    // An Inkling 2 checkpoint bundles its DSpark drafter (issue #3374); the
+    // marker is the `mtp_config` plus `mtp.safetensors`, not the config alone,
+    // so model detection (which reads only the config) is unaffected.
+    if crate::drafter::inkling2_dspark::is_inkling2_dspark_dir(path) {
+        return true;
+    }
     let Ok(bytes) = std::fs::read(path.join("config.json")) else {
         return false;
     };

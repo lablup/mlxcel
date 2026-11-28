@@ -14,7 +14,7 @@
 
 //! Shared SwitchLinear / SwitchGLU for MoE models
 //!
-//! Used by: KimiLinear, KimiK3, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
+//! Used by: KimiLinear, KimiK3, Raon1Mini, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
 //!          GLM4Moe, GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe,
 //!          Qwen3VLMoe, PhiMoE, OLMoE, Inkling, etc.
 //!
@@ -87,7 +87,7 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// `mlxcel generate -n 256` with the kernel than without it although the
 /// kernel is faster per token. The `jit_module.cpp` overlay caches custom
 /// kernels since issue #2492; see
-/// `docs/benchmark_results/fused-moe-jit-cache-gb10-2026-10-22.md` before
+/// `docs/benchmark_results/versions/v0.8.0.md#fused-moe-jit-cache-gb10-2026-10-22` before
 /// reading a short-run CUDA A/B of this gate as a per-token result.
 ///
 /// This only chooses whether to *attempt* the kernel. Callers still fall back to
@@ -118,20 +118,23 @@ pub fn fused_moe_enabled() -> bool {
 
 /// Whether [`SwitchGLU::forward`] tries the gate/up kernel for this batch.
 ///
-/// Batched decode on M1 Ultra loses about 10% to it against `gather_qmm`:
-/// Qwen3-30B-A3B 4-bit is 94.2 vs 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4,
-/// and Mixtral 8x7B 4-bit is 34.3 vs 41.1 at B=4 (#2587). The M3 Ultra numbers
-/// in `docs/benchmark_results/switch-gate-up-batch-m3ultra-2026-10-21.md` keep
-/// it on where it was measured. M2 shares M1's narrow quantized paths and is
-/// declined with it, as is an unenumerated generation, on the rule
-/// [`AppleSiliconGen::wide_quantized_projections`] documents.
+/// Single-token decode only. Multi-token decode loses to `gather_qmm` at every
+/// measured batch size: on M1 Ultra about 10% (Qwen3-30B-A3B 4-bit is 94.2 vs
+/// 104.1 tok/s at B=2 and 115.3 vs 124.5 at B=4, Mixtral 8x7B 4-bit 34.3 vs
+/// 41.1 at B=4; #2587), and on M3 Ultra 3.6% to 7.6% at B=2 to B=7 in the
+/// corrected-geometry A/B in
+/// `docs/benchmark_results/versions/unreleased.md#switch-gate-up-batch-m3ultra-2026-11-04`, whose
+/// B=8 sorted-path control sits at +0.6%. The 2026-10-21 record that kept the
+/// kernel on at B >= 2 ran the default `--parallel 4`, so its concurrency 5 to
+/// 8 levels queued behind four decoding rows and its batch-3 and batch-4 cells
+/// were inside its noise floor; a focused `--parallel 4` replication at the
+/// current head shows -4.3% at B=2 and -7.5% at B=4. M4 and M5 are unmeasured
+/// and decline with every other generation.
 ///
-/// [`AppleSiliconGen::wide_quantized_projections`]: mlxcel_core::hardware::AppleSiliconGen::wide_quantized_projections
-pub(crate) fn switch_gate_up_preferred_in_forward(
-    tokens: i32,
-    silicon_gen: mlxcel_core::hardware::AppleSiliconGen,
-) -> bool {
-    tokens == 1 || silicon_gen.wide_quantized_projections()
+/// [`SwitchGLU::forward_activated`] (Inkling's decode) is unaffected: it calls
+/// the kernel directly at its measured single-token win.
+pub(crate) fn switch_gate_up_preferred_in_forward(tokens: i32) -> bool {
+    tokens == 1
 }
 
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested
@@ -153,28 +156,27 @@ pub(crate) fn fused_moe_enabled_from(value: Option<&str>) -> bool {
 /// The fused two-kernel path wins only while `gather_qmm` underutilizes the GPU
 /// (small experts); above this bound the caller falls back to `gather_qmm`.
 /// Tuned on M1 Ultra, where phi-3.5-moe (Dff 6400) already regresses. See
-/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
+/// `docs/benchmark_results/versions/v0.3.0.md#fused-moe-decode-kernel-design`.
 const FUSED_MOE_MAX_DFF_METAL: i32 = 4096;
 
 /// CUDA default for the same bound. At batch=1 `gather_qmm` leaves far more of
-/// the GPU idle than on Metal, so the fused path keeps winning to a larger
-/// expert size. Re-measured on GB10 (DGX Spark, sm_121) under MLX pin e9463bb
-/// (#626, after the #625 pin bump moved `gather_gemm` to JIT and sped the
-/// fallback): fused wins through Dff 6400 (phi-3.5-moe +5%, lfm2 +12%), is
-/// break-even at 8192 (llama-4-scout, within run-to-run noise) and loses at
-/// 14336 (mixtral -1.2%), so the crossover interpolates to ~8000. Set to the
-/// 8192 break-even boundary, which stays well below the 14336 regression while
-/// capturing the phi-3.5-moe / llama-4-scout mid-size experts that the old 4096
-/// default silently declined. The env var overrides this on both backends.
+/// the GPU idle than on Metal, so the fused path keeps paying off to a larger
+/// expert size.
 ///
-/// Provenance caveat: that GB10 sweep ran on MLX pin e9463bb (#626). The pin has
-/// since advanced to 0.32.1 (#703/#704, commit 57c66cac), so 8192 is carried
-/// forward as the documented-data-based default, not a value re-measured on the
-/// current binaries. It is deliberately the conservative floor of the measured
-/// crossover (the 8192 break-even, not the 14336 regression edge), so MLX pin
-/// drift cannot flip the default into a regression. A GB10 re-validation on the
-/// 0.32.1 pin is pending; see the pending re-validation note in
-/// `docs/benchmark_results/fused-moe-decode-kernel-design.md`.
+/// Set to 8192 by the GB10 sweep of #626 (MLX pin e9463bb) and confirmed by
+/// #712 and by the 2026-11-11 re-measurement on pin 9f806b36 (#2540,
+/// `docs/benchmark_results/fused-moe-dff-crossover-gb10-2026-11-11.md`), which
+/// added a null arm and interleaved rounds. That record measures a clear fused
+/// win at Dff 768 (qwen3-30b, +28% to +35%), ties at 1792 (lfm2) and 6400
+/// (phi-3.5-moe), and a clear loss at 14336 (mixtral, about -2%), so the
+/// crossover lies between 6400 and 14336 and 8192 keeps mixtral on
+/// `gather_qmm`.
+///
+/// Dff 8192 itself has not been measured through the fused kernel. The
+/// llama-4-scout row the earlier sweeps read as "break-even at 8192" is not a
+/// fused-path point: Llama 4 has its own `SwitchGLU` (`llama4.rs`) that calls
+/// `gather_qmm` and never reads this bound, so both of its arms ran the same
+/// code. The env var overrides this default on every backend.
 const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 
 /// ROCm default for the same bound. On gfx1151, Mixtral-8x7B (Dff 14336) decodes
@@ -199,7 +201,7 @@ const FUSED_MOE_MAX_DFF_GPU_PORT: i32 = if cfg!(feature = "rocm") {
 /// The cap is family-agnostic, but it only governs families whose fused decode
 /// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
 /// BailingMoe, Cohere2Moe, DBRX, dots.llm1, GraniteMoeHybrid, Inkling, Klear,
-/// Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
+/// Kolibri-1, Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
 /// Qwen2Moe, Qwen3-MoE and Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which
 /// is built as a `Qwen3VLMoeModel`). Two families still drive a fused kernel
 /// from their own
@@ -347,7 +349,8 @@ pub(crate) fn validate_expert_quantization_shapes(
 /// Used by: the guard tests of every family listed on
 ///          [`validate_expert_quantization_params`], plus the Qwen3MoE and
 ///          Qwen3VLMoE block-loader guard tests (their experts moved onto the
-///          shared loader in issue #1884)
+///          shared loader in issue #1884), and the Xing4.0 per-plane width
+///          refusal test (issue #2356)
 #[cfg(test)]
 pub(crate) fn insert_stacked_quantized_expert_plane(
     weights: &mut WeightMap,
@@ -525,7 +528,8 @@ impl SwitchLinear {
     ///
     /// Used by: `SwitchLinear::forward`, `SwitchGLU::forward`,
     ///          `SwitchGLU::forward_with_expert_scales`,
-    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`),
+    ///          `DeepSeekV3` (`FloatSwitchGLU::forward`)
     pub(crate) fn forward_indexed(
         &self,
         x: &MlxArray,
@@ -661,6 +665,56 @@ pub struct QuantizedSwitchLinearRef<'a> {
 }
 
 impl SwitchLinear {
+    /// Check the stack's input width against the config's `in_features`
+    /// (issue #3457), as `UnifiedLinear::check_input_width` does for a
+    /// dense projection: a mismatch would abort inside `gather_qmm` /
+    /// `gather_mm` at the first routed forward pass.
+    ///
+    /// Used by: [`SwitchGLU::check_input_widths`]
+    pub fn check_input_width(&self, label: &str, in_features: usize) -> Result<(), String> {
+        match self {
+            Self::Quantized {
+                weight,
+                scales,
+                biases,
+                group_size,
+                bits,
+                mode,
+                ..
+            } => {
+                let w_shape = mlxcel_core::array_shape(weight);
+                let s_shape = mlxcel_core::array_shape(scales);
+                let b_shape = biases.as_ref().map(|b| mlxcel_core::array_shape(b));
+                let shapes = mlxcel_core::layers::QuantizedTensorShapes {
+                    weight: &w_shape,
+                    scales: &s_shape,
+                    biases: b_shape.as_deref(),
+                };
+                mlxcel_core::layers::validate_quantized_packing(
+                    label,
+                    &shapes,
+                    in_features,
+                    *group_size,
+                    *bits,
+                    mode,
+                )
+                .map_err(|e| format!("{label}.weight: input width check failed: {e}"))
+            }
+            Self::Regular { weight } => {
+                let shape = mlxcel_core::array_shape(weight);
+                let width = shape.last().copied().unwrap_or(0);
+                if usize::try_from(width).ok() == Some(in_features) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{label}.weight: shape {shape:?} has an input width of {width}, but the \
+                         config says {in_features}"
+                    ))
+                }
+            }
+        }
+    }
+
     pub fn from_weights_with_mode(
         weights: &WeightMap,
         prefix: &str,
@@ -738,7 +792,7 @@ impl SwitchLinear {
         // already-loadable checkpoint. No declared expert count is available at
         // this generic call site, so the shortfall cross-check is skipped
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
-        if let Some(parts) = stack_individual_expert_parts(weights, prefix) {
+        if let Some(parts) = stack_individual_expert_parts(weights, prefix)? {
             refuse_unstacked_expert_sidecars(weights, prefix, &parts)?;
             let (mode, group_size) = resolve_mode(mode, &parts, group_size);
             return Self::from_stacked_parts(prefix, parts, group_size, bits, mode);
@@ -806,6 +860,16 @@ impl SwitchLinear {
                 // group_size`.
                 let w_shape = mlxcel_core::array_shape(&weight);
                 let s_shape = mlxcel_core::array_shape(&scales);
+                // `gather_qmm` indexes scales by expert and output row, and MLX
+                // checks neither axis, so a short one reads past the scales
+                // buffer (issue #3457).
+                let b_shape = biases.as_ref().map(|b| mlxcel_core::array_shape(b));
+                mlxcel_core::layers::check_scales_leading_axes(
+                    prefix,
+                    &w_shape,
+                    &s_shape,
+                    b_shape.as_deref(),
+                )?;
                 let packed_in = *w_shape.last().unwrap_or(&0);
                 let num_groups = *s_shape.last().unwrap_or(&0);
 
@@ -1177,7 +1241,13 @@ fn refuse_unstacked_expert_sidecars(
 /// 32), and those are the only bias-free modes MLX has. `None` for float
 /// scales or any other ratio, which the caller leaves on the affine path to
 /// refuse.
-fn infer_block_float_layout(weight: &MlxArray, scales: &MlxArray) -> Option<(&'static str, i32)> {
+///
+/// Used by: [`resolve_mode`], and Raon1Mini's dense linears and `lm_head`
+/// (`raon1_mini_quant::linear`)
+pub(crate) fn infer_block_float_layout(
+    weight: &MlxArray,
+    scales: &MlxArray,
+) -> Option<(&'static str, i32)> {
     if mlxcel_core::array_dtype(scales) != mlxcel_core::dtype::UINT8 {
         return None;
     }
@@ -1262,6 +1332,114 @@ pub(crate) fn stack_expert_leaf(
         "biases" => ("biases", mlxcel_core::stack(parts, 0)),
         other => panic!("stack_expert_leaf: {other} is not one of EXPERT_PLANE_LEAVES"),
     }
+}
+
+/// Refuse per-expert parts of one leaf that disagree in shape or dtype, before
+/// they reach `mlxcel_core::stack`. That FFI is not fallible, so MLX's
+/// `[stack]` shape exception would terminate the process instead of failing
+/// the load (issue #3297). `parts` pairs each expert index with its tensor;
+/// the first part is the reference, and `key(e)` names expert `e`'s tensor in
+/// the error.
+///
+/// Used by: [`drain_numbered_expert_planes`],
+/// [`stack_individual_experts_with_count`], and the family-local expert
+/// stacking in DeepSeek-V3, Mistral4, PhiMoE, OLMoE, MiMo-V2 and Mellum
+/// (issue #3320)
+pub(crate) fn refuse_mismatched_expert_parts(
+    parts: &[(usize, &MlxArray)],
+    key: impl Fn(usize) -> String,
+) -> Result<(), String> {
+    let Some(&(first, reference)) = parts.first() else {
+        return Ok(());
+    };
+    let want_shape = mlxcel_core::array_shape(reference);
+    let want_dtype = mlxcel_core::array_dtype(reference);
+    for &(expert, part) in &parts[1..] {
+        let shape = mlxcel_core::array_shape(part);
+        let dtype = mlxcel_core::array_dtype(part);
+        if shape != want_shape || dtype != want_dtype {
+            return Err(format!(
+                "{}: expert {expert} has shape {shape:?} (dtype {dtype}), but expert {first} \
+                 ({}) has shape {want_shape:?} (dtype {want_dtype}); every expert's plane must \
+                 match before the experts are stacked",
+                key(expert),
+                key(first),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Drain the numbered per-expert planes `{experts_root}.{e}.{src_proj}.{leaf}`
+/// (`e` from 0 until an expert has no `weight`) out of `weights` and insert
+/// each leaf, stacked over the experts, under `{stacked_prefix}.{leaf}`. A
+/// no-op when expert 0 has no `weight`.
+///
+/// The leaves are [`EXPERT_PLANE_LEAVES`] through [`stack_expert_leaf`], so
+/// the `global_scale` sidecar the NVFP4 repack leaves beside each expert's
+/// plane (issue #2351) lands as `inv_global_scale`. A loop that stacks only
+/// `weight` / `scales` / `biases` leaves the sidecar in the map, and
+/// [`refuse_unstacked_expert_sidecars`] then refuses the load. A leaf only
+/// some experts carry stacks shorter than `weight`, which `SwitchLinear`'s
+/// shape checks refuse.
+///
+/// Returns `Err` naming the key, the expert index and both shapes when one
+/// expert's `weight`, `scales` or `biases` differs in shape or dtype from the
+/// first expert that carries the leaf (issue #3297). The sidecar is exempt:
+/// it is flattened and concatenated, so a malformed one changes the vector's
+/// length instead of aborting, and `SwitchLinear` refuses that. On `Err` the
+/// drained planes are dropped; the load is failing anyway.
+///
+/// Used by: the MoE stacking passes of Qwen3.5 (`qwen3_5::sanitize_weights`)
+/// and Qwen3-Next (`Qwen3NextModel::sanitize_weights`), Nemotron-H
+/// (`NemotronHModel::sanitize_weights`), Gemma 4's
+/// `stack_gemma4_per_expert_planes` (`src/models/sanitize.rs`), ERNIE 4.5 text
+/// (`Ernie45MoeModel::prepare_checkpoint_weights`), Kolibri-1 (`kolibri1_weights::sanitize_weights`),
+/// and Raon1Mini's ModelOpt NVFP4 experts (`raon1_mini_quant::sanitize_export`)
+pub(crate) fn drain_numbered_expert_planes(
+    weights: &mut WeightMap,
+    experts_root: &str,
+    src_proj: &str,
+    stacked_prefix: &str,
+) -> Result<(), String> {
+    let mut planes: [Vec<(usize, UniquePtr<MlxArray>)>; EXPERT_PLANE_LEAVES.len()] =
+        Default::default();
+    let mut expert = 0;
+    while let Some(weight) = weights.remove(&format!("{experts_root}.{expert}.{src_proj}.weight")) {
+        planes[0].push((expert, weight));
+        for (slot, leaf) in EXPERT_PLANE_LEAVES.iter().enumerate().skip(1) {
+            if let Some(part) =
+                weights.remove(&format!("{experts_root}.{expert}.{src_proj}.{leaf}"))
+            {
+                planes[slot].push((expert, part));
+            }
+        }
+        expert += 1;
+    }
+    let mut stacked_leaves = Vec::with_capacity(EXPERT_PLANE_LEAVES.len());
+    for (leaf, parts) in EXPERT_PLANE_LEAVES.iter().zip(&planes) {
+        if parts.is_empty() {
+            continue;
+        }
+        let borrowed: Vec<(usize, &MlxArray)> = parts
+            .iter()
+            .map(|(e, part)| (*e, part.as_ref().expect("weight map holds no null handles")))
+            .collect();
+        if *leaf != "global_scale" {
+            refuse_mismatched_expert_parts(&borrowed, |e| {
+                format!("{experts_root}.{e}.{src_proj}.{leaf}")
+            })?;
+        }
+        let ptrs: Vec<*const MlxArray> = borrowed
+            .iter()
+            .map(|(_, part)| *part as *const MlxArray)
+            .collect();
+        stacked_leaves.push(stack_expert_leaf(leaf, &ptrs));
+    }
+    for (leaf, stacked) in stacked_leaves {
+        weights.insert(format!("{stacked_prefix}.{leaf}"), stacked);
+    }
+    Ok(())
 }
 
 /// Multiply a gathered expert output by the selected experts' global scales.
@@ -1353,7 +1531,7 @@ pub(crate) fn stack_individual_experts(
     )>,
     String,
 > {
-    let Some((parts, found)) = stack_individual_experts_with_count(weights, prefix) else {
+    let Some((parts, found)) = stack_individual_experts_with_count(weights, prefix)? else {
         return Ok(None);
     };
     let StackedParts {
@@ -1378,8 +1556,11 @@ pub(crate) fn stack_individual_experts(
 
 /// [`stack_individual_experts`] for `SwitchLinear`'s own loader, which also
 /// takes the stacked ModelOpt scale sidecar (issue #2351).
-fn stack_individual_expert_parts(weights: &WeightMap, prefix: &str) -> Option<StackedParts> {
-    stack_individual_experts_with_count(weights, prefix).map(|(parts, _)| parts)
+fn stack_individual_expert_parts(
+    weights: &WeightMap,
+    prefix: &str,
+) -> Result<Option<StackedParts>, String> {
+    Ok(stack_individual_experts_with_count(weights, prefix)?.map(|(parts, _)| parts))
 }
 
 /// Same contiguous per-expert stacking as [`stack_individual_experts`], plus
@@ -1388,17 +1569,27 @@ fn stack_individual_expert_parts(weights: &WeightMap, prefix: &str) -> Option<St
 /// stacked into `inv_global_scale` through [`stack_expert_leaf`] when expert 0
 /// carries one; an expert without it shortens the vector, which
 /// `SwitchLinear`'s shape check refuses.
+///
+/// `Ok(None)` when the prefix is not in the stacked form or there is no
+/// expert 0. `Err` when an expert lacks `scales` / `biases` that expert 0
+/// carries, or when an expert's `weight`, `scales` or `biases` differs in
+/// shape or dtype from expert 0's: `mlxcel_core::stack` would otherwise abort
+/// the process on the mismatch (issue #3297).
 fn stack_individual_experts_with_count(
     weights: &WeightMap,
     prefix: &str,
-) -> Option<(StackedParts, usize)> {
+) -> Result<Option<(StackedParts, usize)>, String> {
     // prefix: "{root}.switch_mlp.{proj}"  ->  experts at "{root}.experts.{idx}.{proj}"
-    let proj = prefix.rsplit('.').next()?;
-    let root = prefix.strip_suffix(&format!(".switch_mlp.{}", proj))?;
+    let Some(proj) = prefix.rsplit('.').next() else {
+        return Ok(None);
+    };
+    let Some(root) = prefix.strip_suffix(&format!(".switch_mlp.{}", proj)) else {
+        return Ok(None);
+    };
     let expert_key = |idx: usize, leaf: &str| format!("{}.experts.{}.{}.{}", root, idx, proj, leaf);
 
     if !weights.contains_key(&expert_key(0, "weight")) {
-        return None;
+        return Ok(None);
     }
     let has_scales = weights.contains_key(&expert_key(0, "scales"));
     let has_biases = weights.contains_key(&expert_key(0, "biases"));
@@ -1442,14 +1633,23 @@ fn stack_individual_experts_with_count(
     let mut scales_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut biases_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut sidecar_ptrs: Vec<*const MlxArray> = Vec::new();
+    let required = |idx: usize, leaf: &str| {
+        weights.get(&expert_key(idx, leaf)).ok_or_else(|| {
+            format!(
+                "{} is missing, but {} exists; every expert must carry the same leaves",
+                expert_key(idx, leaf),
+                expert_key(0, leaf)
+            )
+        })
+    };
     let mut idx = 0;
     while let Some(weight) = weights.get(&expert_key(idx, "weight")) {
         weight_ptrs.push(as_ptr(weight));
         if has_scales {
-            scales_ptrs.push(as_ptr(weights.get(&expert_key(idx, "scales"))?));
+            scales_ptrs.push(as_ptr(required(idx, "scales")?));
         }
         if has_biases {
-            biases_ptrs.push(as_ptr(weights.get(&expert_key(idx, "biases"))?));
+            biases_ptrs.push(as_ptr(required(idx, "biases")?));
         }
         if has_sidecar && let Some(sidecar) = weights.get(&expert_key(idx, "global_scale")) {
             sidecar_ptrs.push(as_ptr(sidecar));
@@ -1457,11 +1657,28 @@ fn stack_individual_experts_with_count(
         idx += 1;
     }
 
+    // Check every stacked leaf before the first `stack` call: the FFI aborts
+    // on a shape mismatch instead of returning an error.
+    for (leaf, ptrs) in [
+        ("weight", &weight_ptrs),
+        ("scales", &scales_ptrs),
+        ("biases", &biases_ptrs),
+    ] {
+        let parts: Vec<(usize, &MlxArray)> = ptrs
+            .iter()
+            .enumerate()
+            // SAFETY: the pointers were taken from `weights`, which is borrowed
+            // for the whole function and only read.
+            .map(|(e, p)| (e, unsafe { &**p }))
+            .collect();
+        refuse_mismatched_expert_parts(&parts, |e| expert_key(e, leaf))?;
+    }
+
     let weight = mlxcel_core::stack(&weight_ptrs, 0);
     let scales = has_scales.then(|| mlxcel_core::stack(&scales_ptrs, 0));
     let biases = has_biases.then(|| mlxcel_core::stack(&biases_ptrs, 0));
     let inv_global_scale = has_sidecar.then(|| stack_expert_leaf("global_scale", &sidecar_ptrs).1);
-    Some((
+    Ok(Some((
         StackedParts {
             weight,
             scales,
@@ -1470,7 +1687,7 @@ fn stack_individual_experts_with_count(
             native_global_scale: None,
         },
         idx,
-    ))
+    )))
 }
 
 /// The gating nonlinearity a [`SwitchGLU`] applies between its `gate_proj` /
@@ -1482,7 +1699,8 @@ fn stack_individual_experts_with_count(
 /// [`situ_activation`] with the config's `activation_situ_beta` and
 /// `activation_situ_linear_beta`.
 ///
-/// Used by: KimiK3 (SiTU); every other `SwitchGLU` caller stays on SwiGlu.
+/// Used by: KimiK3 and Raon1Mini (SiTU); every other `SwitchGLU` caller
+/// stays on SwiGlu.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum SwitchGluActivation {
     /// `silu(gate) * up`.
@@ -1506,7 +1724,7 @@ pub enum SwitchGluActivation {
 /// https://huggingface.co/moonshotai/Kimi-K3/blob/main/modeling_kimi_linear.py).
 ///
 /// Used by: KimiK3 (`KimiK3MLP`, and `SwitchGLU` through
-/// [`SwitchGluActivation::SiTU`])
+/// [`SwitchGluActivation::SiTU`]), Raon1Mini (`RaonSituMlp` and its MoE experts)
 pub fn situ_activation(
     gate: &MlxArray,
     up: &MlxArray,
@@ -1546,6 +1764,25 @@ pub struct SwitchGLU {
 }
 
 impl SwitchGLU {
+    /// Check the three stacks' input widths (issue #3457): `gate_proj` and
+    /// `up_proj` take `hidden`, `down_proj` takes `intermediate`. `prefix` is
+    /// the `switch_mlp` key the stacks were loaded from.
+    ///
+    /// Used by: Raon1Mini (`RaonMoe::check_input_widths`)
+    pub fn check_input_widths(
+        &self,
+        prefix: &str,
+        hidden: usize,
+        intermediate: usize,
+    ) -> Result<(), String> {
+        self.gate_proj
+            .check_input_width(&format!("{prefix}.gate_proj"), hidden)?;
+        self.up_proj
+            .check_input_width(&format!("{prefix}.up_proj"), hidden)?;
+        self.down_proj
+            .check_input_width(&format!("{prefix}.down_proj"), intermediate)
+    }
+
     /// Replace the gating nonlinearity. Every constructor starts at
     /// [`SwitchGluActivation::SwiGlu`]; Kimi K3 chains this to select SiTU.
     pub fn with_activation(mut self, activation: SwitchGluActivation) -> Self {
@@ -1558,8 +1795,19 @@ impl SwitchGLU {
         self.activation
     }
 
+    /// The `(gate, up, down)` expert planes, for a caller that drives its own
+    /// expert kernel over them.
+    ///
+    /// Used by: Inkling 2 (`kernels::grouped_expert_projections`, #3359)
+    pub(crate) fn projections(&self) -> [&SwitchLinear; 3] {
+        [&self.gate_proj, &self.up_proj, &self.down_proj]
+    }
+
     /// Apply the configured activation to a gate / up pair.
-    fn activate(&self, x_gate: &MlxArray, x_up: &MlxArray) -> UniquePtr<MlxArray> {
+    ///
+    /// Used by: `SwitchGLU`'s own forwards, and Inkling 2
+    /// (`kernels::grouped_expert_projections`, #3359)
+    pub(crate) fn activate(&self, x_gate: &MlxArray, x_up: &MlxArray) -> UniquePtr<MlxArray> {
         match self.activation {
             SwitchGluActivation::SwiGlu => mlxcel_core::compiled_swiglu_activation(x_gate, x_up),
             SwitchGluActivation::SiTU { beta, linear_beta } => {
@@ -1590,7 +1838,7 @@ impl SwitchGLU {
     /// Used by: AfMoE, BailingMoe, BailingMoeLinear, Cohere2Moe, Dbrx,
     ///          DeepSeekV2, DeepSeekV3, DeepSeekV32, Dots1, Ernie4_5MoeVL,
     ///          GLM4Moe, GraniteMoeHybrid, Jamba, KimiK3, KimiLinear, Klear,
-    ///          Laguna, Lfm2, LongcatFlashNgram, Mellum, MiniMax, Mistral4,
+    ///          Kolibri1, Laguna, Lfm2, LongcatFlashNgram, Mellum, MiniMax, Mistral4,
     ///          Mixtral, OLMoE, PhiMoE, Qwen2Moe, Qwen3_5, Qwen3Moe,
     ///          Qwen3VLMoe, SolarOpen, Step3p5, and Inkling through
     ///          [`Self::forward_with_expert_scales`]
@@ -1615,12 +1863,9 @@ impl SwitchGLU {
             let activated = self.activate(&x_gate, &x_up);
             let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
-        } else if let Some(activated) = switch_gate_up_preferred_in_forward(
-            n_tokens,
-            mlxcel_core::hardware::get_hardware().silicon_gen,
-        )
-        .then(|| self.forward_switch_gate_up_kernel(x, indices))
-        .flatten()
+        } else if let Some(activated) = switch_gate_up_preferred_in_forward(n_tokens)
+            .then(|| self.forward_switch_gate_up_kernel(x, indices))
+            .flatten()
         {
             // The kernel's activated output is `[tokens, top_k, dff]`; the
             // down projection's indexed path consumes the gather layout's
@@ -1787,10 +2032,11 @@ impl SwitchGLU {
     /// never run. The reference is mlx-vlm's
     /// `short_block_affine4_switch_gate_up`, whose gate is generic (any
     /// affine 4-bit quantized switch MoE at decode shapes), so it lives here
-    /// in the shared [`SwitchGLU`] rather than a model crate. Wired into both
-    /// [`Self::forward_activated`] (inkling's decode) and [`Self::forward`]
-    /// (the other MoE families' multi-token decode), each ahead of its gather
-    /// path.
+    /// in the shared [`SwitchGLU`] rather than a model crate. Wired into
+    /// [`Self::forward_activated`] (inkling's decode) and, at one token only,
+    /// into [`Self::forward`] ahead of its gather path; the measured
+    /// multi-token batch loss keeps that second wire-in single-token, see
+    /// [`switch_gate_up_preferred_in_forward`].
     ///
     /// Returns `None` when any condition fails and the caller stays on the
     /// gather path: non-affine or block-float planes, bits other than 4,
@@ -1910,8 +2156,8 @@ impl SwitchGLU {
     /// caller (`MLXCEL_FUSED_MOE`).
     ///
     /// Used by: AfMoE, BailingMoe, Cohere2Moe, Dbrx, Dots1, GraniteMoeHybrid,
-    ///          Inkling, Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE,
-    ///          PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
+    ///          Inkling, Klear, Kolibri1, Laguna, Lfm2, Mellum, MiniMax, Mixtral,
+    ///          OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -2125,7 +2371,8 @@ pub(crate) struct GatherIndices {
 /// changes the graph's node count and nothing else.
 ///
 /// Used by: `SwitchGLU::forward`, `SwitchGLU::forward_with_expert_scales`,
-///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`),
+///          `DeepSeekV3` (`FloatSwitchGLU::forward`)
 pub(crate) fn prepare_gather_indices(x: &MlxArray, indices: &MlxArray) -> GatherIndices {
     let rhs = mlxcel_core::astype(indices, dtype::UINT32);
     let x_shape = mlxcel_core::array_shape(x);
@@ -2543,6 +2790,10 @@ mod gather_index_tests;
 mod global_scale_tests;
 
 #[cfg(test)]
+#[path = "switch_layers_expert_shape_tests.rs"]
+mod expert_shape_tests;
+
+#[cfg(test)]
 #[path = "switch_layers_sorted_gather_test_support.rs"]
 mod sorted_gather_test_support;
 
@@ -2714,16 +2965,13 @@ mod tests {
     }
 
     #[test]
-    fn switch_gate_up_in_forward_is_batched_only_on_wide_generations() {
-        use mlxcel_core::hardware::AppleSiliconGen as Gen;
-        for silicon_gen in [Gen::M1, Gen::M2, Gen::M3, Gen::M4, Gen::M5, Gen::Unknown] {
-            assert!(switch_gate_up_preferred_in_forward(1, silicon_gen));
-        }
-        for silicon_gen in [Gen::M1, Gen::M2, Gen::Unknown] {
-            assert!(!switch_gate_up_preferred_in_forward(2, silicon_gen));
-        }
-        for silicon_gen in [Gen::M3, Gen::M4, Gen::M5] {
-            assert!(switch_gate_up_preferred_in_forward(2, silicon_gen));
+    fn switch_gate_up_in_forward_is_single_token_only() {
+        assert!(switch_gate_up_preferred_in_forward(1));
+        for tokens in 2..=8 {
+            assert!(
+                !switch_gate_up_preferred_in_forward(tokens),
+                "multi-token batch decode of {tokens} tokens loses to gather_qmm"
+            );
         }
     }
 
@@ -3230,7 +3478,9 @@ mod tests {
                 ..
             },
             found,
-        ) = stack_individual_experts_with_count(&weights, &prefix).expect("per-expert layout");
+        ) = stack_individual_experts_with_count(&weights, &prefix)
+            .unwrap()
+            .expect("per-expert layout");
         assert_eq!(found, 3, "the contiguous expert count must be unchanged");
         let scales = scales.expect("expert 0 carries scales, so scales are stacked");
         assert!(biases.is_none(), "expert 0 carries no biases");

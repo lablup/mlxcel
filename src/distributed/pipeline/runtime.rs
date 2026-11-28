@@ -71,6 +71,24 @@ pub trait PipelineModelRuntime {
         input_ids: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>>;
+    /// [`Self::forward_sequence`] for a request that samples only position
+    /// `last_pos` of this call's sequence (a prefill): the final stage
+    /// projects just that row through the LM head and returns `[1, 1, vocab]`
+    /// logits (#3074).
+    ///
+    /// The default runs the full forward and leaves the slicing to the
+    /// caller, which keeps a runtime without the hook correct but does not
+    /// save the projection.
+    fn forward_sequence_last_row(
+        &self,
+        seq_id: SequenceId,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let _ = last_pos;
+        self.forward_sequence(seq_id, input_ids, mask)
+    }
     fn forward_batched(
         &self,
         seq_ids: &[SequenceId],
@@ -146,6 +164,38 @@ fn request_id_for_sequence(seq_id: SequenceId) -> RequestId {
         .expect("sequence-derived request id must be valid")
 }
 
+impl InProcessPipelineRuntime {
+    /// Shared body of the full and last-row forwards; `last_pos` asks the
+    /// final stage to project that row only (#3074).
+    fn forward_sequence_at(
+        &self,
+        seq_id: SequenceId,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let request_id = self.request_id_for(seq_id)?;
+        let mut input = PipelineWorkerInput::new(request_id, copy(input_ids));
+        if let Some(mask) = mask {
+            input = input.with_attention_mask(copy(mask));
+        }
+        if let Some(pos) = last_pos {
+            input = input.with_last_pos(
+                u32::try_from(pos).map_err(|_| anyhow!("last_pos {pos} overflows u32"))?,
+            );
+        }
+        let mut worker_loop = self
+            .worker_loop
+            .lock()
+            .expect("pipeline worker loop poisoned");
+        let mut outputs = worker_loop.run_to_completion(vec![input])?;
+        let output = outputs
+            .pop()
+            .ok_or_else(|| anyhow!("pipeline worker loop returned no logits"))?;
+        Ok(output.logits)
+    }
+}
+
 impl PipelineModelRuntime for InProcessPipelineRuntime {
     fn prepare_sequence_state(&self, seq_id: SequenceId) -> Result<()> {
         self.request_ids
@@ -175,20 +225,17 @@ impl PipelineModelRuntime for InProcessPipelineRuntime {
         input_ids: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
-        let request_id = self.request_id_for(seq_id)?;
-        let mut input = PipelineWorkerInput::new(request_id, copy(input_ids));
-        if let Some(mask) = mask {
-            input = input.with_attention_mask(copy(mask));
-        }
-        let mut worker_loop = self
-            .worker_loop
-            .lock()
-            .expect("pipeline worker loop poisoned");
-        let mut outputs = worker_loop.run_to_completion(vec![input])?;
-        let output = outputs
-            .pop()
-            .ok_or_else(|| anyhow!("pipeline worker loop returned no logits"))?;
-        Ok(output.logits)
+        self.forward_sequence_at(seq_id, input_ids, mask, None)
+    }
+
+    fn forward_sequence_last_row(
+        &self,
+        seq_id: SequenceId,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>> {
+        self.forward_sequence_at(seq_id, input_ids, mask, Some(last_pos))
     }
 
     fn forward_batched(
@@ -943,6 +990,94 @@ impl RemotePipelineRuntime {
     }
 }
 
+impl RemotePipelineRuntime {
+    /// Shared body of the full and last-row forwards; `last_pos` asks the
+    /// final stage to project that row only (#3074). A stage that predates
+    /// the field ignores it and answers every position, which
+    /// `validate_logits_shape` accepts.
+    fn forward_sequence_at(
+        &self,
+        seq_id: SequenceId,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+        last_pos: Option<usize>,
+    ) -> Result<UniquePtr<MlxArray>> {
+        let request_id = self.request_id_for(seq_id)?;
+        // A sequence prepared before a stage went silent is failed here at
+        // once instead of waiting out the `RunEntry` (#2782); like every
+        // other post-mapping failure it goes through `fail_sequence`, so
+        // `Err` still means the coordinator's state was discarded (#2753).
+        if let Err(err) = self.ensure_stages_available() {
+            self.fail_sequence(seq_id, &request_id);
+            return Err(err);
+        }
+        let input_seq_len = mlxcel_core::array_shape(input_ids)
+            .get(1)
+            .copied()
+            .unwrap_or(1);
+        let response = match self.exchange(
+            &self.stage_peers[0],
+            RemoteStageCommand::RunEntry {
+                request_id: request_id.as_str().to_string(),
+                micro_batch_id: 0,
+                input_ids: serialize_mlx_array(input_ids)?,
+                attention_mask: mask.map(serialize_mlx_array).transpose()?,
+                last_pos: last_pos
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| anyhow!("last_pos {last_pos:?} overflows the wire's u32"))?,
+            },
+        ) {
+            Ok(response) => response,
+            Err(err) => {
+                self.fail_sequence(seq_id, &request_id);
+                return Err(err);
+            }
+        };
+        match response {
+            RemoteStageResponse::RunResult { logits, .. } => {
+                // Bound the frame by the expected logits shape before decoding
+                // it (#2716); `validate_logits_shape` keeps the exact
+                // "input length or 1" rule.
+                let limits = StageWireLimits {
+                    activation_width: None,
+                    vocab_size: self.vocab_size.map(|v| v as u64),
+                }
+                .logits(u64::try_from(input_seq_len.max(1)).unwrap_or(1));
+                let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
+                    Ok(logits) => logits,
+                    Err(err) => {
+                        self.fail_sequence(seq_id, &request_id);
+                        return Err(err);
+                    }
+                };
+                if let Err(err) =
+                    validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
+                {
+                    self.fail_sequence(seq_id, &request_id);
+                    return Err(err);
+                }
+                Ok(logits)
+            }
+            RemoteStageResponse::Error {
+                stage_index,
+                message,
+                ..
+            } => {
+                self.fail_sequence(seq_id, &request_id);
+                Err(anyhow!(
+                    "remote stage {stage_index} failed the forward: {}",
+                    loggable_peer_text(&message)
+                ))
+            }
+            other => {
+                self.fail_sequence(seq_id, &request_id);
+                Err(anyhow!("unexpected remote forward response: {:?}", other))
+            }
+        }
+    }
+}
+
 impl PipelineModelRuntime for RemotePipelineRuntime {
     /// Record the request id and broadcast `PrepareSequence` to every stage.
     /// A stage that answers with an `Error` (it is draining, or another
@@ -1004,75 +1139,17 @@ impl PipelineModelRuntime for RemotePipelineRuntime {
         input_ids: &MlxArray,
         mask: Option<&MlxArray>,
     ) -> Result<UniquePtr<MlxArray>> {
-        let request_id = self.request_id_for(seq_id)?;
-        // A sequence prepared before a stage went silent is failed here at
-        // once instead of waiting out the `RunEntry` (#2782); like every
-        // other post-mapping failure it goes through `fail_sequence`, so
-        // `Err` still means the coordinator's state was discarded (#2753).
-        if let Err(err) = self.ensure_stages_available() {
-            self.fail_sequence(seq_id, &request_id);
-            return Err(err);
-        }
-        let input_seq_len = mlxcel_core::array_shape(input_ids)
-            .get(1)
-            .copied()
-            .unwrap_or(1);
-        let response = match self.exchange(
-            &self.stage_peers[0],
-            RemoteStageCommand::RunEntry {
-                request_id: request_id.as_str().to_string(),
-                micro_batch_id: 0,
-                input_ids: serialize_mlx_array(input_ids)?,
-                attention_mask: mask.map(serialize_mlx_array).transpose()?,
-            },
-        ) {
-            Ok(response) => response,
-            Err(err) => {
-                self.fail_sequence(seq_id, &request_id);
-                return Err(err);
-            }
-        };
-        match response {
-            RemoteStageResponse::RunResult { logits, .. } => {
-                // Bound the frame by the expected logits shape before decoding
-                // it (#2716); `validate_logits_shape` keeps the exact
-                // "input length or 1" rule.
-                let limits = StageWireLimits {
-                    activation_width: None,
-                    vocab_size: self.vocab_size.map(|v| v as u64),
-                }
-                .logits(u64::try_from(input_seq_len.max(1)).unwrap_or(1));
-                let logits = match deserialize_wire_tensor_with_limits(&logits, &limits) {
-                    Ok(logits) => logits,
-                    Err(err) => {
-                        self.fail_sequence(seq_id, &request_id);
-                        return Err(err);
-                    }
-                };
-                if let Err(err) =
-                    validate_logits_shape(logits.as_ref().unwrap(), input_seq_len, self.vocab_size)
-                {
-                    self.fail_sequence(seq_id, &request_id);
-                    return Err(err);
-                }
-                Ok(logits)
-            }
-            RemoteStageResponse::Error {
-                stage_index,
-                message,
-                ..
-            } => {
-                self.fail_sequence(seq_id, &request_id);
-                Err(anyhow!(
-                    "remote stage {stage_index} failed the forward: {}",
-                    loggable_peer_text(&message)
-                ))
-            }
-            other => {
-                self.fail_sequence(seq_id, &request_id);
-                Err(anyhow!("unexpected remote forward response: {:?}", other))
-            }
-        }
+        self.forward_sequence_at(seq_id, input_ids, mask, None)
+    }
+
+    fn forward_sequence_last_row(
+        &self,
+        seq_id: SequenceId,
+        input_ids: &MlxArray,
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Result<UniquePtr<MlxArray>> {
+        self.forward_sequence_at(seq_id, input_ids, mask, Some(last_pos))
     }
 
     fn forward_batched(

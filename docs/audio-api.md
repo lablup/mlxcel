@@ -57,7 +57,7 @@ mlxcel-server -m models/kokoro-82m
 
 The checkpoint directory must contain `config.json` (with `vocab` and architecture blocks), `kokoro-v1_0.safetensors`, and a `voices/` subdirectory of per-voice safetensors packs. The Kokoro checkpoint from Hugging Face (`hexgrad/Kokoro-82M`) ships 54 voice packs.
 
-Loading a Kokoro checkpoint occupies the audio slot only; the server does not serve `/v1/chat/completions` or generation requests from that process. TTS and text generation are separate server instances.
+Loading a Kokoro checkpoint occupies the audio slot only; the server does not serve `/v1/chat/completions` or generation requests from that process. TTS and text generation are separate server instances. A Kokoro checkpoint needs no tokenizer file, because the phoneme vocab comes from `config.json`; `/tokenize`, `/detokenize`, and `/apply-template` return 501 on such a server, like the generation routes. If the checkpoint cannot be loaded (for example, a missing `vocab` or weight file), the server exits at startup instead of running without a TTS slot.
 
 **Voices.** The `voice` field in the request selects a pack from `voices/<name>.safetensors`. Available voice names are the file stems (e.g. `af_heart`, `bm_lewis`). The default is `af_heart`. A requested voice that does not exist or contains unsafe characters (anything outside `[A-Za-z0-9_-]`) falls back silently to `af_heart`.
 

@@ -1,0 +1,10 @@
+Runtime device: CPU
+KV cache mode: fp16 (applied to 4 of 4 layers)
+Generating...
+tok4 tok17 tok5 tok29 tok11 tok8OpenXLA context capacity: 256 for 6 prompt + up to 12 generated tokens (request-sized; MLXCEL_XLA_CONTEXT_CAPACITY pins one shape)
+[prompt ids (6): 4 17 5 29 11 8]
+[token ids (12): 8 8 22 29 29 7 29 29 24 24 24 22]
+ tok8 tok8 tok22 tok29 tok29 tok7 tok29 tok29 tok24 tok24 tok24 tok22
+
+[Generated 12 tokens in 0.01s = 2098.53 tok/s]
+exit=0

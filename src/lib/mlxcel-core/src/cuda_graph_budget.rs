@@ -55,7 +55,7 @@
 //! keeps MLX's table value.
 //!
 //! The measurement behind the value here is
-//! `docs/benchmark_results/cuda-graph-budget-gb10-2026-09-12.md`. This is a
+//! `docs/benchmark_results/versions/v0.8.0.md#cuda-graph-budget-gb10-2026-09-12`. This is a
 //! default only: an operator-set value of either variable always wins, per
 //! variable, the same contract as [`crate::hardware::apply_cuda_graph_cache_default`].
 

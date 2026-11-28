@@ -797,6 +797,30 @@ impl LanguageModel for Gemma4UnifiedModel {
         )
     }
 
+    fn state_checkpoint_from_snapshot(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::state_checkpoint_from_snapshot(
+            &self.text_model,
+            snapshot,
+        )
+    }
+
+    fn restore_sequence_state_from_checkpoint(
+        &self,
+        seq_id: SequenceId,
+        checkpoint: &mlxcel_core::generate::ModelStateSnapshot,
+        donor: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state_from_checkpoint(
+            &self.text_model,
+            seq_id,
+            checkpoint,
+            donor,
+        )
+    }
+
     fn num_layers(&self) -> usize {
         self.text_model.num_layers_value()
     }

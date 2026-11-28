@@ -13,7 +13,79 @@
 // limitations under the License.
 
 use super::{NemotronHConfig, NemotronLayerCache, NemotronMambaCache, nemotron_h_ssm_attn};
-use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
+use mlxcel_core::weights::WeightMap;
+use mlxcel_core::{MlxArray, UniquePtr, dtype, generate::ModelStateSnapshot, layers::KVCache};
+
+/// Layers of the [`tiny_model`] fixture: an attention block, then an MLP block.
+pub(crate) const TINY_LAYERS: usize = 2;
+
+fn ramp(shape: &[i32], scale: f32) -> UniquePtr<MlxArray> {
+    let n: i32 = shape.iter().product();
+    let data: Vec<f32> = (0..n)
+        .map(|i| ((i * 7 % 13) as f32 - 6.0) * scale)
+        .collect();
+    mlxcel_core::from_slice_f32(&data, shape)
+}
+
+/// A two-layer Nemotron-H (attention, then MLP) with synthetic weights, for
+/// the pipeline stage-executor tests.
+pub(crate) fn tiny_model() -> super::NemotronHModel {
+    let mut config: NemotronHConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "nemotron_h",
+        "vocab_size": 16,
+        "hidden_size": 8,
+        "intermediate_size": 16,
+        "num_hidden_layers": TINY_LAYERS,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "mamba_num_heads": 1,
+        "mamba_head_dim": 4,
+        "ssm_state_size": 4,
+        "conv_kernel": 4,
+        "n_groups": 1,
+        "hybrid_override_pattern": "*-",
+    }))
+    .expect("tiny Nemotron-H config parses");
+    config.post_init().expect("tiny config is valid");
+    let block_types: Vec<super::BlockType> = config
+        .hybrid_override_pattern
+        .clone()
+        .expect("pattern is set")
+        .iter()
+        .map(|name| super::BlockType::from_str(name))
+        .collect();
+    let ones = mlxcel_core::ones(&[8], dtype::FLOAT32);
+    let mut w = WeightMap::new();
+    let mut put = |k: &str, v: UniquePtr<MlxArray>| {
+        w.insert(k.to_string(), v);
+    };
+    put("backbone.embeddings.weight", ramp(&[16, 8], 0.1));
+    put("lm_head.weight", ramp(&[16, 8], 0.05));
+    put("backbone.norm_f.weight", mlxcel_core::copy(&ones));
+    for layer in 0..TINY_LAYERS {
+        put(
+            &format!("backbone.layers.{layer}.norm.weight"),
+            mlxcel_core::copy(&ones),
+        );
+    }
+    for (i, proj) in ["q_proj", "k_proj", "v_proj", "o_proj"].iter().enumerate() {
+        put(
+            &format!("backbone.layers.0.mixer.{proj}.weight"),
+            ramp(&[8, 8], 0.03 * (i as f32 + 1.0)),
+        );
+    }
+    put(
+        "backbone.layers.1.mixer.up_proj.weight",
+        ramp(&[16, 8], 0.02),
+    );
+    put(
+        "backbone.layers.1.mixer.down_proj.weight",
+        ramp(&[8, 16], 0.02),
+    );
+    let w = super::NemotronHModel::sanitize_weights(w, &config)
+        .expect("tiny Nemotron-H weights must sanitize");
+    super::NemotronHModel::from_weights(config, w, block_types).expect("tiny Nemotron-H must build")
+}
 
 // ---------------------------------------------------------------------------
 // NemotronMambaCache state management
@@ -867,6 +939,126 @@ fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
         .expect("a non-quantized expert plane must not be gated on quantization params");
 }
 
+/// Exercise the post-repack layout of NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4.
+#[test]
+fn per_expert_nvfp4_planes_are_stacked_with_their_tensor_scales() {
+    use super::{BlockType, NemotronHMixer, NemotronHModel, SwitchLinear};
+    use crate::models::switch_layers::{
+        expect_native_nvfp4_load, insert_modelopt_expert_plane, stacked_inv_global_scale,
+    };
+
+    let mut config: NemotronHConfig =
+        serde_json::from_value(transformers_config(serde_json::json!({
+            "layer_types": ["moe"],
+            "n_routed_experts": 3,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 32,
+        })))
+        .unwrap();
+    config.post_init().unwrap();
+
+    let mixer = "backbone.layers.0.mixer";
+    let mut weights = WeightMap::new();
+    for (key, shape) in [
+        ("backbone.embeddings.weight", &[256, 64][..]),
+        ("lm_head.weight", &[256, 64]),
+        ("backbone.norm_f.weight", &[64]),
+        ("backbone.layers.0.norm.weight", &[64]),
+        ("backbone.layers.0.mixer.gate.weight", &[3, 64]),
+    ] {
+        weights.insert(key.into(), mlxcel_core::zeros(shape, dtype::FLOAT32));
+    }
+    for expert in 0..3 {
+        for (proj, out, input, scale) in [("up_proj", 32, 64, 0.25), ("down_proj", 64, 32, 0.5)] {
+            insert_modelopt_expert_plane(
+                &mut weights,
+                &format!("{mixer}.experts.{expert}.{proj}"),
+                out,
+                input,
+                expert as f32 + scale,
+                expert,
+            );
+        }
+    }
+
+    let weights = NemotronHModel::sanitize_weights(weights, &config)
+        .expect("matching per-expert planes must stack");
+    for (fc, expected) in [("fc1", [0.25, 1.25, 2.25]), ("fc2", [0.5, 1.5, 2.5])] {
+        let prefix = format!("{mixer}.switch_mlp.{fc}");
+        assert_eq!(stacked_inv_global_scale(&weights, &prefix), expected);
+    }
+    assert!(!weights.keys().any(|k| k.contains(".experts.")));
+    let Some(model) = expect_native_nvfp4_load(
+        NemotronHModel::from_weights(config, weights, vec![BlockType::MoE])
+            .map_err(|e| e.to_string()),
+        "backbone.layers.0.mixer.switch_mlp",
+        "load Nemotron-H with NVFP4 experts",
+    ) else {
+        return;
+    };
+    let NemotronHMixer::MoE(moe) = &model.layers[0].mixer else {
+        panic!("expected an MoE layer");
+    };
+    for plane in [&moe.switch_mlp.fc1, &moe.switch_mlp.fc2] {
+        assert!(matches!(
+            plane,
+            SwitchLinear::Quantized { mode, inv_global_scale: Some(_), .. } if mode == "nvfp4"
+        ));
+    }
+}
+
+/// A per-expert plane that disagrees with expert 0 must fail the load with the
+/// stacking helper's message naming the offending key. `mlxcel_core::stack` is
+/// not fallible, so a discarded error here would let the mismatch reach it.
+#[test]
+fn mismatched_per_expert_planes_fail_sanitize_with_the_expert_key() {
+    use super::NemotronHModel;
+
+    let mut config: NemotronHConfig =
+        serde_json::from_value(transformers_config(serde_json::json!({
+            "layer_types": ["moe"],
+            "n_routed_experts": 3,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 32,
+        })))
+        .unwrap();
+    config.post_init().unwrap();
+
+    let mixer = "backbone.layers.0.mixer";
+    let planes = |odd_proj: &str, odd_shape: &[i32], odd_dtype: i32| {
+        let mut weights = WeightMap::new();
+        for expert in 0..3 {
+            for (proj, shape) in [("up_proj", [32, 64]), ("down_proj", [64, 32])] {
+                let odd = expert == 2 && proj == odd_proj;
+                let plane = if odd {
+                    mlxcel_core::zeros(odd_shape, odd_dtype)
+                } else {
+                    mlxcel_core::zeros(&shape, dtype::FLOAT32)
+                };
+                weights.insert(format!("{mixer}.experts.{expert}.{proj}.weight"), plane);
+            }
+        }
+        weights
+    };
+    let sanitize_err = |weights: WeightMap| {
+        NemotronHModel::sanitize_weights(weights, &config)
+            .err()
+            .expect("mismatched per-expert planes must fail to sanitize")
+    };
+
+    let err = sanitize_err(planes("up_proj", &[32, 64], dtype::FLOAT16));
+    assert!(
+        err.contains(&format!("{mixer}.experts.2.up_proj.weight")) && err.contains("dtype"),
+        "{err}"
+    );
+
+    let err = sanitize_err(planes("down_proj", &[64, 16], dtype::FLOAT32));
+    assert!(
+        err.contains(&format!("{mixer}.experts.2.down_proj.weight")) && err.contains("[64, 16]"),
+        "{err}"
+    );
+}
+
 /// Nemotron-H builds its shared-expert and latent projections as optional
 /// layers. A runtime LoRA term of the wrong width on one of them used to be
 /// dropped with the layer (`from_weights(..).ok()`), so the load only failed
@@ -1143,8 +1335,141 @@ fn config_without_any_layer_stack_description_is_rejected() {
 /// now load as nvfp4 (issue #2665). The routed experts must then match a
 /// dequantized reference both on the unsorted decode layout and on the sorted
 /// prefill layout, which the MoE takes from 64 (token, expert) pairs on.
+///
+/// Issue #2852 failed this assertion once inside the full serial lib binary
+/// and never in isolation. The audit ruled out every process-global candidate
+/// of the shape the report named: the private `SwitchMLP` below never calls
+/// `fused_moe_enabled()`, and no in-tree test sets `MLXCEL_FUSED_MOE`, so that
+/// `OnceLock` cannot be initialized to anything but its default here;
+/// `SSD_PREFILL_DISPATCH_LOGGED` only suppresses a log line and no Mamba layer
+/// is built; the rope override needs an attention layer and this model has
+/// one MoE block; and a per-thread MLX default stream (what a leaked
+/// `install_thread_local_default_stream` would leave) cannot reach a later
+/// test because libtest gives every test a fresh thread. The last remaining
+/// candidate, a process-global default device left on the CPU, is measured by
+/// `nemotron_h_nvfp4_experts_parity_is_independent_of_the_default_device`
+/// and falsified: the CPU arm stays inside the bound (5.7e-6 max absolute at
+/// 40 tokens) and returns the GPU arm unchanged. The numeric failure did not
+/// reproduce in more than forty full serial runs of the failing commit's
+/// binary, including under an eight-way concurrent load, so the assertion now
+/// reports the measured error and the device it ran on instead of a bare
+/// message and holds MLX's state locks, and a companion test pins the result
+/// against the ambient thread stream. The 1e-3 bound is unchanged.
 #[test]
 fn nemotron_h_runs_nvfp4_experts_sorted_and_unsorted() {
+    // The default device is process-global, so a concurrent
+    // `DefaultDeviceGuard::cpu()` would move this test's dispatches off the
+    // GPU mid-run (issue #1421). Hold the shared MLX state locks for the
+    // test's duration so the two arms cannot observe a device or stream an
+    // unrelated test is holding.
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the parity assertion must not depend on the calling
+/// thread's MLX default stream. A caller that runs the model on a thread with
+/// an installed per-thread generation stream (server workers do, and
+/// `models::kokoro`'s test helper does) must get the same result, because MLX
+/// keys its compiled-function cache, which the shared `relu_squared` reference
+/// uses, by the default stream. Both gather arms must agree with the
+/// dequantized reference on the installed stream as well.
+#[test]
+fn nemotron_h_nvfp4_experts_parity_is_independent_of_the_thread_stream() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let _restore = mlxcel_core::streams::DefaultStreamGuard::capture();
+    let Some(stream) = mlxcel_core::streams::new_thread_local_generation_stream() else {
+        eprintln!("no GPU backend; the per-thread stream arm needs one, skipping");
+        return;
+    };
+    mlxcel_core::streams::install_thread_local_default_stream(Some(&stream));
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the parity does not depend on MLX's process-global
+/// default device, and a CPU span leaves nothing behind for a later GPU run.
+///
+/// The one observed failure compared a quantized `gather_qmm` result against
+/// an f32 matmul over dequantized planes. The remaining lead after the first
+/// audit was that an earlier test left the process-global default device on
+/// the CPU, moving the gather off the backend where the bound was measured.
+/// Forcing the CPU for the whole case, the nvfp4 quantize and the f32
+/// reference included, measures it: at 40 tokens the CPU arm's max absolute
+/// error is 5.7e-6 against 7.6e-6 on the GPU, and its max relative error is
+/// 2.5e-4, all inside the unchanged 1e-3 bound. The arm that runs after the
+/// CPU span reproduces the GPU baseline's measured errors exactly (3.8e-6 at
+/// 5 tokens, 7.6e-6 at 40 tokens), so the span also leaves no cached state
+/// behind. Kept as a test so a later change that makes the CPU path, or the
+/// return to the GPU, diverge fails here instead of once in a full serial run
+/// (issue #2852).
+#[test]
+fn nemotron_h_nvfp4_experts_parity_is_independent_of_the_default_device() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let device_before = mlxcel_core::default_device_is_gpu();
+    assert_nvfp4_experts_sorted_and_unsorted();
+    {
+        let _cpu = mlxcel_core::streams::DefaultDeviceGuard::cpu();
+        assert!(
+            !mlxcel_core::default_device_is_gpu(),
+            "the CPU arm must actually run on the CPU"
+        );
+        assert_nvfp4_experts_sorted_and_unsorted();
+    }
+    assert_eq!(
+        mlxcel_core::default_device_is_gpu(),
+        device_before,
+        "the CPU span must restore the previous default device"
+    );
+    assert_nvfp4_experts_sorted_and_unsorted();
+}
+
+/// Regression for #2852: the private `SwitchMLP` must not consult the shared
+/// fused-MoE gate. The gate caches `MLXCEL_FUSED_MOE` in a process-wide
+/// `OnceLock`, so wiring it into this path would make the two arms depend on
+/// whichever test called the gate first; the issue named that as the prime
+/// candidate before the audit showed this path never reads it. Pin the
+/// independence at the source so a later change cannot reintroduce it
+/// silently.
+#[test]
+fn nemotron_h_switch_mlp_does_not_consult_the_fused_moe_gate() {
+    let source = include_str!("nemotron_h.rs");
+    let start = source
+        .find("impl SwitchMLP")
+        .expect("nemotron_h.rs must define impl SwitchMLP");
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .expect("impl SwitchMLP must close at column zero");
+    let body = &source[start..end];
+    assert!(
+        !body.contains("fused_moe_enabled"),
+        "Nemotron's private SwitchMLP must not read the process-wide fused-MoE gate; that gate \
+         is cached in a OnceLock and its value would depend on test order"
+    );
+    assert!(
+        body.contains(">= 64"),
+        "the sorted branch threshold must stay in SwitchMLP::forward: the parity test's 5-token \
+         arm and 40-token arm depend on it"
+    );
+}
+
+fn assert_nvfp4_experts_sorted_and_unsorted() {
+    run_nvfp4_expert_arms(|tokens, got, want| {
+        let close = mlxcel_core::allclose(got, want, 1e-3, 1e-3);
+        if !mlxcel_core::item_bool(&close) {
+            assert_expert_parity(got, want, tokens);
+        }
+    });
+}
+
+/// Build the one-layer nvfp4 MoE and hand both routing arms to `check`.
+///
+/// `check` receives the evaluated gather result and the lazy dequantized
+/// reference for 5 tokens (unsorted) and 40 tokens (sorted), with the same
+/// shape. Splitting the graph construction out lets the parity assertion and
+/// the device-independence test share one definition of the case.
+fn run_nvfp4_expert_arms(
+    mut check: impl FnMut(i32, &mlxcel_core::MlxArray, &mlxcel_core::MlxArray),
+) {
     use super::{BlockType, NemotronHMixer, NemotronHModel};
     use mlxcel_core::weights::WeightMap;
 
@@ -1253,12 +1578,169 @@ fn nemotron_h_runs_nvfp4_experts_sorted_and_unsorted() {
         let h = mlxcel_core::utils::relu_squared(&h);
         let want = mlxcel_core::matmul(&h, &mlxcel_core::swap_axes(&w2, -1, -2));
         let want = mlxcel_core::reshape(&want, &[tokens, TOP_K, HIDDEN]);
-        let close = mlxcel_core::allclose(&got, &want, 1e-3, 1e-3);
-        assert!(
-            mlxcel_core::item_bool(&close),
-            "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens"
-        );
+        check(tokens, &got, &want);
     }
+}
+
+/// Measured divergence between the gather result and the reference.
+///
+/// The bound MLX's `allclose` applies is `|got - want| <= atol + rtol *
+/// |want|`, so `out_of_bound` counts the elements that actually missed it.
+/// A near-bound precision miss leaves `max_abs` close to the bound and few
+/// offending elements; a corrupted row leaves a large `max_abs` and a cluster
+/// of them. Non-finite values are counted per side as well: one side only means
+/// the gather or the reference produced them, both sides means something they
+/// share did (issue #2852).
+struct ExpertParityError {
+    max_abs: f32,
+    max_rel: f32,
+    non_finite: usize,
+    got_non_finite: usize,
+    want_non_finite: usize,
+    out_of_bound: usize,
+    elements: usize,
+}
+
+impl ExpertParityError {
+    fn measure(got: &mlxcel_core::MlxArray, want: &mlxcel_core::MlxArray) -> Self {
+        let got_values = mlxcel_core::utils::array_to_vec_f32(got);
+        let want_values = mlxcel_core::utils::array_to_vec_f32(want);
+        let mut error = Self {
+            max_abs: 0.0,
+            max_rel: 0.0,
+            non_finite: 0,
+            got_non_finite: 0,
+            want_non_finite: 0,
+            out_of_bound: 0,
+            elements: got_values.len(),
+        };
+        for (got, want) in got_values.iter().zip(&want_values) {
+            if !got.is_finite() {
+                error.got_non_finite += 1;
+            }
+            if !want.is_finite() {
+                error.want_non_finite += 1;
+            }
+            if !got.is_finite() || !want.is_finite() {
+                error.non_finite += 1;
+                continue;
+            }
+            let abs = (got - want).abs();
+            error.max_abs = error.max_abs.max(abs);
+            error.max_rel = error.max_rel.max(abs / want.abs().max(1e-6));
+            if abs > 1e-3 + 1e-3 * want.abs() {
+                error.out_of_bound += 1;
+            }
+        }
+        error
+    }
+}
+
+/// Fail with the measured divergence, not only the arm that missed.
+///
+/// Issue #2852's one observed failure printed no magnitude, which is why it
+/// stayed unexplained: a near-bound precision miss and a corrupted row have
+/// very different causes. Report the maximum absolute and relative
+/// differences, how many elements actually missed the bound, the non-finite
+/// count, and the default device and GPU backend the comparison ran on, so the
+/// next occurrence is actionable without a separate probe.
+fn assert_expert_parity(
+    got: &mlxcel_core::MlxArray,
+    want: &mlxcel_core::MlxArray,
+    tokens: i32,
+) -> ! {
+    let error = ExpertParityError::measure(got, want);
+    let device = if mlxcel_core::default_device_is_gpu() {
+        "the GPU"
+    } else {
+        "the CPU"
+    };
+    let backend = mlxcel_core::hardware::gpu_backend_kind();
+    panic!(
+        "nvfp4 routed experts differ from the dequantized reference at {tokens} tokens: \
+         max absolute {:e}, max relative {:e}, {} of {} elements outside the 1e-3 + 1e-3*|ref| \
+         bound, non-finite {} of {} (got {}, reference {}); default device {device}, backend \
+         {backend:?} (issue #2852). A near-bound miss and a non-finite or large row have \
+         different causes; record these numbers on the issue.",
+        error.max_abs,
+        error.max_rel,
+        error.out_of_bound,
+        error.elements,
+        error.non_finite,
+        error.elements,
+        error.got_non_finite,
+        error.want_non_finite,
+    );
+}
+
+/// Regression for #2852: the sorted nvfp4 gather must not dequantize bytes
+/// past an expert's weight and scale planes when K (the quantized dimension)
+/// is not a multiple of the kernel's 32-wide K tile.
+///
+/// The fixture's `FF = 48` gives fc2 a K of 48, so the Metal sorted gather's
+/// last K tile is 16 wide. The quantized block loader used to ignore the
+/// tile's K extent and dequantize the full 32-wide tile anyway, taking the
+/// next output row's packed bytes and its group scale; for the last output row
+/// of the last expert those reads land past the end of the weight and scale
+/// planes. nvfp4 scales are E4M3 bytes, and 0x7F decodes to NaN, so a stale
+/// 0x7F there turned the tile's zero-filled x into `0 * NaN` and made the last
+/// output column of the last expert's 20 pairs NaN: exactly the "non-finite 20
+/// of 2560" the full serial suite reported once in a while, depending on what
+/// earlier tests had left in the allocator's buffer pool.
+///
+/// Seed every size class the 384-byte scale plane can reuse with that byte, so
+/// the read lands on it on every run instead of once per unlucky pool. The
+/// assertion is finiteness, not a tolerance: a NaN here means the kernel read
+/// memory it never owned.
+#[test]
+fn nemotron_h_nvfp4_partial_k_tile_does_not_read_past_the_expert_planes() {
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    // Start from an empty pool so the seeds below are the only cached
+    // candidates, then seed the reuse window of a 384-byte allocation. The
+    // Metal allocator's `reuse_from_cache(384)` accepts any cached buffer
+    // smaller than `min(2 * 384, 384 + 2 pages)`, so every 4-byte size from
+    // 388 through 768 is seeded with 0x7F bytes. Any finite byte would be
+    // harmless there, because the partial tile's x is zero; a NaN scale is
+    // not, because `0 * NaN` is NaN.
+    mlxcel_core::memory::clear_cache();
+    let seeds: Vec<_> = (97..=192u32)
+        .map(|words| {
+            mlxcel_core::from_slice_u32(&vec![0x7F7F_7F7Fu32; words as usize], &[words as i32])
+        })
+        .collect();
+    drop(seeds);
+
+    let mut tokens_seen = Vec::new();
+    run_nvfp4_expert_arms(|tokens, got, want| {
+        tokens_seen.push(tokens);
+        let got_values = mlxcel_core::utils::array_to_vec_f32(got);
+        let non_finite: Vec<usize> = got_values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            non_finite.is_empty(),
+            "the sorted nvfp4 gather produced {} non-finite elements at {tokens} tokens \
+             ({:?}): with K = FF = 48 the last K tile is partial, and it must be zero-filled \
+             rather than dequantized from the next output row's bytes and group scale; the \
+             reads past the last expert's planes landed on a seeded E4M3 NaN scale byte \
+             (issue #2852)",
+            non_finite.len(),
+            &non_finite[..non_finite.len().min(40)],
+        );
+        let close = mlxcel_core::allclose(got, want, 1e-3, 1e-3);
+        if !mlxcel_core::item_bool(&close) {
+            assert_expert_parity(got, want, tokens);
+        }
+    });
+    assert_eq!(
+        tokens_seen,
+        vec![5, 40],
+        "both arms must run; 40 tokens is the one that takes the sorted branch"
+    );
 }
 
 pub(crate) fn batching_model() -> super::NemotronHModel {
@@ -1405,5 +1887,52 @@ fn nemotron_h_fresh_and_mixed_recurrent_states_match_solo_rows() {
                 assert!(mlxcel_core::item_f32(&delta) <= 1e-5);
             }
         }
+    }
+}
+
+/// Issue #3057: the Nemotron-H SSD scan runs `exp` on a float32 copy of
+/// `A_log`, so an f16 `A_log` past 11.09 (where f16 `exp` overflows) still
+/// gives a finite `A`. A step whose `softplus` is zero then decays by
+/// `exp(0 * A) = 1` instead of `exp(0 * -inf) = NaN`, so the output and the
+/// carried state stay finite.
+#[test]
+fn nemotron_h_ssm_a_is_float32_and_finite_for_an_f16_a_log() {
+    use crate::models::ssm_test_support::{overflowing_f16_a_log, zero_step_dt_bias};
+    use mlxcel_core::utils::array_to_vec_f32;
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+
+    const SEQ_LEN: i32 = 4;
+    const HEADS: i32 = 2;
+    const HEAD_DIM: i32 = 2;
+    const STATE_DIM: i32 = 3;
+    let f16 = |a: UniquePtr<MlxArray>| mlxcel_core::astype(&a, dtype::FLOAT16);
+    let x = f16(ramp(&[1, SEQ_LEN, HEADS, HEAD_DIM], 0.05));
+    let b = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.04));
+    let c = f16(ramp(&[1, SEQ_LEN, 1, STATE_DIM], 0.03));
+    let dt = f16(ramp(&[1, SEQ_LEN, HEADS], 0.1));
+    let d = f16(ramp(&[HEADS], 0.2));
+    let prior_state = ramp(&[1, HEADS, HEAD_DIM, STATE_DIM], 0.01);
+
+    let (y, state) = nemotron_h_ssm_attn(
+        &x,
+        &overflowing_f16_a_log(&[HEADS]),
+        &b,
+        &c,
+        &d,
+        &dt,
+        &zero_step_dt_bias(HEADS),
+        Some(&prior_state),
+        (0.0, f32::INFINITY),
+        2,
+    );
+    assert_eq!(mlxcel_core::array_dtype(&y), dtype::FLOAT16);
+    for (name, values) in [
+        ("output", array_to_vec_f32(&y)),
+        ("state", array_to_vec_f32(&state)),
+    ] {
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "{name} must be finite: {values:?}"
+        );
     }
 }

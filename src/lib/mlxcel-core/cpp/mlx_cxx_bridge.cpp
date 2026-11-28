@@ -3,6 +3,10 @@
 
 #include "mlx_cxx_internal.h"
 #include "../../mlxcelverse/kernels/gpu_backend.h"
+#include "../../mlxcelverse/kernels/gelu_tanh_f32.h"
+#include "../../mlxcelverse/kernels/mla_absorbed_decode.h"
+#include "../../mlxcelverse/kernels/inkling2_kernels.h"
+#include "../../mlxcelverse/kernels/row_invariant_matvec.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
@@ -27,6 +31,13 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+// Defined by the core overlay (mlxcelverse/overlays/core/mlx/device.cpp, and
+// its ROCm copy) on every backend; global scope for the reason given below.
+namespace mlx::core {
+struct Device;
+void mlxcel_set_process_default_device(const Device& d);
+} // namespace mlx::core
 
 #ifdef MLXCEL_BRIDGE_METAL_BACKEND
 // Defined by the mlx/backend/metal/quantized.cpp overlay (issue #1187).
@@ -194,7 +205,7 @@ bool native_env_read(rust::Str name, rust::Vec<uint8_t>& value) {
 }
 
 int32_t mlx_env_get_var_int(rust::Str name, int32_t default_value) {
-    return mlx::core::env::get_var(std::string(name).c_str(), default_value);
+    return mlx::core::config::get(std::string(name).c_str(), default_value);
 }
 
 rust::String shapeless_compile_audit_report() {
@@ -670,6 +681,20 @@ size_t array_itemsize(const MlxArray& arr) {
 
 size_t array_nbytes(const MlxArray& arr) {
     return arr.inner.nbytes();
+}
+
+// Host address of an evaluated array's bytes. For address-only uses such as
+// mlock; nothing may read through it. 0 before evaluation and for a strided
+// view, where the address plus nbytes() does not cover the array's bytes.
+size_t array_data_address(const MlxArray& arr) {
+    if (!arr.inner.is_available()) {
+        return 0;
+    }
+    const auto& flags = arr.inner.flags();
+    if (!flags.row_contiguous && !flags.col_contiguous) {
+        return 0;
+    }
+    return reinterpret_cast<size_t>(arr.inner.data<uint8_t>());
 }
 
 // Array data access (scalar extraction).
@@ -1973,6 +1998,158 @@ std::unique_ptr<MlxArray> compiled_gelu_tanh_f32(const MlxArray& x) {
     static auto compiled_fn = get_compiled_gelu_tanh_f32();
     auto result = compiled_fn({x.inner});
     return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
+// Custom kernel for `fused_gelu_tanh_f32` (Metal #2857, CUDA #2780): the
+// tanh-GELU as one 1-D elementwise JIT kernel instead of the compiled graph
+// above. Flattens any shape to 1-D for the launch and reshapes back; f32,
+// bfloat16 and float16 are upcast inside the kernel and rounded back at the
+// store. Throws when there is no port on this backend (ROCm). Rust-side callers
+// gate on `fused_gelu_tanh_f32_available()` first or route to the compiled chain.
+std::unique_ptr<MlxArray> fused_gelu_tanh_f32(const MlxArray& x) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::fused_gelu_tanh_f32(x.inner));
+}
+
+bool fused_gelu_tanh_f32_available() {
+    return mlxcel::turbo::fused_gelu_tanh_f32_available();
+}
+
+bool fused_gelu_tanh_f32_matches_eager_bits() {
+    return mlxcel::turbo::fused_gelu_tanh_f32_matches_eager_bits();
+}
+
+// Fused absorbed-MLA single-query decode attention (#3121), Metal only.
+// Throws off-Metal or on a shape outside the kernel's contract; Rust callers
+// gate on `mla_absorbed_decode_fused_available()` first.
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv,
+    const MlxArray& kpe,
+    float scale) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::mla_absorbed_decode(
+        q_abs.inner, q_pe.inner, ckv.inner, kpe.inner, scale));
+}
+
+bool mla_absorbed_decode_fused_available() {
+    return mlxcel::turbo::mla_absorbed_decode_available();
+}
+
+// The same kernel over an affine-quantized latent window (#3156), Metal only.
+// Throws off-Metal, at an unsupported bit width or outside the shape contract;
+// the Rust declaration is `-> Result`, so a refusal sends the caller to the
+// composed quantized path.
+std::unique_ptr<MlxArray> mla_absorbed_decode_fused_quantized(
+    const MlxArray& q_abs,
+    const MlxArray& q_pe,
+    const MlxArray& ckv_q,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& kpe,
+    float scale,
+    int32_t group_size,
+    int32_t bits) {
+    return std::make_unique<MlxArray>(mlxcel::turbo::mla_absorbed_decode_quantized(
+        q_abs.inner, q_pe.inner, ckv_q.inner, scales.inner, biases.inner, kpe.inner,
+        scale, group_size, bits));
+}
+
+bool mla_absorbed_decode_fused_quantized_available() {
+    return mlxcel::turbo::mla_absorbed_decode_quantized_available();
+}
+
+// Whether the fused kernels evaluate at a geometry on this device: the
+// pipeline's thread limit is per chip and per template geometry, so the
+// launcher probes it once (see `mla_absorbed_decode_supported`).
+bool mla_absorbed_decode_fused_supported(int32_t dtype, int32_t rank, int32_t rope) {
+    return mlxcel::turbo::mla_absorbed_decode_supported(to_dtype(dtype), rank, rope);
+}
+
+bool mla_absorbed_decode_fused_quantized_supported(
+    int32_t dtype,
+    int32_t kpe_dtype,
+    int32_t scales_dtype,
+    int32_t rank,
+    int32_t rope,
+    int32_t group_size,
+    int32_t bits) {
+    return mlxcel::turbo::mla_absorbed_decode_quantized_supported(
+        to_dtype(dtype), to_dtype(kpe_dtype), to_dtype(scales_dtype), rank, rope, group_size, bits);
+}
+
+// Inkling 2 Mini Metal kernels (#3359). Each launcher throws off-Metal or
+// outside its contract, and the Rust declarations are `-> Result`, so a
+// refusal sends the caller back to the ops path.
+bool inkling2_kernels_available() {
+    return mlxcel::turbo::inkling2_kernels_available();
+}
+
+void inkling2_short_convolution(
+    const MlxArray& history,
+    const MlxArray& weight,
+    const MlxArray& x,
+    const MlxArray* residual,
+    int32_t output_dtype,
+    int32_t margin,
+    std::unique_ptr<MlxArray>& out,
+    std::unique_ptr<MlxArray>& next_history) {
+    std::optional<mlx::core::array> res;
+    if (residual) res = residual->inner;
+    auto result = mlxcel::turbo::inkling2_short_convolution(
+        history.inner, weight.inner, x.inner, res, to_dtype(output_dtype), margin);
+    out = std::make_unique<MlxArray>(std::move(result.out));
+    next_history = std::make_unique<MlxArray>(std::move(result.history));
+}
+
+void inkling2_prepare_attention_heads(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& r,
+    const MlxArray& q_scale,
+    const MlxArray& r_scale,
+    float clip,
+    float rel_clip,
+    float eps,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& r_out) {
+    auto heads = mlxcel::turbo::inkling2_prepare_attention_heads(
+        q.inner, k.inner, v.inner, r.inner, q_scale.inner, r_scale.inner, clip, rel_clip, eps);
+    q_out = std::make_unique<MlxArray>(std::move(heads.q));
+    k_out = std::make_unique<MlxArray>(std::move(heads.k));
+    v_out = std::make_unique<MlxArray>(std::move(heads.v));
+    r_out = std::make_unique<MlxArray>(std::move(heads.r));
+}
+
+std::unique_ptr<MlxArray> inkling2_grouped_expert_qmv(
+    const MlxArray& x,
+    const MlxArray& w,
+    const MlxArray& scales,
+    const MlxArray* global_scale,
+    const MlxArray& experts,
+    const MlxArray& source,
+    const MlxArray& destination,
+    int32_t bits,
+    int32_t group_size) {
+    std::optional<mlx::core::array> g;
+    if (global_scale) g = global_scale->inner;
+    return std::make_unique<MlxArray>(mlxcel::turbo::inkling2_grouped_expert_qmv(
+        x.inner, w.inner, scales.inner, g, experts.inner, source.inner, destination.inner,
+        bits, group_size));
+}
+
+bool row_invariant_matvec_available() {
+    return mlxcel::turbo::row_invariant_matvec_available();
+}
+
+std::unique_ptr<MlxArray> row_invariant_matvec(
+    const MlxArray& x,
+    const MlxArray& w,
+    int32_t output_dtype) {
+    return std::make_unique<MlxArray>(
+        mlxcel::turbo::row_invariant_matvec(x.inner, w.inner, to_dtype(output_dtype)));
 }
 
 // Compiled GeGLU: gelu(gate) * x
@@ -3333,6 +3510,31 @@ std::unique_ptr<MlxArray> any_axis(const MlxArray& a, int32_t axis, bool keepdim
     return std::make_unique<MlxArray>(mlx::core::any(a.inner, axis, keepdims));
 }
 
+// Test-only. One reduction over several axes at once, in MLX's native dtype:
+// op 0 sum, 1 prod, 2 any, 3 all. The per-axis entry points above take one
+// axis, which never reaches the backends' multi-axis row reduction.
+std::unique_ptr<MlxArray> reduce_axes_probe_for_test(
+    const MlxArray& a,
+    int32_t op,
+    rust::Slice<const int32_t> axes,
+    bool keepdims
+) {
+    std::vector<int> axes_vec(axes.begin(), axes.end());
+    switch (op) {
+        case 0:
+            return std::make_unique<MlxArray>(mlx::core::sum(a.inner, axes_vec, keepdims));
+        case 1:
+            return std::make_unique<MlxArray>(mlx::core::prod(a.inner, axes_vec, keepdims));
+        case 2:
+            return std::make_unique<MlxArray>(mlx::core::any(a.inner, axes_vec, keepdims));
+        case 3:
+            return std::make_unique<MlxArray>(mlx::core::all(a.inner, axes_vec, keepdims));
+        default:
+            throw std::invalid_argument(
+                "reduce_axes_probe_for_test: op must be 0 (sum), 1 (prod), 2 (any) or 3 (all)");
+    }
+}
+
 std::unique_ptr<MlxArray> greater_equal(const MlxArray& a, const MlxArray& b) {
     return std::make_unique<MlxArray>(mlx::core::greater_equal(a.inner, b.inner));
 }
@@ -4343,7 +4545,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
 }
 
 // Fast SDPA with optional attention sinks: an extra per-head logit added to the softmax denominator, with no value row
-// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, OpenAIPrivacyFilter
+// Used by: GptOss, Laguna, DeepSeekV4, FalconOcr, MiMoV2Flash, OpenAIPrivacyFilter
 std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     const MlxArray& q,
     const MlxArray& k,
@@ -4926,6 +5128,11 @@ void synchronize_default() {
 
 void set_default_device(bool gpu) {
     mlx::core::set_default_device(gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
+}
+
+void set_process_default_device(bool gpu) {
+    mlx::core::mlxcel_set_process_default_device(
+        gpu ? mlx::core::Device::gpu : mlx::core::Device::cpu);
 }
 
 size_t set_wired_limit(size_t limit) {
@@ -5528,11 +5735,18 @@ bool quantized_matmul_matches_dense_gemm(
 namespace {
     // `single_dtype_scalars` is true on non-Metal backends (issue #636): build
     // the comparison/fill scalars in the working dtype so the CUDA bf16
-    // promotion patch inserts no per-step AsType on the scalar. On Metal it is
-    // false, keeping the bare `array(f32)` scalars exactly as before so the
-    // unpatched f16+f32 rule upcasts the chain to an f32 softmax unchanged.
+    // promotion patch inserts no per-step AsType on the scalar. For bf16
+    // inputs, upcast to float32 for softmax + cumsum so large-vocab nucleus
+    // scans do not swamp tail probabilities below 2^-9 once cumulative mass
+    // passes 0.5 (issue #2958), while keeping `sorted_logits` and `fill_scalar`
+    // in `x.dtype()`. On Metal `single_dtype_scalars` is false, keeping the
+    // bare `array(f32)` scalars exactly as before so the unpatched f16+f32
+    // rule upcasts the chain to an f32 softmax unchanged.
     array top_p_filter(const array& x, float top_p, bool single_dtype_scalars) {
-        auto probs = mlx::core::softmax(x, -1);
+        auto softmax_in = (single_dtype_scalars && x.dtype() == mlx::core::bfloat16)
+            ? mlx::core::astype(x, mlx::core::float32)
+            : x;
+        auto probs = mlx::core::softmax(softmax_in, -1);
         auto sorted_indices = mlx::core::argsort(mlx::core::negative(probs), -1);
         auto sorted_probs = mlx::core::take_along_axis(probs, sorted_indices, -1);
         auto cum_probs = mlx::core::cumsum(sorted_probs, -1, false, true);
@@ -7856,6 +8070,96 @@ std::unique_ptr<MlxArray> qwen4_hyper_inject(const MlxArray& branch, const MlxAr
         return std::vector<array>{add(in[2], multiply(in[0], in[1]))};
     });
     return std::make_unique<MlxArray>(fn({branch.inner, weights.inner, hyper.inner})[0]);
+}
+
+// Raon_mHC site graphs for a decode step (issue #3458). The eager path in
+// `models/raon_mhc.rs` issues about 45 small ops per site and a Raon-1 mini
+// token crosses 50 sites; these two graphs replay the same ops in the same
+// order from one compiled tape each, so the float32 compute and the single
+// rounding to the model dtype are those of the eager path, bit for bit.
+//
+// Compiled with fixed shapes (not shapeless): the graphs reshape and slice by
+// the stream count. The Rust side calls them for single-position steps only,
+// so the trace cache holds one entry per batch width.
+namespace {
+    // inputs: streams [B, L, n, D] and proj [B, L, 2n + (n-1)^2] in the model
+    // dtype; float32 alpha and bias [2n + (n-1)^2], eps [1], post_factor [1],
+    // basis [n, n-1], basis_t [n-1, n], chart0 [n, n], identity
+    // ((1 - gamma) I, [n, n]) and gamma [1].
+    // outputs: branch input [B, L, D] (model dtype), h_post [B, L, n] and
+    // h_res [B, L, n, n] (float32).
+    std::vector<array> raon_mhc_route_aggregate_graph(const std::vector<array>& in) {
+        using namespace mlx::core;
+        const auto& streams = in[0];
+        const int b = streams.shape(0);
+        const int l = streams.shape(1);
+        const int n = streams.shape(2);
+        const int d = streams.shape(3);
+        const int nm = n - 1;
+        auto sf = astype(streams, float32);
+        auto flat = reshape(sf, {b, l, n * d});
+        auto inv = rsqrt(add(mean(square(flat), -1, true), in[4]));
+        auto t = add(multiply(multiply(astype(in[1], float32), inv), in[2]), in[3]);
+        auto h_pre = sigmoid(slice(t, {0, 0, 0}, {b, l, n}));
+        auto h_post = multiply(sigmoid(slice(t, {0, 0, n}, {b, l, 2 * n})), in[5]);
+        auto z = reshape(slice(t, {0, 0, 2 * n}, {b, l, 2 * n + nm * nm}), {b, l, nm, nm});
+        auto error = matmul(matmul(in[6], z), in[7]);
+        auto ratio = reshape(divide(negative(error), in[8]), {b, l, n * n});
+        auto rho = maximum(max(ratio, -1, true), zeros({1}, float32));
+        auto denom = expand_dims(add(rho, full({1}, 1.0f, float32)), -1);
+        auto chart = add(in[8], divide(error, denom));
+        auto h_res = add(in[9], multiply(chart, in[10]));
+        auto x = astype(squeeze(matmul(expand_dims(h_pre, -2), sf), -2), streams.dtype());
+        return {x, h_post, h_res};
+    }
+
+    // inputs: streams [B, L, n, D] (model dtype), branch [B, L, D] (any float
+    // dtype), h_post [B, L, n] and h_res [B, L, n, n] (float32).
+    // output: h_res @ streams + h_post * branch in float32, rounded once.
+    std::vector<array> raon_mhc_mix_graph(const std::vector<array>& in) {
+        using namespace mlx::core;
+        auto sf = astype(in[0], float32);
+        auto mixed = matmul(in[3], sf);
+        auto branch = expand_dims(astype(in[1], float32), -2);
+        auto written = add(mixed, multiply(expand_dims(in[2], -1), branch));
+        return {astype(written, in[0].dtype())};
+    }
+}
+
+void raon_mhc_route_aggregate(
+    const MlxArray& streams,
+    const MlxArray& proj,
+    const MlxArray& alpha,
+    const MlxArray& bias,
+    const MlxArray& eps,
+    const MlxArray& post_factor,
+    const MlxArray& basis,
+    const MlxArray& basis_t,
+    const MlxArray& chart0,
+    const MlxArray& identity,
+    const MlxArray& gamma,
+    std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_post_out,
+    std::unique_ptr<MlxArray>& h_res_out
+) {
+    static auto fn = mlx::core::compile(raon_mhc_route_aggregate_graph, /*shapeless=*/false);
+    auto out = fn({streams.inner, proj.inner, alpha.inner, bias.inner, eps.inner,
+                   post_factor.inner, basis.inner, basis_t.inner, chart0.inner,
+                   identity.inner, gamma.inner});
+    x_out = std::make_unique<MlxArray>(std::move(out[0]));
+    h_post_out = std::make_unique<MlxArray>(std::move(out[1]));
+    h_res_out = std::make_unique<MlxArray>(std::move(out[2]));
+}
+
+std::unique_ptr<MlxArray> raon_mhc_mix(
+    const MlxArray& streams,
+    const MlxArray& branch,
+    const MlxArray& h_post,
+    const MlxArray& h_res
+) {
+    static auto fn = mlx::core::compile(raon_mhc_mix_graph, /*shapeless=*/false);
+    auto out = fn({streams.inner, branch.inner, h_post.inner, h_res.inner});
+    return std::make_unique<MlxArray>(std::move(out[0]));
 }
 
 std::unique_ptr<MlxArray> compiled_scaled_rms_norm(const MlxArray& x, const MlxArray& scale, float eps) {

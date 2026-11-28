@@ -178,6 +178,7 @@ impl ModelProvider {
                             generation_time_ms: 0,
                             prompt_eval_ms: 0,
                             generation_only_ms: 0,
+                            decode_window_tokens: Some(0),
                             finish_reason: "stop".to_string(),
                             stop_kind,
                             logprobs: None,
@@ -216,6 +217,16 @@ impl ModelProvider {
             worker_exit,
             _worker_handle: worker_handle,
         }
+    }
+
+    /// Tokenize on the dispatch thread, as a served model's provider does, so
+    /// a route test can exercise the pre-header prompt refusal (#2877).
+    pub(crate) fn with_prompt_tokenizer_for_route_tests(
+        mut self,
+        tokenizer: crate::tokenizer::MlxcelTokenizer,
+    ) -> Self {
+        self.prompt_tokenizer = Some(Arc::new(tokenizer));
+        self
     }
 
     pub(crate) fn chat_unavailable_for_route_tests() -> Self {
@@ -362,6 +373,7 @@ impl ModelProvider {
                         let mut tokens_emitted = 0usize;
                         let mut aborted = false;
                         let mut finish_reason = "stop";
+                        let mut failure = None;
                         while let Ok(step) = step_rx.recv() {
                             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                                 aborted = true;
@@ -376,12 +388,20 @@ impl ModelProvider {
                                     let _ = response_tx
                                         .send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
+                                ScriptedStreamStep::Fail(message) => {
+                                    failure = Some(message);
+                                    break;
+                                }
                                 ScriptedStreamStep::Finish => break,
                                 ScriptedStreamStep::FinishLength => {
                                     finish_reason = "length";
                                     break;
                                 }
                             }
+                        }
+                        if let Some(message) = failure {
+                            let _ = response_tx.send(GenerateEvent::Error(message));
+                            continue;
                         }
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
                             text,
@@ -390,6 +410,7 @@ impl ModelProvider {
                             generation_time_ms: 1,
                             prompt_eval_ms: 0,
                             generation_only_ms: 1,
+                            decode_window_tokens: Some(tokens_emitted.saturating_sub(1)),
                             finish_reason: finish_reason.to_string(),
                             stop_kind: crate::server::model_provider::StopKind::Eos,
                             logprobs: None,
@@ -445,6 +466,9 @@ pub(crate) enum ScriptedStreamStep {
     Finish,
     /// End it as a generation that hit its output limit (`length`).
     FinishLength,
+    /// End it as a failed generation (`GenerateEvent::Error`), as a scheduler
+    /// does alongside `FinishReason::Error` (#2877).
+    Fail(String),
 }
 
 /// Test-side driver for [`ModelProvider::scripted_streaming_for_route_tests`].
@@ -465,6 +489,13 @@ impl ScriptedStreamHandle {
 
     pub(crate) fn finish(&self) {
         let _ = self.step_tx.send(ScriptedStreamStep::Finish);
+    }
+
+    /// End the current request with a generation error.
+    pub(crate) fn fail(&self, message: &str) {
+        let _ = self
+            .step_tx
+            .send(ScriptedStreamStep::Fail(message.to_string()));
     }
 
     /// End the current request with `finish_reason: "length"`.

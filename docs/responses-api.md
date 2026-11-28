@@ -16,17 +16,25 @@ Implementation source map:
 | `src/server/responses_store.rs` | In-memory response store. |
 | `src/server/conversation_store.rs` | In-memory conversation transcript store. |
 | `src/server/routes/responses.rs` | Route handlers. |
+| `src/server/routes/responses_run.rs` | One streamed generation, driven into an event sink. |
+| `src/server/routes/responses_background.rs` | Background job admission and lifecycle. |
+| `src/server/routes/responses_background_sink.rs` | Background event sink and terminal recording. |
+| `src/server/responses_background_events.rs` | Replayable event log of a streamed background response. |
+| `src/server/routes/responses_background_stream.rs` | SSE readers of that log: the streamed create and `GET ...?stream=true`. |
 | `src/server/responses_compaction.rs` | Compaction capsule, replay, selection and summarization core. |
 | `src/server/routes/responses_compact.rs` | `POST /v1/responses/compact` handler. |
+| `src/server/mcp/` | MCP server configuration, stdio JSON-RPC client, runtime and approval registry. |
+| `src/server/routes/responses_mcp.rs`, `responses_mcp_loop.rs`, `responses_mcp_round.rs` | The server-side MCP tool loop on `POST /v1/responses`. |
 
 ## Implemented endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/v1/responses` | Create a response, either non-streaming or streaming. |
-| GET | `/v1/responses/{id}` | Retrieve a stored response. |
-| DELETE | `/v1/responses/{id}` | Delete a stored response. |
-| POST | `/v1/responses/{id}/cancel` | Best-effort cancellation of an in-flight streaming response. Stored (finished) responses return `400 invalid_request_error` without changing the saved result. |
+| POST | `/v1/responses` | Create a response: non-streaming, streaming, or as a background job (`background: true`, see [Background mode](#background-mode)). |
+| GET | `/v1/responses/{id}` | Retrieve a stored response, or poll a background response. |
+| GET | `/v1/responses/{id}?stream=true&starting_after=N` | Replay and tail the events of a streamed background response after `sequence_number` `N` (all of them without `starting_after`); see [Streaming and resuming](#streaming-and-resuming). |
+| DELETE | `/v1/responses/{id}` | Delete a stored response. A background response that has not finished returns `400`; cancel it first. |
+| POST | `/v1/responses/{id}/cancel` | Cancel a background job or an in-flight foreground stream. A background job answers with its full final Response object (`status: "cancelled"`), the same object a following `GET` and a repeated cancel return; see [Background mode](#background-mode). A foreground stream answers with a minimal `{id, object, status: "cancelled"}` envelope and ends with `response.completed` whose `response.status` is `cancelled`; once stored, a repeated cancel returns the stored object. A response that already finished otherwise returns `400 invalid_request_error` and keeps its result. |
 | POST | `/v1/responses/compact` | Summarize older turns into a `compaction` item; see [Conversation compaction](#conversation-compaction). |
 | POST | `/v1/responses/input_tokens` | Count the prompt tokens a body would prefill; see `docs/llama-server-compat.md`. |
 
@@ -71,22 +79,22 @@ with client.responses.stream(
 | `model` | required | Must match the loaded model alias/path accepted by the server. |
 | `input` | supported | String or typed input item array. |
 | `instructions` | supported | Prepended as a system-style message; not inherited through `previous_response_id`. |
-| `tools` | function-only | Only `{"type":"function", ...}` is accepted. |
+| `tools` | function, `mcp` opt-in | `{"type":"function", ...}` is always accepted. `{"type":"mcp", ...}` is accepted when the server runs with `--mcp-tools`; see [MCP tools](#mcp-tools-server-side-tool-loop). |
 | `tool_choice` | supported | `auto`, `none`, `required`, or a named function. `required` and the named form are enforced, not just accepted; see [Tool choice enforcement](#tool-choice-enforcement). |
 | `parallel_tool_calls` | accepted | Forwarded to existing tool-call handling. |
 | `text.format` | supported subset | `text` and `json_schema` shapes are handled through existing structured-output code. |
-| `reasoning` | supported subset | `reasoning.effort` is echoed unchanged and feeds the same template controls as chat-completions `reasoning_effort`: `none`, `off`, `disabled`, `false`, and `0` (case-insensitive after trimming) disable `enable_thinking`; other values enable thinking and are forwarded verbatim as `reasoning_effort`, or as `reasoning_strength` when that is the identifier the loaded template reads. The derived controls override server-wide template defaults per key. `summary` remains model/runtime dependent. |
+| `reasoning` | supported subset | `reasoning.effort` is echoed unchanged and feeds the same template controls as chat-completions `reasoning_effort`: `none`, `off`, `disabled`, `false`, and `0` (case-insensitive after trimming) disable `enable_thinking`; other values enable thinking and are forwarded verbatim as `reasoning_effort`, or as `reasoning_strength` when that is the identifier the loaded template reads. The derived controls override server-wide template defaults per key. For a model that steers by reasoning effort in its weights (Raon-1 mini, see [supported models](supported-models.md)), `reasoning.effort` also reaches the model and must be one of its levels (`none`, `low`, `medium`, `high`, `xhigh`, `max`); any other value returns 400 with that set. `summary` remains model/runtime dependent. |
 | `conversation` | supported | String id or `{ "id": "..." }`; uses in-memory conversation store. |
 | `previous_response_id` | supported | Rehydrates stored prior input/output items. Mutually exclusive with `conversation`. |
-| `store` | supported | Defaults to `true`; `false` skips persistence. |
+| `store` | supported | Defaults to `true`; `false` skips persistence. A background response needs the response store; with `false` its final object stays readable by polling for `--responses-background-ephemeral-ttl-secs`. |
 | `stream` | supported | Streams typed SSE events. |
 | `max_output_tokens` | supported | Must be greater than zero. |
-| `max_tool_calls` | supported | Soft cap on emitted function-call items. |
+| `max_tool_calls` | supported | Soft cap on emitted function-call items. In the MCP tool loop it caps the MCP calls that run; a response that asks for more ends `incomplete` with reason `max_tool_calls`. |
 | `temperature`, `top_p`, `top_logprobs` | supported subset | Mapped to chat-completions sampling fields. |
 | `metadata` | supported | Maximum 16 entries. |
 | `prompt_cache_key` | accepted | Forwarded to prompt-cache plumbing. |
 | `user`, `safety_identifier` | accepted | `user` is used when both are present; `safety_identifier` is used as a fallback. |
-| `background` | rejected when `true` | Async polling is not implemented. |
+| `background` | supported | `true` returns a `queued` response at once and runs the generation as a job; see [Background mode](#background-mode). With `stream: true` the events are streamed and can be resumed. |
 | `truncation` | only `disabled` | Other values, including `auto`, return 400. |
 | `service_tier` | accepted | Echoed/ignored; no scheduling tier is implemented. |
 | `context_management` | supported subset | `[{"type":"compaction","compact_threshold":N}]` enables automatic compaction; see [Automatic compaction](#automatic-compaction). `[]` or `null` disables it. |
@@ -109,6 +117,8 @@ Phase 1 supports these typed items:
 ```
 
 A `compaction` item is the capsule `POST /v1/responses/compact` returns; see [Conversation compaction](#conversation-compaction) for how it replays.
+
+The MCP tool loop adds four more: `mcp_approval_response` (the answer to an approval request, accepted only with `--mcp-tools`), and `mcp_list_tools`, `mcp_call` and `mcp_approval_request`, which are the loop's own output items sent back as history. A replayed `mcp_call` renders as a function call with its stored result and is never run again. See [MCP tools](#mcp-tools-server-side-tool-loop).
 
 `developer` role is treated like `system`. Reasoning input items are accepted and forwarded: the text content is buffered and attached to the parallel `reasoning` field of the following assistant turn. Chat templates that render `message.get('reasoning')` (such as Gemma 4) receive it there. The `preserve_thinking` kwarg controls whether the field survives the rolling-checkpoint strip: `false` (the default, unless the prompt cache is on) drops prior-turn reasoning along with any inline `<think>` blocks; `true` retains it.
 
@@ -204,8 +214,9 @@ Phase 1 emits events such as:
 - `response.function_call_arguments.done`
 - `response.reasoning_text.delta`
 - `response.reasoning_text.done`
-- `response.completed`
+- `response.completed` (a stream stopped by a cancel call or a client disconnect also ends with this event: `response.status` is `cancelled` and `completed_at` is null, so clients must check `status`)
 - `mlx.compaction.started`, `mlx.compaction.completed` (MLX extension, only after an automatic compaction; see [Automatic compaction](#automatic-compaction))
+- `response.mcp_list_tools.in_progress` / `.completed` / `.failed`, `response.mcp_call.in_progress` / `.completed` / `.failed`, `response.mcp_call_arguments.delta` / `.done` (only in the [MCP tool loop](#mcp-tools-server-side-tool-loop))
 - failure/incomplete/error events on error paths
 
 Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning` output item, ahead of the message item, and never as `output_text`. This holds when the chat template primes an open thinking block (for example a generation prompt ending in `<think>\n`), where the model writes only the close marker: the stream starts inside the reasoning item, as the non-streaming split does.
@@ -214,19 +225,129 @@ Harmony (GPT-OSS) replies surface their `analysis` channel as the same `reasonin
 
 Function calls stream while they are generated for the formats `/v1/chat/completions` streams incrementally (Hermes / Qwen JSON, Mistral `[ARGS]` and JSON list, Llama 3 JSON, Qwen3-Coder XML; see `docs/server-features.md`). Once a call's name is complete, any open reasoning or message item is closed and a `function_call` item is added with `status: "in_progress"` and empty `arguments`; `response.function_call_arguments.delta` events then carry the argument fragments. After generation, `response.function_call_arguments.done` and `response.output_item.done` carry the authoritative parsed arguments, and the call keeps its streamed `call_id` in the completed response. For a streamed request that parses tool calls, `response.completed` (and the copy stored for `previous_response_id`) is built from the items the stream sent: same item ids and `output_index` order, each message segment as its own `message` item (prose before and after a call are two items), function calls with their streamed `fc_` id, `call_id` and parsed arguments, and `output_text` as the concatenation of the message segments. If the streamer panics on a fragment, it is contained and the remaining arguments arrive from the final parse. Non-streaming responses are unchanged. For Hermes, Granite, Mistral and Llama 3, object `arguments` are the model's raw JSON text, not a re-serialization. A streamed call that the final parse does not confirm is logged at `warn` with the response id and closed as `incomplete`; the parsed calls are then emitted as separate items. Other formats emit each call as one `output_item.added`, one argument delta, `.done`, and `output_item.done` after generation, as before.
 
+## Background mode
+
+`POST /v1/responses` with `"background": true` returns HTTP 200 at once with a `queued` response and runs the generation as a job on the server. Poll `GET /v1/responses/{id}` until `status` is terminal.
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"local","input":"Write a haiku about rain.","background":true}'
+# {"id":"resp_...","status":"queued","background":true,"output":[],...}
+curl -s http://127.0.0.1:8080/v1/responses/resp_...
+# status: queued -> in_progress -> completed
+```
+
+| Status | Meaning |
+|--------|---------|
+| `queued` | Admitted; generation has not started. Media decoding, automatic compaction and the wait for a generation slot happen here. |
+| `in_progress` | The model started prefilling or generating. |
+| `completed`, `incomplete` | Finished, with the same `output`, `usage` and `incomplete_details` a foreground response carries. |
+| `failed` | `error` holds `{code, message}`. `code` is `server_error`, `server_overloaded` (the queue was full when the job tried to start), or `invalid_prompt` (a media read, the prompt render or automatic compaction refused the request). |
+| `cancelled` | `POST /v1/responses/{id}/cancel` stopped the job. |
+
+Every object of a background response carries `"background": true`; a foreground response has no `background` key. Until the job is terminal, `output` is `[]` and `usage` is all zeros: polling does not expose partial output.
+
+What create answers:
+
+- `400 invalid_request_error` for everything a foreground request is refused for before generation (malformed fields, unsupported media, invalid sampling or tool parameters, an invalid schema, an unknown `previous_response_id`), and also when the response store is disabled, when `stream` is `true` and `--responses-background-event-log-bytes` is `0`, or when `--responses-background-max-jobs`, the response store entry limit, or `--responses-store-max-bytes` is `0`. No job is created.
+- `429` with `error.code: "rate_limit_exceeded"` when `--responses-background-max-jobs` jobs are already active, or when the active jobs fill `--responses-store-max-bytes`. Retry after a job finishes.
+- `503` when the generation queue is full, as for a foreground request.
+
+Cancelling a job: `POST /v1/responses/{id}/cancel` returns the job's final Response object with `status: "cancelled"`, byte for byte what a following `GET` returns, so `client.responses.cancel()` gets a full object.
+
+- A `queued` job is recorded `cancelled` at once with `output: []` and `completed_at: null`, and never starts generating. Work the job had started before generation (automatic compaction, video frame extraction, request preparation) is abandoned, as for a foreground client that disconnects; a compaction summary or video decode that is already running finishes that one step.
+- An `in_progress` job stops at its next token. The reply waits up to 5 seconds for it and carries the output generated so far. A job that does not stop in time is recorded `cancelled` with `output: []`; whatever it produces later is discarded.
+- A repeated cancel returns the same object.
+- A job that finished as `completed`, `incomplete` or `failed` before the cancel took effect returns `400 invalid_request_error` (`response '<id>' has already finished and cannot be cancelled`) and keeps its result. The reply never says `cancelled` for a response that `GET` reports otherwise.
+- `store: false` jobs behave the same for as long as the final object is readable.
+- An unknown id returns `404`.
+
+A cancelled job stops counting against `--responses-background-max-jobs` when its final object is recorded, which is before the cancel reply.
+
+Interactions:
+
+- Dropping the create connection or a poll cancels nothing. Only the cancel endpoint stops a job.
+- `store` omitted or `true`: the final object becomes a stored response and follows `--responses-store-ttl-secs` and LRU eviction like a foreground one.
+- `store: false` is allowed. The final object is then readable by polling for `--responses-background-ephemeral-ttl-secs` and cannot be used as `previous_response_id`.
+- `previous_response_id` that names a job that has not finished returns `400` with `previous response '<id>' has not finished (status: <status>)`. Once the job is terminal it chains like any stored response.
+- `conversation` history is read when the job is created, and the turn is appended when the job finishes with output. A `failed` job appends nothing.
+- `context_management` runs inside the job, so a compaction failure ends the job as `failed` instead of failing the create call.
+- Media inputs are allowed. Whether the model supports a media kind is checked at create; reading and decoding happen inside the job, so a media file that cannot be read or decoded ends the job as `failed` with `invalid_prompt`.
+
+### Streaming and resuming
+
+`"background": true` with `"stream": true` answers with an SSE stream of the job's events, and the same events stay readable from the server afterwards. Every event carries a `sequence_number` that starts at 0 and increases by one, so a client that lost its connection resumes after the last one it received:
+
+```bash
+curl -N http://127.0.0.1:8080/v1/responses -H 'Content-Type: application/json' \
+  -d '{"model":"local","input":"Write a haiku about rain.","background":true,"stream":true}'
+# event: response.created      (sequence_number 0, status queued; carries the id)
+# event: response.queued       (sequence_number 1)
+# event: response.in_progress  (when the model starts)
+# ... the same item and delta events a foreground stream sends ...
+# event: response.completed
+curl -N 'http://127.0.0.1:8080/v1/responses/resp_...?stream=true&starting_after=7'
+# events 8, 9, ... then the live ones, closing after the terminal event
+```
+
+With the OpenAI Python SDK this is `client.responses.create(..., background=True, stream=True)` and `client.responses.retrieve(id, stream=True, starting_after=n)`.
+
+- The stream ends with exactly one terminal event carrying the stored object: `response.completed`, `response.incomplete`, or `response.failed`. A cancelled job ends with `response.completed` whose `response.status` is `cancelled`. The foreground `response.error` event is not used for a job failure.
+- After an automatic compaction, `response.in_progress` is followed by the two `mlx.compaction.*` events and the compaction item, as in the foreground.
+- Any number of readers can stream the same response, each with its own cursor. Closing a stream ends that reader only; the job keeps running, and only the cancel endpoint stops it. Idle streams get the SSE comment ping (`--sse-ping-interval`).
+- `X-Conversation-Id` is ignored on a background create: `starting_after` is the resume cursor.
+- `GET /v1/responses/{id}?stream=true` without `starting_after` replays from the first event. `stream=false` or no `stream` returns the JSON object as before.
+- The server keeps about `--responses-background-event-log-bytes` of events per response (default 4 MiB) and drops the oldest when the log is full; the terminal event is never dropped. A resume that asks for dropped events (a `starting_after` below the oldest retained `sequence_number` minus one, or no `starting_after` once the first event is gone) returns `400 invalid_request_error` naming the oldest retained `sequence_number`; retrieve the response with a plain GET instead. A reader that falls behind the retained window while streaming receives one `response.error` event with `code: "stream_events_evicted"` and the same message, and its stream ends.
+- Other `400` answers: a `starting_after` that is not a non-negative integer, a `starting_after` past the newest `sequence_number` sent so far (on a finished response, past its terminal event), a `stream` that is not a boolean, a response whose event log was dropped for the store budget (the message says it is no longer retained), and a response that has no event log because it was not created with both `background: true` and `stream: true`. An unknown id returns `404`.
+- The log lives as long as the response: it is counted in `--responses-store-max-bytes` and is freed when the response is evicted, deleted or expires (after `--responses-background-ephemeral-ttl-secs` for `store: false`), even while a client keeps a stream open without reading it; such a stream then receives the `response.error` event with `code: "stream_events_evicted"` and ends. A log too large to fit the store budget beside its response is dropped when the job finishes; streams waiting on the live tail still receive the terminal event.
+- While a job runs, its log is counted in the store's byte accounting but not in the admission budget, so active logs can add up to `--responses-background-max-jobs` times `--responses-background-event-log-bytes` (256 MiB with the defaults) beside `--responses-store-max-bytes`. Size the two flags together on memory-constrained hosts.
+
+`scripts/verify_responses_background.py` checks this behavior end to end with the official OpenAI Python SDK against a running server (create and poll, `store: false`, cancel, streaming, resume after a dropped stream, chaining, the job limit, and an RSS leak bound): `uv run --with openai python scripts/verify_responses_background.py --base-url http://127.0.0.1:8080/v1 --model <name>`. Pass `--expect-max-jobs N` for a server started with `--responses-background-max-jobs N` to include the 429 check, and `--jobs 200 --pid <server pid>` for the leak bound.
+
+Jobs are held in memory. The single-model server does not drain them on exit: stopping or restarting the process loses queued and running jobs, and their ids return `404` afterwards. If the model worker exits while the process keeps running, its jobs end as `failed`.
+
+### Serving roles
+
+A response, running or stored, lives in the memory of the one process and the one loaded model that created it. How retrieve, delete and cancel find it depends on how the server is deployed.
+
+**Single model and pipeline head.** One store serves every request. Nothing to configure.
+
+**Multi-model router (`--models-dir`, `--models-preset`, the model cache).** Every loaded model has its own response store, built from the router's `--responses-store-*` and `--responses-background-*` flags when the model loads, so the limits apply per loaded model. Create selects the model with the JSON `model` field as usual.
+
+Because the limits are per loaded model, the router can retain up to `--models-max` times the single-server amount: `--models-max` x (`--responses-store-max-bytes` + `--responses-background-max-jobs` x `--responses-background-event-log-bytes`). With the defaults (4 models, 256 MiB store, 64 jobs, 4 MiB event log) that is 4 x (256 MiB + 256 MiB) = 2 GiB in the worst case, and up to 4 x 64 = 256 background generation threads. `--models-max 0` (unlimited) removes the model-count factor, so lower the per-store flags when you run an unbounded pool.
+
+- `GET` and `DELETE /v1/responses/{id}` and `POST /v1/responses/{id}/cancel` (and the `/responses/...` aliases) need no `model`: the router asks each loaded model's store whether it knows the id and forwards the request to the one that does. This covers every form of retrieve, including `?stream=true` and `starting_after`, and it covers stored foreground responses and a foreground stream being cancelled as well as background jobs. The OpenAI SDK calls `client.responses.retrieve(id)`, `.cancel(id)` and `.delete(id)` therefore work unchanged.
+- The lookup is in-process and read-only: it does not refresh a stored response's LRU position, does not load a model, and touches at most the loaded models, which `--models-max` bounds. Ids are random, so two models holding the same id is not expected; if it happens the first model in name order answers.
+- An id no loaded model knows returns `404` with `error.type: "not_found"`, the same body the single-model server returns, instead of the router's `model name is missing from the request` 400.
+- `?model=<name>` still works and skips the lookup: the named model answers, with `404` if it does not hold the id. On the cancel route the router accepts `?model=` in the query as well as `model` in a JSON body.
+- A model with an active background job (`queued` or `in_progress`) is busy for eviction. Loading another model at `--models-max` never unloads it, neither through LRU eviction nor when it is named as the explicit eviction target; the load is refused with the usual capacity error when every loaded model is busy. The model becomes evictable again when its jobs reach a terminal state. Polling with `GET` does not count as use for LRU ordering; create and cancel do.
+- `POST /models/unload` (and the WebUI unload action, removing the model, or stopping the router) still unloads a model that has active jobs. Each of those jobs ends at once as `failed` with `error.code: "server_error"` and the message `The model was unloaded before the response finished.`, without the output generated so far; the unload does not wait for them. A job whose cancel was already requested ends `cancelled` instead. Stream readers receive the `response.failed` event and their streams close. The store is dropped with the model, so after the unload every id it held, finished responses included, returns `404`. Reloading the model starts with an empty store. The jobs are ended when the unload starts draining the model, before it waits for in-flight requests: if that wait then times out (a foreground request outlasts the 30-second drain timeout) or the model's state changes underneath it, the unload fails and the model stays loaded in the draining state, refusing new requests, but its jobs have already ended `failed` and are not restarted. Retry the unload once the request finishes.
+- Models in a router have no conversation store, so `conversation` is refused there as on a server started with `--conversation-store-max-entries 0`; chain with `previous_response_id` instead.
+
+**Disaggregated front (`--node-role router`).** The front does not serve the Responses API. `POST /v1/responses` and `POST /responses` return `400 invalid_request_error` with `the disaggregated router does not serve /v1/responses; send Responses API requests, including background mode, to a serving node`, for foreground and background requests alike, and create no state. Send Responses requests to a server that runs the model.
+
+**Behind an external load balancer.** Several mlxcel servers behind one address do not share responses. The balancer must send every retrieve, resume, delete and cancel for an id to the node that created it, for example by pinning the client (source address, cookie or a routing header) or by recording the node that answered the create call and routing by response id. A request that reaches another node gets `404`. Jobs do not migrate between nodes and are not written to disk.
+
 ## Response and conversation stores
 
 The stores are in memory and are bounded by entry count, approximate retained
-JSON bytes, and TTL.
+JSON bytes, and TTL. In router mode (`--models-dir`, `--models-preset`, the model
+cache) the `--responses-*` flags apply to each loaded model's own store; see
+[Serving roles](#serving-roles).
 
 | Flag | Default | Env var | Notes |
 |------|---------|---------|-------|
 | `--responses-store-max-entries` | `1024` | `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES` | `0` disables response persistence. |
 | `--responses-store-max-bytes` | `268435456` | `MLXCEL_RESPONSES_STORE_MAX_BYTES` | Approximate retained-byte budget; `0` keeps the route enabled but immediately evicts stored responses. |
 | `--responses-store-ttl-secs` | `3600` | `LLAMA_ARG_RESPONSES_STORE_TTL_SECS` | `0` disables TTL. |
+| `--responses-background-max-jobs` | `64` | `MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS` | Cap on concurrently active `background: true` responses; each holds one generation thread. `0` disables background mode. |
+| `--responses-background-ephemeral-ttl-secs` | `600` | `MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS` | How long a finished `background: true` response created with `store: false` stays readable by polling. Must be at least `1`; `0` fails startup. |
+| `--responses-background-event-log-bytes` | `4194304` | `MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES` | Byte budget of the replayable event log of one `background: true` response created with `stream: true`; the oldest events are dropped when it is full. `0` refuses `stream: true` on background responses. |
 | `--conversation-store-max-entries` | `256` | `LLAMA_ARG_CONVERSATION_STORE_MAX_ENTRIES` | `0` disables conversations. |
 | `--conversation-store-max-bytes` | `67108864` | `MLXCEL_CONVERSATION_STORE_MAX_BYTES` | Approximate retained-byte budget; `0` keeps the route enabled but immediately evicts transcripts. |
 | `--conversation-store-ttl-secs` | `3600` | `LLAMA_ARG_CONVERSATION_STORE_TTL_SECS` | `0` disables TTL. |
+
+Active background jobs are tracked outside the TTL and LRU limits, so a running job is never evicted. Their approximate bytes count against `--responses-store-max-bytes` at admission (a job that would push the active total past the budget is refused) but never evict stored responses. When a job finishes, its final object becomes a stored response. If that object alone is larger than `--responses-store-max-bytes`, a `failed` response with `error.code: "server_error"` and empty output is kept instead, so a poll still gets an answer. The final object of a `store: false` job is kept only for `--responses-background-ephemeral-ttl-secs` and is never usable as `previous_response_id`. Background jobs are in memory only and a restart loses them. Background mode is disabled when the job limit, the entry limit, or the byte budget is `0`.
 
 When response storage is disabled, retrieve/delete/cancel-by-id and
 `previous_response_id` chaining return an error. When conversation storage is
@@ -461,19 +582,165 @@ A forced `tool_choice` cannot be combined with `text.format` of type
 `json_schema`: the two constraints would each claim the whole generation, so
 the request returns 400.
 
+## MCP tools (server-side tool loop)
+
+With `--mcp-tools`, `mlxcel-server` (and `mlxcel serve`) starts the stdio [MCP](https://modelcontextprotocol.io) servers the operator configured and lets a `/v1/responses` request use their tools through OpenAI's built-in `mcp` tool. The server runs the loop itself: model turn, tool calls, tool results, next model turn, until the model answers or a bound stops it. `/v1/chat/completions` is unchanged and never runs a tool.
+
+The feature is off by default. MCP servers are child processes that run with the server's privileges, so read [Security](#security) before enabling it.
+
+### Configuration
+
+```bash
+mlxcel-server -m <model> --mcp-tools --mcp-servers-config mcp.json
+```
+
+`mcp.json` uses the Cursor-compatible format (the one llama-server accepts for the same two flags):
+
+```json
+{
+  "mcpServers": {
+    "files": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"], "env": {"LOG_LEVEL": "warn"}}
+  }
+}
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--mcp-tools` | off | Enables the loop. Required: `--mcp-servers-config`, `--mcp-servers-json` or their `LLAMA_ARG_MCP_SERVERS_CONFIG` / `LLAMA_ARG_MCP_SERVERS_JSON` variables without it fail startup, so a variable inherited from a llama.cpp deployment never starts a process. The opt-in has no environment variable. |
+| `--mcp-servers-config <PATH>` | none | File with the server set. |
+| `--mcp-servers-json <JSON>` | none | The same document inline. Pass one of the two, not both. |
+| `--mcp-max-tool-rounds <N>` | 8 | Model turns in one response whose MCP calls are run or refused. A refused call (for example one that needs approval on a `store: false` request) still spends its round. |
+| `--mcp-tool-timeout <SECONDS>` | 30 | Limit for one tool call and for one server start. |
+| `--mcp-max-output-bytes <BYTES>` | 65536 | Text one tool call may hand to the model. |
+
+The document is parsed strictly at startup, before the model loads. Only stdio servers are accepted: an entry is `command` (required), `args`, `env`, and optionally `"type": "stdio"`. An entry with `url`, `headers`, `transport`, another `type`, or any unknown key fails startup with a message naming the server. Server names are 1 to 64 characters from `A-Z a-z 0-9 _ - .`, and at most 32 servers are accepted.
+
+Each server is started once the model has loaded, and its tools are listed. A server that fails to start or to list its tools does not stop the others or the process: it is logged at `warn`, a request that names it gets an `mcp_list_tools` item with an `error` and no tools from it, and that request starts it again. A child that exited, timed out, or sent an oversized or malformed message is killed and replaced by the next call that needs it. Calls to one server run one at a time; a call that waits longer than `--mcp-tool-timeout` for the server to finish other calls fails without being sent. At most `--max-queue-depth` tool-loop responses run at once (each holds a worker thread while it waits on tools); one more gets a 503.
+
+The loop needs a single loaded chat model on a single node. Router mode (`--models-dir`, `--models-preset`, or `--webui` without a model), `--image-model` without `-m`, and every distributed launch (`--tp-size` above 1, `--pp-layers`, `--pp-auto`, `--pp-peer`, `--distributed-config`, `--node-role` including `router`, `--peers`, `--prefill-peers`, `--decode-peers`, `--serving-bind`) refuse `--mcp-tools` at startup with a one-line message naming the conflicting flag, because those server paths do not carry the MCP runtime.
+
+### Request
+
+```bash
+curl -s http://127.0.0.1:8080/v1/responses -H 'content-type: application/json' -d '{
+  "model": "<model>",
+  "input": "How many files are in /srv/data?",
+  "tools": [{"type": "mcp", "server_label": "files", "allowed_tools": ["list_directory"], "require_approval": "never"}]
+}'
+```
+
+| `mcp` tool field | Handling |
+|------------------|----------|
+| `server_label` | Required. Must name a configured server, otherwise 400. A label may appear once per request. |
+| `allowed_tools` | Optional array of tool names, or `{"tool_names": [...]}`. Only these tools are offered to the model. Other filter keys (`read_only`) return 400. |
+| `require_approval` | `"always"`, `"never"`, or `{"never": {"tool_names": [...]}, "always": {"tool_names": [...]}}`. Omitted means `"always"`, as on OpenAI. In the object form a tool named under neither key, or under both, needs approval. |
+| `server_description` | Accepted and ignored. |
+| `server_url`, `connector_id`, `headers`, `authorization` | 400. Only servers configured at startup can be used; a stdio server takes its credentials from the `env` of its configuration entry. |
+
+The allowed tools are offered to the model as function tools, with the server's `description` and `inputSchema`. A tool is addressed by name alone, so a name that two declared servers both offer, or that is also a client `function` tool, returns 400; restrict one side with `allowed_tools`. `tool_choice` (including a named function that is an MCP tool) applies to the first model turn only; later turns use `auto`. `max_output_tokens` applies to each model turn.
+
+With `--mcp-tools` off, an `mcp` tool or an `mcp_approval_response` item returns 400 with a message naming the flags. `background: true` and `context_management` cannot be combined with `mcp` tools (400).
+
+### Output items
+
+```jsonc
+"output": [
+  {"type": "mcp_list_tools", "id": "mcpl_...", "server_label": "files", "tools": [{"name": "list_directory", "description": "...", "input_schema": {...}}]},
+  {"type": "mcp_call", "id": "mcp_...", "server_label": "files", "name": "list_directory", "arguments": "{\"path\":\"/srv/data\"}", "output": "a.txt\nb.txt", "error": null, "status": "completed"},
+  {"type": "message", "id": "msg_...", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "There are 2 files."}]}
+]
+```
+
+- `mcp_list_tools` appears once per declared server, unless the chain reached through `previous_response_id` already holds one for that label.
+- `mcp_call` reports one call. On success `output` is the tool's text and `status` is `completed`. A call that failed, was refused, or was not run has `output: null`, the reason in `error`, and `status` `failed` (or `incomplete` when a bound stopped it). `approval_request_id` is present on a call that resolved an approval.
+- A model turn that calls a client `function` tool produces a `function_call` item and ends the response, as without the loop. MCP calls of the same turn that need no approval have already run; their results are replayed when the client continues with `previous_response_id` and its `function_call_output`.
+- `usage` sums every model turn of the response. `usage.mcp` (an mlxcel extension, present only on tool-loop responses) reports what the loop did and the bounds in force: `tool_rounds`, `tool_calls`, `failed_tool_calls`, `truncated_outputs`, `max_tool_rounds`, `tool_timeout_ms`, `max_output_bytes`.
+
+Streaming sends the same items. Each `mcp_call` is `response.output_item.added`, `response.mcp_call.in_progress`, `response.mcp_call_arguments.delta`, `response.mcp_call_arguments.done`, then `response.mcp_call.completed` or `response.mcp_call.failed`, and `response.output_item.done`; a call that is not run skips `in_progress`. Each `mcp_list_tools` is `response.output_item.added`, `response.mcp_list_tools.in_progress`, `.completed` or `.failed`, and `response.output_item.done`. Message and reasoning text stream as usual in every model turn. Arguments arrive in one delta once the model turn has ended (also for `function_call` items in a tool-loop response), and `response.completed` lists exactly the items the stream completed. The non-streamed response is built from the same event sequence.
+
+### Bounds and failures
+
+| Situation | Result |
+|-----------|--------|
+| The model asks for MCP tools after `--mcp-max-tool-rounds` rounds | The calls are not run (`mcp_call` items with `status: "incomplete"` and an `error`); the response ends `status: "incomplete"`, `incomplete_details.reason: "max_tool_rounds"`. |
+| More MCP calls than the request's `max_tool_calls` (approved calls run on resume included) | Same, with reason `max_tool_calls`. |
+| One model turn asks for more than 16 MCP calls and the request sets no `max_tool_calls` | The first 16 run; the rest are not run (`mcp_call` items with `status: "incomplete"` and an `error`) and the response ends `incomplete` with reason `max_tool_calls`. The 16-call per-turn cap is fixed and applies only when the request has no `max_tool_calls`. |
+| A model turn hits `max_output_tokens` | The turn's calls are not run; `incomplete`, reason `max_output_tokens`. |
+| A tool call exceeds `--mcp-tool-timeout` | The child is killed; that `mcp_call` has `error` "MCP server did not answer within N ms". |
+| The server is still busy with other calls after `--mcp-tool-timeout` | The call is not sent; that `mcp_call` has `error` "MCP server stayed busy with other calls for N ms". |
+| The child exits, or closes its output, during a call | That `mcp_call` has `error` "MCP server exited or closed its output before answering". |
+| The child writes a line that is not JSON-RPC 2.0 | The child is killed; that `mcp_call` reports the invalid message. |
+| A result's text is longer than `--mcp-max-output-bytes` | The text is cut at the cap and marked `[output truncated at N bytes]`; `usage.mcp.truncated_outputs` counts it. |
+| One JSON-RPC message is larger than four times the cap plus 64 KiB | It is refused without being buffered, the child is killed, and that `mcp_call` reports the size limit. |
+| The tool returns `isError: true` | That `mcp_call` has the tool's text as `error`. |
+| The model's arguments are not a JSON object | The call is not sent; `error` says so. |
+
+In every row but the first three the failure belongs to one call: the model receives `Tool call failed: <error>` as that call's result and the loop continues, so the response still completes. A failed call is not retried. A client disconnect or `POST /v1/responses/{id}/cancel` stops the loop between and during steps.
+
+### Approval
+
+When a call needs approval, the response ends with an `mcp_approval_request` item instead of running it:
+
+```jsonc
+{"type": "mcp_approval_request", "id": "mcpr_...", "server_label": "files", "name": "delete_file", "arguments": "{\"path\":\"/srv/data/a.txt\"}"}
+```
+
+The client answers in a new request that chains from that response and repeats the `mcp` tool declaration:
+
+```json
+{
+  "model": "<model>",
+  "previous_response_id": "resp_...",
+  "tools": [{"type": "mcp", "server_label": "files"}],
+  "input": [{"type": "mcp_approval_response", "approval_request_id": "mcpr_...", "approve": true}]
+}
+```
+
+- On `approve: true` the server runs the call with the arguments it stored when the model produced them. The answer carries no arguments, and nothing the client sends changes what runs. The resulting `mcp_call` item has `approval_request_id` set, and the loop continues.
+- On `approve: false` nothing runs; the model is told the call was denied (with the optional `reason`) and continues.
+- An approval is single-use. An answer whose id is not a pending request of the response named by `previous_response_id`, an answer sent twice, or an answer without `previous_response_id` returns 400.
+- A response with several pending requests must have all of them answered in one request, and it cannot be continued without answering them (400).
+- The answering request must declare the `mcp` tool for the same `server_label`, and its `allowed_tools` must still allow the tool (400 otherwise).
+- When the answer cannot be collected, the call is refused, not run: with `store: false`, with the response store disabled, or on a request that uses `conversation`, a call that needs approval becomes an `mcp_call` with an `error` and the model continues without it.
+
+Pending approvals live in memory beside the response store. They do not survive a restart, and an approval whose stored response was evicted (by `--responses-store-max-entries`, the byte budget, or the TTL) can no longer be answered.
+
+### Security
+
+- **Off by default, explicit opt-in.** Nothing is started without `--mcp-tools` on the command line.
+- **Startup refusal on an open listener.** With `--mcp-tools`, startup fails when the listener is a non-loopback TCP address and no API key is configured (`--api-key`, `--api-key-file`). Loopback addresses and Unix domain sockets are accepted without a key. The check runs before any child starts and before the model loads. Every caller that can reach `/v1/responses` can make the configured servers act, so keep the listener local or authenticated, and configure only servers whose tools you would let those callers use.
+- **Keep credentials out of the command line.** `--mcp-servers-json` puts the whole document, including any `env` credentials, in the process arguments, where other local users can read it. Prefer `--mcp-servers-config` with a file readable only by the server's user. `--help` does not print the value of either `LLAMA_ARG_MCP_SERVERS_*` variable.
+- **No shell, no inherited secrets.** A server is started from its `command` and `args` directly, never through a shell. Its environment is cleared and rebuilt from a short allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TZ`, `TERM`, and the Windows equivalents) plus the entry's own `env`. API keys, access tokens and every `MLXCEL_*` / `LLAMA_*` variable of the server are not passed on; a server that needs a credential gets it from its `env` entry.
+- **Tool output is untrusted text.** It is size-capped and handed to the model as a tool result. The server does not parse it or act on it. A tool result can still steer the model (prompt injection), which is why `require_approval` defaults to `always`.
+- **Bounded reads.** A child's stdout is read under a per-message byte cap and its stderr is drained into a 4 KiB ring, so a server cannot grow mlxcel's memory or block on a full pipe.
+- **Logs.** Tool arguments and outputs are not logged. Tool name, server label, duration and success are logged at `debug`; a failed child's stderr tail is logged at `debug` only.
+- No `/tools` endpoint, generic URL proxy, shell tool or filesystem tool is added by this feature.
+
+### Limitations
+
+- stdio servers configured at startup only. Per-request `server_url`, HTTP and SSE transports are not implemented.
+- Approval resume does not survive a restart (in-memory store).
+- `background: true` and `context_management` are refused together with `mcp` tools.
+- The Responses-specific `tool_choice` form `{"type": "mcp", ...}` is not parsed; use a named function.
+- Only tool `text` content reaches the model; image, audio and resource parts are replaced by a placeholder such as `[image content omitted]`.
+- Single-model server only (no router mode).
+
 ## Unsupported tool types
 
-Only function tools are accepted. Built-in/external tool types such as
-`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`,
-`image_generation`, `mcp`, `custom`, `apply_patch`, and `function_shell` return
-400 responses. `mlxcel` does not execute external tools for the Responses API.
+Function tools are always accepted, and the built-in `mcp` tool is accepted when
+the server runs with `--mcp-tools` (see
+[MCP tools](#mcp-tools-server-side-tool-loop)); without it an `mcp` tool returns
+400 with a message naming the flags. The other built-in/external tool types
+(`web_search`, `file_search`, `computer_use_preview`, `code_interpreter`,
+`image_generation`, `custom`, `apply_patch`, and `function_shell`) return 400
+responses.
 
 ## Differences from OpenAI's full API
 
 Notable gaps:
 
-- no background job mode;
+- background responses are lost on restart, and their event streams are retained up to a byte budget rather than in full;
 - no input-items pagination endpoint;
-- no built-in tools or MCP connector execution;
+- no built-in tools other than `mcp`, which is limited to stdio servers configured at startup (no `server_url`, no connectors);
 - no disk-persisted response store;
 - no `input_file` ingestion or `file_id` resolution through an uploads store.

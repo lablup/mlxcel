@@ -1,0 +1,17 @@
+round,arm,model,prompt_tokens,flags,decode_ms,decode_tok_s,prefill_tok_s,measured_phase_peak_gb,mla_paths,load_average_at_start
+1,fp16-latent,deepseek-v3.2-4bit,512,,6096.00,20.83,74.22,380.32,decompressed=122 absorbed_composed=8662,3.48 2.06 1.43
+1,int8-latent,deepseek-v3.2-4bit,512,--kv-cache-mode int8,6501.88,19.53,62.67,381.84,decompressed=122 absorbed_fused=8662,4.87 2.84 1.76
+2,fp16-latent,deepseek-v3.2-4bit,512,,6239.70,20.35,74.04,380.32,decompressed=122 absorbed_composed=8662,5.94 3.67 2.17
+2,int8-latent,deepseek-v3.2-4bit,512,--kv-cache-mode int8,6431.94,19.75,63.48,381.84,decompressed=122 absorbed_fused=8662,5.41 4.06 2.45
+3,fp16-latent,deepseek-v3.2-4bit,512,,6118.28,20.76,74.21,380.32,decompressed=122 absorbed_composed=8662,4.85 4.19 2.63
+3,int8-latent,deepseek-v3.2-4bit,512,--kv-cache-mode int8,6429.52,19.75,63.58,381.84,decompressed=122 absorbed_fused=8662,4.35 4.20 2.76
+1,fp16-latent,deepseek-v3.2-4bit,2048,,7240.83,17.54,74.51,381.21,decompressed=122 absorbed_composed=8662,3.64 4.08 2.87
+1,int8-latent,deepseek-v3.2-4bit,2048,--kv-cache-mode int8,8227.32,15.44,63.73,382.54,decompressed=122 absorbed_fused=8662,3.27 3.96 2.99
+2,fp16-latent,deepseek-v3.2-4bit,2048,,7211.75,17.61,74.54,381.21,decompressed=122 absorbed_composed=8662,5.26 4.43 3.29
+2,int8-latent,deepseek-v3.2-4bit,2048,--kv-cache-mode int8,8114.94,15.65,64.73,382.54,decompressed=122 absorbed_fused=8662,4.17 4.78 3.62
+3,fp16-latent,deepseek-v3.2-4bit,2048,,7372.64,17.23,74.76,381.21,decompressed=122 absorbed_composed=8662,2.48 3.98 3.46
+3,int8-latent,deepseek-v3.2-4bit,2048,--kv-cache-mode int8,8350.05,15.21,64.88,382.54,decompressed=122 absorbed_fused=8662,1.77 3.40 3.30
+1,fp16-latent,deepseek-v3.2-4bit,16384,,8098.10,15.68,62.10,395.93,decompressed=976 absorbed_composed=8662,2.50 3.14 3.23
+1,int8-latent,deepseek-v3.2-4bit,16384,--kv-cache-mode int8,9315.87,13.63,50.04,393.16,decompressed=976 absorbed_fused=8662,0.89 1.59 2.33
+2,fp16-latent,deepseek-v3.2-4bit,16384,,8103.01,15.67,62.29,395.93,decompressed=976 absorbed_composed=8662,1.05 0.84 1.47
+2,int8-latent,deepseek-v3.2-4bit,16384,--kv-cache-mode int8,9324.00,13.62,50.01,393.16,decompressed=976 absorbed_fused=8662,0.57 0.54 0.99

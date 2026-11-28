@@ -165,7 +165,8 @@ pub fn is_image_too_large(
 ) -> bool {
     let p = patch_size.max(1) as f64;
     let total = (patch_size.max(1) * downsample_factor.max(1)) as f64;
-    let round_to = |v: f64| -> f64 { (v / total).round() * total };
+    // The reference's `round_by_factor` uses Python's `round` (half to even).
+    let round_to = |v: f64| -> f64 { (v / total).round_ties_even() * total };
     let h_bar = round_to(height as f64).max(p);
     let w_bar = round_to(width as f64).max(p);
     let limit = max_image_tokens.max(1) as f64
@@ -273,7 +274,8 @@ impl Lfm2VlProcessor {
         let max_pixels = self.max_image_tokens as f64 * p2f2;
         let (hf, wf) = (h as f64, w as f64);
 
-        let round_to = |v: f64| -> f64 { (v / total).round() * total };
+        // Python's `round` in the reference's `round_by_factor`: half to even.
+        let round_to = |v: f64| -> f64 { (v / total).round_ties_even() * total };
         let floor_to = |v: f64| -> f64 { (v / total).floor() * total };
         let ceil_to = |v: f64| -> f64 { (v / total).ceil() * total };
 

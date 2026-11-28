@@ -213,7 +213,6 @@ struct Pending {
     input: PendingInput,
     cap: usize,
     params: SampleParams,
-    cancelled: bool,
 }
 
 /// Resolve a request's PRNG seed: the explicit seed if given, else a deterministic
@@ -290,8 +289,9 @@ impl Scheduler {
     /// to different requests. The server matches cancellations and completion
     /// events by id, so the collision would cancel or complete the wrong
     /// request rather than fail visibly. Striding by the bucket count makes ids
-    /// unique across buckets and lets `id % stride` name the owning bucket
-    /// without a side table that could drift out of step.
+    /// unique across buckets. Ownership is not encoded in the id: a bucket that
+    /// fails to compile is dropped, which would leave the residue naming a
+    /// position that no longer exists, so [`XlaBucketSet::cancel`] scans.
     fn new_with_id_stride(b_max: usize, eos: Vec<i32>, first_id: u64, stride: u64) -> Self {
         debug_assert!(stride >= 1, "id stride must be at least 1");
         let mut slots = Vec::with_capacity(b_max);
@@ -315,7 +315,6 @@ impl Scheduler {
             input,
             cap,
             params,
-            cancelled: false,
         });
         req_id
     }
@@ -325,8 +324,8 @@ impl Scheduler {
     }
 
     /// Cancel a request by id: free its slot if active, or drop it from the queue
-    /// if still pending. Returns whether the id was found (and not already
-    /// cancelled). A cancelled request emits no further events.
+    /// if still pending. Returns whether the id was found. A cancelled request
+    /// emits no further events.
     fn cancel(&mut self, req_id: u64) -> bool {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|s| s.req_id == req_id) {
@@ -337,7 +336,7 @@ impl Scheduler {
         if let Some(index) = self
             .queue
             .iter()
-            .position(|pending| pending.req_id == req_id && !pending.cancelled)
+            .position(|pending| pending.req_id == req_id)
         {
             self.queue.remove(index);
             return true;
@@ -347,18 +346,13 @@ impl Scheduler {
 
     /// No active slots and nothing left to admit.
     fn is_idle(&self) -> bool {
-        self.slots.iter().all(Option::is_none) && self.queue.iter().all(|p| p.cancelled)
+        self.slots.iter().all(Option::is_none) && self.queue.is_empty()
     }
 
-    /// Pop the next live queued request, discarding any cancelled-while-queued
-    /// entries it skips past.
+    /// Pop the next queued request. Cancellation removes a queued entry outright
+    /// (see [`Scheduler::cancel`]), so nothing is skipped here.
     fn pop_next_pending(&mut self) -> Option<Pending> {
-        while let Some(p) = self.queue.pop_front() {
-            if !p.cancelled {
-                return Some(p);
-            }
-        }
-        None
+        self.queue.pop_front()
     }
 
     /// Indices of the currently free slots, in order.
@@ -429,14 +423,18 @@ fn queue_gemma3n_prepared_request(
     ))
 }
 
-fn mrope_slot_coordinates(slots: &[Option<Slot>]) -> Result<Vec<[i32; 3]>, MropeCoordinateError> {
+fn mrope_slot_coordinates(
+    slots: &[Option<Slot>],
+    context_capacity: usize,
+) -> Result<Vec<[i32; 3]>, MropeCoordinateError> {
     slots
         .iter()
         .map(|slot| {
             let Some(slot) = slot else {
                 return Ok([0; 3]);
             };
-            let coordinate = mrope_decode_coordinate(slot.cache_len, slot.rope_delta)?;
+            let coordinate =
+                mrope_decode_coordinate(slot.cache_len, slot.rope_delta, context_capacity)?;
             Ok([coordinate; 3])
         })
         .collect()
@@ -709,8 +707,24 @@ impl XlaBucketSet {
         }
     }
 
-    /// Queue a Gemma3n embeddings-plus-dense-PLE request into the smallest
-    /// bucket that admits its expanded length plus its whole generation budget.
+    /// Queue a Gemma3n embeddings-plus-dense-PLE request into the bucket whose
+    /// static shape its dense PLE was built for.
+    ///
+    /// Every other prepared payload is capacity-agnostic and is padded to the
+    /// routed bucket at submit time. The dense PLE is not: the audio pipeline
+    /// computes it once against one static capacity, and each bundle validates
+    /// its first axis against its own
+    /// ([`IreeRaggedLlama::validate_gemma3n_dense_ple`]). Routing on the
+    /// generation budget alone can therefore choose a smaller bucket and fail
+    /// that check, which would reject every short audio request on a
+    /// multi-bucket set. The PLE's own capacity is what names the one bucket
+    /// that can run it.
+    ///
+    /// # Errors
+    ///
+    /// Reports a request that cannot fit the PLE's bucket, or a PLE built for a
+    /// capacity no loaded bucket provides (the largest bucket dropped at load,
+    /// for instance).
     pub fn submit_gemma3n_prepared(
         &mut self,
         request: Gemma3nPreparedPrefill,
@@ -718,17 +732,19 @@ impl XlaBucketSet {
         params: SampleParams,
     ) -> Result<u64, XlaAdmissionError> {
         let sequence_len = request.prepared().sequence_len;
-        match self.route(sequence_len, max_new_tokens) {
-            Some(index) => {
-                self.buckets[index].submit_gemma3n_prepared(request, max_new_tokens, params)
-            }
-            None => Err(crate::ContextCapacityError {
-                effective_prompt_len: sequence_len,
-                max_new_tokens,
-                context_capacity: self.largest_capacity(),
-            }
-            .into()),
-        }
+        let ple_capacity = request.dense_ple().shape()[0];
+        let Some(index) = self
+            .buckets
+            .iter()
+            .position(|bucket| bucket.context_capacity() == ple_capacity)
+        else {
+            return Err(XlaAdmissionError::Gemma3nPrepared(format!(
+                "the Gemma3n dense PLE was built for context capacity {ple_capacity}, which no loaded bucket provides (loaded capacities: {:?})",
+                self.capacities()
+            )));
+        };
+        validate_request_capacity(sequence_len, max_new_tokens, ple_capacity)?;
+        self.buckets[index].submit_gemma3n_prepared(request, max_new_tokens, params)
     }
 
     /// Queue an owned prepared-embeddings + DeepStack request into the smallest
@@ -759,18 +775,14 @@ impl XlaBucketSet {
     }
 
     /// Cancel `req_id` in whichever bucket owns it.
+    ///
+    /// The id's stride residue names the bucket by its position in the
+    /// *requested* capacity list, and a bucket that failed to compile is
+    /// dropped from `buckets`, so that residue no longer indexes the surviving
+    /// list. Scan instead: a set holds a handful of buckets, and stale index
+    /// arithmetic is not something a cancel path should trust.
     pub fn cancel(&mut self, req_id: u64) -> bool {
-        let stride = self.buckets.len() as u64;
-        let owner = (req_id % stride) as usize;
-        // The id encodes its bucket, but a caller can pass anything, so fall
-        // back to a scan rather than trusting arithmetic on unvalidated input.
-        if self.buckets[owner].cancel(req_id) {
-            return true;
-        }
-        self.buckets
-            .iter_mut()
-            .enumerate()
-            .any(|(index, bucket)| index != owner && bucket.cancel(req_id))
+        self.buckets.iter_mut().any(|bucket| bucket.cancel(req_id))
     }
 
     /// Whether every bucket is idle.
@@ -797,6 +809,14 @@ impl XlaBucketSet {
         self.buckets
             .first()
             .map_or(&[], XlaBatchEngine::eos_token_ids)
+    }
+
+    /// Replace the stop ids of every bucket (see
+    /// [`XlaBatchEngine::set_eos_token_ids`]).
+    pub fn set_eos_token_ids(&mut self, ids: &[i32]) {
+        for bucket in &mut self.buckets {
+            bucket.set_eos_token_ids(ids.to_vec());
+        }
     }
 
     /// Advance every non-empty bucket by one step and collect their events.
@@ -882,10 +902,20 @@ impl XlaBatchEngine {
         self.engine.compatibility_fingerprint()
     }
 
-    /// The model's EOS token ids (from `generation_config.json`).
+    /// The model's EOS token ids, read from the checkpoint at load
+    /// ([`crate::config_eos_token_ids`]) unless replaced by
+    /// [`Self::set_eos_token_ids`].
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.sched.eos
+    }
+
+    /// Replace the stop ids, so a caller that resolves EOS more completely than
+    /// this crate can (the root crate also reads the tokenizer's `eos_token`)
+    /// stops where the eager backend does. The scheduler reads the ids on every
+    /// step, so set them right after load, before any request is submitted.
+    pub fn set_eos_token_ids(&mut self, ids: Vec<i32>) {
+        self.sched.eos = ids;
     }
 
     /// Conditionally load a Gemma3n audio bucket against this exact verified
@@ -911,10 +941,11 @@ impl XlaBatchEngine {
         self.sched.is_idle()
     }
 
-    /// Number of queued (not yet admitted) live requests.
+    /// Number of queued (not yet admitted) requests. Cancellation removes a
+    /// queued entry, so every entry is live.
     #[must_use]
     pub fn pending_len(&self) -> usize {
-        self.sched.queue.iter().filter(|p| !p.cancelled).count()
+        self.sched.queue.len()
     }
 
     /// Number of active slots.
@@ -1148,7 +1179,8 @@ impl XlaBatchEngine {
             }
             PreparedPositionMode::Mrope3D => {
                 let mrope_positions =
-                    mrope_slot_coordinates(&self.sched.slots).map_err(|error| error.to_string())?;
+                    mrope_slot_coordinates(&self.sched.slots, self.engine.context_capacity())
+                        .map_err(|error| error.to_string())?;
                 self.engine.decode_ragged_mrope_logits_with_modes(
                     &adapter_modes,
                     &tok,
@@ -1308,6 +1340,54 @@ impl LlavaReferenceDiagnosticEngine {
             prefill_seconds,
             decode_seconds,
         })
+    }
+
+    /// Greedy-generate a text-only prompt on the gated batch engine: its token
+    /// prefill seeds slot 0, then the ragged decode continues on that cache,
+    /// the path the server takes for a text-only request.
+    ///
+    /// Issue #3364: this is the gated reference for the production
+    /// single-sequence session's token-prefill path, which compiles a
+    /// different projection layout and entry modules than this engine.
+    pub fn greedy_from_tokens(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+    ) -> Result<Vec<i32>, String> {
+        if max_new_tokens == 0 {
+            return Err("diagnostic token greedy requires max_new_tokens >= 1".to_string());
+        }
+        if prompt.len() + max_new_tokens > self.engine.context_capacity() {
+            return Err(format!(
+                "diagnostic token greedy would exceed context_capacity={}",
+                self.engine.context_capacity()
+            ));
+        }
+        self.engine.reset_slots_for_diagnostics()?;
+        let b_max = self.engine.b_max();
+        let vocab = self.engine.vocab();
+        let logits = self.engine.prefill_slot_logits(0, prompt)?;
+        let mut current = diagnostic_argmax(&logits[..vocab]);
+        let mut tokens = vec![current];
+        let mut cache_len = i32::try_from(prompt.len())
+            .map_err(|_| "prompt length does not fit i32".to_string())?;
+        while tokens.len() < max_new_tokens {
+            let mut carrier_tokens = vec![0; b_max];
+            let mut carrier_positions = vec![0; b_max];
+            let mut carrier_cache_lengths = vec![0; b_max];
+            carrier_tokens[0] = current;
+            carrier_positions[0] = cache_len;
+            carrier_cache_lengths[0] = cache_len;
+            let logits = self.engine.decode_ragged_logits(
+                &carrier_tokens,
+                &carrier_positions,
+                &carrier_cache_lengths,
+            )?;
+            current = diagnostic_argmax(&logits[..vocab]);
+            tokens.push(current);
+            cache_len += 1;
+        }
+        Ok(tokens)
     }
 }
 
@@ -1898,7 +1978,8 @@ mod tests {
             .collect();
         assert_eq!(ids_a, vec![0, 2, 4]);
         assert_eq!(ids_b, vec![1, 3, 5]);
-        // And the id names its own bucket, which is what `cancel` relies on.
+        // Uniqueness is what matters; ownership is resolved by scanning, because
+        // a bucket dropped at load no longer sits at its original position.
         for id in &ids_a {
             assert_eq!(id % 2, 0);
         }
@@ -2190,14 +2271,20 @@ mod tests {
     }
 
     #[test]
-    fn pop_next_pending_skips_cancelled() {
+    fn cancelling_a_queued_request_removes_it_from_the_queue() {
         let mut s = Scheduler::new(2, EOS.to_vec());
         let a = s.submit(vec![1], 8, g());
         let b = s.submit(vec![2], 8, g());
         assert!(s.cancel(a)); // cancel the head while queued
-        let got = s.pop_next_pending().expect("a live request remains");
+        assert_eq!(
+            s.queue.len(),
+            1,
+            "the cancelled entry is removed, not flagged"
+        );
+        let got = s.pop_next_pending().expect("the live request remains");
         assert_eq!(got.req_id, b);
         assert!(s.pop_next_pending().is_none());
+        assert!(s.is_idle(), "a cancelled head leaves nothing to admit");
     }
 
     #[test]
@@ -2287,7 +2374,7 @@ mod tests {
         assert_eq!(admit_next(&mut scheduler, 1), positive);
         assert_eq!(admit_next(&mut scheduler, 2), zero);
         assert_eq!(
-            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            mrope_slot_coordinates(&scheduler.slots, 8).unwrap(),
             [[3, 3, 3], [6, 6, 6], [4, 4, 4]],
             "the first decode coordinate for each row is sequence_len + its own delta"
         );
@@ -2297,9 +2384,32 @@ mod tests {
         let replacement = scheduler.submit(vec![9, 10, 11, 12], 4, g());
         assert_eq!(admit_next(&mut scheduler, 1), replacement);
         assert_eq!(
-            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            mrope_slot_coordinates(&scheduler.slots, 8).unwrap(),
             [[3, 3, 3], [4, 4, 4], [4, 4, 4]],
             "reusing the cancelled positive-delta slot must restore text delta zero"
+        );
+    }
+
+    #[test]
+    fn mrope_slot_coordinates_reject_at_and_past_context_capacity() {
+        let mut scheduler = Scheduler::new(1, EOS.to_vec());
+        // The fixture's first decode coordinate is sequence_len + delta = 4 + 4.
+        let (prepared, features) = public_deepstack_input(4);
+        let req = queue_deepstack_prepared_request(&mut scheduler, prepared, features, 4, g(), 16)
+            .unwrap();
+        assert_eq!(admit_next(&mut scheduler, 0), req);
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots, 8),
+            Err(MropeCoordinateError::OutOfRange {
+                coordinate: 8,
+                context_capacity: 8,
+            }),
+            "a coordinate equal to the capacity is already past the RoPE table"
+        );
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots, 9).unwrap(),
+            [[8, 8, 8]],
+            "one row below the capacity is still valid"
         );
     }
 
@@ -2450,6 +2560,6 @@ mod tests {
         let id = s.submit(vec![1], 8, g());
         assert!(!s.is_idle()); // queued
         assert!(s.cancel(id));
-        assert!(s.is_idle()); // cancelled-while-queued counts as drained
+        assert!(s.is_idle()); // cancelling a queued request removes it
     }
 }

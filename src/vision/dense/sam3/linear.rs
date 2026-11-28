@@ -68,14 +68,12 @@ mod tests {
     use mlxcel_core::layers::Linear;
 
     use super::*;
-    use crate::vision::addmm_oracle_test_support::{
-        ROUTING_ROWS, routing_rows, single_row_addmm_rounds_twice,
-    };
+    use crate::vision::addmm_oracle_test_support::{ROUTING_ROWS, routing_rows};
 
     #[test]
     fn biased_bf16_projection_matches_mlx_addmm_rounding() {
-        // Two rows select a single-rounding addmm kernel on every backend;
-        // one row on Metal does not (see `addmm_oracle_test_support`).
+        // Every backend rounds `addmm` once at one row and at two (see
+        // `addmm_oracle_test_support`), so both shapes expect the fused value.
         let _device_lock = mlxcel_core::streams::lock_default_device();
         let bf16 = |values: &[f32], shape: &[i32]| {
             mlxcel_core::astype(
@@ -104,20 +102,14 @@ mod tests {
         let bias = bf16(&[1.3671875, -0.70703125, 0.82421875], &[3]);
         let layer = UnifiedLinear(CoreUnifiedLinear::Regular(Linear::new(weight, Some(bias))));
         let fused = [1.296875, -0.50390625, 1.9296875];
-        let separate = [1.296875, -0.50390625, 1.9375];
         let rows = bf16(&routing_rows(&input), &[ROUTING_ROWS as i32, 4]);
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&layer.forward(&rows)),
             routing_rows(&fused)
         );
-        let single = if single_row_addmm_rounds_twice() {
-            separate
-        } else {
-            fused
-        };
         assert_eq!(
             mlxcel_core::utils::array_to_vec_f32(&layer.forward(&bf16(&input, &[1, 4]))),
-            single
+            fused
         );
     }
 }

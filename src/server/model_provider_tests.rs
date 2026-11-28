@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -43,6 +44,7 @@ fn sample_result() -> GenerationResult {
         generation_time_ms: 10,
         prompt_eval_ms: 4,
         generation_only_ms: 6,
+        decode_window_tokens: Some(1),
         finish_reason: "stop".to_string(),
         stop_kind: StopKind::Eos,
         logprobs: None,
@@ -75,14 +77,18 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         },
         reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: None,
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 
@@ -582,6 +588,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             generation_time_ms: 80,
             prompt_eval_ms: 79,
             generation_only_ms: 1,
+            decode_window_tokens: Some(0),
             finish_reason: "stop".to_string(),
             stop_kind: StopKind::Eos,
             logprobs: None,
@@ -1086,4 +1093,68 @@ fn shutdown_and_wait_times_out_on_a_worker_that_ignores_shutdown() {
         .shutdown_and_wait(Duration::from_secs(5))
         .expect("the released worker exits");
     assert!(provider.worker_exit_observed());
+}
+
+/// Serialises the MLX-allocator test below against the other cases in this
+/// file. The allocator is process-global, so the assertion is a relative
+/// delta with slack, never `cache_bytes == 0`.
+static MLX_MEMORY_SERIAL: Mutex<()> = Mutex::new(());
+
+#[test]
+fn observe_worker_exit_releases_the_workers_mlx_cache() {
+    let _serial = MLX_MEMORY_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // A big enough allocation that the parked buffers dominate the noise from
+    // whatever else the lib suite is doing on other threads.
+    const FLOATS: usize = 8 * 1024 * 1024;
+    const FOOTPRINT_BYTES: u64 = (FLOATS * std::mem::size_of::<f32>()) as u64;
+
+    // Start from a drained cache so `baseline` is a real floor.
+    mlxcel_core::memory::clear_cache();
+    let baseline = mlxcel_core::memory::snapshot().cache_bytes;
+
+    let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    let (parked_tx, parked_rx) = mpsc::channel::<u64>();
+    let worker = std::thread::spawn(move || {
+        let values = vec![1.0f32; FLOATS];
+        let array = mlxcel_core::from_slice_f32(&values, &[FLOATS as i32]);
+        mlxcel_core::eval(&array);
+        // Dropping the last reference hands the device buffers back to MLX's
+        // free-buffer cache, which is exactly what the exit watcher reclaims.
+        drop(array);
+        drop(values);
+        let _ = parked_tx.send(mlxcel_core::memory::snapshot().cache_bytes);
+        // Stay alive until the test asks for shutdown, so the watcher's clear
+        // runs on a cache that actually holds this worker's buffers.
+        let _ = request_rx.recv();
+    });
+    let provider = provider_with_worker(request_tx, worker);
+
+    let parked = parked_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the worker parks its buffers in the MLX cache");
+    if parked < baseline.saturating_add(FOOTPRINT_BYTES / 2) {
+        // MLX's no-gpu CPU allocator returns 0 from `get_cache_memory()` by
+        // upstream design, so there is nothing to observe on that backend.
+        eprintln!(
+            "skipped: cache_bytes reads {parked} against a {baseline} baseline after parking \
+             a {FOOTPRINT_BYTES}-byte array; this MLX backend does not track the free-buffer cache"
+        );
+        return;
+    }
+
+    provider
+        .shutdown_and_wait(Duration::from_secs(60))
+        .expect("the worker exits when asked");
+    assert!(provider.worker_exit_observed());
+    let after = mlxcel_core::memory::snapshot().cache_bytes;
+
+    assert!(
+        after.saturating_add(FOOTPRINT_BYTES / 2) < parked,
+        "the worker exit left {after} bytes in the MLX cache against {parked} bytes parked by a \
+         {FOOTPRINT_BYTES}-byte array ({baseline} before the worker ran); the exit watcher must \
+         clear the cache after the join returns"
+    );
 }

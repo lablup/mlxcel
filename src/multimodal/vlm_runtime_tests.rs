@@ -14,12 +14,14 @@
 
 use super::{
     InklingAudioPromptLayout, InklingAudioTokenIds, InklingPromptTokenIds,
-    InklingVideoPromptLayout, QwenMediaOrdinal, VlmPreparationSummary, expand_gemma3n_audio_tokens,
+    InklingVideoPromptLayout, QwenMediaOrdinal, QwenVideoTimestamps, QwenVisualGrid,
+    QwenVisualKind, VlmPreparationSummary, expand_gemma3n_audio_tokens,
     expand_gemma4_audio_tokens_for_server, expand_gemma4_unified_video_tokens,
     expand_gemma4_video_tokens, expand_inkling_audio_prompt,
     expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
     insert_inkling_video_prompt, prepared_embedding_refs, qwen_media_order_from_prompt,
-    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings, split_jina_vlm_prompt,
+    qwen_request_cache_key, qwen_video_group_prefixes, shift_molmo_v1_image_input_idx_for_bos,
+    should_prepare_vlm_embeddings, split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 
@@ -362,6 +364,149 @@ fn qwen_media_order_from_prompt_rejects_missing_video_placeholder() {
     let err = qwen_media_order_from_prompt(&prompt, IMAGE, VIDEO, 1, 1).unwrap_err();
 
     assert!(err.to_string().contains("prompt/media mismatch"));
+}
+
+/// Mixed request: one image followed by one two-group video.
+fn mixed_image_then_video() -> (Vec<QwenMediaOrdinal>, Vec<QwenVisualGrid>) {
+    (
+        vec![QwenMediaOrdinal::Image(0), QwenMediaOrdinal::Video(0)],
+        vec![
+            QwenVisualGrid {
+                kind: QwenVisualKind::Image,
+                grid_thw: (1, 4, 4),
+            },
+            QwenVisualGrid {
+                kind: QwenVisualKind::Video,
+                grid_thw: (2, 4, 4),
+            },
+        ],
+    )
+}
+
+/// Encoder that maps each marker to its byte values, so the tests can see
+/// exactly which text reached the tokenizer.
+fn byte_encoder(text: &str) -> anyhow::Result<Vec<i32>> {
+    Ok(text.bytes().map(i32::from).collect())
+}
+
+#[test]
+fn qwen_video_group_prefixes_encode_one_marker_per_group() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.26_f64, 1.5]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let prefixes = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing))
+        .unwrap()
+        .expect("a timestamp family with a video renders markers");
+
+    assert_eq!(prefixes.len(), 1);
+    assert_eq!(prefixes[0].len(), 2);
+    assert_eq!(
+        prefixes[0][0],
+        byte_encoder("<0.3 seconds>").unwrap(),
+        "markers use one decimal place"
+    );
+    assert_eq!(prefixes[0][1], byte_encoder("<1.5 seconds>").unwrap());
+}
+
+#[test]
+fn qwen_video_group_prefixes_keep_flat_layout_for_non_timestamp_families() {
+    let (order, grids) = mixed_image_then_video();
+    // Timing is supplied but a family without timestamps must ignore it, and
+    // must not even require it.
+    let seconds = vec![vec![0.0_f64, 1.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    assert!(
+        qwen_video_group_prefixes(false, &order, &grids, 1, Some(&timing))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        qwen_video_group_prefixes(false, &order, &grids, 1, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_ignore_image_only_requests() {
+    let order = vec![QwenMediaOrdinal::Image(0)];
+    let grids = vec![QwenVisualGrid {
+        kind: QwenVisualKind::Image,
+        grid_thw: (1, 4, 4),
+    }];
+
+    assert!(
+        qwen_video_group_prefixes(true, &order, &grids, 0, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_missing_timing_for_timestamp_family() {
+    let (order, grids) = mixed_image_then_video();
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, None).unwrap_err();
+
+    assert!(err.to_string().contains("no video timing was provided"));
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_video_count_mismatch() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.0_f64, 1.0], vec![0.0_f64, 1.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("covers 2 video(s), but request has 1")
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_group_count_mismatch() {
+    let (order, grids) = mixed_image_then_video();
+    // The processor derived two temporal groups, but timing has three.
+    let seconds = vec![vec![0.0_f64, 1.0, 2.0]];
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &byte_encoder,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("has 2 temporal group(s), but 3 timestamp(s)")
+    );
+}
+
+#[test]
+fn qwen_video_group_prefixes_propagate_tokenizer_errors() {
+    let (order, grids) = mixed_image_then_video();
+    let seconds = vec![vec![0.0_f64, 1.0]];
+    let failing = |_: &str| -> anyhow::Result<Vec<i32>> { anyhow::bail!("tokenizer exploded") };
+    let timing = QwenVideoTimestamps {
+        group_seconds: &seconds,
+        encode_text: &failing,
+    };
+
+    let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+
+    assert!(err.to_string().contains("tokenizer exploded"));
 }
 
 #[test]
@@ -885,4 +1030,99 @@ fn a_surplus_marker_with_no_image_behind_it_is_spliced_out() {
     let segments = split_jina_vlm_prompt(" User: <|image|>a<|image|>b Assistant:", 1, true);
     assert_eq!(segments, [" User: ", "ab Assistant:"]);
     assert!(segments.iter().all(|s| !s.contains("<|image|>")));
+}
+
+#[test]
+fn qwen_video_group_prefixes_reject_non_finite_and_negative_seconds() {
+    let (order, grids) = mixed_image_then_video();
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
+        let seconds = vec![vec![0.0, invalid]];
+        let timing = QwenVideoTimestamps {
+            group_seconds: &seconds,
+            encode_text: &byte_encoder,
+        };
+        let err = qwen_video_group_prefixes(true, &order, &grids, 1, Some(&timing)).unwrap_err();
+        assert!(err.to_string().contains("finite non-negative seconds"));
+    }
+}
+
+/// Qwen-VL caches the vision output of the whole request (every image of the
+/// request concatenated) under one key, so that key must be a function of
+/// every image's key, in order (#3265). A key taken from the first image alone
+/// lets `[A, C]` be served the features stored for `[A]` or `[A, B]`.
+#[test]
+fn qwen_vl_cache_key_covers_every_image() {
+    use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
+
+    let k = |bytes: &[u8]| Some(CacheKey::from_hash(image_hash_from_bytes(bytes)));
+    let grid = [(1, 4, 4)];
+    let request_key =
+        |keys: &[Option<CacheKey>]| qwen_request_cache_key(Some(keys), keys.len(), &grid);
+
+    let a_c = request_key(&[k(b"A"), k(b"C")]);
+    let a_b = request_key(&[k(b"A"), k(b"B")]);
+    let a = request_key(&[k(b"A")]);
+    assert!(a_c.is_some() && a_b.is_some() && a.is_some());
+    assert_ne!(a_c, a_b, "[A, C] and [A, B] must not share a request key");
+    assert_ne!(a, a_c, "[A] and [A, C] must not share a request key");
+    assert_ne!(a, a_b, "[A] and [A, B] must not share a request key");
+    // Order matters: the features are concatenated in request order.
+    assert_ne!(request_key(&[k(b"C"), k(b"A")]), a_c);
+    // Same images in the same order: the same entry, so a repeated request
+    // still hits.
+    assert_eq!(request_key(&[k(b"A"), k(b"C")]), a_c);
+}
+
+/// When any image lacks an explicit key, no request key is derived from the
+/// partial list; the caller falls back to hashing the whole pixel tensor.
+#[test]
+fn qwen_vl_cache_key_needs_every_image_key() {
+    use crate::vision::feature_cache::{CacheKey, image_hash_from_bytes};
+
+    let a = Some(CacheKey::from_hash(image_hash_from_bytes(b"A")));
+    let grid = [(1, 4, 4), (1, 4, 4)];
+    assert_eq!(
+        qwen_request_cache_key(Some(&[a.clone(), None]), 2, &grid),
+        None
+    );
+    assert_eq!(
+        qwen_request_cache_key(Some(&[None, a.clone()]), 2, &grid),
+        None
+    );
+    assert_eq!(qwen_request_cache_key(Some(&[]), 0, &[]), None);
+    assert_eq!(qwen_request_cache_key(None, 2, &grid), None);
+    // A key list that does not name every image of the request would key the
+    // whole request's features on a subset of its images.
+    assert_eq!(qwen_request_cache_key(Some(&[a]), 2, &grid), None);
+}
+
+/// The same image keys (or the same flattened patch bytes) encoded at another
+/// patch grid produce different features, so they must not share an entry
+/// (Neywa-Labs/mlx-vlm#2529, `processed_image_key`).
+#[test]
+fn qwen_vl_cache_key_covers_grid_layout() {
+    use crate::vision::feature_cache::{CacheKey, hash_with_grid_layout, image_hash_from_bytes};
+
+    let a = Some(CacheKey::from_hash(image_hash_from_bytes(b"A")));
+    let keys = [a];
+    let wide = qwen_request_cache_key(Some(&keys), 1, &[(1, 2, 4)]);
+    let tall = qwen_request_cache_key(Some(&keys), 1, &[(1, 4, 2)]);
+    assert!(wide.is_some());
+    assert_ne!(
+        wide, tall,
+        "one image key at two grids must not share an entry"
+    );
+    assert_eq!(wide, qwen_request_cache_key(Some(&keys), 1, &[(1, 2, 4)]));
+
+    // The pixel-hash fallback: identical flattened bytes, one 4x4 grid versus
+    // two 2x4 grids.
+    let pixels = [7u8; 32];
+    assert_ne!(
+        hash_with_grid_layout(&pixels, &[(1, 4, 4)]),
+        hash_with_grid_layout(&pixels, &[(1, 2, 4), (1, 2, 4)])
+    );
+    assert_ne!(
+        hash_with_grid_layout(&pixels, &[(1, 2, 4)]),
+        hash_with_grid_layout(&pixels, &[(1, 4, 2)])
+    );
 }

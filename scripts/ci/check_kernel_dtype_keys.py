@@ -123,6 +123,7 @@ EXPECTED_IN_SCOPE = frozenset(
     {
         "src/lib/mlxcelverse/kernels/fused_norm.cpp",
         "src/lib/mlxcelverse/kernels/fused_rope_append.cpp",
+        "src/lib/mlxcelverse/kernels/gelu_tanh_f32.cpp",
         "src/lib/mlxcelverse/kernels/paged_attention.cpp",
         "src/lib/mlxcelverse/kernels/paged_attention_v2.cpp",
         "src/lib/mlxcelverse/kernels/paged_attention_v2_merge.cpp",

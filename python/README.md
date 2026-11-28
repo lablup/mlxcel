@@ -11,7 +11,7 @@ pip install ./python          # from a repo checkout
 pip install "./python[dev]"     # with pytest, ruff, mypy for development
 ```
 
-Requires Python 3.9+. The client itself is pure Python (`openai>=1.40`, `httpx>=0.27`). Managed mode additionally needs the `mlxcel` binary on `PATH`, or pass `binary=` / set `MLXCEL_BIN`.
+Requires Python 3.11+. The client itself is pure Python (`openai>=1.40`, `httpx>=0.27`). Managed mode additionally needs the `mlxcel` binary on `PATH`, or pass `binary=` / set `MLXCEL_BIN`.
 
 ## Usage
 
@@ -58,6 +58,8 @@ Runnable scripts live in [`examples/`](examples/). Each expects the `mlxcel` bin
 - Passing a model together with `base_url=` or `transport=` raises `MlxcelError`. `socket=` alongside a model is the bind path for the spawned server.
 
 On POSIX, managed mode defaults to a Unix domain socket for low-overhead local IPC. Keep socket paths short (`sun_path` is about 104 bytes on macOS, 108 on Linux); the default lives under `/tmp`. Pass `socket=` to override. Windows uses TCP.
+
+When a managed start finds something at the socket path, it removes a socket nobody listens on (a leftover from a server that crashed) and starts. It does not replace a socket another server is listening on, or an entry that is not a socket (a file, a directory, a symlink): the start raises `MlxcelServerError` and the entry is left as it is. The check is not a lock against another process creating the path at the same moment.
 
 ## Server options (`**server_kwargs`)
 

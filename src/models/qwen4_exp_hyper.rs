@@ -80,28 +80,52 @@ impl GatedResidual {
         mlxcel_core::reshape(x, &split)
     }
 
-    fn mix(&self, normed: &MlxArray) -> UniquePtr<MlxArray> {
-        let down = self.input_mix_weight_down.forward(normed);
+    fn mix(&self, normed: &MlxArray, decode_equivalent: bool) -> UniquePtr<MlxArray> {
+        let project = |linear: &UnifiedLinear, x: &MlxArray| {
+            if decode_equivalent {
+                super::linear::decode_equivalent_projection(linear, x)
+            } else {
+                linear.forward(x)
+            }
+        };
+        let down = project(&self.input_mix_weight_down, normed);
         let activated = mlxcel_core::qwen4_hyper_activate(&down, self.hc_count);
-        let projected = self.input_mix_weight_up.forward(&activated);
+        let projected = project(&self.input_mix_weight_up, &activated);
         mlxcel_core::qwen4_hyper_mix(&self.streams(&projected), &self.streams(normed))
     }
 
-    /// The mixer path: the `[B, L, hidden]` mixed stream.
-    pub(crate) fn collapse(&self, hyper: &MlxArray) -> UniquePtr<MlxArray> {
-        self.mix(&self.hc_norm.forward(hyper))
+    /// The mixer path: the `[B, L, hidden]` mixed stream. `decode_equivalent`
+    /// is the speculative verify block's contract (see [`Self::split`]).
+    pub(crate) fn collapse(
+        &self,
+        hyper: &MlxArray,
+        decode_equivalent: bool,
+    ) -> UniquePtr<MlxArray> {
+        self.mix(&self.hc_norm.forward(hyper), decode_equivalent)
     }
 
     /// Returns the sublayer input `[B, L, hidden]` and the per-stream injection
     /// weights `[B, L, hc_count]` (`2 * sigmoid(inject(normed) / hc_count)`).
-    pub(crate) fn split(&self, hyper: &MlxArray) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    ///
+    /// `decode_equivalent` (a speculative verify block, issue #2880) takes the
+    /// plain injection projection single-row decode takes, not the
+    /// prefill-only gathered form.
+    pub(crate) fn split(
+        &self,
+        hyper: &MlxArray,
+        decode_equivalent: bool,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let normed = self.hc_norm.forward(hyper);
-        let mixed = self.mix(&normed);
+        let mixed = self.mix(&normed, decode_equivalent);
         let inject = self
             .block_inject_weight
             .as_ref()
             .expect("split() is only called on a sublayer hyper-connection");
-        let projected = super::linear::row_invariant_projection(inject, &normed);
+        let projected = if decode_equivalent {
+            super::linear::decode_equivalent_projection(inject, &normed)
+        } else {
+            super::linear::row_invariant_projection(inject, &normed)
+        };
         let weights = mlxcel_core::qwen4_hyper_gate(&projected, self.hc_count);
         (mixed, weights)
     }

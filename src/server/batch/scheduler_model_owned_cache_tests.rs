@@ -47,7 +47,7 @@ const HIDDEN: i32 = 4;
 const VOCAB: i32 = 8;
 const INTERMEDIATE: i32 = 8;
 const HEAD_DIM: i32 = 2;
-const EOS_ID: i32 = 7;
+pub(super) const EOS_ID: i32 = 7;
 
 fn tensor(shape: &[i32], value: f32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     let len = shape.iter().product::<i32>() as usize;
@@ -208,6 +208,10 @@ pub(super) fn cache_ctx() -> PromptCacheRequestContext {
         mm_digest: MultimodalDigest::empty(),
         history_prompt: None,
         history_prefix_tokens: None,
+        root_prompt: None,
+        root_prefix_tokens: None,
+        snapshot_lineage: Default::default(),
+        model_reasoning_effort: None,
     }
 }
 
@@ -230,14 +234,18 @@ pub(super) fn options() -> ServerGenerateOptions {
         logprobs: Default::default(),
         reasoning_budget: ReasoningBudgetOverride::InheritServerDefault,
         thinking_enter_block_on_start: false,
+        thinking_primed_close: None,
         reasoning_control: None,
         prompt_cache_ctx: Some(cache_ctx()),
         structured: None,
         grammar: None,
         image_soft_tokens: None,
+        video_num_frames: None,
+        video_min_frames: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
         count_prompt_only: false,
+        model_reasoning_effort: None,
     }
 }
 
@@ -300,13 +308,13 @@ pub(super) fn prompt(n: usize) -> Vec<i32> {
 /// allocated backend is exactly the thing that lies, and the layout override
 /// is a server-config artifact that never consults the model.
 #[test]
-fn paged_override_does_not_change_the_model_owned_natural_backend() {
+fn paged_override_does_not_change_the_scheduler_owned_natural_backend() {
     let mut sched = scheduler(test_store());
 
     assert_eq!(
         sched.engine.model().sequence_state_layout().backend,
-        SequenceStateBackend::ModelOwned,
-        "Gemma 3 keeps its K/V in ModelOwnedSequenceState"
+        SequenceStateBackend::SchedulerOwned,
+        "Gemma 3 keeps its K/V in the pool entry's layer state (issue #3254)"
     );
     assert!(matches!(
         sched.sequence_state_layout_override(),
@@ -328,6 +336,11 @@ fn paged_override_does_not_change_the_model_owned_natural_backend() {
     assert!(
         set.caches.is_empty(),
         "yet the sequence carries no per-layer K/V: the block table is shadow accounting"
+    );
+    assert_eq!(
+        set.layer_state().map(<[_]>::len),
+        Some(sched.engine.model().num_layers()),
+        "the real state is the layer state, present whatever backend was allocated"
     );
 }
 
@@ -443,7 +456,7 @@ fn snapshot_partial_match_declines_under_require_whole_entry() {
     second.extend([1, 2, 3, 4]);
     let ctx = cache_ctx();
 
-    let declined = sched.try_adopt_cached_prefix(&ctx, &second, true);
+    let declined = sched.try_adopt_cached_prefix(&ctx, &second, true).adopted();
     assert!(
         declined.is_none(),
         "a partial snapshot match must decline when require_whole_entry is set"
@@ -454,6 +467,7 @@ fn snapshot_partial_match_declines_under_require_whole_entry() {
     // other miss (e.g. a bad key or a below-minimum prefix).
     let adopted = sched
         .try_adopt_cached_prefix(&ctx, &second, false)
+        .adopted()
         .expect("without the gate the same partial match must adopt");
     assert_eq!(adopted.1, 20, "adopted at the 20-token common prefix");
 }

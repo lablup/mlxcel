@@ -258,6 +258,25 @@ exactly this reason.
    The shared loader does this for you; a family-local `SwitchLinear` /
    `SwitchGLU` / `ExpertLinear` does not inherit it. See
    [Quantization Parameter Bounds](#quantization-parameter-bounds).
+9. Implement `LanguageModel::last_row_logits` so the prefill projects only the
+   sampled hidden row through the final norm, the LM head and any softcap or
+   logit scale. Without it the engine's prefill computes `[B, L, vocab]` and
+   keeps one row, about 1 GB per 2048-token piece at a 262K vocabulary.
+   - Thread the row through the forward body with
+     `mlxcel_core::generate::select_row(h, row)` right before the final norm,
+     or slice with `logits_at_position` when the model already separates its
+     hidden states from its head. The hook mirrors `forward_with_sequence_id`
+     for `None` embeddings and `forward_with_embeddings_and_sequence_id`
+     otherwise, and returns `None` for a combination it does not support.
+   - A VLM wrapper that implements `LanguageModel` forwards the hook to its
+     text model: `mlxcel_core::generate::last_row_logits_from` when its
+     forwards are plain delegations, the text model's own last-row variant
+     when it prepares positions or injects features.
+   - Add a `last_row_case!` test (`src/models/last_row_logits_harness.rs`)
+     over a tiny random-weight fixture.
+   - `src/models/last_row_logits_coverage_tests.rs` lists every implementation
+     that keeps the full-logits default, with the reason. A model that cannot
+     take the hook is added there.
 
 ## VLM Checklist
 

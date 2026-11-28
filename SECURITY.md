@@ -13,7 +13,7 @@ We provide security updates for the following versions:
 | 0.8.x                | :white_check_mark: | Current release line        |
 | < 0.8.0              | :x:                | Unsupported                 |
 
-> **Note**: mlxcel's current release line is 0.8.x (tags v0.1.4 through v0.8.0 have shipped). The latest published `0.8.x` release is the only supported version and security fixes ship as a new patch release. End-of-support dates for older lines will be defined as the project approaches 1.0.
+> **Note**: mlxcel's current release line is 0.8.x (tags v0.1.4 through v0.8.1 have shipped). The latest published `0.8.x` release is the only supported version and security fixes ship as a new patch release. End-of-support dates for older lines will be defined as the project approaches 1.0.
 
 We strongly recommend always running the latest published release to ensure you have the most recent security fixes.
 

@@ -222,7 +222,7 @@ pub struct TokenOnlyRounds {
 /// Each proposing row costs one verify forward on top of the batched step,
 /// so the gain shrinks as the batch grows. Measured on GB10 (Qwen3-1.7B
 /// 4-bit, `--parallel 8`;
-/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): with
+/// `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-gb10-2026-10-11`): with
 /// this default, concurrency 4 and 8 match the flag-off server in every
 /// workload, while a gate of 8 gains 15 to 63 % on raw-completion workloads
 /// but loses 13 % on the chat-template copy workload at concurrency 4.
@@ -239,7 +239,7 @@ pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
 /// accepted-token EMA was already at least four, so an abrupt field boundary
 /// does not discard an established profitable copy run. Consecutive misses
 /// still pause. A round meeting the floor repays startup EMA debt.
-/// See `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`.
+/// See `docs/benchmark_results/versions/v0.8.0.md#server-prompt-lookup-break-even-gb10-2026-10-11`.
 pub(crate) const PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND: usize = 4;
 /// Require a whole default proposal's worth of shadow evidence to avoid
 /// resuming on the incidental two-token matches common in chat prose.
@@ -409,6 +409,24 @@ impl SpeculativeDispatch {
         // - any other kind (`InternalMtp`, which no drafter `model_type` maps
         //   to, or a future `#[non_exhaustive]` variant) has no server-side
         //   round loop and is refused at startup.
+        // The Inkling 2 bundled DSpark (issue #3374) serves 2..=block_size
+        // verify rows; refuse a wider or narrower override at startup rather
+        // than on every request.
+        if resolved_kind == DrafterKind::Dflash
+            && mlxcel_core::drafter::inkling2_dspark::is_inkling2_dspark_dir(&draft_model_path)
+        {
+            let config = mlxcel_core::drafter::inkling2_dspark::Inkling2DsparkConfig::from_dir(
+                &draft_model_path,
+            )
+            .map_err(|message| SpeculativeDispatchError::DrafterConfig {
+                path: draft_model_path.clone(),
+                message,
+            })?;
+            if let Some(message) = config.verify_width_error(block_size.width as usize) {
+                return Err(SpeculativeDispatchError::InvalidKind { message });
+            }
+        }
+
         match resolved_kind {
             DrafterKind::Mtp => Ok(Self::Mtp {
                 draft_model_path,

@@ -38,6 +38,9 @@ pub enum ToolCallFormat {
     /// `<atem:invoke name="fn">` blocks with `<atem:parameter name="k">v`
     /// `</atem:parameter>` values.
     Atem,
+    /// Inkling: `<|message_model|>NAME<|content_invoke_tool_json|>`
+    /// `{"name": ..., "args": {...}}<|end_message|>`.
+    Inkling,
     /// Hermes/Qwen: `<tool_call>{"name": ..., "arguments": ...}</tool_call>`
     Hermes,
     /// Llama 3.x: `{"name": ..., "parameters": ...}` possibly with `<|python_tag|>`
@@ -117,7 +120,7 @@ pub enum ToolCallFormat {
     /// inside a `<|open|>tools<|sep|>` ... `<|close|>tools<|sep|>` section.
     /// Argument values are typed by the `type` attribute rather than inferred.
     KimiK3,
-    /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`): structurally
+    /// LongCat-Flash (`longcat_flash`, `longcat_flash_ngram`, `longcat_flash_sparse`): structurally
     /// identical to [`Glm47`](ToolCallFormat::Glm47) but with the distinct tags
     /// `<longcat_tool_call>`, `<longcat_arg_key>`, and `<longcat_arg_value>`; a
     /// block body that starts with `{` is treated as a raw JSON tool object.
@@ -129,6 +132,7 @@ impl ToolCallFormat {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Atem => "atem",
+            Self::Inkling => "inkling",
             Self::Hermes => "hermes",
             Self::Llama3 => "llama3",
             Self::MistralNemo => "mistral_nemo",
@@ -165,6 +169,7 @@ impl FromStr for ToolCallFormat {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "atem" => Ok(Self::Atem),
+            "inkling" => Ok(Self::Inkling),
             "hermes" => Ok(Self::Hermes),
             "llama3" | "llama_3" => Ok(Self::Llama3),
             "mistral_nemo" | "mistral-nemo" => Ok(Self::MistralNemo),

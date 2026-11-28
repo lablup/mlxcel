@@ -157,3 +157,51 @@ async fn a_busy_server_refuses_before_counting() {
         "no summary pass, no generation"
     );
 }
+
+/// Issue #2900: a streamed background response reports the compaction after
+/// `response.in_progress`, as the foreground does, with one sequence.
+#[tokio::test]
+async fn a_streamed_background_response_reports_compaction_after_in_progress() {
+    let h = harness(CONTEXT);
+    let mut request = body(history(), Some(200));
+    request["stream"] = json!(true);
+    request["background"] = json!(true);
+    let (status, text) = h
+        .post_raw(
+            &request,
+            &[Script(&[SUMMARY], false), Script(&["an", "swer"], false)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let events = sse_events(&text);
+    let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        &names[..7],
+        [
+            "response.created",
+            "response.queued",
+            "response.in_progress",
+            "mlx.compaction.started",
+            "mlx.compaction.completed",
+            "response.output_item.added",
+            "response.output_item.done",
+        ],
+        "{names:?}"
+    );
+    assert_eq!(names.last(), Some(&"response.completed"), "{names:?}");
+    let sequence: Vec<u64> = events
+        .iter()
+        .map(|(_, data)| data["sequence_number"].as_u64().expect("sequence_number"))
+        .collect();
+    let expected: Vec<u64> = (0..events.len() as u64).collect();
+    assert_eq!(sequence, expected);
+
+    // The compaction item is at output_index 0 and the reply follows it.
+    assert_eq!(events[5].1["output_index"], 0, "{:?}", events[5]);
+    assert_eq!(events[5].1["item"]["type"], "compaction");
+    let done = &events.last().expect("terminal").1["response"];
+    assert_eq!(done["status"], "completed", "{done}");
+    assert_eq!(done["output"][0]["type"], "compaction", "{done}");
+    assert_eq!(done["output"][1]["type"], "message", "{done}");
+    assert_eq!(done["output_text"], "answer", "{done}");
+}

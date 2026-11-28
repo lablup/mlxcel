@@ -1,0 +1,649 @@
+{
+  "request": 0,
+  "mode": "sse",
+  "started": 1795687116.3647952,
+  "ended": 1795687135.4034944,
+  "body": {
+    "choices": [
+      {
+        "text": " Paris.\n\nThe capital of Germany is Berlin.\n\nThe capital of Italy is Rome.\n\nThe capital of Spain is Madrid.\n\nThe capital of the United Kingdom is London.",
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 6,
+      "completion_tokens": 40,
+      "total_tokens": 46
+    },
+    "sse_events": [
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687127,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Paris",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687127,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687127,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687128,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687128,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "The",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687128,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " capital",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687128,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687128,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Germany",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687129,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " is",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687129,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Berlin",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687129,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687129,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687129,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687130,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "The",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687130,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " capital",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687130,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687130,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Italy",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687130,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " is",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687131,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Rome",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687131,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687131,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687131,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687131,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "The",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687132,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " capital",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687132,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687132,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Spain",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687132,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " is",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687132,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Madrid",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687133,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687133,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687133,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "\n",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687133,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "The",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687133,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " capital",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687134,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " of",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687134,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " the",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687134,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " United",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687134,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Kingdom",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687134,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " is",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687135,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " London",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687135,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": ".",
+            "finish_reason": null,
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687135,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": "",
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ]
+      },
+      {
+        "id": "cmpl-8f65479f-5b5e-4e15-ab9a-defcf496d226",
+        "object": "text_completion",
+        "created": 1795687135,
+        "model": "jamba-3b",
+        "system_fingerprint": null,
+        "choices": [],
+        "usage": {
+          "prompt_tokens": 6,
+          "completion_tokens": 40,
+          "total_tokens": 46
+        }
+      }
+    ]
+  }
+}

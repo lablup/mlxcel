@@ -1,0 +1,21 @@
+model,prompt_tokens,stage,peak_above_start_gib,retained_gib
+qwen3.5-4b-4bit,28000,embedding,0.17,0.17
+qwen3.5-4b-4bit,28000,causal mask,3.65,3.65
+qwen3.5-4b-4bit,28000,linear-attention layer (max of 24),3.53,0.00
+qwen3.5-4b-4bit,28000,full-attention layer (max of 8),6.18,0.00
+qwen3.5-4b-4bit,28000,final norm,0.13,0.13
+qwen3.5-4b-4bit,28000,lm_head every position,12.95,12.95
+qwen3.5-4b-4bit,28000,sampling (argmax of last row),0.00,0.00
+qwen3.5-4b-4bit,28000,lm_head last position only,0.00,0.00
+qwen3.5-4b-4bit,28000,lazy single pass full logits then slice,25.80,
+qwen3.5-4b-4bit,28000,lazy single pass last-row projection,20.27,
+qwen3.8-27b-4bit,28000,embedding,0.34,0.34
+qwen3.8-27b-4bit,28000,causal mask,3.65,3.65
+qwen3.8-27b-4bit,28000,linear-attention layer (max of 48),5.30,0.00
+qwen3.8-27b-4bit,28000,full-attention layer (max of 16),6.52,0.00
+qwen3.8-27b-4bit,28000,final norm,0.27,0.27
+qwen3.8-27b-4bit,28000,lm_head every position,12.95,12.95
+qwen3.8-27b-4bit,28000,sampling (argmax of last row),0.00,0.00
+qwen3.8-27b-4bit,28000,lm_head last position only,0.00,0.00
+qwen3.8-27b-4bit,28000,lazy single pass full logits then slice,43.58,
+qwen3.8-27b-4bit,28000,lazy single pass last-row projection,37.02,

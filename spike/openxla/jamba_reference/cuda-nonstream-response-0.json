@@ -1,0 +1,26 @@
+{
+  "request": 0,
+  "mode": "nonstream",
+  "started": 1795687097.1329882,
+  "ended": 1795687116.1550546,
+  "body": {
+    "id": "cmpl-a5649cb8-3f91-4878-9c44-1216c6cc7929",
+    "object": "text_completion",
+    "created": 1795687116,
+    "model": "jamba-3b",
+    "system_fingerprint": null,
+    "choices": [
+      {
+        "index": 0,
+        "text": " Paris.\n\nThe capital of Germany is Berlin.\n\nThe capital of Italy is Rome.\n\nThe capital of Spain is Madrid.\n\nThe capital of the United Kingdom is London.",
+        "finish_reason": "length",
+        "logprobs": null
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 6,
+      "completion_tokens": 40,
+      "total_tokens": 46
+    }
+  }
+}

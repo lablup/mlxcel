@@ -66,9 +66,95 @@ fn render_full_starts_inside_a_primed_block() {
 
 #[test]
 fn plain_text_passes_through() {
+    for text in [
+        "hello world",
+        "answer  \n",
+        " \t\r\n",
+        "안녕\u{2003}\n",
+        "answer <thi  \n",
+    ] {
+        for show_reasoning in [false, true] {
+            assert_eq!(render_full(text, false, show_reasoning, false), text);
+        }
+    }
+}
+
+#[test]
+fn preserving_plain_whitespace_keeps_structured_cleanup() {
+    for (text, primed, want) in [
+        ("<think>plan</think>answer  \n", false, "answer"),
+        ("plan</think>answer  \n", true, "answer"),
+        ("unclosed thought  \n", true, ""),
+        ("answer \n<tool_call>{}</tool_call>  \n", false, "answer"),
+        ("answer \n<tool_call>unfinished  \n", false, "answer"),
+        ("<|channel|>final<|message|> answer  \n", false, "answer"),
+        ("to=user<|message|>answer  \n", false, "answer"),
+        ("answer <|channel>", false, "answer"),
+    ] {
+        assert_eq!(render_full(text, primed, false, false), want);
+        let mut filter = if primed {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        };
+        let mut streamed = String::new();
+        for ch in text.chars() {
+            streamed.push_str(
+                filter
+                    .feed(&ch.to_string())
+                    .content
+                    .as_deref()
+                    .unwrap_or_default(),
+            );
+        }
+        streamed.push_str(
+            filter
+                .flush_preserving_plain_whitespace()
+                .content
+                .as_deref()
+                .unwrap_or_default(),
+        );
+        assert_eq!(streamed, want, "one character per feed: {text:?}");
+    }
+}
+
+#[test]
+fn plain_whitespace_flush_is_chunk_independent_and_accounts_positions() {
+    let text = "answer  \n";
+    for chunks in [vec![text], vec!["answer", " ", " ", "\n"]] {
+        let mut filter = StreamFilter::new();
+        let mut content = String::new();
+        let mut consumed = 0;
+        let mut suppressed = 0;
+        for chunk in &chunks {
+            let out = filter.feed(chunk);
+            content.push_str(out.content.as_deref().unwrap_or_default());
+            consumed += out.consumed_positions;
+            suppressed += out.suppressed_positions;
+        }
+        let tail = filter.flush_preserving_plain_whitespace();
+        content.push_str(tail.content.as_deref().unwrap_or_default());
+        consumed += tail.consumed_positions;
+        suppressed += tail.suppressed_positions;
+        assert_eq!(content, text);
+        assert_eq!(consumed, chunks.len());
+        assert_eq!(suppressed, 0);
+        assert_eq!(
+            filter.flush_preserving_plain_whitespace(),
+            FilterOutput::default()
+        );
+    }
+    // Raw-display opt-in must not change the established chat default.
+    let mut filter = StreamFilter::new();
+    let first = filter.feed(text);
+    let last = filter.flush();
     assert_eq!(
-        render_full("hello world", false, false, false),
-        "hello world"
+        format!(
+            "{}{}",
+            first.content.unwrap_or_default(),
+            last.content.unwrap_or_default()
+        ),
+        "answer"
     );
 }
 

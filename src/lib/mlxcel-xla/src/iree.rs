@@ -59,12 +59,13 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
-    QuantConfig, VisionProjector, WeightScheme, check_packed_supported, emit_decode_ragged_with,
-    emit_decode_with, emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
+    ProjectionLayout, QuantConfig, QuantScaleDtype, StateTensorSpec, VisionProjector, WeightScheme,
+    check_packed_supported, emit_decode_ragged_with_native, emit_decode_with_native,
+    emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
     emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
-    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs,
-    precision_env_override, quant_in_graph, resolve_precision_checked,
+    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs, quant_in_graph,
+    resolve_pinned_precision_with_override, resolve_quant_scale_dtype,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{
@@ -80,6 +81,7 @@ use crate::prepared_gemma3::{
     GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID, Gemma3VlmCompatibilityContract,
     bind_gemma3_vlm_compatibility,
 };
+use crate::state_ffi::StateFfi;
 use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill};
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
@@ -90,13 +92,14 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
-    slice_rows, weight_specs,
+    slice_rows, transpose_projection, weight_specs,
 };
 
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
 /// f32 (a widened / dequantized weight), or f16 / packed-U32 for the raw parts of an
 /// MLX affine-quantized projection on the packed path. Kept in sync with the
-/// `switch` in `csrc/xla_iree.c`.
+/// `switch` in `csrc/xla_iree.c`. The packed path's scales/biases take
+/// [`QuantScaleDtype::weight_dtype_code`] instead (1 f16 or 3 bf16, issue #603).
 const WDT_F32: c_int = 0;
 const WDT_F16: c_int = 1;
 const WDT_U32: c_int = 2;
@@ -199,6 +202,50 @@ impl WeightBuf {
             WeightBuf::Raw(v) => v.as_ptr(),
         }
     }
+
+    /// Bytes the shim copies for this weight (issue #2961: upload accounting).
+    fn byte_len(&self) -> u64 {
+        match self {
+            WeightBuf::F32(v) => (v.len() as u64) * 4,
+            WeightBuf::F16(v) => (v.len() as u64) * 2,
+            WeightBuf::Raw(v) => v.len() as u64,
+        }
+    }
+}
+
+/// What one `upload_weights_with_sink` pass spent, split by stage (issue #2961).
+///
+/// The ragged f16 load path reports about 4 s in `ragged-context-and-upload`,
+/// which lumps module load together with host dequantization, f16 packing and
+/// the device copies. These counters separate the three so the regression can
+/// be attributed instead of guessed.
+#[derive(Default)]
+struct WeightUploadStats {
+    /// Device uploads issued, one per weight spec.
+    tensors: usize,
+    /// Bytes copied to the device across every upload.
+    uploaded_bytes: u64,
+    /// Host widening: affine dequantization or bf16/f16/f32 conversion.
+    widen_micros: u128,
+    /// f16 packing of the widened projection weights.
+    pack_micros: u128,
+    /// Time inside the sink, i.e. the shim copy to the device.
+    upload_micros: u128,
+}
+
+impl WeightUploadStats {
+    /// Extra `key=value` fields appended to the phase line. Silent-free: the
+    /// caller only prints this when `MLXCEL_XLA_LOAD_TIMING` is set.
+    fn detail(&self) -> String {
+        format!(
+            "tensors={} uploaded_bytes={} dequantize_ms={} pack_ms={} copy_ms={}",
+            self.tensors,
+            self.uploaded_bytes,
+            self.widen_micros / 1000,
+            self.pack_micros / 1000,
+            self.upload_micros / 1000,
+        )
+    }
 }
 
 fn load_timing_enabled() -> bool {
@@ -215,13 +262,33 @@ fn current_rss_kib() -> Option<u64> {
 }
 
 fn report_load_timing(label: &str, started: std::time::Instant) {
+    report_load_timing_detail(label, started, None);
+}
+
+/// The one line format every load phase prints. Kept separate from the env gate
+/// so the shape is unit-testable without touching process-global environment.
+fn load_timing_line(label: &str, elapsed_ms: u128, rss_kib: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => {
+            format!(
+                "mlxcel-xla-load: phase={label} elapsed_ms={elapsed_ms} rss_kib={rss_kib} {detail}"
+            )
+        }
+        None => format!("mlxcel-xla-load: phase={label} elapsed_ms={elapsed_ms} rss_kib={rss_kib}"),
+    }
+}
+
+/// [`report_load_timing`] with extra `key=value` fields, for a phase that has
+/// counters of its own (issue #2961). One env gate and one line format: a
+/// detail line stays silent unless `MLXCEL_XLA_LOAD_TIMING` is set.
+fn report_load_timing_detail(label: &str, started: std::time::Instant, detail: Option<&str>) {
     if load_timing_enabled() {
+        let rss = current_rss_kib()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
         eprintln!(
-            "mlxcel-xla-load: phase={label} elapsed_ms={} rss_kib={}",
-            started.elapsed().as_millis(),
-            current_rss_kib()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unavailable".to_string())
+            "{}",
+            load_timing_line(label, started.elapsed().as_millis(), &rss, detail)
         );
     }
 }
@@ -258,7 +325,18 @@ unsafe extern "C" {
         deepstack_target_layers: *const c_int,
         has_adapter_modes: c_int,
         local_task_workers: c_int,
+        has_kv: c_int,
+        n_state: c_int,
+        state_ranks: *const c_int,
+        state_dims: *const i64,
+        state_elems: *const c_int,
     ) -> *mut XlaCtx;
+    /// Start a recurrent sequence from the zero state without a prefill (an
+    /// empty prompt prefix); the next decode imports it (issue #3339).
+    fn xla_llama_state_reset(c: *mut XlaCtx) -> c_int;
+    /// Forget the current sequence's recurrent state, so a decode refuses until
+    /// a prefill or a state reset succeeds (a no-op without state).
+    fn xla_llama_state_drop(c: *mut XlaCtx);
     fn xla_llama_upload_weight(
         c: *mut XlaCtx,
         i: c_int,
@@ -297,6 +375,95 @@ unsafe extern "C" {
     // copy the per-row `[vocab]` logits to host so the engine samples there (Stage
     // 2d). `prefill_slot_logits` also does the device-side KV slot write.
     fn xla_llama_ragged_reset(c: *mut XlaCtx, bsz: c_int) -> c_int;
+    /// Record the ragged batch size baked into this context's decode graph.
+    /// Must be called before the first `xla_llama_ragged_reset`.
+    fn xla_llama_ragged_bind(c: *mut XlaCtx, compiled_b: c_int) -> c_int;
+    /// Mark one batch slot invalid before a request is admitted into it, so a
+    /// request refused on the Rust side never leaves the slot's previous KV or
+    /// recurrent state live for the ragged decode (issue #3340).
+    fn xla_llama_slot_invalidate(c: *mut XlaCtx, slot: c_int) -> c_int;
+    /// Test support (issue #3340): allocations of the per-slot recurrent-state
+    /// set and their device bytes.
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_allocs() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_state_reset_counters();
+    /// Test support (issue #2923): host-mirror and host-to-device byte counters
+    /// for the lazy rank-5 batch-KV allocation path.
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_host_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_h2d_bytes() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_batch_kv_reset_counters();
+    /// Test support (issue #2923): force the V transfer of the next prefill
+    /// slot store to fail, and read one slot's KV validity flag.
+    #[cfg(feature = "test-support")]
+    fn xla_test_set_slot_store_failure(c: *mut XlaCtx, fail: c_int);
+    #[cfg(feature = "test-support")]
+    fn xla_test_slot_valid(c: *const XlaCtx, slot: c_int) -> c_int;
+    /// Test support (issue #2961): resident-weight upload call and byte
+    /// counters, so a device test can prove every weight uploads once and a
+    /// bucket context uploads none.
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_calls_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_bytes_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_weight_upload_reset();
+    /// Test support (issue #3028): per-decode-step staging allocation and
+    /// persistent readback counters, plus the state field and a hook that forces
+    /// the fallback path, so a device test can prove reuse and degradation.
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_scalar_alloc_calls_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_d2d_readbacks_get() -> u64;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_step_scalars_state(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3060): whether the loaded decode graph exports the
+    /// scalar-input marker (token/pos/cache_len as ABI-level `i32` values).
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_scalar_inputs(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3339): `-1` without state, else bit 0 = the state
+    /// is present, bit 1 = a decode still has to import it.
+    #[cfg(feature = "test-support")]
+    fn xla_test_state_status(c: *const XlaCtx) -> c_int;
+    /// Test support (issue #3339): make zero-state preparation fail.
+    #[cfg(feature = "test-support")]
+    fn xla_test_set_state_zero_failure(c: *mut XlaCtx, fail: c_int);
+    /// Test support (issue #3339): `1` when the KV-only entry points refuse a
+    /// context with this layout, `0` when they admit it.
+    #[cfg(feature = "test-support")]
+    fn xla_test_require_kv(has_kv: c_int, n_state: c_int) -> c_int;
+    #[cfg(feature = "test-support")]
+    fn xla_test_decode_counters_reset();
+    #[cfg(feature = "test-support")]
+    fn xla_test_force_step_scalars_unsupported(c: *mut XlaCtx, unsupported: c_int);
+    /// Test support (issue #2954): reach the prefill C entry points with
+    /// caller-supplied positions, so a device test can prove the C boundary
+    /// rejects out-of-range values the public API never forwards.
+    #[cfg(feature = "test-support")]
+    fn xla_test_prefill(
+        c: *mut XlaCtx,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        out_token: *mut c_int,
+    ) -> c_int;
+    #[cfg(feature = "test-support")]
+    fn xla_test_prefill_slot_logits(
+        c: *mut XlaCtx,
+        slot: c_int,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
+    ) -> c_int;
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
@@ -475,10 +642,255 @@ unsafe extern "C" {
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
+/// Test support (issue #2923): reset the shim's counters for host-resident and
+/// host-to-device bytes spent by the lazy rank-5 batch-KV allocation. A first
+/// admit must leave both at zero now that the caches are zeroed with a device
+/// fill instead of a host mirror.
+#[cfg(feature = "test-support")]
+pub fn reset_batch_kv_allocation_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_batch_kv_reset_counters() };
+}
+
+/// Test support (issue #2923): bytes the rank-5 batch-KV path has allocated or
+/// uploaded from host memory since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn batch_kv_allocation_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_batch_kv_host_bytes(),
+            xla_test_batch_kv_h2d_bytes(),
+        )
+    }
+}
+
+/// Test support (issue #3340): reset the shim's per-slot recurrent-state
+/// allocation counters.
+#[cfg(feature = "test-support")]
+pub fn reset_batch_state_allocation_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_batch_state_reset_counters() };
+}
+
+/// Test support (issue #3340): `(allocations, device_bytes)` of the per-slot
+/// recurrent-state set since the last reset. The set is allocated zeroed on
+/// the first slot store after each ragged reset, so one reset followed by any
+/// number of admits counts one allocation.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn batch_state_allocation_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { (xla_test_batch_state_allocs(), xla_test_batch_state_bytes()) }
+}
+
+/// Test support (issue #2961): reset the shim's resident-weight upload counters
+/// before a load.
+#[cfg(feature = "test-support")]
+pub fn reset_weight_upload_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_weight_upload_reset() };
+}
+
+/// Test support (issue #2961): `(calls, bytes)` the shim has uploaded through
+/// `xla_llama_upload_weight` since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn weight_upload_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_weight_upload_calls_get(),
+            xla_test_weight_upload_bytes_get(),
+        )
+    }
+}
+
+/// Test support (issue #3028): reset the shim's per-decode-step staging and
+/// persistent-readback counters.
+#[cfg(feature = "test-support")]
+pub fn reset_decode_scalar_counters() {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe { xla_test_decode_counters_reset() };
+}
+
+/// Test support (issue #3028): `(scalar_alloc_calls, d2d_readbacks)` the single-
+/// sequence decode shim has made since the last reset.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn decode_scalar_counters() -> (u64, u64) {
+    // Safety: the counters are process-global scalars with no aliasing rules.
+    unsafe {
+        (
+            xla_test_decode_scalar_alloc_calls_get(),
+            xla_test_decode_d2d_readbacks_get(),
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 enum RuntimeConfig {
     Dense(Box<Config>),
     Gemma3n(Box<Gemma3nConfig>),
+}
+
+/// Whether the checkpoint's packing matches the native GEMV kernel (issue
+/// #2889); the kernel serves the Dense graphs only. The packing rule itself is
+/// [`Config::native_qmv_supported`].
+fn native_quant_supported(cfg: &RuntimeConfig) -> bool {
+    match cfg {
+        RuntimeConfig::Dense(config) => config.native_qmv_supported(),
+        RuntimeConfig::Gemma3n(_) => false,
+    }
+}
+
+/// Whether the ragged engine's native GEMV can register any packed projection
+/// (issue #2922). `take_weight` keeps a weight packed only when the config's
+/// projection layout is one the packed path supports, so a 4-bit group-64
+/// checkpoint with fused q/k/v, fused gate/up, MoE, MLA or a dense MLP would
+/// compile and embed the HSACO while every projection stayed on the f16 path.
+/// The ragged loader reports the fallback instead of paying for an unused
+/// artifact.
+fn native_ragged_supported(cfg: &RuntimeConfig) -> bool {
+    match cfg {
+        RuntimeConfig::Dense(config) => {
+            config.native_qmv_supported() && config.supports_packed_quant()
+        }
+        RuntimeConfig::Gemma3n(_) => false,
+    }
+}
+
+/// The dtype of one checkpoint tensor, from the safetensors header only.
+fn checkpoint_tensor_dtype(model_dir: &Path, tensor: &str) -> Result<Option<Dtype>, String> {
+    let single = model_dir.join("model.safetensors");
+    let shards = if single.exists() {
+        vec![single]
+    } else {
+        checkpoint_candidate_shards(model_dir)?
+    };
+    let wrapped = language_model_tensor_name(tensor);
+    for shard in shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the header is read-only for the lifetime of this scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for name in [tensor, wrapped.as_str()] {
+            if let Ok(t) = tensors.tensor(name) {
+                return Ok(Some(t.dtype()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the checkpoint's LM head tensor is MLX-quantized, so the native
+/// GEMV can read it packed (issue #2891). The emitter must agree with the
+/// loader here, and `config.json` alone does not prove it: a checkpoint can
+/// quantize its projections but keep the head in a narrow float.
+fn native_head_supported(model_dir: &Path, cfg: &RuntimeConfig) -> Result<bool, String> {
+    let RuntimeConfig::Dense(config) = cfg else {
+        return Ok(false);
+    };
+    let names = crate::weight_names::scheme_names(config.weight_scheme);
+    let tensor = if config.tie_word_embeddings {
+        names.embed
+    } else {
+        names.lm_head
+    };
+    Ok(matches!(
+        checkpoint_tensor_dtype(model_dir, tensor)?,
+        Some(Dtype::U32)
+    ))
+}
+
+/// Whether the native GEMV can read this checkpoint's affine metadata (issue
+/// #603). `csrc/qmv4.hip` and `csrc/qmv4.cu` read the scales and biases as
+/// `half`, so only f16 metadata may reach them; bf16 bytes would be
+/// misinterpreted rather than rejected. The caller falls back to the f16 weight
+/// path on an error.
+fn native_scale_dtype_check(model_dir: &Path, cfg: &RuntimeConfig) -> Result<(), String> {
+    match packed_scale_dtype(model_dir, cfg) {
+        Ok(QuantScaleDtype::F16) => Ok(()),
+        Ok(QuantScaleDtype::Bf16) => Err(
+            "MLXCEL_XLA_QUANT=native needs f16 scales/biases and this checkpoint stores bf16"
+                .to_string(),
+        ),
+        Err(error) => Err(format!(
+            "MLXCEL_XLA_QUANT=native cannot read this checkpoint's affine metadata ({error})"
+        )),
+    }
+}
+
+/// The element type of the affine `scales` / `biases` the packed path uploads
+/// raw (issue #603), read from the safetensors headers of every shard. `cfg`
+/// must already have its packed flags set, so the probed tensors are exactly
+/// the `QuantRaw` specs the loader will upload. An error (mixed f16 / bf16
+/// metadata, or another dtype) means the packed path cannot serve this
+/// checkpoint; callers fall back to the dequant-at-load path.
+fn packed_scale_dtype(model_dir: &Path, cfg: &RuntimeConfig) -> Result<QuantScaleDtype, String> {
+    let wanted: Vec<String> = cfg
+        .weight_specs()
+        .into_iter()
+        .filter_map(|spec| match spec {
+            WeightSpec::QuantRaw {
+                name,
+                part: QuantPart::Scales | QuantPart::Biases,
+            } => Some(name),
+            _ => None,
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(QuantScaleDtype::default());
+    }
+    let single = model_dir.join("model.safetensors");
+    let shards = if single.exists() {
+        vec![single]
+    } else {
+        checkpoint_candidate_shards(model_dir)?
+    };
+    let mut found: std::collections::HashMap<String, Dtype> = std::collections::HashMap::new();
+    for shard in shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the header is read-only for the lifetime of this scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for name in &wanted {
+            if found.contains_key(name) {
+                continue;
+            }
+            let wrapped = language_model_tensor_name(name);
+            if let Some(t) = [name.as_str(), wrapped.as_str()]
+                .into_iter()
+                .find_map(|candidate| tensors.tensor(candidate).ok())
+            {
+                found.insert(name.clone(), t.dtype());
+            }
+        }
+    }
+    let mut parts = Vec::with_capacity(wanted.len());
+    for name in &wanted {
+        let dtype = found
+            .get(name)
+            .ok_or_else(|| format!("{name} is missing from the checkpoint"))?;
+        let resolved = match dtype {
+            Dtype::F16 => Some(QuantScaleDtype::F16),
+            Dtype::BF16 => Some(QuantScaleDtype::Bf16),
+            _ => None,
+        };
+        parts.push((name.as_str(), resolved, format!("{dtype:?}")));
+    }
+    resolve_quant_scale_dtype(
+        parts
+            .iter()
+            .map(|(name, dtype, raw)| (*name, *dtype, raw.as_str())),
+    )
 }
 
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
@@ -515,6 +927,8 @@ struct RuntimeFfiDimensions {
     model_layers: c_int,
     deepstack_layers: c_int,
     deepstack_visual: c_int,
+    /// The threaded recurrent-state layout and whether a KV cache exists.
+    state: StateFfi,
 }
 
 fn runtime_ffi_dimensions(
@@ -546,6 +960,7 @@ fn runtime_ffi_dimensions(
                 .map_or(0, |schema| schema.max_visual_positions),
             "deepstack_visual_positions",
         )?,
+        state: cfg.state_ffi()?,
     })
 }
 
@@ -554,7 +969,7 @@ impl RuntimeConfig {
         let path = model_dir.join("config.json");
         let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
-        let root: serde_json::Value = serde_json::from_str(&text)
+        let root = crate::parse_hf_config_json(&text)
             .map_err(|error| format!("parse {}: {error}", path.display()))?;
         let model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         if matches!(model_type, Some("gemma3n" | "gemma3n_text")) {
@@ -564,10 +979,91 @@ impl RuntimeConfig {
                 .map(Self::Gemma3n)
                 .map_err(|error| format!("{}: {error}", path.display()));
         }
-        Config::from_json(model_dir)?
+        let config = Config::from_json(model_dir)?;
+        // Issue #3339: refuse a Mamba2 grouping whose gated-norm reference is
+        // not settled rather than emit silently different output.
+        config.check_ssm_norm_grouping()?;
+        config
             .with_context_capacity(context_capacity)
             .map(Box::new)
             .map(Self::Dense)
+    }
+
+    /// The threaded recurrent-state tensors, in graph-argument order (issue
+    /// #3339). Empty for every attention-only model, including Gemma3n.
+    fn state_tensors(&self) -> Vec<StateTensorSpec> {
+        match self {
+            Self::Dense(config) => config.state_tensors(),
+            Self::Gemma3n(_) => Vec::new(),
+        }
+    }
+
+    /// Whether the graphs carry a KV cache; false for an attention-free model.
+    fn has_kv(&self) -> bool {
+        match self {
+            Self::Dense(config) => config.has_kv_cache(),
+            Self::Gemma3n(_) => true,
+        }
+    }
+
+    fn has_recurrent_state(&self) -> bool {
+        !self.state_tensors().is_empty()
+    }
+
+    /// The state layout as `xla_llama_create` receives it.
+    fn state_ffi(&self) -> Result<StateFfi, String> {
+        StateFfi::new(self.has_kv(), &self.state_tensors())
+    }
+
+    /// Select the projection weight layout this engine emits and uploads
+    /// (issue #2859). Gemma3n's own emitters keep the checkpoint layout.
+    fn with_projection_layout(mut self, layout: ProjectionLayout) -> Self {
+        if let Self::Dense(config) = &mut self {
+            config.projection_layout = layout;
+        }
+        self
+    }
+
+    /// Declare the checkpoint's packed 4-bit projection tensors (issues #516 /
+    /// #2889). Gemma3n has its own weight list and is unaffected.
+    fn set_packed_args(&mut self, packed: bool) {
+        if let Self::Dense(config) = self {
+            config.packed_args = packed;
+        }
+    }
+
+    /// Declare the LM head packed as well (issue #2891). Only set together with
+    /// [`Self::set_packed_args`], and only when the checkpoint stores the head
+    /// tensor 4-bit.
+    fn set_native_head(&mut self, packed: bool) {
+        if let Self::Dense(config) = self {
+            config.native_head = packed;
+        }
+    }
+
+    /// Record the packed path's scales/biases element type (issue #603). The
+    /// emitter declares it and the loader uploads with it, from this one field.
+    fn set_quant_scale_dtype(&mut self, dtype: QuantScaleDtype) {
+        if let Self::Dense(config) = self {
+            config.quant_scale_dtype = dtype;
+        }
+    }
+
+    /// The packed path's scales/biases element type; f16 for Gemma3n, whose
+    /// weight list never carries raw quantized parts.
+    fn quant_scale_dtype(&self) -> QuantScaleDtype {
+        match self {
+            Self::Dense(config) => config.quant_scale_dtype,
+            Self::Gemma3n(_) => QuantScaleDtype::F16,
+        }
+    }
+
+    /// The projection weight layout the emitted graphs declare.
+    fn projection_layout(&self) -> ProjectionLayout {
+        match self {
+            Self::Dense(config) => config.projection_layout,
+            Self::Gemma3n(_) => ProjectionLayout::OutIn,
+        }
     }
 
     fn context_capacity(&self) -> usize {
@@ -659,8 +1155,8 @@ fn gemma3_vlm_compatibility_from_json(
     config_json: &str,
     cfg: &RuntimeConfig,
 ) -> Result<Option<Gemma3VlmCompatibilityContract>, String> {
-    let root: serde_json::Value =
-        serde_json::from_str(config_json).map_err(|error| format!("parse config.json: {error}"))?;
+    let root = crate::parse_hf_config_json(config_json)
+        .map_err(|error| format!("parse config.json: {error}"))?;
     let is_vlm = root.get("model_type").and_then(serde_json::Value::as_str) == Some("gemma3")
         && root
             .get("vision_config")
@@ -826,16 +1322,31 @@ mod gemma3_vlm_compatibility_tests {
     }
 }
 
+/// The precision a runtime bundle is emitted, compiled and uploaded at.
+///
+/// MLA configs and recurrent-state configs (Mamba2, issue #3340) default to F32
+/// on every device. An f16 recurrent state is not token-exact: on hip the
+/// single-sequence path diverges from the HF fp32 reference after about 16
+/// tokens on some prompts, while F32 matches it. An explicit
+/// `MLXCEL_XLA_PRECISION` still wins for both, for measurement.
 fn effective_precision(device: &str, cfg: &RuntimeConfig) -> Result<Precision, String> {
+    let raw = std::env::var("MLXCEL_XLA_PRECISION").ok();
+    effective_precision_with_override(device, cfg, raw.as_deref())
+}
+
+/// [`effective_precision`] with the raw `MLXCEL_XLA_PRECISION` value passed in,
+/// so unit tests cover the override branches without mutating the process env.
+fn effective_precision_with_override(
+    device: &str,
+    cfg: &RuntimeConfig,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
     match cfg {
-        RuntimeConfig::Dense(config) if config.mla.is_some() => {
-            if precision_env_override().is_some() {
-                resolve_precision_checked(device)
-            } else {
-                Ok(Precision::F32)
-            }
-        }
-        RuntimeConfig::Dense(_) => resolve_precision_checked(device),
+        RuntimeConfig::Dense(config) => resolve_pinned_precision_with_override(
+            device,
+            config.pins_f32_precision(),
+            raw_override,
+        ),
         RuntimeConfig::Gemma3n(_) if device == "metal" => Err(
             "Gemma3n uses an exact BF16 activation stream with F32 AltUp coefficient islands, \
              but the Metal target cannot lower BF16. Use CUDA or a CPU local-task/local-sync \
@@ -875,7 +1386,7 @@ fn gemma3n_native_qmv_eligibility(
     if !qmv_available {
         return Err(
             "Gemma3n CUDA Q4 requires the token-exact native QMV, but this binary was \
-             built without the CUDA-IREE PTX (`cfg(xla_iree_cuda)`). Rebuild with \
+             built without the CUDA-IREE PTX (`cfg(xla_iree_cuda_ptx)`). Rebuild with \
              IREE_CUDA_HOME and nvcc; refusing the numerically different dot fallback."
                 .to_string(),
         );
@@ -1021,6 +1532,14 @@ pub(crate) fn target_flags(device: &str) -> Result<Vec<String>, String> {
     crate::emitter::target_flags_with_rocm_target(device, rocm_target.as_deref())
 }
 
+/// The active `gfx` architecture, from the same validated flag the compiler uses.
+fn rocm_arch() -> Result<String, String> {
+    target_flags("hip")?
+        .into_iter()
+        .find_map(|flag| flag.strip_prefix("--iree-rocm-target=").map(str::to_string))
+        .ok_or_else(|| "hip target flags carry no --iree-rocm-target".to_string())
+}
+
 fn compiled_graph_paths<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
@@ -1071,7 +1590,9 @@ pub(crate) fn compile_one_to<S: AsRef<str>>(
 ) -> Result<(), String> {
     let (mlir_path, _) =
         compiled_graph_paths(iree_compile, mlir, flags, cache, tag, context_capacity);
-    std::fs::write(&mlir_path, mlir).map_err(|e| format!("write {}: {e}", mlir_path.display()))?;
+    // Atomic and owner-only: the compiler reads this file back, so it must not
+    // be written through an entry planted at its name (#3248).
+    crate::cache_dir::write_private_atomic(&mlir_path, mlir.as_bytes())?;
     let mut cmd = Command::new(iree_compile);
     cmd.arg("--iree-input-type=stablehlo");
     for flag in flags {
@@ -1094,6 +1615,12 @@ pub(crate) fn compile_one_to<S: AsRef<str>>(
 
 /// Compile one bundled graph to a vmfb, cached by a hash of its text + flags so
 /// repeated loads skip the ~3 s compile.
+///
+/// A cached vmfb is reused only when it and its directory are private to the
+/// current user ([`crate::cache_dir::artifact_slot`]); otherwise the graph is
+/// compiled into a fresh private directory. The compiler writes a temporary
+/// sibling that is renamed into place, so a crash or a concurrent load never
+/// leaves or sees a partial vmfb under the cache name (#3248).
 pub(crate) fn compile_one<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
@@ -1102,26 +1629,114 @@ pub(crate) fn compile_one<S: AsRef<str>>(
     tag: &str,
     context_capacity: usize,
 ) -> Result<PathBuf, String> {
-    let vmfb_path = cached_vmfb_path(iree_compile, mlir, flags, cache, tag, context_capacity);
-    if vmfb_path.exists() {
+    let wanted = cached_vmfb_path(iree_compile, mlir, flags, cache, tag, context_capacity);
+    let vmfb_path = crate::cache_dir::artifact_slot(&wanted, &[])?;
+    if vmfb_path.is_file() {
         return Ok(vmfb_path);
     }
-    compile_one_to(
+    let cache = vmfb_path.parent().unwrap_or(cache);
+    let temporary = crate::cache_dir::temporary_sibling(&vmfb_path, "compile");
+    if let Err(error) = compile_one_to(
         iree_compile,
         mlir,
         flags,
         cache,
         tag,
         context_capacity,
-        &vmfb_path,
-    )?;
+        &temporary,
+    ) {
+        std::fs::remove_file(&temporary).ok();
+        return Err(error);
+    }
+    crate::cache_dir::publish_private(&temporary, &vmfb_path)?;
     Ok(vmfb_path)
 }
+
+/// The `iree-compile` flags every member of a runtime bundle shares: the
+/// device target, the CUDA PTX target when the graph embeds one of the native
+/// kernels, and the ROCm tuning spec for the Dense graphs on `hip`.
+fn bundle_compile_flags(
+    device: &str,
+    cfg: &RuntimeConfig,
+    embeds_cuda_ptx: bool,
+    cache: &Path,
+) -> Result<Vec<String>, String> {
+    let mut flags = target_flags(device)?;
+    // Both embedded CUDA kernels are PTX built for compute_80, so a graph that
+    // carries one is compiled for the same target (issue #2905 for the native
+    // 4-bit GEMV).
+    if embeds_cuda_ptx {
+        flags.push(format!(
+            "--iree-cuda-target=sm_{}",
+            crate::native_qmv::CUDA_MIN_SM
+        ));
+    }
+    // issue #2873: the ROCm lowering tuning spec for the narrow single-row
+    // vecmats (any K, 128 <= N <= 8192), the wide long-K fallback (N >= 8193,
+    // K >= 4096) and, since issues #2921 and #2956, the grouped-query decode
+    // score and context contractions. Gemma3n has its own emitters (some with
+    // native qmv) and was not measured with it, so it stays on the compiler
+    // defaults.
+    if device == "hip" && matches!(cfg, RuntimeConfig::Dense(_)) {
+        flags.push(crate::tuning::rocm_tuning_spec_flag_in(cache)?);
+    }
+    Ok(flags)
+}
+
+/// IREE's aggressive dispatch fusion, enabled for the Dense decode compile.
+const AGGRESSIVE_FUSION_FLAG: &str = "--iree-dispatch-creation-enable-aggressive-fusion";
+
+/// The decode compile's flags: the shared bundle `flags`, plus aggressive
+/// fusion for the Dense decode graph.
+///
+/// issue #3043: the Dense decode step is a long chain of small elementwise and
+/// reduction dispatches whose cost is dominated by per-dispatch launch latency
+/// (about 2.5 us each on gfx1151, 0.79 ms per step in total). Aggressive fusion
+/// removes two dispatches per layer on this graph (309 to 277) without changing
+/// the results, so the Dense decode compile turns it on and the prefill
+/// compiles keep the defaults.
+///
+/// issue #3363: the Gemma3n decode stays on the compiler defaults. Its AltUp
+/// magnitude and the RMSNorm that follows square the same activation, so IREE
+/// shares one `x * x` between the plain sum the RMSNorm reduces and the
+/// bf16-rounded copy the magnitude consumes. Aggressive fusion pulls that
+/// multi-use producer into the RMSNorm reduction dispatch as a second,
+/// unreduced result (`main_dispatch_10_reduction_2048_f32` on gemma-3n-e2b),
+/// and the CUDA `VectorDistribute` pipeline cannot distribute that extra store,
+/// so iree-compile fails with `'func.func' op failed to distribute` (IREE
+/// 3.12.0rc20260721; local-task compiles it). The flag was only ever measured
+/// on the Dense graph, so the exemption covers the Gemma3n family on every
+/// device. Revisit it on an IREE upgrade by compiling the Gemma3n decode with
+/// the flag (`decode_flags_tests::gemma3n_cuda_decode_compiles`).
+///
+/// issue #3349: a softmax-routed MoE decode stays on the defaults too. Its
+/// router feeds the softmax probabilities to the tuple-reduction top-k
+/// argmax; aggressive fusion pulls both into one dispatch that neither
+/// llvm-cpu (`'vector.store' op write affecting operations on global resources
+/// are restricted to workgroup distributed contexts`) nor CUDA can lower
+/// (IREE 3.12.0rc20260721). The Jamba, Qwen2-MoE and OLMoE ragged decode goldens
+/// all fail that way with the flag and compile without it. Sigmoid routing
+/// (#3411) already uses a single-result argmax and keeps the flag.
+fn decode_compile_flags(cfg: &RuntimeConfig, flags: &[String]) -> Vec<String> {
+    let mut decode_flags = flags.to_vec();
+    match cfg {
+        RuntimeConfig::Dense(config) if config.has_softmax_moe() => {}
+        RuntimeConfig::Dense(_) => decode_flags.push(AGGRESSIVE_FUSION_FLAG.to_string()),
+        RuntimeConfig::Gemma3n(_) => {}
+    }
+    decode_flags
+}
+
+#[cfg(test)]
+#[path = "iree_decode_flags_tests.rs"]
+mod decode_flags_tests;
 
 /// Compatible entry modules loaded atomically into one runtime session.
 struct CompiledBundle {
     prefill_vmfb: PathBuf,
-    prefill_embeddings_vmfb: PathBuf,
+    /// `None` for a recurrent bundle, whose embeddings prefill has no state
+    /// contract yet (issue #3339).
+    prefill_embeddings_vmfb: Option<PathBuf>,
     prefill_embeddings_deepstack_vmfb: Option<PathBuf>,
     decode_vmfb: PathBuf,
     compatibility_fingerprint: u64,
@@ -1138,10 +1753,10 @@ fn compile_bundle(
     cfg: &RuntimeConfig,
     gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
     gemma3n_qmv: bool,
+    native_cuda_ptx: bool,
     prefill_mlir: &str,
     prefill_tag: &str,
-    prefill_embeddings_mlir: &str,
-    prefill_embeddings_tag: &str,
+    prefill_embeddings: Option<(&str, &str)>,
     prefill_embeddings_deepstack: Option<(&str, &str)>,
     decode_mlir: &str,
     decode_tag: &str,
@@ -1153,12 +1768,9 @@ fn compile_bundle(
             iree_compile.display()
         ));
     }
-    let mut flags = target_flags(device)?;
-    if gemma3n_qmv {
-        flags.push("--iree-cuda-target=sm_80".to_string());
-    }
-    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
-    std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
+    let flags = bundle_compile_flags(device, cfg, gemma3n_qmv || native_cuda_ptx, &cache)?;
+    let decode_flags = decode_compile_flags(cfg, &flags);
     let pre = compile_one(
         &iree_compile,
         prefill_mlir,
@@ -1167,14 +1779,18 @@ fn compile_bundle(
         prefill_tag,
         cfg.context_capacity(),
     )?;
-    let pre_embeddings = compile_one(
-        &iree_compile,
-        prefill_embeddings_mlir,
-        &flags,
-        &cache,
-        prefill_embeddings_tag,
-        cfg.context_capacity(),
-    )?;
+    let pre_embeddings = prefill_embeddings
+        .map(|(mlir, tag)| {
+            compile_one(
+                &iree_compile,
+                mlir,
+                &flags,
+                &cache,
+                tag,
+                cfg.context_capacity(),
+            )
+        })
+        .transpose()?;
     let pre_embeddings_deepstack = prefill_embeddings_deepstack
         .map(|(mlir, tag)| {
             compile_one(
@@ -1190,7 +1806,7 @@ fn compile_bundle(
     let dec = compile_one(
         &iree_compile,
         decode_mlir,
-        &flags,
+        &decode_flags,
         &cache,
         decode_tag,
         cfg.context_capacity(),
@@ -1204,8 +1820,13 @@ fn compile_bundle(
     if gemma3n_qmv {
         gemma3n_qmv_artifact_identity().hash(&mut fingerprint);
     }
+    // Issue #3339: the state layout is part of the artifact identity, so a
+    // context is never created against a bundle compiled for other state shapes.
+    cfg.state_ffi()?.identity().hash(&mut fingerprint);
     prefill_mlir.hash(&mut fingerprint);
-    prefill_embeddings_mlir.hash(&mut fingerprint);
+    prefill_embeddings
+        .map(|(mlir, _)| mlir)
+        .hash(&mut fingerprint);
     prefill_embeddings_deepstack
         .map(|(mlir, _)| mlir)
         .hash(&mut fingerprint);
@@ -1225,6 +1846,7 @@ fn compile_vmfbs(
     device: &str,
     cfg: &RuntimeConfig,
     gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
+    packed_native: Option<(&str, &str)>,
 ) -> Result<CompiledBundle, String> {
     let precision = effective_precision(device, cfg)?;
     let native_qmv = match cfg {
@@ -1233,20 +1855,31 @@ fn compile_vmfbs(
     };
     let (prefill, prefill_embeddings, prefill_embeddings_deepstack, decode) = match cfg {
         RuntimeConfig::Dense(config) => {
-            check_packed_supported(device, quant_in_graph() && config.supports_packed_quant())?;
+            check_packed_supported(device, config.packed_args && config.supports_packed_quant())?;
+            // Issue #3339 (carry-over from #3338): the embeddings prefill has no
+            // recurrent-state contract and refuses a recurrent config, so a
+            // recurrent bundle is the token prefill plus the decode only.
+            let prefill_embeddings = if config.has_recurrent_state() {
+                None
+            } else {
+                Some(emit_prefill_embeddings_with(config, true, precision)?)
+            };
             (
                 emit_prefill_with(config, true, precision),
-                emit_prefill_embeddings_with(config, true, precision),
+                prefill_embeddings,
                 config
                     .deepstack
                     .as_ref()
-                    .map(|_| emit_prefill_embeddings_deepstack_with(config, true, precision)),
-                emit_decode_with(config, true, precision),
+                    .map(|_| emit_prefill_embeddings_deepstack_with(config, true, precision))
+                    .transpose()?,
+                emit_decode_with_native(config, true, precision, packed_native),
             )
         }
         RuntimeConfig::Gemma3n(config) => (
             emit_gemma3n_prefill_with_qmv(config, true, precision, native_qmv),
-            emit_gemma3n_prefill_embeddings_ple_with_qmv(config, true, precision, native_qmv),
+            Some(emit_gemma3n_prefill_embeddings_ple_with_qmv(
+                config, true, precision, native_qmv,
+            )),
             None,
             emit_gemma3n_decode_with_qmv(config, true, precision, native_qmv),
         ),
@@ -1256,10 +1889,12 @@ fn compile_vmfbs(
         cfg,
         gemma3_vlm_contract,
         native_qmv,
+        packed_native.is_some() && device == "cuda",
         &prefill,
         "prefill",
-        &prefill_embeddings,
-        "prefill_embeddings",
+        prefill_embeddings
+            .as_deref()
+            .map(|mlir| (mlir, "prefill_embeddings")),
         prefill_embeddings_deepstack
             .as_deref()
             .map(|mlir| (mlir, "prefill_embeddings_deepstack")),
@@ -1289,9 +1924,7 @@ fn compile_gemma3n_diagnostics(
     if !compiler.exists() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
     let mut flags = target_flags(device)?;
     if native_qmv {
         flags.push("--iree-cuda-target=sm_80".to_string());
@@ -1320,14 +1953,12 @@ fn compile_deepstack_diagnostics(device: &str, cfg: &RuntimeConfig) -> Result<Pa
         return Err("DeepStack diagnostics require a declared DeepStack schema".to_string());
     }
     let precision = effective_precision(device, cfg)?;
-    let mlir = emit_prefill_embeddings_deepstack_diagnostics_with(config, precision);
+    let mlir = emit_prefill_embeddings_deepstack_diagnostics_with(config, precision)?;
     let compiler = iree_compile_bin()?;
     if !compiler.exists() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
-    std::fs::create_dir_all(&cache)
-        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let cache = crate::cache_dir::xla_cache_dir(crate::cache_dir::XlaCache::Vmfb)?;
     compile_one(
         &compiler,
         &mlir,
@@ -1534,8 +2165,11 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
+pub(crate) use crate::shard_path::index_shard_path;
+
 fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index = model_dir.join("model.safetensors.index.json");
+    let mut hostile_index = false;
     let indexed = std::fs::read_to_string(&index)
         .map_err(|error| format!("read {}: {error}", index.display()))
         .and_then(|text| {
@@ -1548,8 +2182,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
             let mut paths = weight_map
                 .values()
                 .filter_map(serde_json::Value::as_str)
-                .map(|file| model_dir.join(file))
-                .collect::<Vec<_>>();
+                .map(|file| index_shard_path(model_dir, &index, file))
+                .collect::<Result<Vec<_>, _>>()
+                .inspect_err(|_| hostile_index = true)?;
             paths.sort();
             paths.dedup();
             if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
@@ -1562,6 +2197,9 @@ fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String>
         });
     let indexed_error = match indexed {
         Ok(paths) => return Ok(paths),
+        // A traversal entry is a hostile index, not a stale one: fail the load
+        // rather than quietly scanning the directory instead.
+        Err(error) if hostile_index => return Err(error),
         Err(error) => error,
     };
     let mut actual: Vec<PathBuf> = std::fs::read_dir(model_dir)
@@ -1737,14 +2375,71 @@ mod checkpoint_name_tests {
             .unwrap(),
         ));
         assert!(!cfg.supports_f16_resident());
-        if precision_env_override().is_none() {
-            assert_eq!(effective_precision("hip", &cfg).unwrap(), Precision::F32);
-            assert_eq!(effective_precision("cuda", &cfg).unwrap(), Precision::F32);
+        for device in ["hip", "cuda", "local-task"] {
             assert_eq!(
-                effective_precision("local-task", &cfg).unwrap(),
+                effective_precision_with_override(device, &cfg, None).unwrap(),
                 Precision::F32
             );
         }
+    }
+
+    #[test]
+    fn recurrent_runtime_pins_f32_unless_precision_is_explicit() {
+        // Issue #3340: an f16 Mamba2 state drifts from the HF fp32 reference on
+        // hip, so recurrent configs default to F32 like MLA configs.
+        let cfg = RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(
+                r#"{"model_type": "mamba2", "hidden_size": 16, "num_hidden_layers": 2,
+                    "vocab_size": 40, "num_heads": 4, "head_dim": 8, "state_size": 16,
+                    "n_groups": 2, "conv_kernel": 4, "expand": 2, "use_conv_bias": true,
+                    "use_bias": false, "time_step_limit": [0.0, Infinity],
+                    "layer_norm_epsilon": 1e-05, "chunk_size": 256, "rms_norm": true,
+                    "hidden_act": "silu", "tie_word_embeddings": true}"#,
+            )
+            .unwrap()
+            .with_context_capacity(8)
+            .unwrap(),
+        ));
+        assert!(cfg.has_recurrent_state());
+        for device in ["hip", "cuda", "metal", "local-task"] {
+            for raw in [None, Some(""), Some("fp8")] {
+                assert_eq!(
+                    effective_precision_with_override(device, &cfg, raw).unwrap(),
+                    Precision::F32,
+                    "{device} {raw:?}"
+                );
+            }
+        }
+        assert_eq!(
+            effective_precision_with_override("hip", &cfg, Some("f16")).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            effective_precision_with_override("cuda", &cfg, Some(" bf16 ")).unwrap(),
+            Precision::Bf16
+        );
+        assert!(effective_precision_with_override("metal", &cfg, Some("bf16")).is_err());
+
+        // A dense attention-only config keeps the per-device default.
+        let dense = RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(
+                &serde_json::json!({
+                    "model_type": "llama", "hidden_size": 16, "intermediate_size": 32,
+                    "num_hidden_layers": 2, "num_attention_heads": 2,
+                    "num_key_value_heads": 2, "rms_norm_eps": 1e-6,
+                    "rope_theta": 10000.0, "vocab_size": 32
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .with_context_capacity(8)
+            .unwrap(),
+        ));
+        assert!(!dense.has_recurrent_state());
+        assert_eq!(
+            effective_precision_with_override("hip", &dense, None).unwrap(),
+            Precision::F16
+        );
     }
 
     #[test]
@@ -1823,6 +2518,53 @@ mod checkpoint_name_tests {
         std::fs::remove_dir_all(model_dir).unwrap();
     }
 
+    /// The shard probe (issue #603) and the loader read the index of an
+    /// untrusted checkpoint, so a shard name must not leave the model directory.
+    #[test]
+    fn candidate_shards_reject_index_names_outside_the_model_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "mlxcel-xla-traversal-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(model_dir.join("nested")).unwrap();
+        let outside = root.join("outside.safetensors");
+        std::fs::write(&outside, []).unwrap();
+        std::fs::write(model_dir.join("nested/inner.safetensors"), []).unwrap();
+        std::fs::write(model_dir.join("model-00001-of-00001.safetensors"), []).unwrap();
+        let outside_text = outside.to_str().unwrap().to_string();
+        for hostile in [
+            "../outside.safetensors",
+            outside_text.as_str(),
+            "nested/inner.safetensors",
+            "./../outside.safetensors",
+        ] {
+            std::fs::write(
+                model_dir.join("model.safetensors.index.json"),
+                serde_json::json!({
+                    "weight_map": {
+                        "model.embed_tokens.weight": "model-00001-of-00001.safetensors",
+                        "model.norm.weight": hostile
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = checkpoint_candidate_shards(&model_dir).unwrap_err();
+            assert!(error.contains("plain file names"), "{hostile}: {error}");
+        }
+        let index = model_dir.join("model.safetensors.index.json");
+        assert_eq!(
+            index_shard_path(&model_dir, &index, "model-00001-of-00001.safetensors").unwrap(),
+            model_dir.join("model-00001-of-00001.safetensors")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     #[ignore = "requires GEMMA3N_MODEL_DIR pointing at a real local checkpoint"]
     fn real_gemma3n_headers_resolve_every_graph_weight_once() {
@@ -1854,15 +2596,41 @@ mod checkpoint_name_tests {
 /// canonical tensor name also ensures fused tensors (`qkv_proj`, `gate_up_proj`,
 /// `att_proj`, `ff_proj`) are dequantized once per layer instead of once per
 /// slice.
+///
+/// `projection_layout` is the layout the emitted graphs declare (issue #2859):
+/// with [`ProjectionLayout::InOut`] each `Proj` / `Rows` weight is transposed
+/// once here, from the checkpoint's `[out, in]` to `[in, out]`, so no decode
+/// step pays for it; [`ProjectionLayout::OutIn`] uploads the checkpoint layout
+/// unchanged.
 fn upload_weights_with_sink<F>(
     model_dir: &Path,
     cfg: &RuntimeConfig,
     resident_f16: bool,
+    projection_layout: ProjectionLayout,
     mut sink: F,
 ) -> Result<(), String>
 where
     F: FnMut(usize, WeightBuf, c_int, c_int, [i64; 4]) -> Result<(), String>,
 {
+    let upload_started = std::time::Instant::now();
+    let mut stats = WeightUploadStats::default();
+    // One device upload: time the shim copy and account the bytes that crossed.
+    // The counters live on the stack here, so a macro (not a closure) keeps
+    // `stats` usable between the calls.
+    macro_rules! emit_weight {
+        ($i:expr, $buf:expr, $dtype:expr, $rank:expr, $dims:expr) => {{
+            let buf = $buf;
+            let bytes = buf.byte_len();
+            let started = std::time::Instant::now();
+            let result = sink($i, buf, $dtype, $rank, $dims);
+            stats.upload_micros += started.elapsed().as_micros();
+            if result.is_ok() {
+                stats.tensors += 1;
+                stats.uploaded_bytes += bytes;
+            }
+            result
+        }};
+    }
     let specs = cfg.weight_specs();
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let (shard_paths, mut dense_name_scheme, gemma3n_name_scheme) = match cfg {
@@ -1954,6 +2722,7 @@ where
             let needs_widened = tensor_idxs
                 .iter()
                 .any(|&i| !matches!(specs[i], WeightSpec::QuantRaw { .. }));
+            let widen_started = std::time::Instant::now();
             let widened: Option<(Vec<f32>, Vec<usize>)> = if needs_widened {
                 // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
                 // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
@@ -2082,6 +2851,7 @@ where
             } else {
                 None
             };
+            stats.widen_micros += widen_started.elapsed().as_micros();
 
             let mut remaining = tensor_idxs.len();
             let mut owned_widened = widened;
@@ -2090,7 +2860,15 @@ where
                 if let WeightSpec::QuantRaw { part, .. } = &specs[i] {
                     let (code, expect) = match part {
                         QuantPart::Packed => (WDT_U32, Dtype::U32),
-                        QuantPart::Scales | QuantPart::Biases => (WDT_F16, Dtype::F16),
+                        // issue #603: the dtype the emitter declared for this arg.
+                        QuantPart::Scales | QuantPart::Biases => {
+                            let dtype = cfg.quant_scale_dtype();
+                            let expect = match dtype {
+                                QuantScaleDtype::F16 => Dtype::F16,
+                                QuantScaleDtype::Bf16 => Dtype::BF16,
+                            };
+                            (dtype.weight_dtype_code() as c_int, expect)
+                        }
                     };
                     if t.dtype() != expect {
                         return Err(format!(
@@ -2108,7 +2886,7 @@ where
                     let mut dims = [0i64; 4];
                     dims[0] = checked_ffi_i64(shape[0], &format!("weight {name} dim 0"))?;
                     dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
-                    sink(i, WeightBuf::Raw(t.data().to_vec()), code, 2, dims)?;
+                    emit_weight!(i, WeightBuf::Raw(t.data().to_vec()), code, 2, dims)?;
                     continue;
                 }
 
@@ -2118,6 +2896,7 @@ where
                 let mut dims = [0i64; 4];
                 match &specs[i] {
                     WeightSpec::Whole(_) => {
+                        let shape = &whole_graph_shape(name, shape);
                         let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
                         for (k, &s) in shape.iter().enumerate() {
                             dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
@@ -2127,26 +2906,50 @@ where
                         } else {
                             data_ref.clone()
                         };
-                        sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                        emit_weight!(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
                     }
                     WeightSpec::Proj(_) => {
-                        let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
-                        for (k, &s) in shape.iter().enumerate() {
-                            dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
+                        if shape.len() != 2 {
+                            return Err(format!(
+                                "projection weight {name} is rank {} (expected 2)",
+                                shape.len()
+                            ));
                         }
-                        if resident_f16 {
-                            let packed = pack_f16(data_ref);
+                        let (out, in_) = (shape[0], shape[1]);
+                        if specs[i].uploads_transposed(projection_layout) {
+                            let transposed = transpose_projection(data_ref, out, in_);
                             if remaining == 0 {
                                 drop(owned_widened.take());
                             }
-                            sink(i, WeightBuf::F16(packed), WDT_F16, rank, dims)?;
-                        } else {
-                            let data = if remaining == 0 {
-                                owned_widened.take().unwrap().0
+                            dims[0] = checked_ffi_i64(in_, &format!("weight {name} in axis"))?;
+                            dims[1] = checked_ffi_i64(out, &format!("weight {name} out axis"))?;
+                            if resident_f16 {
+                                let pack_started = std::time::Instant::now();
+                                let packed = pack_f16(&transposed);
+                                stats.pack_micros += pack_started.elapsed().as_micros();
+                                emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
                             } else {
-                                data_ref.clone()
-                            };
-                            sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                                emit_weight!(i, WeightBuf::F32(transposed), WDT_F32, 2, dims)?;
+                            }
+                        } else {
+                            dims[0] = checked_ffi_i64(out, &format!("weight {name} dim 0"))?;
+                            dims[1] = checked_ffi_i64(in_, &format!("weight {name} dim 1"))?;
+                            if resident_f16 {
+                                let pack_started = std::time::Instant::now();
+                                let packed = pack_f16(data_ref);
+                                stats.pack_micros += pack_started.elapsed().as_micros();
+                                if remaining == 0 {
+                                    drop(owned_widened.take());
+                                }
+                                emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
+                            } else {
+                                let data = if remaining == 0 {
+                                    owned_widened.take().unwrap().0
+                                } else {
+                                    data_ref.clone()
+                                };
+                                emit_weight!(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
+                            }
                         }
                     }
                     WeightSpec::Rows { start, end, .. } => {
@@ -2158,16 +2961,27 @@ where
                         }
                         let sliced = slice_rows(data_ref, shape[0], *start, *end)
                             .map_err(|e| format!("row-slice {name}: {e}"))?;
-                        dims[0] =
-                            checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
-                        dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
+                        // Same layout rule as `Proj` (issue #2859).
+                        let rows = *end - *start;
+                        let in_ = shape[1];
+                        let (data, (r, c)) = match projection_layout {
+                            ProjectionLayout::OutIn => (sliced, (rows, in_)),
+                            ProjectionLayout::InOut => {
+                                (transpose_projection(&sliced, rows, in_), (in_, rows))
+                            }
+                        };
+                        dims[0] = checked_ffi_i64(r, &format!("weight {name} sliced dim 0"))?;
+                        dims[1] = checked_ffi_i64(c, &format!("weight {name} sliced dim 1"))?;
                         if remaining == 0 {
                             drop(owned_widened.take());
                         }
                         if resident_f16 {
-                            sink(i, WeightBuf::F16(pack_f16(&sliced)), WDT_F16, 2, dims)?;
+                            let pack_started = std::time::Instant::now();
+                            let packed = pack_f16(&data);
+                            stats.pack_micros += pack_started.elapsed().as_micros();
+                            emit_weight!(i, WeightBuf::F16(packed), WDT_F16, 2, dims)?;
                         } else {
-                            sink(i, WeightBuf::F32(sliced), WDT_F32, 2, dims)?;
+                            emit_weight!(i, WeightBuf::F32(data), WDT_F32, 2, dims)?;
                         }
                     }
                     WeightSpec::Elements { start, end, .. } => {
@@ -2192,7 +3006,7 @@ where
                         if remaining == 0 {
                             drop(owned_widened.take());
                         }
-                        sink(i, buf, WDT_F32, 1, dims)?;
+                        emit_weight!(i, buf, WDT_F32, 1, dims)?;
                     }
                     WeightSpec::QuantRaw { .. } => {
                         unreachable!("QuantRaw is handled by the early-continue above")
@@ -2201,7 +3015,77 @@ where
             }
         }
     }
+    report_load_timing_detail(
+        "language-weight-upload-parts",
+        upload_started,
+        Some(&stats.detail()),
+    );
     Ok(())
+}
+
+/// The shape a whole-tensor weight is declared with in the graph. MLX
+/// conversions store a Mamba2 depthwise conv as `[C, K, 1]`, while the graph
+/// declares torch's `[C, 1, K]` (issue #3338); both are the same row-major
+/// bytes, so only the dims change.
+fn whole_graph_shape(name: &str, shape: &[usize]) -> Vec<usize> {
+    match shape {
+        [channels, kernel, 1] if name.ends_with("mixer.conv1d.weight") && *kernel > 1 => {
+            vec![*channels, 1, *kernel]
+        }
+        _ => shape.to_vec(),
+    }
+}
+
+/// One host weight read by [`load_host_weights`].
+pub(crate) enum HostWeight {
+    F32(Vec<f32>),
+    /// IEEE half bits (an f16-resident projection).
+    F16(Vec<u16>),
+}
+
+/// Read every graph weight of `cfg` from `model_dir` in the emitter's argument
+/// order, with their graph shapes, through the same loader the runtime uploads
+/// from: the config's projection layout, and f16 projections when
+/// `resident_f16` (the runtime's rule for an f16 graph). The SSM model check
+/// (issue #3338) feeds these to the auxiliary module.
+pub(crate) fn load_host_weights(
+    model_dir: &Path,
+    cfg: &Config,
+    resident_f16: bool,
+) -> Result<Vec<(HostWeight, Vec<usize>)>, String> {
+    let runtime = RuntimeConfig::Dense(Box::new(cfg.clone()));
+    let mut slots: Vec<Option<(HostWeight, Vec<usize>)>> =
+        (0..runtime.weight_specs().len()).map(|_| None).collect();
+    upload_weights_with_sink(
+        model_dir,
+        &runtime,
+        resident_f16,
+        cfg.projection_layout,
+        |index, buf, _dtype, rank, dims| {
+            let weight = match buf {
+                WeightBuf::F32(values) => HostWeight::F32(values),
+                WeightBuf::F16(bits) => HostWeight::F16(bits),
+                WeightBuf::Raw(_) => {
+                    return Err(format!("weight {index} is a raw (packed) buffer"));
+                }
+            };
+            let rank = usize::try_from(rank).map_err(|_| format!("weight {index} rank"))?;
+            let shape = dims[..rank]
+                .iter()
+                .map(|&dim| usize::try_from(dim).map_err(|_| format!("weight {index} dim")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let slot = slots
+                .get_mut(index)
+                .ok_or_else(|| format!("weight index {index} out of range"))?;
+            *slot = Some((weight, shape));
+            Ok(())
+        },
+    )?;
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| slot.ok_or_else(|| format!("weight {index} was never loaded")))
+        .collect()
 }
 
 fn path_cstring(p: &Path) -> Result<CString, String> {
@@ -2272,7 +3156,11 @@ fn create_bucket_ctx(
     context_capacity: usize,
 ) -> Result<*mut XlaCtx, String> {
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
-    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_pre_embeddings = bundle
+        .prefill_embeddings_vmfb
+        .as_deref()
+        .map(path_cstring)
+        .transpose()?;
     let c_pre_embeddings_deepstack = bundle
         .prefill_embeddings_deepstack_vmfb
         .as_deref()
@@ -2280,6 +3168,7 @@ fn create_bucket_ctx(
         .transpose()?;
     let c_dec = path_cstring(&bundle.decode_vmfb)?;
     let capacity = checked_ffi_int(context_capacity, "context_capacity")?;
+    let bucket_started = std::time::Instant::now();
     // Safety: every pointer is a live CString owned above for the duration of
     // the call, `base` is a live context by this function's contract, and the
     // shim treats a null deepstack or diagnostics path as "this bundle has
@@ -2288,7 +3177,9 @@ fn create_bucket_ctx(
         xla_llama_create_bucket(
             base,
             c_pre.as_ptr(),
-            c_pre_embeddings.as_ptr(),
+            c_pre_embeddings
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
             c_pre_embeddings_deepstack
                 .as_ref()
                 .map_or(std::ptr::null(), |p| p.as_ptr()),
@@ -2302,6 +3193,14 @@ fn create_bucket_ctx(
             "failed to create an OpenXLA capacity bucket at {context_capacity} tokens"
         ));
     }
+    // issue #2961: a bucket shares the base's resident weights, so it must
+    // report no upload at all. The line makes a re-upload regression visible in
+    // the same measurement that caught the load cost.
+    report_load_timing_detail(
+        "language-weight-upload-parts",
+        bucket_started,
+        Some("tensors=0 uploaded_bytes=0 dequantize_ms=0 pack_ms=0 copy_ms=0"),
+    );
     Ok(ctx)
 }
 
@@ -2334,7 +3233,11 @@ fn create_ctx_with_diagnostics(
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
     let local_task_workers = crate::local_task::local_task_workers_for(device)?;
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
-    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_pre_embeddings = bundle
+        .prefill_embeddings_vmfb
+        .as_deref()
+        .map(path_cstring)
+        .transpose()?;
     let c_pre_embeddings_deepstack = bundle
         .prefill_embeddings_deepstack_vmfb
         .as_deref()
@@ -2356,11 +3259,18 @@ fn create_ctx_with_diagnostics(
     // Safety: pointers are valid for the duration of the call; passing null
     // weight pointers allocates the empty weight slot table so each tensor can
     // be uploaded and freed incrementally via `xla_llama_upload_weight`.
+    // issue #2961: split what was one opaque span. `xla_llama_create` builds the
+    // instance, opens the device, creates the session and loads the vmfb
+    // modules; the loop below is host prep plus device copies. Only the latter
+    // changes with the weight dtype, so the two must be reported apart.
+    let create_started = std::time::Instant::now();
     let ctx = unsafe {
         xla_llama_create(
             c_dev.as_ptr(),
             c_pre.as_ptr(),
-            c_pre_embeddings.as_ptr(),
+            c_pre_embeddings
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
             c_pre_embeddings_deepstack
                 .as_ref()
                 .map_or(std::ptr::null(), |path| path.as_ptr()),
@@ -2390,6 +3300,11 @@ fn create_ctx_with_diagnostics(
             },
             i32::from(cfg.has_adapter_modes()),
             local_task_workers,
+            ffi.state.has_kv,
+            ffi.state.n_state,
+            ffi.state.ranks_ptr(),
+            ffi.state.dims_ptr(),
+            ffi.state.elems_ptr(),
         )
     };
     if ctx.is_null() {
@@ -2410,8 +3325,14 @@ fn create_ctx_with_diagnostics(
              (IREE runtime; see stderr for the annotated status)"
         ));
     }
-    if let Err(error) =
-        upload_weights_with_sink(model_dir, cfg, resident_f16, |i, buf, dtype, rank, dims| {
+    report_load_timing("language-module-load", create_started);
+    let upload_started = std::time::Instant::now();
+    if let Err(error) = upload_weights_with_sink(
+        model_dir,
+        cfg,
+        resident_f16,
+        cfg.projection_layout(),
+        |i, buf, dtype, rank, dims| {
             let index = checked_ffi_int(i, "weight index")?;
             let rc = unsafe {
                 xla_llama_upload_weight(
@@ -2430,11 +3351,12 @@ fn create_ctx_with_diagnostics(
                 ));
             }
             Ok(())
-        })
-    {
+        },
+    ) {
         unsafe { xla_llama_free(ctx) };
         return Err(error);
     }
+    report_load_timing("language-weight-upload", upload_started);
     report_load_timing("language-vmfb-and-device-upload", load_started);
     Ok(ctx)
 }
@@ -2453,6 +3375,10 @@ pub struct IreeLlama {
     position_mode: PreparedPositionMode,
     decode_position: DecodePositionState,
     deepstack_schema: Option<DeepStackConfig>,
+    /// Whether the model threads recurrent state (issue #3339). An empty
+    /// prompt prefix then resets the state instead of running a
+    /// `real_len = 0` prefill, which the shim refuses for such a model.
+    has_state: bool,
 }
 
 impl IreeLlama {
@@ -2461,12 +3387,98 @@ impl IreeLlama {
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
         let load_started = std::time::Instant::now();
-        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        // The single-sequence graphs contract one row, where IREE materializes a
+        // separate weight transpose for the checkpoint layout; the pre-transposed
+        // layout removes it (issue #2859). The batching engine keeps `OutIn`
+        // because its ragged decode lowers that layout to one fast matmul.
+        let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?
+            .with_projection_layout(ProjectionLayout::InOut);
+        // issue #2889: run the decode projections from the checkpoint's packed
+        // 4-bit weights through the native GEMV. On hip the HSACO is compiled
+        // for the active gfx target at load; on cuda the PTX was compiled with
+        // the crate (issue #2905). Any failure falls back to the f16 path
+        // rather than failing the model.
+        let mut native_module: Option<(String, String)> = None;
+        if crate::native_qmv::requested() && matches!(device, "hip" | "cuda") {
+            // The kernel is MLX affine 4-bit with a group of 64; any other
+            // packing (8-bit, another group size) keeps the f16 path rather than
+            // computing the wrong dequant.
+            if !native_quant_supported(&cfg) {
+                eprintln!(
+                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint; \
+                     using the f16 weight path"
+                );
+            } else {
+                let module = if device == "cuda" {
+                    crate::native_qmv::cuda_ptx().map(crate::native_qmv::cuda_module_parts)
+                } else {
+                    let arch = rocm_arch()?;
+                    crate::native_qmv::hsaco(&arch)
+                        .map(|bytes| crate::native_qmv::module_parts(&bytes, &arch))
+                };
+                match module {
+                    Ok(module) => {
+                        cfg.set_packed_args(true);
+                        // issue #2891: the head joins the native path only when
+                        // the checkpoint stores it 4-bit; the dtype decides, not
+                        // config.json.
+                        match native_head_supported(model_dir, &cfg) {
+                            Ok(true) => cfg.set_native_head(true),
+                            Ok(false) => eprintln!(
+                                "mlxcel: the LM head is not 4-bit packed; keeping the f16 head path"
+                            ),
+                            Err(error) => eprintln!(
+                                "mlxcel: could not inspect the LM head packing ({error}); \
+                                 keeping the f16 head path"
+                            ),
+                        }
+                        // issue #603: the native kernels read f16 scales/biases,
+                        // so a bf16 (or mixed) checkpoint keeps the f16 path.
+                        match native_scale_dtype_check(model_dir, &cfg) {
+                            Ok(()) => native_module = Some(module),
+                            Err(error) => {
+                                eprintln!("mlxcel: {error}; falling back to the f16 weight path");
+                                cfg.set_packed_args(false);
+                                cfg.set_native_head(false);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "mlxcel: native 4-bit decode projections unavailable ({error}); \
+                             falling back to the f16 weight path"
+                        );
+                    }
+                }
+            }
+        } else if quant_in_graph() {
+            cfg.set_packed_args(true);
+            // issue #603: declare and upload the checkpoint's own f16 or bf16
+            // affine metadata; a checkpoint the packed path cannot serve (mixed
+            // or another dtype) dequantizes at load instead.
+            match packed_scale_dtype(model_dir, &cfg) {
+                Ok(dtype) => cfg.set_quant_scale_dtype(dtype),
+                Err(error) => {
+                    eprintln!(
+                        "mlxcel: MLXCEL_XLA_QUANT=packed cannot keep this checkpoint packed \
+                         ({error}); dequantizing at load instead"
+                    );
+                    cfg.set_packed_args(false);
+                }
+            }
+        }
         report_load_timing("language-config", load_started);
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         let gemma3_vlm_contract = gemma3_vlm_compatibility(model_dir, &cfg)?;
         let compile_started = std::time::Instant::now();
-        let bundle = compile_vmfbs(device, &cfg, gemma3_vlm_contract.as_ref())?;
+        let bundle = compile_vmfbs(
+            device,
+            &cfg,
+            gemma3_vlm_contract.as_ref(),
+            native_module
+                .as_ref()
+                .map(|(alias, source)| (alias.as_str(), source.as_str())),
+        )?;
         report_load_timing("language-emit-and-compile", compile_started);
         let context_started = std::time::Instant::now();
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
@@ -2481,8 +3493,9 @@ impl IreeLlama {
             adapter_mode: 0,
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
-            decode_position: DecodePositionState::default(),
+            decode_position: DecodePositionState::new(cfg.context_capacity()),
             deepstack_schema: cfg.deepstack().cloned(),
+            has_state: cfg.has_recurrent_state(),
         })
     }
 
@@ -2505,6 +3518,20 @@ impl IreeLlama {
         self.prefill_padded(token_ids).map(|_| ())
     }
 
+    /// Forget the previous request's recurrent state before a new request
+    /// runs (issue #3339). Every prefill entry calls it first, so a request
+    /// refused before it reaches the shim (an oversized prompt, an invalid
+    /// prepared payload) leaves no state for a decode to continue: the decode
+    /// refuses until a prefill or a state reset succeeds. A no-op for a model
+    /// without recurrent state, whose KV handling is unchanged.
+    pub(crate) fn invalidate_sequence_state(&mut self) {
+        if self.has_state {
+            // Safety: ctx is a live context; the call only releases the
+            // shim's own state references.
+            unsafe { xla_llama_state_drop(self.ctx) };
+        }
+    }
+
     /// Run the bucketed prefill over the FULL prompt and return its first token
     /// (the argmax at `prompt.len() - 1`). Unlike [`prefill_seed`], which seeds
     /// the KV and discards the token for the seed-then-decode loop, this returns
@@ -2514,6 +3541,7 @@ impl IreeLlama {
     ///
     /// [`prefill_seed`]: Self::prefill_seed
     pub fn prefill_first(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if prompt.is_empty() {
             return Err("prefill_first requires a non-empty prompt".to_string());
         }
@@ -2523,6 +3551,7 @@ impl IreeLlama {
     /// Validate an owned embeddings payload, seed the resident KV through the
     /// dedicated embeddings module, and return the first sampled token.
     pub fn prefill_prepared_first(&mut self, prepared: &PreparedPrefill) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if self.dense_ple_shape.is_some() {
             return Err(
                 "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
@@ -2573,6 +3602,7 @@ impl IreeLlama {
         &mut self,
         request: &DeepStackPreparedPrefill,
     ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack prefill was requested from a runtime bundle without that capability"
                 .to_string()
@@ -2633,6 +3663,7 @@ impl IreeLlama {
         &mut self,
         request: &Gemma3nPreparedPrefill,
     ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         let expected = self.dense_ple_shape.ok_or_else(|| {
             "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
         })?;
@@ -2682,13 +3713,29 @@ impl IreeLlama {
     /// Pad `prompt` into the configured static bucket, run the prefill, and return its
     /// first token. Accepts an empty prompt (the seed-then-decode loop prefills a
     /// zero-length prefix when the prompt is a single token).
+    ///
+    /// For a recurrent model an empty prefix runs no graph: the shim resets the
+    /// state to zeros for the next decode to import, and the returned token is
+    /// a placeholder the seed path discards (issue #3339).
     fn prefill_padded(&mut self, prompt: &[i32]) -> Result<i32, String> {
+        self.invalidate_sequence_state();
         if prompt.len() > self.context_capacity {
             return Err(format!(
                 "prompt prefix of {} exceeds context_capacity={}",
                 prompt.len(),
                 self.context_capacity
             ));
+        }
+        if self.has_state && prompt.is_empty() {
+            // Safety: ctx is a live context; the call reads no caller memory.
+            let rc = unsafe { xla_llama_state_reset(self.ctx) };
+            let result = if rc == 0 {
+                self.adapter_mode = 0;
+                Ok(0)
+            } else {
+                Err(format!("xla_llama_state_reset failed (status {rc})"))
+            };
+            return self.decode_position.complete_prefill(0, result);
         }
         let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
@@ -2766,6 +3813,122 @@ impl IreeLlama {
         }
         Ok(out)
     }
+
+    /// Test support (issue #3028): the shim's decode-step scalar state
+    /// (`0` not attempted, `1` reuse active, `-1` fallback).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_decode_step_scalars_state(&self) -> i32 {
+        // Safety: the state is a plain field read from a live context.
+        unsafe { xla_test_decode_step_scalars_state(self.ctx) }
+    }
+
+    /// Test support (issue #3060): whether this engine's decode graph exports
+    /// the scalar-input marker, so the shim passes token/pos/cache_len as
+    /// ABI-level `i32` values rather than buffer views.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_decode_scalar_inputs(&self) -> bool {
+        // Safety: the flag is a plain field read from a live context.
+        unsafe { xla_test_decode_scalar_inputs(self.ctx) != 0 }
+    }
+
+    /// Test support (issue #3339): `None` when the model threads no state,
+    /// else `(present, import_pending)` for the single-sequence state handoff.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_state_status(&self) -> Option<(bool, bool)> {
+        // Safety: the status is a plain field read from a live context.
+        let status = unsafe { xla_test_state_status(self.ctx) };
+        (status >= 0).then_some((status & 1 != 0, status & 2 != 0))
+    }
+
+    /// Test support (issue #3339): whether the shim's KV-only entry points
+    /// (the embeddings and diagnostics prefills; the ragged and slot paths
+    /// thread per-slot state since #3340) refuse a context with this KV/state
+    /// layout (`None` when the hook rejects `n_state`). Needs no device or
+    /// bundle.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_kv_only_entries_refuse(has_kv: bool, n_state: i32) -> Option<bool> {
+        // Safety: the hook builds and frees its own scratch context.
+        match unsafe { xla_test_require_kv(c_int::from(has_kv), n_state) } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Test support (issue #3339): make every zero-state preparation (a state
+    /// reset, or a recurrent prefill's zeroed inputs) fail until cleared.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_state_zero_failure(&mut self, fail: bool) {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_state_zero_failure(self.ctx, i32::from(fail)) };
+    }
+
+    /// Test support (issue #3028): force the per-step allocation path on
+    /// (`true`) or clear the forced state (`false`), so a device test can drive
+    /// the fallback directly.
+    #[cfg(feature = "test-support")]
+    pub fn test_force_step_scalars_unsupported(&mut self, unsupported: bool) {
+        // Safety: only writes one state field on a live context.
+        unsafe { xla_test_force_step_scalars_unsupported(self.ctx, i32::from(unsupported)) };
+    }
+
+    /// Test support (issue #2954): run the token prefill C entry with exactly
+    /// the caller's positions. The public `prefill_*` path synthesizes
+    /// canonical positions, so this is the only way to prove the C boundary
+    /// bounds direct-caller values. `tokens` must be `context_capacity` long and
+    /// `positions` must be `context_capacity` (`3 * context_capacity` for
+    /// M-RoPE) long, matching what the entry reads; `real_len` may be shorter,
+    /// because the padded tail reaches the same gather.
+    #[cfg(feature = "test-support")]
+    pub fn test_prefill_with_positions(
+        &mut self,
+        tokens: &[i32],
+        positions: &[i32],
+        real_len: usize,
+    ) -> Result<i32, String> {
+        self.invalidate_sequence_state();
+        let axes = match self.position_mode {
+            PreparedPositionMode::OneD => 1,
+            PreparedPositionMode::Mrope3D => 3,
+        };
+        if tokens.len() != self.context_capacity {
+            return Err(format!(
+                "test prefill tokens must be context_capacity={} long, got {}",
+                self.context_capacity,
+                tokens.len()
+            ));
+        }
+        let expected = self.context_capacity * axes;
+        if positions.len() != expected {
+            return Err(format!(
+                "test prefill positions must be {expected} long ({axes} axes), got {}",
+                positions.len()
+            ));
+        }
+        let lp = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(real_len, "real_len")?;
+        let mut out_token = 0i32;
+        // Safety: both slices outlive the call and match the C entry's expected
+        // lengths; `out_token` is a single valid output element.
+        let rc = unsafe {
+            xla_test_prefill(
+                self.ctx,
+                tokens.as_ptr(),
+                lp,
+                positions.as_ptr(),
+                real_len,
+                &mut out_token,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_test_prefill failed (status {rc})"));
+        }
+        Ok(out_token)
+    }
 }
 
 impl Drop for IreeLlama {
@@ -2820,6 +3983,11 @@ pub struct IreeRaggedLlama {
     vocab: usize,
     context_capacity: usize,
     hidden_size: usize,
+    /// Weight slots this engine declares, i.e. how many uploads one base load
+    /// must issue (issue #2961). Test-only so a device test can assert the
+    /// upload count instead of trusting it.
+    #[cfg(feature = "test-support")]
+    n_weights: usize,
     has_adapter_modes: bool,
     #[cfg(feature = "diagnostics")]
     model_layers: usize,
@@ -2938,8 +4106,8 @@ impl IreeRaggedLlama {
                 .count()
                 <= 1
         );
-        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
-        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
+        let load_started = std::time::Instant::now();
+        let mut cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
         checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
@@ -2947,55 +4115,133 @@ impl IreeRaggedLlama {
                  {b_max} is not one of them"
             ));
         }
+        // issue #2922: run the ragged batch engine's projections from the
+        // checkpoint's packed 4-bit weights through the native multi-row HIP
+        // GEMV. As on the single-sequence path, any unsupported checkpoint or
+        // missing compiler falls back to the f16 weight graph with one warning
+        // rather than failing the load. The packed argument list is shared with
+        // the prefill graphs, so the decision is taken once here, before
+        // `runtime_ffi_dimensions` and weight upload see the config.
+        let mut native_module: Option<(String, String)> = None;
+        if crate::native_qmv::requested() && device == "hip" {
+            if !native_ragged_supported(&cfg) {
+                eprintln!(
+                    "mlxcel: MLXCEL_XLA_QUANT=native needs a 4-bit group-64 checkpoint in a \
+                     layout the packed projections support; using the f16 weight path"
+                );
+            } else {
+                match rocm_arch() {
+                    Ok(arch) => match crate::native_qmv::hsaco_multi(&arch, b_max) {
+                        Ok(bytes) => {
+                            cfg.set_packed_args(true);
+                            // issue #603: the kernels read f16 scales/biases only.
+                            match native_scale_dtype_check(model_dir, &cfg) {
+                                Ok(()) => {
+                                    native_module =
+                                        Some(crate::native_qmv::ragged_module_parts(&bytes, &arch));
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "mlxcel: {error}; falling back to the f16 weight path"
+                                    );
+                                    cfg.set_packed_args(false);
+                                }
+                            }
+                        }
+                        Err(error) => eprintln!(
+                            "mlxcel: native 4-bit batch projections unavailable ({error}); \
+                             falling back to the f16 weight path"
+                        ),
+                    },
+                    Err(error) => eprintln!(
+                        "mlxcel: native 4-bit batch projections unavailable ({error}); \
+                         falling back to the f16 weight path"
+                    ),
+                }
+            }
+        }
+        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
+        report_load_timing("ragged-config", load_started);
         // Emit the logits prefill + the ragged decode graph for this model + b_max
         // at the device-resolved precision (f16 on GPU by default, f32 on CPU).
+        let emit_started = std::time::Instant::now();
         let precision = effective_precision(device, &cfg)?;
         let native_qmv = match &cfg {
             RuntimeConfig::Dense(_) => false,
             RuntimeConfig::Gemma3n(config) => gemma3n_native_qmv(device, config)?,
         };
+        let native_ragged = native_module
+            .as_ref()
+            .map(|(alias, source)| (alias.as_str(), source.as_str()));
         let (prefill_mlir, prefill_embeddings_mlir, prefill_embeddings_deepstack_mlir, decode_mlir) =
             match &cfg {
                 RuntimeConfig::Dense(config) => {
+                    // Gate on the resolved `packed_args` flag rather than the
+                    // environment: it is what the ragged loader can actually
+                    // enable here (the native GEMV), so the check matches the
+                    // argument list the graphs and the weight specs declare.
                     check_packed_supported(
                         device,
-                        quant_in_graph() && config.supports_packed_quant(),
+                        config.packed_args && config.supports_packed_quant(),
                     )?;
+                    // A recurrent bundle has no embeddings prefill (its graph
+                    // has no state contract), as on the single-sequence path.
+                    let prefill_embeddings = if config.has_recurrent_state() {
+                        None
+                    } else {
+                        Some(emit_prefill_embeddings_with(config, false, precision)?)
+                    };
                     (
                         emit_prefill_with(config, false, precision),
-                        emit_prefill_embeddings_with(config, false, precision),
-                        config.deepstack.as_ref().map(|_| {
-                            emit_prefill_embeddings_deepstack_with(config, false, precision)
-                        }),
-                        emit_decode_ragged_with(config, b_max, false, precision),
+                        prefill_embeddings,
+                        config
+                            .deepstack
+                            .as_ref()
+                            .map(|_| {
+                                emit_prefill_embeddings_deepstack_with(config, false, precision)
+                            })
+                            .transpose()?,
+                        emit_decode_ragged_with_native(
+                            config,
+                            b_max,
+                            false,
+                            precision,
+                            native_ragged,
+                        )?,
                     )
                 }
                 RuntimeConfig::Gemma3n(config) => (
                     emit_gemma3n_prefill_with_qmv(config, false, precision, native_qmv),
-                    emit_gemma3n_prefill_embeddings_ple_with_qmv(
+                    Some(emit_gemma3n_prefill_embeddings_ple_with_qmv(
                         config, false, precision, native_qmv,
-                    ),
+                    )),
                     None,
                     emit_gemma3n_decode_ragged_with_qmv(
                         config, b_max, false, precision, native_qmv,
                     ),
                 ),
             };
+        report_load_timing("ragged-emit", emit_started);
+        let compile_started = std::time::Instant::now();
         let bundle = compile_bundle(
             device,
             &cfg,
             gemma3_vlm_compatibility(model_dir, &cfg)?.as_ref(),
             native_qmv,
+            // The ragged engine's native path is HIP-only.
+            false,
             &prefill_mlir,
             "prefill_logits",
-            &prefill_embeddings_mlir,
-            "prefill_embeddings_logits",
+            prefill_embeddings_mlir
+                .as_deref()
+                .map(|mlir| (mlir, "prefill_embeddings_logits")),
             prefill_embeddings_deepstack_mlir
                 .as_deref()
                 .map(|mlir| (mlir, "prefill_embeddings_deepstack_logits")),
             &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
         )?;
+        report_load_timing("ragged-compile", compile_started);
         #[cfg(feature = "diagnostics")]
         let (diagnostic_vmfb, diagnostic_layout) = if diagnostics || all_layer_diagnostics {
             let (vmfb, layout) = compile_gemma3n_diagnostics(device, &cfg, all_layer_diagnostics)?;
@@ -3007,6 +4253,7 @@ impl IreeRaggedLlama {
         };
         #[cfg(not(feature = "diagnostics"))]
         debug_assert!(!diagnostics && !all_layer_diagnostics && !deepstack_diagnostics);
+        let ctx_started = std::time::Instant::now();
         let ctx = match base {
             Some(base) => create_bucket_ctx(base, &bundle, cfg.context_capacity())?,
             None => {
@@ -3026,13 +4273,26 @@ impl IreeRaggedLlama {
                 }
             }
         };
+        report_load_timing("ragged-context-and-upload", ctx_started);
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
+        let reset_started = std::time::Instant::now();
+        // Record the compiled B before any reset. The ragged decode graph's
+        // static [B,...] shapes were fixed when it was emitted, so a reset at
+        // any other size can only fail inside IREE with an opaque shape error;
+        // binding first turns that into a clear rejection naming both values.
+        let rc = unsafe { xla_llama_ragged_bind(ctx, b_max_ffi) };
+        if rc != 0 {
+            unsafe { xla_llama_free(ctx) };
+            return Err(format!("xla_llama_ragged_bind failed (status {rc})"));
+        }
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max_ffi) };
         if rc != 0 {
             unsafe { xla_llama_free(ctx) };
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
+        report_load_timing("ragged-bind-and-reset", reset_started);
+        report_load_timing("ragged-total", load_started);
         Ok(Self {
             ctx,
             compatibility_fingerprint: bundle.compatibility_fingerprint,
@@ -3040,6 +4300,8 @@ impl IreeRaggedLlama {
             vocab: cfg.vocab(),
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
+            #[cfg(feature = "test-support")]
+            n_weights: cfg.weight_specs().len(),
             has_adapter_modes: cfg.has_adapter_modes(),
             #[cfg(feature = "diagnostics")]
             model_layers: cfg.n_layers(),
@@ -3101,6 +4363,31 @@ impl IreeRaggedLlama {
         self.b_max
     }
 
+    /// Validate `slot` and mark it invalid before a request is admitted into
+    /// it (issue #3340). Every slot-prefill entry calls this first, so a
+    /// request refused here, before the shim runs a graph, cannot leave the
+    /// slot's previous KV or recurrent state valid for the ragged decode; the
+    /// shim sets the flag again only after the new prefill stored every result.
+    fn begin_slot_prefill(&mut self, slot: usize) -> Result<(), String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine and
+        // the call only clears one byte of this ctx's slot flags.
+        let rc = unsafe { xla_llama_slot_invalidate(self.ctx, slot) };
+        if rc != 0 {
+            return Err(format!("xla_llama_slot_invalidate failed (status {rc})"));
+        }
+        Ok(())
+    }
+
+    /// Test support (issue #2961): weight slots this engine declares. One base
+    /// load must issue exactly this many `xla_llama_upload_weight` calls.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn weight_count(&self) -> usize {
+        self.n_weights
+    }
+
     /// Clear all ragged KV slots before an independent diagnostic capture.
     ///
     /// Production batching retains slots between scheduler steps. Diagnostic
@@ -3116,6 +4403,115 @@ impl IreeRaggedLlama {
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
         }
         Ok(())
+    }
+
+    /// Test support (issue #2923): record `compiled_b` as this context's
+    /// compiled ragged batch size and then reset to `bsz`, returning the shim's
+    /// status code. The engine's own `b_max` is rebound by the caller.
+    #[cfg(feature = "test-support")]
+    pub fn test_bind_and_reset(&mut self, compiled_b: i32, bsz: i32) -> i32 {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        let rc = unsafe { xla_llama_ragged_bind(self.ctx, compiled_b) };
+        if rc != 0 {
+            return rc;
+        }
+        // Safety: as above; the reset only releases and re-sizes this ctx's
+        // batch state.
+        unsafe { xla_llama_ragged_reset(self.ctx, bsz) }
+    }
+
+    /// Test support (issue #2923): make the next prefill slot store fail after
+    /// its first transfer (the K transfer, or the first state transfer of an
+    /// attention-free model, issue #3340), so the caller can observe the
+    /// slot's validity state. A `false` call restores the normal path.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_slot_store_failure(&mut self, fail: bool) {
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, i32::from(fail)) };
+    }
+
+    /// Fail after writing the first recurrent tensor, with both KV transfers
+    /// already complete on a hybrid. This probes the shared validity boundary
+    /// between KV and recurrent state; `false` clears either failure mode.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_state_slot_store_failure(&mut self, fail: bool) {
+        // SAFETY: `self.ctx` remains valid for the lifetime of this engine.
+        unsafe { xla_test_set_slot_store_failure(self.ctx, if fail { 2 } else { 0 }) };
+    }
+
+    /// Test support (issue #2923): whether `slot` currently holds a KV store
+    /// that completed both transfers. `None` means the slot index is out of
+    /// range or no reset has allocated the flags.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_slot_valid(&self, slot: usize) -> Option<bool> {
+        let slot = checked_ffi_int(slot, "slot").ok()?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine.
+        match unsafe { xla_test_slot_valid(self.ctx, slot) } {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Test support (issue #2954): run the slot-logits prefill C entry with
+    /// exactly the caller's positions. The public `prefill_slot_logits`
+    /// synthesizes canonical positions, so this is the only way to prove the C
+    /// boundary bounds direct-caller values. `tokens` must be
+    /// `context_capacity` long and `positions` must be `context_capacity`
+    /// (`3 * context_capacity` for M-RoPE) long; `real_len` may be shorter,
+    /// because the padded tail reaches the same gather.
+    #[cfg(feature = "test-support")]
+    pub fn test_prefill_slot_logits_with_positions(
+        &mut self,
+        slot: usize,
+        tokens: &[i32],
+        positions: &[i32],
+        real_len: usize,
+    ) -> Result<Vec<f32>, String> {
+        self.begin_slot_prefill(slot)?;
+        let axes = match self.position_mode {
+            PreparedPositionMode::OneD => 1,
+            PreparedPositionMode::Mrope3D => 3,
+        };
+        if tokens.len() != self.context_capacity {
+            return Err(format!(
+                "test prefill tokens must be context_capacity={} long, got {}",
+                self.context_capacity,
+                tokens.len()
+            ));
+        }
+        let expected = self.context_capacity * axes;
+        if positions.len() != expected {
+            return Err(format!(
+                "test prefill positions must be {expected} long ({axes} axes), got {}",
+                positions.len()
+            ));
+        }
+        let slot = checked_ffi_int(slot, "slot")?;
+        let lp = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(real_len, "real_len")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let mut logits = vec![0f32; self.vocab];
+        // Safety: both input slices outlive the call and match the C entry's
+        // expected lengths; `logits` has `self.vocab` elements for the shim to
+        // fill, and the shim also writes the slot's KV device-side.
+        let rc = unsafe {
+            xla_test_prefill_slot_logits(
+                self.ctx,
+                slot,
+                tokens.as_ptr(),
+                lp,
+                positions.as_ptr(),
+                real_len,
+                vocab,
+                logits.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_test_prefill_slot_logits failed (status {rc})"));
+        }
+        Ok(logits)
     }
 
     /// The vocabulary size (logits per row). The engine slices the ragged decode's
@@ -3191,7 +4587,7 @@ impl IreeRaggedLlama {
         slot: usize,
         prompt: &[i32],
     ) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prompt.is_empty() || prompt.len() > self.context_capacity {
             return Err(format!(
                 "diagnostic prompt length {} is outside 1..={}",
@@ -3240,7 +4636,7 @@ impl IreeRaggedLlama {
     /// untouched, so a mid-stream admit does not disturb live sequences. The caller
     /// samples the first token from the returned logits.
     pub fn prefill_slot_logits(&mut self, slot: usize, prompt: &[i32]) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prompt.is_empty() {
             return Err("prefill_slot_logits requires a non-empty prompt".to_string());
         }
@@ -3291,12 +4687,12 @@ impl IreeRaggedLlama {
         slot: usize,
         prepared: &PreparedIreePrefill,
     ) -> Result<Vec<f32>, String> {
+        self.begin_slot_prefill(slot)?;
         if self.dense_ple_shape.is_some() {
             return Err(
                 "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
             );
         }
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -3359,7 +4755,7 @@ impl IreeRaggedLlama {
                 "LLaVA diagnostics require the ordinary embeddings prefill entry".to_string(),
             );
         }
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -3429,11 +4825,11 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         deepstack: &PreparedDeepStack,
     ) -> Result<Vec<f32>, String> {
+        self.begin_slot_prefill(slot)?;
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack prefill was requested from a runtime bundle without that capability"
                 .to_string()
         })?;
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -3497,11 +4893,11 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         deepstack: &PreparedDeepStack,
     ) -> Result<DeepStackPrefillDiagnostics, String> {
+        self.begin_slot_prefill(slot)?;
         let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
             "DeepStack diagnostics were requested from a runtime without that capability"
                 .to_string()
         })?;
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
             || prepared.effective_len == 0
@@ -3581,7 +4977,7 @@ impl IreeRaggedLlama {
         prepared: &PreparedIreePrefill,
         dense_ple: &Gemma3nDensePle,
     ) -> Result<Vec<f32>, String> {
-        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        self.begin_slot_prefill(slot)?;
         let expected = self.dense_ple_shape.ok_or_else(|| {
             "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
         })?;
@@ -3741,6 +5137,18 @@ impl IreeRaggedLlama {
                     "decode row {row} has negative M-RoPE coordinates {coordinates:?}"
                 ));
             }
+            // The compiled RoPE table has exactly `context_capacity` rows, so a
+            // coordinate at or past it is an out-of-bounds device gather. Reject
+            // here, before any IREE call (issue #2923).
+            if let Some(&coordinate) = coordinates
+                .iter()
+                .find(|&&coordinate| coordinate as usize >= self.context_capacity)
+            {
+                return Err(format!(
+                    "decode row {row} has M-RoPE coordinate {coordinate} outside context_capacity={}",
+                    self.context_capacity
+                ));
+            }
         }
         let flat_positions: Vec<i32> = positions
             .iter()
@@ -3779,5 +5187,49 @@ impl Drop for IreeRaggedLlama {
             unsafe { xla_llama_free(self.ctx) };
             self.ctx = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod load_timing_accounting_tests {
+    use super::*;
+
+    #[test]
+    fn weight_buf_byte_lengths_match_the_shim_copy_size() {
+        assert_eq!(WeightBuf::F32(vec![0.0; 3]).byte_len(), 12);
+        assert_eq!(WeightBuf::F16(vec![0; 3]).byte_len(), 6);
+        assert_eq!(WeightBuf::Raw(vec![0; 5]).byte_len(), 5);
+    }
+
+    #[test]
+    fn upload_detail_reports_tensors_bytes_and_stage_milliseconds() {
+        let stats = WeightUploadStats {
+            tensors: 7,
+            uploaded_bytes: 1_500_000_000,
+            widen_micros: 2_400_000,
+            pack_micros: 300_000,
+            upload_micros: 900_000,
+        };
+        assert_eq!(
+            stats.detail(),
+            "tensors=7 uploaded_bytes=1500000000 dequantize_ms=2400 pack_ms=300 copy_ms=900"
+        );
+    }
+
+    #[test]
+    fn phase_line_keeps_its_shape_with_and_without_detail() {
+        assert_eq!(
+            load_timing_line("ragged-config", 12, "3456", None),
+            "mlxcel-xla-load: phase=ragged-config elapsed_ms=12 rss_kib=3456"
+        );
+        assert_eq!(
+            load_timing_line(
+                "language-weight-upload-parts",
+                4800,
+                "unavailable",
+                Some("tensors=0 uploaded_bytes=0"),
+            ),
+            "mlxcel-xla-load: phase=language-weight-upload-parts elapsed_ms=4800 rss_kib=unavailable tensors=0 uploaded_bytes=0"
+        );
     }
 }

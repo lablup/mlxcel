@@ -24,7 +24,25 @@ pub(crate) mod batched_decode_harness;
 #[cfg(test)]
 pub(crate) mod deepstack_state_test_support;
 #[cfg(test)]
+mod dense_verify_block_tests;
+#[cfg(test)]
+mod last_row_logits_coverage_tests;
+#[cfg(test)]
+pub(crate) mod last_row_logits_harness;
+#[cfg(test)]
+mod last_row_logits_moe2_tests;
+#[cfg(test)]
+mod last_row_logits_moe_tests;
+#[cfg(test)]
+mod last_row_logits_stateful2_tests;
+#[cfg(test)]
+mod last_row_logits_stateful_tests;
+#[cfg(test)]
+mod last_row_logits_tests;
+#[cfg(test)]
 mod mixtral_style_batched_decode_tests;
+#[cfg(test)]
+pub(crate) mod padded_prefill_parity_tests;
 #[cfg(test)]
 pub(crate) mod popular_dense_batched_decode_tests;
 #[cfg(test)]
@@ -46,15 +64,22 @@ pub(crate) mod embedding_sanitize;
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 pub(crate) mod headless_llama;
-mod kv_snapshot;
+pub(crate) mod hybrid_snapshot;
+pub(crate) mod kv_ring_checkpoint;
+pub(crate) mod kv_snapshot;
 mod llama4_helpers;
 pub(crate) mod model_owned;
+pub(crate) mod modelopt_mixed_precision;
 pub mod multimodal_placeholders;
+pub mod pooled_model;
 pub(crate) mod qwen_mrope_state;
 pub(crate) mod recurrent_batch;
-mod recurrent_snapshot;
+pub(crate) mod recurrent_snapshot;
 pub mod registry;
 mod sanitize;
+mod sliding_hybrid_lm;
+#[cfg(test)]
+pub(crate) mod ssm_test_support;
 
 // Shared modules
 // `config` holds shared serde defaults and the common `QuantizationArgs`. It
@@ -76,8 +101,29 @@ pub mod dynamic_ntk_rope;
 // mxfp8 at load. It is a pre-pass rather than part of `sanitize`, which is
 // already 3k lines and carries no MLX-op-heavy conversion of this size.
 pub mod fp8_block;
+// `fp8_ct` covers the compressed-tensors `float-quantized` layout (E4M3 bytes
+// plus a per-channel or per-block `.weight_scale`), the sibling of the vendor
+// block path. Split out so each layout's detection and its refusals stay in one
+// readable file.
+pub mod fp8_ct;
+// `fp8_checkpoint` picks between the two FP8 layouts above for the Qwen3.5
+// loaders, so the config merge and the weight pre-pass are one call each.
+pub mod fp8_checkpoint;
 pub mod gated_delta;
+// `ssd_scan` is the float32-hardened chunked Mamba2 SSD scan shared by the
+// hybrid families, so its working set is bounded by a chunk, not the prefill
+// piece (#3073).
 pub(crate) mod mla_batched;
+// `mla_rope` is the decoupled `q_pe` / `k_pe` RoPE of the DeepSeek-style MLA
+// attentions (DeepSeek-V3 family, V3.2, LongCat ngram and sparse, Xing4.0),
+// one type instead of the three private copies #3295 found.
+#[cfg(test)]
+pub(crate) mod mla_latent_test_support;
+pub(crate) mod mla_rope;
+pub(crate) mod ssd_scan;
+// `ssm_a` computes the SSM transition `A = -exp(A_log)` in float32 for the
+// Mamba1, Jamba and Mamba2 families (#3046, #3057, #3125).
+pub(crate) mod ssm_a;
 // `rope_overrides` carries llama-server b10621's `--rope-scaling`,
 // `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
 // CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).
@@ -111,6 +157,7 @@ pub(crate) fn parse_optional_eos_token_ids(value: &Option<serde_json::Value>) ->
 // Model implementations (mlxcel-core based)
 pub mod afmoe;
 pub mod apertus;
+pub mod arcee;
 pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
@@ -141,8 +188,9 @@ pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod diffusion_gemma;
 pub mod dots1;
-/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` drafter and
-/// delegates every other kind to `mlxcel_core::drafter::load_drafter`.
+/// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` and
+/// `qwen4_exp_mtp` drafters and delegates every other kind to
+/// `mlxcel_core::drafter::load_drafter`.
 pub mod drafter_loader;
 pub mod embedding_gemma2;
 pub mod ernie4_5;
@@ -184,6 +232,7 @@ pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
 pub mod inkling;
+pub mod inkling2;
 pub mod inkling_mtp_target;
 pub mod internlm2;
 pub mod internlm3;
@@ -191,15 +240,22 @@ pub mod iquestloopcoder;
 pub mod iquestloopcoder_model;
 pub mod jamba;
 pub mod jina_vlm;
+pub mod k2_horizon;
 pub mod kimi_k3;
 pub mod kimi_linear;
 pub mod klear;
+pub mod kolibri1;
+mod kolibri1_lm;
+pub mod kolibri1_moe;
+pub mod kolibri1_weights;
 pub mod laguna;
 pub mod laguna_layers;
 pub mod laguna_sanitize;
 pub mod laguna_speculative;
 pub mod lfm2;
 pub mod lfm2_embedding;
+pub mod limite;
+pub(crate) mod limite_layers;
 pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
@@ -207,11 +263,14 @@ pub mod llama_bidirec;
 pub mod llama_nemotron_vl_embedding;
 pub(crate) mod llama_nemotron_vl_tiling;
 pub mod longcat_flash_ngram;
+pub mod longcat_flash_sparse;
 pub mod mamba;
 pub mod mamba2;
 pub mod mellum;
 pub mod mimo;
+pub mod mimo_v2;
 pub mod mimo_v2_flash;
+pub(crate) mod mimo_v2_weights;
 pub mod minicpm;
 pub mod minicpm3;
 pub mod minimax;
@@ -258,6 +317,7 @@ pub mod qwen2_moe;
 pub mod qwen2_vl;
 pub mod qwen3;
 pub mod qwen3_5;
+pub(crate) mod qwen3_5_layer_state;
 pub mod qwen3_5_mtp_target;
 pub mod qwen3_embedding;
 pub mod qwen3_moe;
@@ -266,6 +326,17 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_embedding;
 pub mod qwen3_vl_moe;
 pub mod qwen4_exp;
+pub mod qwen4_exp_mtp_config;
+pub mod qwen4_exp_mtp_drafter;
+pub mod qwen4_exp_mtp_target;
+pub mod raon1_mini;
+mod raon1_mini_config;
+pub(crate) mod raon1_mini_moe;
+mod raon1_mini_quant;
+pub(crate) mod raon1_mini_sanitize;
+pub(crate) mod raon_mhc;
+pub(crate) mod raon_rda;
+pub mod reasoning_effort_steering;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
@@ -274,6 +345,10 @@ pub mod smollm3;
 pub mod solar_open;
 /// Runtime block-vs-chain exactness gate shared by the MTP speculative paths.
 pub mod speculative_exactness;
+pub mod speculative_exactness_diag;
+pub mod speculative_exactness_draws;
+#[cfg(test)]
+mod speculative_exactness_survey_tests;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
@@ -281,7 +356,9 @@ pub mod telechat3;
 #[cfg(test)]
 pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
+pub mod xing4_0;
 pub mod youtu_vl_lm;
+pub mod z1t;
 
 // Text-to-speech (StyleTTS2 + iSTFTNet) and its grapheme-to-phoneme front-end.
 pub mod g2p;
@@ -290,6 +367,7 @@ pub mod kokoro;
 // Re-export model types
 pub use afmoe::AfmoeModel;
 pub use apertus::ApertusModel;
+pub use arcee::ArceeModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
 pub use bailing_moe_linear::BailingMoeLinearModel;
@@ -305,6 +383,9 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub use deepseek_v32::hy_v4;
+pub use deepseek_v32::hy_v4::HyV4Model;
+pub(crate) use detection::is_longcat_sparse_architecture;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
@@ -352,6 +433,7 @@ pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use inkling::InklingModel;
+pub use inkling2::Inkling2Model;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use iquestloopcoder_model::{IQuestLoopCoderModel, IQuestLoopCoderWrapper};
@@ -360,12 +442,15 @@ pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_k3::KimiK3Model;
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
+pub use kolibri1::Kolibri1Model;
 pub use laguna::{LagunaModel, LagunaWrapper};
 pub use lfm2::Lfm2Model;
+pub use limite::{LimiteModel, LimiteWrapper};
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
 pub use llama4::{Llama4CxxModel, Llama4Wrapper};
 pub use longcat_flash_ngram::LongcatFlashNgramModel;
+pub use longcat_flash_sparse::LongcatFlashSparseModel;
 pub use mamba::MambaModel;
 pub use mamba2::Mamba2Model;
 pub use mellum::{MellumModel, MellumWrapper};
@@ -418,12 +503,14 @@ pub use qwen3_next::Qwen3NextModel;
 pub use qwen3_vl::Qwen3VLModel;
 pub use qwen3_vl_moe::Qwen3VLMoeModel;
 pub use qwen4_exp::Qwen4ExpModel;
+pub use raon1_mini::Raon1MiniModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
-    Gemma4WeightBacking, config_has_quantization_metadata, load_gemma4_text_weights_with_backing,
-    load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
+    Gemma4WeightBacking, config_has_quantization_metadata, is_modelopt_nvfp4_text_checkpoint,
+    load_gemma4_text_weights_with_backing, load_gemma4_unified_weights_with_backing,
+    load_gemma4_vlm_weights_with_backing, merge_modelopt_nvfp4_quantization,
+    sanitize_gemma4_nvfp4_weights, sanitize_modelopt_nvfp4_weights, strip_gemma4_kv_shared_weights,
 };
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
@@ -431,6 +518,13 @@ pub(crate) use sanitize::{
 pub use fp8_block::{
     Fp8BlockQuantization, has_block_fp8_weights, merge_fp8_block_quantization,
     qwen_fp8_block_quantization, requantize_block_fp8_weights,
+};
+pub use fp8_checkpoint::{
+    Fp8Checkpoint, fp8_checkpoint_quantization, merge_fp8_quantization, requantize_fp8_weights,
+};
+pub use fp8_ct::{
+    Fp8CtQuantization, Fp8CtScaleLayout, compressed_tensors_fp8_quantization,
+    has_compressed_tensors_fp8_weights, requantize_compressed_tensors_fp8_weights,
 };
 /// E4M3 decoder shared with the image-generation FP8 loaders.
 ///
@@ -452,7 +546,9 @@ pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
 pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
+pub use xing4_0::Xing40Model;
 pub use youtu_vl_lm::YoutuLanguageModel;
+pub use z1t::Z1t;
 
 pub use kokoro::KokoroModel;
 pub use nemotron_voicechat::NemotronVoiceChatModel;
@@ -575,8 +671,13 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// Tencent Hy4 (DeepSeek-V3.2 MLA + DSA with identity hyper connections,
+    /// a gated sink attention and shared indexers).
+    HyV4,
     /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
     DeepSeekV4,
+    /// Xing4.0 (DeepSeek-V3 MLA + MoE inside a manifold hyper-connection stream).
+    Xing40,
     /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
     Dots1,
 
@@ -603,6 +704,9 @@ pub enum ModelType {
     /// MoE with a separate V head width, partial RoPE, dual RoPE bases, and
     /// learned attention sinks on the sliding layers.
     MiMoV2Flash,
+    /// Xiaomi MiMo-V2 / V2.5 / V2.6 (`mimo_v2`): the Flash decoder plus the
+    /// `mimovl` vision tower for image and video input.
+    MiMoV2VLM,
     /// Ant Group Ling / Bailing MoE (`bailing_moe`): DeepSeek-shaped sparse
     /// decoder with a fused GQA `query_key_value` and a single wide shared
     /// expert.
@@ -616,10 +720,17 @@ pub enum ModelType {
     /// attention with NoPE global layers, a sigmoid attention gate,
     /// sandwich norms, muP embedding scale and a sparse MoE FFN.
     Afmoe,
+    /// Arcee AFM dense (`arcee`, AFM-4.5B): a Llama-shaped decoder with a
+    /// gate-free squared-ReLU MLP and YaRN RoPE. Not AFMoE and not Apple AFM-7.
+    Arcee,
     /// Kuaishou Klear (`Klear`): a Qwen3-shaped sparse MoE whose shared
     /// expert is blended with the routed mixture through a learned 2-way
     /// softmax rather than added.
     Klear,
+    /// Aleph Alpha Kolibri-1 (`kolibri1`): AFMoE-shaped sliding/full hybrid
+    /// MoE without the attention gate, 384 experts top-6 routed on raw
+    /// logits plus a correction bias, and a shared expert.
+    Kolibri1,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -656,8 +767,11 @@ pub enum ModelType {
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
     Laguna, // Poolside Laguna XS / S (hybrid sliding/full MoE with NVFP4 experts)
 
+    Limite, // Paradigma Limite (MUDD dense connections, sliding/NoPE-global, sigmoid-softcapped head)
+
     // Other Transformer models
     Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
+    K2Horizon, // IFM K2-Horizon dense (Llama-shaped decoder with YaRN RoPE)
     TeleChat3, // TeleAI TeleChat3 (Llama-shaped dense decoder with YaRN RoPE scaling)
     MiniCPM,
     MiniCPM3,
@@ -689,15 +803,21 @@ pub enum ModelType {
     // Thinking Machines Inkling text and HMLP vision-language model
     Inkling,
     InklingVLM,
+    // Thinking Machines Inkling 2 (Small `inkling2`, looped Mini `inkling2_loop`)
+    Inkling2VLM,
 
     // Preferred Networks PLaMo 2 (Mamba + attention interleaved hybrid)
     Plamo2,
+    Plamo2VLM, // PLaMo 2.1 VL (plamo2vl): SigLIP tiles + RMSNorm/GELU adapter + PLaMo 2 text
 
     // IBM Granite 4.x (Mamba2 + attention interleaved hybrid)
     GraniteMoeHybrid,
 
     // Kimi models
     KimiLinear,
+    /// KRAFTON Raon-1 mini (4-stream Raon_mHC residual, RDA gated-delta +
+    /// NoPE gated MLA, SiTU MLP, sigmoid-routed MXFP8 MoE).
+    Raon1Mini,
     KimiK3, // Kimi K3 text backbone (fused-QKV KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)
     KimiK3VLM, // Kimi K3 VLM (MoonViT3D tower + patchmergerv2 projector + the K3 backbone)
     KimiVL, // Kimi-VL (MoonViT vision encoder + DeepSeek-V3-style MoE text)
@@ -706,6 +826,7 @@ pub enum ModelType {
     // Longcat models
     LongcatFlash,
     LongcatFlashNgram,
+    LongcatFlashSparse,
 
     // Step models
     Step3p5,
@@ -714,6 +835,8 @@ pub enum ModelType {
     // RNN models
     Rwkv7,
     RecurrentGemma,
+    // Attention-free AFT-conv decoder with model-owned streaming state
+    Z1t,
 
     // Speech-to-text (encoder-decoder ASR)
     Whisper,
@@ -857,7 +980,9 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::HyV4,
     ModelType::DeepSeekV4,
+    ModelType::Xing40,
     ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
@@ -877,10 +1002,13 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
     ModelType::MiMoV2Flash,
+    ModelType::MiMoV2VLM,
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
+    ModelType::Arcee,
     ModelType::Klear,
+    ModelType::Kolibri1,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -908,8 +1036,10 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::StarCoder2,
     ModelType::Mellum,
     ModelType::Laguna,
+    ModelType::Limite,
     // Other Transformer models
     ModelType::Helium,
+    ModelType::K2Horizon,
     ModelType::TeleChat3,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
@@ -934,25 +1064,30 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Lfm2VL,
     ModelType::Inkling,
     ModelType::InklingVLM,
+    ModelType::Inkling2VLM,
     // Preferred Networks PLaMo 2
     ModelType::Plamo2,
+    ModelType::Plamo2VLM,
     // IBM Granite 4.x hybrid
     ModelType::GraniteMoeHybrid,
     // Kimi models
     ModelType::KimiLinear,
     ModelType::KimiK3,
+    ModelType::Raon1Mini,
     ModelType::KimiK3VLM,
     ModelType::KimiVL,
     ModelType::KimiK25,
     // Longcat models
     ModelType::LongcatFlash,
     ModelType::LongcatFlashNgram,
+    ModelType::LongcatFlashSparse,
     // Step models
     ModelType::Step3p5,
     ModelType::Step3p7,
     // RNN models
     ModelType::Rwkv7,
     ModelType::RecurrentGemma,
+    ModelType::Z1t,
     // Speech-to-text
     ModelType::Whisper,
     // Text-to-speech
@@ -1097,7 +1232,12 @@ impl ModelType {
             ModelType::DeepSeekV2 => ("DeepSeek v2", "DeepSeek"),
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
+            ModelType::HyV4 => ("Hy4", "Tencent"),
             ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
+            ModelType::Xing40 => (
+                "Xing4.0 (DeepSeek-V3 MoE, hyper-connection stream)",
+                "DeepSeek",
+            ),
 
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
@@ -1124,7 +1264,12 @@ impl ModelType {
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
+            ModelType::Arcee => ("Arcee AFM dense (squared-ReLU MLP, YaRN RoPE)", "Arcee"),
             ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
+            ModelType::Kolibri1 => (
+                "Aleph Alpha Kolibri-1 (sliding + full hybrid MoE)",
+                "Aleph Alpha",
+            ),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1179,11 +1324,19 @@ impl ModelType {
                 "Kimi K3 (KDA + gated NoPE-MLA + latent SiTU MoE + AttnRes)",
                 "MoE (other)",
             ),
+            ModelType::Raon1Mini => (
+                "Raon-1 mini (mHC streams, RDA + NoPE MLA, MXFP8 SiTU MoE, reasoning-effort steering)",
+                "MoE (other)",
+            ),
             ModelType::KimiK3VLM => ("Kimi K3 VLM (MoonViT3D + K3 latent MoE)", "Kimi VLM"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::LongcatFlash => ("LongCat Flash (MLA + MoE, dual sublayer)", "MoE (other)"),
             ModelType::LongcatFlashNgram => ("LongCat Flash + N-gram embedding", "MoE (other)"),
+            ModelType::LongcatFlashSparse => (
+                "LongCat Flash Lite Sparse (LSA sparse MLA + N-gram embedding)",
+                "MoE (other)",
+            ),
             ModelType::Step3p5 => ("Step-3.5 (Sigmoid MoE gate + SwitchGLU)", "MoE (other)"),
             ModelType::Step3p7 => ("Step-3.7 (ViT + Step-3.5 MoE)", "Step VLM"),
             ModelType::Dots1 => ("dots.llm1 (MoE)", "MoE (other)"),
@@ -1210,12 +1363,23 @@ impl ModelType {
                 "Inkling VLM (HMLP vision + relative-bias MoE text)",
                 "Inkling",
             ),
+            ModelType::Inkling2VLM => (
+                "Inkling 2 (attention-residual MoE, looped core in Mini, 2-D RoPE ViT)",
+                "Inkling",
+            ),
 
             // ----- Preferred Networks -----
             ModelType::Plamo2 => ("PLaMo 2 (Mamba + attention hybrid)", "PLaMo"),
+            ModelType::Plamo2VLM => (
+                "PLaMo 2.1 VL (SigLIP tiles + MLP adapter + PLaMo 2 hybrid)",
+                "Other VLM",
+            ),
 
             // ----- RWKV -----
             ModelType::Rwkv7 => ("RWKV v7", "RWKV"),
+
+            // ----- Extropic -----
+            ModelType::Z1t => ("Z1T (attention-free AFT-conv, sparse tanh-linears)", "Z1T"),
 
             // ----- Speech-to-text (ASR) -----
             ModelType::Whisper => ("Whisper (encoder-decoder ASR)", "Speech-to-text"),
@@ -1279,6 +1443,7 @@ impl ModelType {
                 "Kyutai Helium (dense Llama shape, traditional RoPE)",
                 "Specialized",
             ),
+            ModelType::K2Horizon => ("IFM K2-Horizon (dense Llama shape, YaRN RoPE)", "Llama"),
             ModelType::TeleChat3 => (
                 "TeleAI TeleChat3 (dense Llama shape, YaRN RoPE)",
                 "Specialized",
@@ -1286,6 +1451,7 @@ impl ModelType {
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::Laguna => ("Laguna XS / S (Poolside code, hybrid MoE)", "Specialized"),
+            ModelType::Limite => ("Paradigma Limite (MUDD, sliding/global)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
             ModelType::Baichuan => ("Baichuan", "Specialized"),
             ModelType::MiniCPM => ("MiniCPM 1", "Specialized"),
@@ -1294,6 +1460,10 @@ impl ModelType {
             ModelType::MiMo => ("MiMo (multi-token prediction)", "Specialized"),
             ModelType::MiMoV2Flash => (
                 "Xiaomi MiMo v2 Flash (hybrid sliding/full attention MoE)",
+                "Xiaomi",
+            ),
+            ModelType::MiMoV2VLM => (
+                "Xiaomi MiMo-V2 / V2.6 (Flash MoE decoder + mimovl vision)",
                 "Xiaomi",
             ),
             ModelType::Apertus => ("Apertus (dense)", "Specialized"),
@@ -1519,7 +1689,9 @@ mod metadata_tests {
             DeepSeekV2,
             DeepSeekV3,
             DeepSeekV32,
+            HyV4,
             DeepSeekV4,
+            Xing40,
             Dots1,
             Cohere,
             Cohere2,
@@ -1537,10 +1709,13 @@ mod metadata_tests {
             HunyuanV1Dense,
             MiMo,
             MiMoV2Flash,
+            MiMoV2VLM,
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
+            Arcee,
             Klear,
+            Kolibri1,
             Apertus,
             SeedOss,
             Granite,
@@ -1560,7 +1735,9 @@ mod metadata_tests {
             StarCoder2,
             Mellum,
             Laguna,
+            Limite,
             Helium,
+            K2Horizon,
             TeleChat3,
             MiniCPM,
             MiniCPM3,
@@ -1582,19 +1759,24 @@ mod metadata_tests {
             Lfm2VL,
             Inkling,
             InklingVLM,
+            Inkling2VLM,
             Plamo2,
+            Plamo2VLM,
             GraniteMoeHybrid,
             KimiLinear,
             KimiK3,
+            Raon1Mini,
             KimiK3VLM,
             KimiVL,
             KimiK25,
             LongcatFlash,
             LongcatFlashNgram,
+            LongcatFlashSparse,
             Step3p5,
             Step3p7,
             Rwkv7,
             RecurrentGemma,
+            Z1t,
             Whisper,
             Kokoro,
             NemotronVoiceChat,
@@ -1717,6 +1899,10 @@ mod gemma3n_helpers_tests;
 pub(crate) mod gemma4_tests;
 
 #[cfg(test)]
+#[path = "gemma4_ring_checkpoint_tests.rs"]
+mod gemma4_ring_checkpoint_tests;
+
+#[cfg(test)]
 #[path = "llama4_helpers_tests.rs"]
 mod llama4_helpers_tests;
 
@@ -1731,6 +1917,14 @@ mod qwen_vl_position_tests;
 #[cfg(test)]
 #[path = "qwen3_5_tests.rs"]
 pub(crate) mod qwen3_5_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_mtp_yarn_tests.rs"]
+mod qwen3_5_mtp_yarn_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_checkpoint_tests.rs"]
+mod qwen3_5_checkpoint_tests;
 
 #[cfg(test)]
 #[path = "apertus_tests.rs"]
@@ -1771,6 +1965,10 @@ mod plamo2_tests;
 #[cfg(test)]
 #[path = "mellum_tests.rs"]
 mod mellum_tests;
+
+#[cfg(test)]
+#[path = "limite_tests.rs"]
+mod limite_tests;
 
 #[cfg(test)]
 #[path = "laguna_dflash_tests.rs"]

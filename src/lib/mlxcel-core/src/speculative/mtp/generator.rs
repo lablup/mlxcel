@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::adaptive::{BlockThroughputController, effective_mtp_block_size};
+use super::classic_fallback::{ClassicFallback, run_classic_steps};
 use super::target::{MtpTarget, MtpVerifyOutput};
 use super::tree::DraftTree;
 use super::walk::{WalkResult, speculative_walk};
@@ -373,6 +374,10 @@ pub struct MtpSessionState {
     announced_tree_round: bool,
     /// Classic-step probe rounds still to run (issue #736).
     probes_remaining: usize,
+    /// Acceptance-aware fallback to classic decode (issue #3425), for a
+    /// target exact at every verify width. `None` keeps every round at the
+    /// width the block controller picks.
+    fallback: Option<ClassicFallback>,
     /// Round diagnostics, accumulated across steps exactly as the
     /// run-to-completion loop accumulates them within one call.
     diagnostics: MtpRoundDiagnostics,
@@ -844,6 +849,13 @@ impl<T: MtpTarget> MtpGenerator<T> {
             warned_block_override: false,
             announced_tree_round: false,
             probes_remaining: self.profile_probe_rounds,
+            fallback: ClassicFallback::for_session(
+                &self.target,
+                &*self.drafter,
+                self.block_size,
+                self.block_controller_mode == BlockControllerMode::Throughput
+                    && !logprobs_config.enabled,
+            ),
             diagnostics,
             prefill_time,
             decode_elapsed: Duration::ZERO,
@@ -932,6 +944,16 @@ impl<T: MtpTarget> MtpGenerator<T> {
             state.decode_elapsed,
             self.drafter.draft_profile(),
         );
+        if let Some(fallback) = state.fallback.as_ref() {
+            tracing::info!(
+                classic_steps = fallback.classic_steps,
+                catch_up_ms = fallback.catch_up_ms,
+                classic_build_ms = fallback.classic_build_ms,
+                classic_wait_ms = fallback.classic_wait_ms,
+                policy = %fallback.summary(),
+                "MTP classic-decode fallback (issue #3425)"
+            );
+        }
         let summary = state.diagnostics.summary();
         self.last_acceptance = Some(summary);
         (
@@ -1014,6 +1036,23 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // classic decode. Probes are recorded separately from the
         // speculative aggregates below.
         let is_probe = state.probes_remaining > 0;
+        // [#3425] The classic-decode fallback picks this round's width; at
+        // width 1 it runs classic steps instead of a round. Before a drafted
+        // round the drafter first takes the classic steps it has not seen,
+        // outside the round's timing.
+        let mut fallback_round: Option<(usize, Instant)> = None;
+        if !is_probe && let Some(fallback) = state.fallback.as_ref() {
+            let width = fallback.decide(state.max_tokens - state.emitted_count + 1);
+            if width == 1
+                && let Some(out) = self.run_classic_fallback(state, sampling, cancel)
+            {
+                return out;
+            }
+            if let Some(fallback) = state.fallback.as_mut() {
+                fallback.catch_up(&mut *self.drafter, sampling);
+                fallback_round = Some((width.max(2), Instant::now()));
+            }
+        }
         // A round proposes either a chain or a tree. The capability question
         // is asked here, before anything is drafted, because the target's
         // rollback moves with its cache state and the verify forward has
@@ -1062,7 +1101,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // prefix bonus position that the round-loop already counts as
             // emitted.
             let remaining = state.max_tokens - state.emitted_count + 1;
-            let bs = if self.prefer_requested_block_size {
+            let bs = if let Some((width, _)) = fallback_round {
+                width.min(remaining)
+            } else if self.prefer_requested_block_size {
                 self.block_size.min(remaining)
             } else {
                 match self.block_controller_mode {
@@ -1090,7 +1131,10 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // throughput comparator the narrower rounds are measurement, not
             // a verdict, so the message names the mechanism that would
             // expand it.
-            if bs < self.block_size && self.block_size <= remaining && !state.warned_block_override
+            if bs < self.block_size
+                && self.block_size <= remaining
+                && fallback_round.is_none()
+                && !state.warned_block_override
             {
                 state.warned_block_override = true;
                 if self.block_controller_mode == BlockControllerMode::Proxy {
@@ -1407,6 +1451,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
                 duration_ms(started.elapsed()),
             );
         }
+        if let (Some((_, started)), Some(fallback)) = (fallback_round, state.fallback.as_mut()) {
+            fallback.record_round(actual_bs, walk.accepted, duration_ms(started.elapsed()));
+        }
 
         // Next round's bonus is the last emitted token. `walk.new_tokens`
         // always carries at least the target's own token at position 0
@@ -1419,6 +1466,64 @@ impl<T: MtpTarget> MtpGenerator<T> {
             new_logprobs,
             finished: false,
         }
+    }
+
+    /// One run of classic steps the fallback chose (issue #3425): emit them,
+    /// keep their rows for the drafter, and leave `state` as a round that
+    /// emitted the same tokens would. `None` when the target builds no
+    /// classic step; the fallback is then dropped for the session and the
+    /// caller drafts.
+    fn run_classic_fallback(
+        &mut self,
+        state: &mut MtpSessionState,
+        sampling: &SamplingConfig,
+        cancel: &AtomicBool,
+    ) -> Option<MtpStepOutput> {
+        let steps = state
+            .fallback
+            .as_ref()?
+            .classic_run_len(state.max_tokens - state.emitted_count);
+        let Some(run) = run_classic_steps(
+            &self.target,
+            state.bonus,
+            steps,
+            &state.eos_tokens,
+            cancel,
+            sampling,
+        ) else {
+            tracing::warn!(
+                "MTP target claims exactness at every verify width but builds no classic step; \
+                 drafting every round"
+            );
+            state.fallback = None;
+            return None;
+        };
+        let Some(last_hidden) = run.hidden.last().map(|row| crate::ffi::copy(row)) else {
+            state.finished = true;
+            return Some(MtpStepOutput::finished_empty());
+        };
+        let new_tokens = run.tokens.clone();
+        let hit_eos = run.hit_eos;
+        if let Some(fallback) = state.fallback.as_mut() {
+            fallback.record_classic_run(run);
+        }
+        let steps = new_tokens.len();
+        state.emitted_count += steps;
+        state.bonus = new_tokens[steps - 1];
+        let kv_offset = state.verify_out.kv_offset + steps;
+        state.verify_out = MtpVerifyOutput {
+            next_hidden: last_hidden,
+            next_shared_kv: Vec::new(),
+            kv_offset,
+            bonus_position: kv_offset.saturating_sub(1),
+            verify_hidden_full: None,
+        };
+        state.finished = hit_eos || state.emitted_count >= state.max_tokens;
+        Some(MtpStepOutput {
+            new_tokens,
+            new_logprobs: Vec::new(),
+            finished: state.finished,
+        })
     }
 
     /// Wire the verify output's `next_shared_kv` into the drafter's
@@ -1440,7 +1545,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
         );
     }
 
-    fn build_stats(
+    pub(super) fn build_stats(
         prompt_count: usize,
         gen_count: usize,
         prefill_time: Duration,
@@ -1448,6 +1553,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
     ) -> GenerationStats {
         let prefill_ms = duration_ms(prefill_time);
         let decode_ms = duration_ms(decode_time);
+        // `gen_count` includes the first bonus `prefill_and_seed` sampled
+        // before the decode window opened.
+        let decode_count = gen_count.saturating_sub(1);
         GenerationStats {
             prompt_tokens: prompt_count,
             generated_tokens: gen_count,
@@ -1458,11 +1566,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             } else {
                 0.0
             },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                gen_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
+            decode_tok_per_sec: crate::generate::decode_tok_per_sec(decode_count, decode_ms),
         }
     }
 }

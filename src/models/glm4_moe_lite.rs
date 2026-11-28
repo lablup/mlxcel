@@ -27,7 +27,7 @@ use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::{BatchedDecodeKind, LanguageModel, route_batched_decode};
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis};
+use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -169,14 +169,45 @@ pub struct MlaAttention {
     pub q_head_dim: i32,
     pub scale: f32,
     pub rope_base: f32,
+    /// Whether this layer stores an `int8` cache's latent through the
+    /// quantizing view (`mla_batched::store_latent_step`'s opt-in): set from
+    /// `mla::stores_quantized_latent_pair`, so it is on only while the family
+    /// is in `mla::QUANTIZED_LATENT_FAMILIES` or an explicit
+    /// `--mla-latent-quant int8` / `int4` is in force (issue #3179).
+    /// GLM-4.7-Flash is not listed: its
+    /// teacher-forced trace showed decided-position disagreements against the
+    /// fp16 latent (#3161), so an `int8` request resolves to fp16 and this
+    /// stays off. Tests turn it on to exercise the ported path.
+    pub(crate) quantized_latent: bool,
 }
 
 impl MlaAttention {
+    /// MLA self-attention over `x` `[B, L, hidden]`.
+    ///
+    /// `mask == None` is causal for a multi-token step (MLX's causal mode over
+    /// the live window) and unmasked for a single query; `Some` is an additive
+    /// mask broadcastable to `[B, H, L, S]`, applied as given.
     pub fn forward(
         &self,
         x: &MlxArray,
         cache: &mut KVCache,
         mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_with_gate(x, cache, mask, None)
+    }
+
+    /// [`Self::forward`] with the absorbed/materializing choice pinnable.
+    ///
+    /// Production always passes `None` and the cost model decides. The
+    /// per-model parity test passes `Some` so one warm cache can be run through
+    /// both branches and compared, which is the only way to exercise the
+    /// materializing side at a query width the model itself selects absorbed.
+    fn forward_with_gate(
+        &self,
+        x: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+        forced_absorbed: Option<bool>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
@@ -242,63 +273,193 @@ impl MlaAttention {
         // Expand kv_latent: [B, L, kv_lora_rank] -> [B, 1, L, kv_lora_rank]
         let kv_latent = mlxcel_core::expand_dims(&kv_latent, 1);
 
-        // Cache stores (kv_latent, k_pe) for memory efficiency
-        let (kv_latent, k_pe) = cache.update_and_fetch(kv_latent, k_pe);
+        // Cache stores (kv_latent, k_pe) for memory efficiency. An `int8`
+        // cache stores the latent as the affine group-64 triple and hands back
+        // a quantized window; the fresh chunk is quantized before this step
+        // reads it, so a prefill reads what later decode steps read (#3161).
+        let window = crate::models::mla_batched::store_latent_step(
+            cache,
+            self.geometry(),
+            kv_latent,
+            k_pe,
+            "glm4_moe_lite",
+            self.quantized_latent,
+        );
 
-        // Compute positional encoding scores: pe_scores = (q_pe * scale) @ k_pe.T
-        let scale_scalar = mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
-        let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
-        let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
-        let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+        // Cost-model gate (issue #2408): one query is always absorbed, and a
+        // multi-token step behind a long enough cache can be cheaper absorbed
+        // than up-projecting the whole window. A cold prefill stays on the
+        // materializing side. Computed once so nothing below gates on `l`.
+        let absorbed = forced_absorbed.unwrap_or_else(|| {
+            mlxcel_core::mla::use_absorbed_mla(
+                l as usize,
+                cache.seq_len() as usize,
+                self.kv_lora_rank as usize,
+                self.qk_nope_head_dim as usize,
+                self.v_head_dim as usize,
+            )
+        });
 
-        // Apply causal mask to pe_scores
-        let pe_scores = if let Some(m) = mask {
-            mlxcel_core::add(&pe_scores, m)
-        } else {
-            pe_scores
-        };
-
-        // MLA attention: different paths for decode vs prefill
-        let output = if l == 1 {
-            // Decode: project Q into latent space, use kv_latent as K=V
-            let q_projected = self.embed_q.forward(&q_nope);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            let output = unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+        // A quantized window's one absorbed query goes to
+        // `quantized_absorbed_attention` (the fused kernel's quantized variant
+        // where it applies, #3156, the #3155 composed decode otherwise), which
+        // records its own path. Every other step over a quantized window
+        // dequantizes it once and runs the fp16 code below.
+        let (kv_latent, k_pe) = match window {
+            mlxcel_core::mla::LatentWindow::Quantized {
+                ckv_q,
+                scales,
+                biases,
+                kpe,
+                bits,
+                group_size,
+            } if absorbed && l == 1 => {
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::quantized_absorbed_attention(
                     &q_projected,
+                    &q_pe,
+                    &ckv_q,
+                    &scales,
+                    &biases,
+                    &kpe,
+                    bits,
+                    group_size,
+                    self.scale,
+                    mask,
+                );
+                return self.project_attention_output(&self.unembed_out.forward(&output), b, l);
+            }
+            // A multi-token step reads the window dequantized, in the
+            // queries' dtype so a bf16 model stays bf16 (#3161).
+            window => {
+                crate::models::mla_batched::dense_latent_in(window, mlxcel_core::array_dtype(&q_pe))
+            }
+        };
+        mlxcel_core::mla::stats::record(if absorbed {
+            if l == 1 {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedComposed
+            } else {
+                mlxcel_core::mla::MlaDecodePath::AbsorbedPrefill
+            }
+        } else {
+            mlxcel_core::mla::MlaDecodePath::Decompressed
+        });
+
+        // MLA attention: absorbed or materializing, chosen by the cost model
+        // above rather than by the query count alone.
+        let output = if l > 1 {
+            // Multi-token step (issue #3099): fold the rope half into the SDPA
+            // head dim, `[q_nope | q_pe] . [k | k_pe]`, instead of building the
+            // dense `[B, H, L, S]` rope-score tensor and handing it to SDPA as
+            // an additive mask (the #3071 change DeepSeek V3 took). A maskless
+            // step is causal over the live window `update_and_fetch` returned,
+            // through MLX's bottom-right aligned causal mode; a caller mask
+            // (the MTP drafter's catch-up) is applied as given.
+            debug_assert_eq!(
+                mlxcel_core::array_shape(&kv_latent)[2],
+                cache.seq_len(),
+                "causal mode needs the live window to end at this step"
+            );
+            let folded_mask = match mask {
+                Some(m) => mlxcel_core::mla::FoldedMask::Array(m),
+                None => mlxcel_core::mla::FoldedMask::Causal,
+            };
+            if absorbed {
+                // Absorbed: Q in latent space, the latent is K and V.
+                let q_projected = self.embed_q.forward(&q_nope);
+                let output = mlxcel_core::mla::rope_folded_attention(
+                    &q_projected,
+                    &q_pe,
                     &kv_latent,
+                    &k_pe,
                     &kv_latent,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
-                )
-            };
-            // Project output from latent space to v_head_dim
-            self.unembed_out.forward(&output)
-        } else {
-            // Prefill: project kv_latent to K and V
-            let k = self.embed_q.forward_no_transpose(&kv_latent);
-            let v = self.unembed_out.forward(&kv_latent);
-            let pe_mask_ptr = &*pe_scores as *const MlxArray;
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
+                    folded_mask,
+                );
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to per-head K and V.
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                mlxcel_core::mla::rope_folded_attention(
                     &q_nope,
+                    &q_pe,
                     &k,
+                    &k_pe,
                     &v,
                     self.scale,
-                    pe_mask_ptr,
-                    0.0,
-                    0,
+                    folded_mask,
                 )
+            }
+        } else {
+            // Single-token decode keeps the rope term as an additive mask: its
+            // score row is one `[B, H, 1, S]` slice.
+            // pe_scores = (q_pe * scale) @ k_pe.T
+            let scale_scalar =
+                mlxcel_core::full_f32(&[1], self.scale, mlxcel_core::array_dtype(&q_pe));
+            let q_pe_scaled = mlxcel_core::multiply(&q_pe, &scale_scalar);
+            let k_pe_t = mlxcel_core::transpose_axes(&k_pe, &[0, 1, 3, 2]);
+            let pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
+            let pe_scores = match mask {
+                Some(m) => mlxcel_core::add(&pe_scores, m),
+                None => pe_scores,
+            };
+            let pe_mask_ptr = &*pe_scores as *const MlxArray;
+            if absorbed {
+                // Absorbed: project Q into latent space, use kv_latent as K=V
+                let q_projected = self.embed_q.forward(&q_nope);
+                // SAFETY: `pe_scores` outlives this call.
+                let output = unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_projected,
+                        &kv_latent,
+                        &kv_latent,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                };
+                // Project output from latent space to v_head_dim
+                self.unembed_out.forward(&output)
+            } else {
+                // Materialize: project kv_latent to K and V
+                let k = self.embed_q.forward_no_transpose(&kv_latent);
+                let v = self.unembed_out.forward(&kv_latent);
+                // SAFETY: `pe_scores` outlives this call.
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &q_nope,
+                        &k,
+                        &v,
+                        self.scale,
+                        pe_mask_ptr,
+                        0.0,
+                        0,
+                    )
+                }
             }
         };
 
-        // Transpose and reshape: [B, heads, L, v_head_dim] -> [B, L, heads * v_head_dim]
-        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
-        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
+        self.project_attention_output(&output, b, l)
+    }
 
+    /// `[B, H, L, v_head_dim]` attention output to `[B, L, hidden]`.
+    fn project_attention_output(&self, output: &MlxArray, b: i32, l: i32) -> UniquePtr<MlxArray> {
+        let output = mlxcel_core::transpose_axes(output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * self.v_head_dim]);
         self.o_proj.forward(&output)
+    }
+
+    /// The layer's MLA shape, for the latent cache view.
+    pub(crate) fn geometry(&self) -> mlxcel_core::mla::MlaGeometry {
+        crate::models::mla_batched::mla_geometry(
+            self.num_heads,
+            self.kv_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
     }
 
     pub fn forward_batched_decode(
@@ -355,7 +516,16 @@ impl MlaAttention {
         );
         let q_latent = self.embed_q.forward(&q_nope);
         let output = crate::models::mla_batched::mla_latent_decode_rows(
-            &q_latent, &q_pe, &latent, &k_pe, caches, self.scale, None,
+            "glm4_moe_lite",
+            self.quantized_latent,
+            self.geometry(),
+            &q_latent,
+            &q_pe,
+            &latent,
+            &k_pe,
+            caches,
+            self.scale,
+            None,
         );
         let output = self.unembed_out.forward(&output);
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
@@ -445,6 +615,7 @@ impl MlaAttention {
             q_head_dim,
             scale,
             rope_base: args.rope_theta,
+            quantized_latent: mlxcel_core::mla::stores_quantized_latent_pair(&args.model_type),
         })
     }
 }
@@ -975,6 +1146,16 @@ impl Glm4MoeLiteModel {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        // With `MLXCEL_MLA_ROW_INVARIANT` on, a verify block of the engine's
+        // token-only round (prompt lookup, a full-model drafter) takes the
+        // row-wise verify forward the MTP gate already probes, so it equals
+        // the decode steps it stands for wherever that probe passes (issue
+        // #3418).
+        if crate::models::mla_batched::row_invariant_mode().is_some()
+            && mlxcel_core::row_invariant::is_verify_block(&mlxcel_core::array_shape(input_ids))
+        {
+            return self.forward_verify(input_ids, caches).0;
+        }
         self.forward_with_hidden(input_ids, caches).0
     }
 
@@ -989,24 +1170,25 @@ impl Glm4MoeLiteModel {
         input_ids: &MlxArray,
         caches: &mut [KVCache],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        let mut h = self.embed_tokens.forward(input_ids);
-
-        let shape = mlxcel_core::array_shape(&h);
-        let seq_len = shape[1];
-
-        let mask = if seq_len > 1 {
-            let offset = caches.first().map(|c| c.seq_len()).unwrap_or(0);
-            Some(create_causal_mask(seq_len, offset))
-        } else {
-            None
-        };
-
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask.as_deref());
-        }
-
+        let h = self.hidden_pre_norm(input_ids, caches);
         let normed = self.norm.forward(&h);
         (self.lm_head.forward(&normed), h)
+    }
+
+    /// Embeddings and every decoder layer: the pre-norm hidden state
+    /// `[B, L, hidden]` the final norm and LM head consume.
+    ///
+    /// Used by: `forward_with_hidden`, `LanguageModel::last_row_logits`
+    fn hidden_pre_norm(&self, input_ids: &MlxArray, caches: &mut [KVCache]) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        // No mask array: a multi-token step runs MLX's causal mode inside the
+        // rope-folded attention, which masks the same keys as
+        // the `[seq_len, offset + seq_len]` additive mask it replaces (#3099).
+        for (i, layer) in self.layers.iter().enumerate() {
+            h = layer.forward(&h, &mut caches[i], None);
+        }
+        h
     }
 
     pub fn make_caches(&self) -> Vec<KVCache> {
@@ -1128,6 +1310,27 @@ impl LanguageModel for Glm4MoeLiteModel {
         Glm4MoeLiteModel::forward(self, input_ids, caches, mask)
     }
 
+    fn last_row_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> Option<UniquePtr<MlxArray>> {
+        // No embeddings path: decline so the default keeps its behavior.
+        if input_embeddings.is_some() {
+            return None;
+        }
+        // The trait forward discards the captured hidden state (the MTP
+        // target reads it through `forward_with_hidden`), so nothing but the
+        // caches outlives this call.
+        let h = self.hidden_pre_norm(input_ids, caches);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        Some(self.lm_head.forward(&self.norm.forward(&row)))
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         Glm4MoeLiteModel::make_caches(self)
     }
@@ -1202,4 +1405,8 @@ impl LanguageModel for Glm4MoeLiteModel {
 
 #[cfg(test)]
 #[path = "glm4_moe_lite_tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "glm4_moe_lite_latent_tests.rs"]
+mod latent_tests;

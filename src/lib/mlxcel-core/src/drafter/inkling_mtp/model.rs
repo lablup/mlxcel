@@ -22,10 +22,12 @@ use crate::inkling_layer::{
     InklingDecoderLayer, InklingDenseMlp, InklingLayerCache, InklingLayerSpec,
 };
 use crate::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use crate::weights::{WeightMap, dir_has_tensor_name, load_weights_from_dir_index_filtered};
+use crate::weights::WeightMap;
 
 use super::config::InklingMtpConfig;
-use super::sanitize::{is_inkling_mtp_tensor_name, sanitize_weights};
+pub use super::sanitize::has_inkling_mtp_tensors;
+pub(super) use super::sanitize::load_drafter_weights;
+use super::sanitize::sanitize_weights;
 
 enum InklingLmHead {
     Linear(UnifiedLinear),
@@ -85,20 +87,7 @@ pub struct InklingMtpDraftModel {
 impl InklingMtpDraftModel {
     pub fn from_path(path: &Path) -> Result<Self, DrafterError> {
         let config = InklingMtpConfig::from_dir(path)?;
-        let mut weights = load_weights_from_dir_index_filtered(path, |name| {
-            is_inkling_mtp_tensor_name(name) || name.starts_with("blocks.")
-        })
-        .map_err(|reason| DrafterError::WeightLoad { reason })?;
-        if weights.is_empty() {
-            return Err(DrafterError::WeightLoad {
-                reason: format!(
-                    "{} has no model.mtp.layers.* tensors; an Inkling config flag alone is not a drafter",
-                    path.display()
-                ),
-            });
-        }
-        sanitize_weights(&mut weights).map_err(|reason| DrafterError::WeightLoad { reason })?;
-        crate::drafter::dflash::drafter::apply_drafter_load_dtype_policy(&mut weights);
+        let weights = load_drafter_weights(path)?;
         Self::from_weights(config, &weights)
     }
 
@@ -492,6 +481,28 @@ impl Drafter for InklingMtpDraftModel {
         Ok(())
     }
 
+    fn extends_history_without_draft(&self) -> bool {
+        true
+    }
+
+    /// Block 0 takes the classic steps as it takes an accepted prefix, with
+    /// no snapshot to restore: none was taken, since no round drafted them.
+    fn extend_history(
+        &mut self,
+        hidden: &MlxArray,
+        tokens: &[i32],
+        sampler: &SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        self.require_bound()?;
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.round_snapshot = None;
+        self.round_appended = 0;
+        let output = self.forward_block(tokens, hidden, 0)?;
+        self.set_seed_from_hidden(&output, sampler)
+    }
+
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError> {
         sanitize_weights(weights).map_err(|reason| DrafterError::WeightLoad { reason })
     }
@@ -499,9 +510,4 @@ impl Drafter for InklingMtpDraftModel {
     fn kind(&self) -> DrafterKind {
         DrafterKind::Mtp
     }
-}
-
-pub fn has_inkling_mtp_tensors(path: &Path) -> Result<bool, DrafterError> {
-    dir_has_tensor_name(path, is_inkling_mtp_tensor_name)
-        .map_err(|reason| DrafterError::WeightLoad { reason })
 }

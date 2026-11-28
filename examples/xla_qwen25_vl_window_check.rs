@@ -19,6 +19,17 @@
 //! window attention, every configured full-attention layer, restoration,
 //! prepared M-RoPE, and final-position logits. Negative runs force Qwen2-style
 //! full attention, identity permutation, and zero vision positions.
+//!
+//! Input requirement (#3365): pass non-uniform images, and more than one
+//! (`--image` may repeat). The negative controls assert that the mutated runs
+//! diverge from the strict run. A solid-colour image, or one whose content is
+//! identical across every patch-aligned window, produces the same vision output
+//! under full attention, identity permutation, and zero positions, so the
+//! negative-control assertions trip even though nothing is wrong. Use real
+//! photographs or images with distinct content per window and per image.
+
+#[path = "xla_common/mlx_reference_policy.rs"]
+mod mlx_reference_policy;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -340,6 +351,7 @@ fn argmax(values: &[f32]) -> usize {
 }
 
 fn main() {
+    mlx_reference_policy::pin_mlx_tf32_disabled_or_exit();
     let model_path = required_paths("--model")
         .into_iter()
         .next()
@@ -946,6 +958,7 @@ fn main() {
         "schema": 2,
         "model": model_path,
         "images": image_paths,
+        "mlx_enable_tf32": mlx_reference_policy::recorded_mlx_tf32(),
         "device": device,
         "context_capacity": context_capacity,
         "grid_thw": processor.grids,

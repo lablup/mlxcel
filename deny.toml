@@ -3,11 +3,13 @@
 
 [graph]
 # Target platforms that mlxcel actually ships binaries for.
-# macOS Apple Silicon (Metal) + Linux aarch64 CUDA (gb10, gh200) are the
-# release targets per `.github/workflows/release.yml`.
+# macOS Apple Silicon (Metal), Linux aarch64 CUDA (gb10, gh200) and Linux
+# x86_64 CUDA are the release targets per `.github/workflows/release.yml`
+# (the `build-macos`, `build-linux-cuda` and `build-linux-x86_64-cuda` jobs).
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
 ]
 all-features = false
 no-default-features = false

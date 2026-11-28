@@ -14,9 +14,10 @@
 #
 # Two things this gets wrong if written by hand, and why they are handled here:
 #
-#   1. `model` is a required field on the request body. Omitting it returns 422
-#      with a deserialization message, which reads like a server fault and is
-#      not one. The id comes from `/v1/models` rather than from the caller.
+#   1. `model` is a required field on the request body. Omitting it returns 400
+#      `invalid_request_error` ("missing field `model`"), a failure of the
+#      request rather than of the backend under test. The id comes from
+#      `/v1/models` rather than from the caller.
 #   2. The reasoning channel. A thinking model (Qwen3 and family) fills
 #      `reasoning_content` before `content`, and a small model can spend the
 #      whole budget there without ever closing its thinking block. Judging on

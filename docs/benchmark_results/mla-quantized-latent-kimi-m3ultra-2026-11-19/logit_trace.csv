@@ -1,0 +1,7 @@
+model,shape,reference,candidate,positions,top1_disagree,decided_positions,decided_disagree,largest_gap_at_disagreement,disagreements_over_0.11,ppl_reference,ppl_candidate,mla_paths_candidate
+kimi-linear-48b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed composed),int8 latent,512,12,201,0,0.500,5,12.4213,12.4579,decompressed=56 absorbed_fused=3584
+kimi-linear-48b-a3b-instruct-4bit,decode4k,fp16 latent (absorbed composed),int8 latent,256,13,52,0,0.312,5,24.5971,24.4992,decompressed=28 absorbed_composed=1792
+kimi-linear-48b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed composed),int8 latent with MLXCEL_MLA_FUSED_DECODE=0,512,12,201,0,0.250,5,12.4213,12.4115,decompressed=56 absorbed_composed=3584
+kimi-linear-48b-a3b-instruct-4bit,decode1k,int8 latent with MLXCEL_MLA_FUSED_DECODE=0,int8 latent,512,16,204,0,0.438,7,12.4115,12.4579,decompressed=56 absorbed_fused=3584
+kimi-linear-48b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed composed),fp16 latent with MLXCEL_MLA_FUSED_DECODE=0,512,0,201,0,,0,12.4213,12.4213,decompressed=56 absorbed_composed=3584
+kimi-linear-48b-a3b-instruct-4bit,decode1k,fp16 latent (absorbed composed),fp16 latent batched rows,512,0,201,0,,0,12.4213,12.4213,decompressed=56 absorbed_composed=3584

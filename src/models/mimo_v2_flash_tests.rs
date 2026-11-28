@@ -639,3 +639,116 @@ fn sanitize_is_a_pass_through_and_drops_a_future_mtp_block() {
     assert!(weights.contains_key("model.layers.0.self_attn.attention_sink_bias"));
     assert!(!weights.contains_key("model.mtp.foo.weight"));
 }
+
+/// The prefill slices the sampled row before the final norm and the LM head
+/// (#3070). The shared harness is not used for the chunked half: without a
+/// sequence id this model treats every multi-token forward as a fresh prompt
+/// and resets its caches, so the two pieces run under a prepared id.
+#[test]
+fn the_prefill_projects_only_the_sampled_row() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::logits_at_position;
+
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
+    let args = tiny_args();
+    let make = || {
+        MiMoV2FlashModel::from_weights(&filled_weights(&args), &args)
+            .expect("the tiny model builds")
+    };
+    let tokens = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 7];
+    let ids = |t: &[i32]| mlxcel_core::from_slice_i32(t, &[1, t.len() as i32]);
+    let input = ids(&tokens);
+    let last = tokens.len() - 1;
+    let vocab = args.vocab_size as i32;
+
+    let reference = make();
+    let mut caches = LanguageModel::make_caches(&reference);
+    let full = LanguageModel::forward_with_sequence_id(&reference, &input, None, &mut caches, None);
+    mlxcel_core::eval(&full);
+    assert_eq!(
+        mlxcel_core::array_shape(&full),
+        vec![1, tokens.len() as i32, vocab]
+    );
+    let assert_row = |actual: &MlxArray, pos: usize, what: &str| {
+        assert_eq!(
+            mlxcel_core::array_shape(actual),
+            vec![1, 1, vocab],
+            "{what}"
+        );
+        let close = mlxcel_core::allclose(actual, &logits_at_position(&full, pos), 1e-4, 1e-4);
+        mlxcel_core::eval(&close);
+        assert!(mlxcel_core::item_bool(&close), "{what}: row {pos} differs");
+    };
+
+    let model = make();
+    let mut caches = LanguageModel::make_caches(&model);
+    let row = LanguageModel::last_row_logits(&model, &input, None, None, &mut caches, None, last)
+        .expect("the hook answers the text forward");
+    assert_row(&row, last, "last_row_logits");
+
+    let model = make();
+    let mut caches = LanguageModel::make_caches(&model);
+    let row = LanguageModel::forward_last_logits(&model, &input, &mut caches, None, last);
+    assert_row(&row, last, "forward_last_logits");
+
+    let seq = SequenceId::from_raw(307_010);
+    let model = make();
+    let mut caches = LanguageModel::make_caches(&model);
+    LanguageModel::prepare_sequence_state(&model, seq);
+    let row = LanguageModel::forward_last_logits_with_sequence_id(
+        &model,
+        &input,
+        Some(seq),
+        &mut caches,
+        None,
+        2,
+    );
+    assert_row(&row, 2, "forward_last_logits_with_sequence_id");
+    LanguageModel::release_sequence_state_by_id(&model, seq);
+
+    // A chunked prefill under one sequence id continues the same caches.
+    let model = make();
+    let mut caches = LanguageModel::make_caches(&model);
+    LanguageModel::prepare_sequence_state(&model, seq);
+    let head = LanguageModel::forward_last_logits_with_sequence_id(
+        &model,
+        &ids(&tokens[..5]),
+        Some(seq),
+        &mut caches,
+        None,
+        4,
+    );
+    mlxcel_core::eval(&head);
+    let tail = LanguageModel::forward_last_logits_with_sequence_id(
+        &model,
+        &ids(&tokens[5..]),
+        Some(seq),
+        &mut caches,
+        None,
+        5,
+    );
+    assert_row(&tail, last, "second piece of a chunked prefill");
+    LanguageModel::release_sequence_state_by_id(&model, seq);
+}
+
+/// One expert whose plane differs in shape from expert 0's is a load error
+/// naming its key and both shapes, not an MLX `[stack]` abort (issue #3320).
+#[test]
+fn stacking_refuses_a_mismatched_expert_plane() {
+    let mut weights = WeightMap::new();
+    for (e, cols) in [(0usize, 8i32), (1, 6)] {
+        weights.insert(
+            format!("model.layers.0.mlp.experts.{e}.gate_proj.weight"),
+            mlxcel_core::from_slice_f32(&vec![0.0; 4 * cols as usize], &[4, cols]),
+        );
+    }
+    let err = crate::models::mimo_v2_weights::stack_experts(weights, 1)
+        .err()
+        .expect("a mismatched expert must be refused");
+    assert!(
+        err.contains("model.layers.0.mlp.experts.1.gate_proj.weight")
+            && err.contains("[4, 6]")
+            && err.contains("[4, 8]"),
+        "{err}"
+    );
+}

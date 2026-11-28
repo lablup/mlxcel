@@ -1853,6 +1853,156 @@ fn serve_store_byte_budget_envs_parse_when_flags_are_absent() {
     assert_eq!(args.conversation_store_max_bytes, 22_222);
 }
 
+#[test]
+fn serve_video_frame_knobs_parse_from_flags_and_envs() {
+    // Issue #2399: `--video-num-frames` / `--video-min-frames` are read on the
+    // serve front, where the worker turns them into the native-video
+    // `target_nframes` and sampling floor.
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let defaults = parse_serve_args(&[]);
+    assert_eq!(defaults.video_num_frames, None);
+    assert_eq!(defaults.video_min_frames, None);
+
+    let args = parse_serve_args(&["--video-num-frames", "24", "--video-min-frames", "12"]);
+    assert_eq!(args.video_num_frames, Some(24));
+    assert_eq!(args.video_min_frames, Some(12));
+
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        let args = parse_serve_args(&[]);
+        assert_eq!(args.video_num_frames, Some(48));
+        assert_eq!(args.video_min_frames, Some(16));
+    }
+
+    // A flag beats the env var, as on every other mlxcel knob.
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        let args = parse_serve_args(&["--video-num-frames", "8"]);
+        assert_eq!(args.video_num_frames, Some(8));
+        assert_eq!(args.video_min_frames, Some(16));
+    }
+}
+
+#[test]
+fn generate_video_frame_knobs_parse_from_flags_and_envs() {
+    // The one-shot front carries the same knob on the CLI's ordered-image
+    // fallback (issue #2399); the fields live on the flattened
+    // `GenerationOptions` group.
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let knobs = |rest: &'static [&'static str]| {
+        let mut argv = vec!["mlxcel", "generate", "-m", "models/foo", "-p", "hi"];
+        argv.extend_from_slice(rest);
+        let argv: &'static [&'static str] = Vec::leak(argv);
+        let Commands::Generate(args) = parse_cli(argv).command else {
+            panic!("expected generate command");
+        };
+        (
+            args.generation.video_num_frames,
+            args.generation.video_min_frames,
+        )
+    };
+
+    assert_eq!(knobs(&[]), (None, None));
+    assert_eq!(
+        knobs(&["--video-num-frames", "24", "--video-min-frames", "12"]),
+        (Some(24), Some(12))
+    );
+
+    {
+        let _env = ScopedEnv::set(&[
+            ("MLXCEL_VIDEO_NUM_FRAMES", "48"),
+            ("MLXCEL_VIDEO_MIN_FRAMES", "16"),
+        ]);
+        assert_eq!(knobs(&[]), (Some(48), Some(16)));
+        assert_eq!(knobs(&["--video-min-frames", "4"]), (Some(48), Some(4)));
+    }
+}
+
+#[test]
+fn serve_responses_background_flags_parse_with_defaults() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let defaults = parse_serve_args(&[]);
+    assert_eq!(
+        defaults.responses_background_max_jobs,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_MAX_JOBS
+    );
+    assert_eq!(
+        defaults.responses_background_ephemeral_ttl_secs,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS
+    );
+    assert_eq!(
+        defaults.responses_background_event_log_bytes,
+        mlxcel::server::responses_store::DEFAULT_RESPONSES_BACKGROUND_EVENT_LOG_BYTES
+    );
+
+    let args = parse_serve_args(&[
+        "--responses-background-max-jobs",
+        "7",
+        "--responses-background-ephemeral-ttl-secs",
+        "30",
+        "--responses-background-event-log-bytes",
+        "65536",
+    ]);
+    assert_eq!(args.responses_background_max_jobs, 7);
+    assert_eq!(args.responses_background_ephemeral_ttl_secs, 30);
+    assert_eq!(args.responses_background_event_log_bytes, 65536);
+}
+
+#[test]
+fn serve_responses_background_envs_parse_when_flags_are_absent() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = ScopedEnv::set(&[
+        ("MLXCEL_RESPONSES_BACKGROUND_MAX_JOBS", "3"),
+        ("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "45"),
+        ("MLXCEL_RESPONSES_BACKGROUND_EVENT_LOG_BYTES", "1024"),
+    ]);
+
+    let args = parse_serve_args(&[]);
+
+    assert_eq!(args.responses_background_max_jobs, 3);
+    assert_eq!(args.responses_background_ephemeral_ttl_secs, 45);
+    assert_eq!(args.responses_background_event_log_bytes, 1024);
+}
+
+#[test]
+fn serve_responses_background_ephemeral_ttl_zero_is_refused() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let err = serve_parse_error(
+        &["--responses-background-ephemeral-ttl-secs", "0"],
+        "an ephemeral TTL of 0 must be refused",
+    );
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+
+    let _env = ScopedEnv::set(&[("MLXCEL_RESPONSES_BACKGROUND_EPHEMERAL_TTL_SECS", "0")]);
+    let err = serve_parse_error(&[], "an ephemeral TTL of 0 from the env must be refused");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
 /// The clap error from `mlxcel serve -m models/foo <rest...>`, which must fail.
 fn serve_parse_error(rest: &[&str], expectation: &str) -> clap::Error {
     Cli::try_parse_from(serve_argv(rest)).expect_err(expectation)
@@ -2065,14 +2215,40 @@ fn serve_reports_a_mistyped_flag_after_an_option_instead_of_swallowing_it() {
 }
 
 #[test]
-fn negative_numbers_stay_rejected_on_sibling_subcommands() {
-    // `allow_negative_numbers` is a per-command setting applied to `serve`
-    // only, so the sibling subcommands keep clap's default posture. Pinning it
-    // here records that the blast radius of #1459 is the server surface, not
-    // every `mlxcel` subcommand.
-    let err = Cli::try_parse_from(["mlxcel", "generate", "--max-tokens", "-1"])
-        .expect_err("`generate --max-tokens -1` must keep the default clap rejection");
-    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+fn generate_accepts_space_separated_unlimited_max_tokens() {
+    for flag in ["-n", "--max-tokens"] {
+        let cli = Cli::try_parse_from(["mlxcel", "generate", "--model", "model", flag, "-1"])
+            .expect("generate must accept a space-separated unlimited token budget");
+        let Commands::Generate(args) = cli.command else {
+            panic!("expected the generate subcommand");
+        };
+        assert_eq!(
+            args.generation.max_tokens,
+            mlxcel::cli::max_tokens::UNLIMITED_MAX_TOKENS
+        );
+    }
+}
+
+#[test]
+fn embed_accepts_space_separated_no_normalization() {
+    // The help documents `-1` as "none" and `--embd-normalize=-1` already
+    // parsed, but the space-separated spelling `serve` takes (#1459) stopped
+    // at clap with "unexpected argument '-1' found".
+    let cli = Cli::try_parse_from([
+        "mlxcel",
+        "embed",
+        "--model",
+        "model",
+        "--prompt",
+        "text",
+        "--embd-normalize",
+        "-1",
+    ])
+    .expect("embed must accept a space-separated `--embd-normalize -1`");
+    let Commands::Embed(args) = cli.command else {
+        panic!("expected the embed subcommand");
+    };
+    assert_eq!(args.embd_normalize, Some(-1));
 }
 
 #[test]

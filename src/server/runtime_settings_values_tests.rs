@@ -155,6 +155,12 @@ fn configured() -> ServerConfig {
             snapshot_capacity_bytes_explicit: false,
             snapshot_max_entries: 8,
             snapshot_ttl: Duration::from_secs(300),
+            keep_previous_turn: false,
+            state_checkpoint_capacity_bytes: 0,
+            state_checkpoints_per_conversation: None,
+            state_checkpoint_min_spacing_tokens: 0,
+            checkpoint_interval_tokens: None,
+            ctx_checkpoint_flags: Default::default(),
         },
         batch_kv_quant: BatchKvQuantConfig {
             scheme: KvQuantScheme::TurboQuant,

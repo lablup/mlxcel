@@ -39,6 +39,8 @@ use crate::server::batch::observability::HistogramSnapshot;
 
 #[path = "metrics_audio.rs"]
 mod metrics_audio;
+#[path = "metrics_process_memory.rs"]
+mod metrics_process_memory;
 use metrics_audio::append_audio_preprocess_metrics;
 
 /// GET /metrics -- Prometheus text format
@@ -141,6 +143,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let pc_reject_block_boundary_floor = obs.prompt_cache_reject_block_boundary_floor;
     let pc_reject_snapshot_diverged = obs.prompt_cache_reject_snapshot_diverged;
     let pc_reject_model_owned_state = obs.prompt_cache_reject_model_owned_state;
+    let pc_reject_memory_reserve = obs.prompt_cache_reject_memory_reserve;
 
     let pp_snapshot = state.pp_observability.snapshot();
     let body = format!(
@@ -248,7 +251,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_prompt_cache_hits_total Successful prompt-prefix cache adoptions\n\
          # TYPE mlxcel_prompt_cache_hits_total counter\n\
          mlxcel_prompt_cache_hits_total {pc_hits}\n\
-         # HELP mlxcel_prompt_cache_misses_total Prompt-prefix cache lookups that produced no match\n\
+         # HELP mlxcel_prompt_cache_misses_total Dense prompt-prefix cache lookups that adopted no prefix\n\
          # TYPE mlxcel_prompt_cache_misses_total counter\n\
          mlxcel_prompt_cache_misses_total {pc_misses}\n\
          # HELP mlxcel_prompt_cache_prefix_tokens_reused_total Total prompt tokens reused from prefix cache\n\
@@ -288,7 +291,8 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          mlxcel_prompt_cache_reject_total{{reason=\"layout_constraints\"}} {pc_reject_layout_constraints}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"block_boundary_floor\"}} {pc_reject_block_boundary_floor}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"snapshot_diverged\"}} {pc_reject_snapshot_diverged}\n\
-         mlxcel_prompt_cache_reject_total{{reason=\"model_owned_state\"}} {pc_reject_model_owned_state}\n",
+         mlxcel_prompt_cache_reject_total{{reason=\"model_owned_state\"}} {pc_reject_model_owned_state}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"memory_reserve\"}} {pc_reject_memory_reserve}\n",
         gen_time_sec = gen_time_ms as f64 / 1000.0,
         seq_started = obs.sequences_started,
         seq_completed = obs.sequences_completed,
@@ -337,6 +341,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         pc_reject_block_boundary_floor = pc_reject_block_boundary_floor,
         pc_reject_snapshot_diverged = pc_reject_snapshot_diverged,
         pc_reject_model_owned_state = pc_reject_model_owned_state,
+        pc_reject_memory_reserve = pc_reject_memory_reserve,
     );
 
     let mut body = body;
@@ -355,11 +360,13 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     append_request_histogram(
         &mut body,
         "mlxcel_request_decode_tok_s",
-        "Per-request decode throughput in tokens per second",
+        "Per-request decode throughput in tokens per second, counting only tokens produced inside the decode window",
         &decode_rate,
     );
 
     append_pipeline_metrics(&mut body, &pp_snapshot);
+    append_expert_stream_metrics(&mut body);
+    body.push_str(&metrics_process_memory::render_current());
 
     let mut full = String::new();
     append_llamacpp_metrics(&mut full, &state);
@@ -381,6 +388,69 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         full,
     )
         .into_response()
+}
+
+/// SSD expert arena counters (issue #2882); nothing when experts are resident.
+fn append_expert_stream_metrics(body: &mut String) {
+    let Some(s) = crate::models::qwen4_exp::stream::active_stream_stats() else {
+        return;
+    };
+    let metrics: [(&str, &str, &str, u64); 8] = [
+        (
+            "mlxcel_expert_arena_bytes",
+            "gauge",
+            "Resident bytes of the SSD expert arena",
+            s.arena_bytes,
+        ),
+        (
+            "mlxcel_expert_arena_slots",
+            "gauge",
+            "Slots of the SSD expert arena across layers",
+            s.slots,
+        ),
+        (
+            "mlxcel_expert_arena_windows_total",
+            "counter",
+            "Routing windows served by the expert arena",
+            s.windows,
+        ),
+        (
+            "mlxcel_expert_arena_hits_total",
+            "counter",
+            "Routed experts found resident",
+            s.hits,
+        ),
+        (
+            "mlxcel_expert_arena_misses_total",
+            "counter",
+            "Routed experts read from disk",
+            s.misses,
+        ),
+        (
+            "mlxcel_expert_arena_read_bytes_total",
+            "counter",
+            "Bytes read from disk for the expert arena",
+            s.bytes_read,
+        ),
+        (
+            "mlxcel_expert_arena_io_nanoseconds_total",
+            "counter",
+            "Time spent reading experts from disk",
+            s.io_ns,
+        ),
+        (
+            "mlxcel_expert_arena_sync_nanoseconds_total",
+            "counter",
+            "Time spent waiting for per-layer router results",
+            s.sync_ns,
+        ),
+    ];
+    for (name, kind, help, value) in metrics {
+        let _ = writeln!(
+            body,
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}"
+        );
+    }
 }
 
 /// The b10621 `llamacpp:` metric families (#1440), name-for-name what

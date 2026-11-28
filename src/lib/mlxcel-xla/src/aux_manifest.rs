@@ -82,7 +82,9 @@ impl AuxiliaryArtifactContract {
     }
 
     /// Opt into the operator-aware v3 manifest.
-    #[allow(dead_code)] // Adopted only after the corresponding operator oracle is implemented.
+    ///
+    /// Every production family adopts it with the contract built by
+    /// `operator_numeric_contract::production_operator_contract` (issue #3211).
     pub(crate) fn new_with_operator_numeric_contract(
         entry_name: impl Into<String>,
         config_identity: impl Into<String>,
@@ -319,8 +321,7 @@ pub(crate) fn write_auxiliary_manifest(
         .map_or_else(|| "module.vmfb.aux.json".into(), |name| name.to_os_string());
     temporary_name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
     let temporary = path.with_file_name(temporary_name);
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+    write_owner_only_new(&temporary, &bytes)?;
     if let Err(error) = std::fs::rename(&temporary, &path) {
         std::fs::remove_file(&temporary).ok();
         return Err(format!(
@@ -450,6 +451,76 @@ fn reject_manifest_downgrade(
     ))
 }
 
+/// Cache location of `contract`'s artifact for a caller-chosen `vmfb` path.
+///
+/// A v1 contract keeps `vmfb`. Every numeric schema lives in a sibling
+/// directory named after its manifest schema, so a binary that writes v3
+/// manifests never shares a cache entry with an older binary that still writes
+/// v1 at the same fixed `temp_dir()` location. Each binary then recompiles or
+/// reuses its own entry, and `reject_manifest_downgrade` only guards a single
+/// schema's directory instead of failing the older binary's loads.
+pub(crate) fn schema_scoped_vmfb_path(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+) -> PathBuf {
+    let schema = contract.manifest_schema();
+    if schema == SCHEMA_V1 {
+        return vmfb.to_path_buf();
+    }
+    let file_name = vmfb
+        .file_name()
+        .map_or_else(|| "module.vmfb".into(), |name| name.to_os_string());
+    vmfb.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(schema)
+        .join(file_name)
+}
+
+/// Qualify a production artifact at its [`schema_scoped_vmfb_path`] and return
+/// the path the caller must pass to `IreeAuxiliaryModule::load`.
+pub(crate) fn qualify_auxiliary_artifact<F>(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+    weights: &[AuxiliaryWeight],
+    compile: F,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    qualify_auxiliary_artifact_for(
+        vmfb,
+        contract,
+        weights,
+        compile,
+        mlxcel_core::private_dir::current_euid(),
+    )
+}
+
+/// [`qualify_auxiliary_artifact`] checked against `euid`, so a test can model
+/// a cache directory owned by another user.
+///
+/// The manifest proves only that an artifact matches a contract derived from
+/// public inputs, not who wrote it, so the VMFB and its manifest are reused
+/// only from a directory private to `euid` and only when both are regular
+/// files private to `euid`. Anything else is left untouched and the artifact is
+/// compiled into a fresh private directory instead (#3248).
+pub(crate) fn qualify_auxiliary_artifact_for<F>(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+    weights: &[AuxiliaryWeight],
+    compile: F,
+    euid: u32,
+) -> Result<PathBuf, String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let wanted = schema_scoped_vmfb_path(vmfb, contract);
+    let scoped =
+        crate::cache_dir::artifact_slot_for(&wanted, &[auxiliary_manifest_path(&wanted)], euid)?;
+    ensure_qualified_auxiliary_artifact(&scoped, contract, weights, compile)?;
+    Ok(scoped)
+}
+
 /// Reuse a qualified auxiliary VMFB or rebuild and publish one exactly once.
 ///
 /// `compile` must write a complete VMFB to the supplied temporary sibling.
@@ -488,14 +559,10 @@ where
             temporary.display()
         ));
     }
-    if let Err(error) = std::fs::rename(&temporary, vmfb) {
-        std::fs::remove_file(&temporary).ok();
-        return Err(format!(
-            "atomically install {} as {}: {error}",
-            temporary.display(),
-            vmfb.display()
-        ));
-    }
+    // Owner-only before the rename, so the published VMFB passes the
+    // private-file check on the next load under any umask (#3248).
+    crate::cache_dir::publish_private(&temporary, vmfb)
+        .map_err(|error| format!("atomically install {}: {error}", vmfb.display()))?;
     if let Err(error) = write_auxiliary_manifest(vmfb, contract, weights) {
         // A VMFB without its matching identity is never a reusable cache
         // member. Remove it so the next load cannot mistake it for qualified.
@@ -616,6 +683,23 @@ fn cache_lock_owner_pid(token: &str) -> Option<u32> {
         .parse::<u128>()
         .ok()?;
     fields.next().is_none().then_some(pid)
+}
+
+/// Create `path` (which must not exist) owner-only and write `bytes` to it.
+/// The manifest is read back as a trusted cache entry, so it must not be left
+/// group-writable by the umask (#3248).
+fn write_owner_only_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(bytes))
+        .map_err(|error| {
+            std::fs::remove_file(path).ok();
+            format!("write {}: {error}", path.display())
+        })
 }
 
 fn cache_lock_path(vmfb: &Path) -> PathBuf {

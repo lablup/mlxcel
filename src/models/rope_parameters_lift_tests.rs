@@ -119,6 +119,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(dots1::ModelArgs),
         // Other text families.
         case!(afmoe::ModelArgs),
+        case!(kolibri1::ModelArgs),
         case!(apertus::ModelArgs),
         case!(baichuan::BaichuanConfig),
         case!(bailing_moe::ModelArgs),
@@ -135,6 +136,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(falcon_h1::ModelArgs),
         case!(gpt_oss::ModelArgs),
         case!(helium::ModelArgs),
+        case!(k2_horizon::K2HorizonConfig),
         case!(hunyuan_moe::ModelArgs),
         case!(hunyuan_v1_dense::ModelArgs),
         case!(internlm2::ModelArgs),
@@ -144,6 +146,7 @@ fn cases() -> Vec<(&'static str, ParseTheta)> {
         case!(llada2_moe::ModelArgs),
         case!(llama4::TextArgs),
         case!(longcat_flash_ngram::LongcatFlashNgramConfig),
+        case!(longcat_flash_sparse::LongcatFlashSparseConfig),
         case!(mimo::ModelArgs),
         case!(minicpm::ModelArgs),
         case!(minicpm3::ModelArgs),
