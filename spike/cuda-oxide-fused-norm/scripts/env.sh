@@ -6,12 +6,29 @@
 # cargo-oxide from the pinned revision), so this delegates to its env.sh
 # rather than restating the checks; see spike/cuda-oxide-smoke/README.md.
 
-if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
+# The path this file was sourced by, and whether it was executed instead.
+# bash and zsh spell both differently, and neither spelling parses in the
+# other shell (or in a POSIX sh), so each one sits inside `eval`.
+if [ -n "${BASH_VERSION:-}" ]; then
+    eval '_fused_norm_src=${BASH_SOURCE[0]}'
+    [ "$_fused_norm_src" != "$0" ] || _fused_norm_src=
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_fused_norm_src=${(%):-%x}'
+    case "${ZSH_EVAL_CONTEXT:-}" in
+        *:file*) ;;
+        *) _fused_norm_src= ;;
+    esac
+else
+    echo "cuda-oxide-fused-norm: source this file from bash or zsh" >&2
+    return 1 2>/dev/null || exit 1
+fi
+if [ -z "$_fused_norm_src" ]; then
     echo "cuda-oxide-fused-norm: source this file instead of executing it: . scripts/env.sh" >&2
     exit 2
 fi
 
-_fused_norm_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+_fused_norm_dir=$(cd "$(dirname "$_fused_norm_src")/.." && pwd)
+unset _fused_norm_src
 _smoke_env="$_fused_norm_dir/../cuda-oxide-smoke/scripts/env.sh"
 if [ ! -f "$_smoke_env" ]; then
     echo "cuda-oxide-fused-norm: sibling package env.sh not found at $_smoke_env" >&2

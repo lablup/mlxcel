@@ -6,17 +6,19 @@ Scope is deliberately the kernel and its evidence: there is no MLX adapter (#283
 
 ## What the kernel computes
 
-The reference semantics are `kernels/fused_norm.cpp` (`FUSED_ADD_RMS_NORM_CUDA_SOURCE`, the CUDA port of the fused kernel every pre-norm residual join uses since #905) and `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs`. For one row of `dim` elements:
+The reference semantics are `kernels/fused_norm_cuda.h` (`FUSED_ADD_RMS_NORM_CUDA_SOURCE`, the CUDA port of the fused kernel every pre-norm residual join uses since #905) and `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs`. For one row of `dim` elements, with `compute = promote(act, weight)` under mlxcel's promotion table (equal dtypes stay, bf16 with f32 is bf16, f16 with f32 is f32):
 
 ```
 new_residual = round_act(x + residual)                      # f32 add, rounded to the activation dtype
-mean         = sum_f32(new_residual^2) / dim                # f32 FMA accumulation, two-stage warp butterfly
-normed       = round_act(gain * round_act(new_residual * rsqrt(mean + eps)))
-gain         = weight                     when weight_bias == 0
-             = round_w(weight_bias + weight)  otherwise    # the Gemma (1 + w) fold, in the weight dtype
+mean         = sum_f32(new_residual^2) / dim                # f32 FMA accumulation, MLX's rms_norm order
+normed       = round_act(gain * round_compute(new_residual * rsqrt(mean + eps)))
+gain         = round_compute(weight)                        when weight_bias == 0
+             = round_compute(round_w(weight_bias + weight))  otherwise    # the Gemma (1 + w) fold, in the weight dtype
 ```
 
-The rounding points, the accumulation precision and the reduction order are the reference kernel's, so the device output is expected to match the existing fused CUDA kernel bit for bit. That identity is measured and reported; the pass criterion is the parity budget of `fused_norm_parity_tests`, frozen before the oracle ran (see the evidence report).
+The sum of squares follows MLX's CUDA `rms_norm` (#3510). A row is read as vectors of `n_reads = 16 / sizeof(compute)` elements (8 at 16 bits, 4 at f32); lane `t` of the block adds the squares of vectors `t`, `t + block`, `t + 2 * block`, ... in ascending order into one f32 register, then a warp butterfly and a second butterfly over the warp totals reduce the block. With the block width MLX launches for the same row (see Running), that is the graph path's summation order, so the fused CUDA kernel, this kernel and the graph agree bit for bit on finite rows.
+
+The rounding points, the accumulation precision and the reduction order are the reference kernel's, so the device output is expected to match the existing fused CUDA kernel bit for bit. That identity is measured and reported; the pass criterion is the parity budget of `fused_norm_parity_tests`, frozen before the oracle ran (see the evidence report). The adapter's matrix test in mlxcel-core requires the identity on all 130 cases.
 
 Five entry points cover the dtype matrix: `fused_add_rms_norm_{f32,f16,bf16}` (weight in the activation dtype) and `fused_add_rms_norm_{f16,bf16}_wf32` (16-bit activations, f32 weight). 16-bit lanes travel as `u16` bit patterns; the kernel converts on load and store (`f16` through the compiler's casts, bf16 through `cuda_device::convert` with round-to-nearest-even).
 
@@ -32,7 +34,7 @@ Five entry points cover the dtype matrix: `fused_add_rms_norm_{f32,f16,bf16}` (w
 | `abi/*.schema.json` | Hand-written ABI claim per entry: argument order and widths, launch rule, semantics, rejected shapes |
 | `artifacts/` | Committed PTX and cubin (one module, five entries) and the generated, validated manifest per entry |
 | `results/` | Machine-readable comparison and benchmark results from the verified run |
-| `scripts/env.sh` | Delegates to the smoke package's toolchain discovery |
+| `scripts/env.sh` | Delegates to the smoke package's toolchain discovery; source it from bash or zsh |
 | `scripts/build.sh` | Pinned build, `.oxart` extraction, cubin assembly, manifest generation and validation |
 | `scripts/run.sh` | Case matrix on device 0 under `gpu-lock`, host-model check, fixture dump, launch check |
 | `scripts/oracle.sh` | Replays the fixtures through mlxcel's fused CUDA kernel and graph path (`mlxcel-core` example) |
@@ -64,13 +66,13 @@ scripts/check-clean-build.sh
 
 `scripts/standalone-bench.sh` (#2834) builds `standalone/oxide_standalone_bench.cpp` against the driver API and runs the committed PTX under `gpu-lock`. Its digest check proves that the PTX matches the five in-tree manifests; it is not an authenticity check, and the gap between the check and the program's load of the file is local-only (anyone who can rewrite the file in that window already runs code as the same user).
 
-Every GPU-allocating command goes through `gpu-lock run --tag issue-2832* -- ...`; a missing or busy lock is an error, never a reason to run unguarded. `run.sh` then checks every reported launch against the manifests: `grid = rows`, `block = fused_norm_threads(dim)` (the reference launcher's rule: `clamp(ceil_div(ceil_div(dim, 4), 32) * 32, 32, 1024)`), the per-entry case and element totals, and that the harness also exercised the shape rejections. A shortened or re-routed run fails the script rather than passing on exit status.
+Every GPU-allocating command goes through `gpu-lock run --tag issue-2832* -- ...`; a missing or busy lock is an error, never a reason to run unguarded. `run.sh` then checks every reported launch against the manifests: `grid = rows`, `block = fused_norm_cuda_block(dim, n_reads)` (the reference launcher's rule, which is MLX's `dispatch_num_chunks` and `eval_gpu` threshold: with `nvec = ceil_div(dim, n_reads)`, 1024 when `dim > n_reads * 1024`, else 64 when `dim <= n_reads * 64`, else 128 when `nvec % 128 == 0`, else 64 when `nvec % 64 == 0` and `nvec <= 512`, else 128), each manifest's `n_reads` and `compute_dtype` against its dtype pair, the per-entry case and element totals, and that the harness also exercised the shape rejections. A shortened or re-routed run fails the script rather than passing on exit status.
 
 ## Case matrix and budgets
 
 `run` executes 26 cases per dtype pair (130 in all, 2,181,390 elements):
 
-- widths 1, 3, 31, 32, 33, 100, 127, 128, 129, 1000, 1024, 2048, 3072, 4096, 4097, 8191, 8192 with one and many rows (up to 33 rows at 2048 and 16 rows at 8192), so partial warps, partial four-wide lane chunks, and rows wider than one 1024-lane sweep are all launched;
+- widths 1, 3, 31, 32, 33, 100, 127, 128, 129, 1000, 1024, 2048, 3072, 4096, 4097, 8191, 8192 with one and many rows (up to 33 rows at 2048 and 16 rows at 8192), so partial vectors, the 64- and 128-thread blocks, and (for the 4-wide entries, from 4097 up) the looped 1024-thread block are all launched;
 - the Gemma `weight_bias = 1` fold and `eps = 1e-5` on four and two of those shapes;
 - one case per pair with a NaN and a +Inf injected into the activations.
 

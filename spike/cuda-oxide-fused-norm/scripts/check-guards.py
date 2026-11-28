@@ -88,7 +88,7 @@ def main() -> int:
             )
         good = root / "good.log"
         good.write_text(
-            "PASS case=f32_f32_r1_d128_e6_b0_normal act=f32 w=f32 rows=1 dim=128 grid=1 block=32 elements=128 model_nrms=0e0 model_nmax=0e0\n"
+            "PASS case=f32_f32_r1_d128_e6_b0_normal act=f32 w=f32 rows=1 dim=128 grid=1 block=64 elements=128 model_nrms=0e0 model_nmax=0e0\n"
             "REJECT case=zero_dim reason=\"x\"\n"
             "RESULT standalone=1 mlx=0 cases_passed=1 cases_total=1 rejected=1 elements_checked=128 comparison=host-model\n"
         )
@@ -105,7 +105,9 @@ def main() -> int:
             return str(path)
 
         cases = [
-            ("wrong block", damaged("block.log", good.read_text().replace("block=32", "block=64"))),
+            # 128 is the block of the next wider branch, 32 the pre-#3510 rule's.
+            ("wrong block", damaged("block.log", good.read_text().replace("block=64", "block=128"))),
+            ("pre-3510 block", damaged("block-old.log", good.read_text().replace("block=64", "block=32"))),
             ("wrong grid", damaged("grid.log", good.read_text().replace("grid=1 ", "grid=2 "))),
             ("short run", damaged("short.log", "RESULT standalone=1 mlx=0 cases_passed=0 cases_total=0 rejected=1 elements_checked=0 comparison=host-model\n")),
             ("missing result", damaged("noresult.log", good.read_text().splitlines()[0] + "\n")),

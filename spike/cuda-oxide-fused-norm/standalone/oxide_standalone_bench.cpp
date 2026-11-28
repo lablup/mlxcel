@@ -35,8 +35,8 @@
 // ABI (abi/*.schema.json): x_ptr, x_len, residual_ptr, residual_len,
 // weight_ptr, weight_len, eps (f32), weight_bias (f32), dim (u32), normed_ptr,
 // normed_len, new_residual_ptr, new_residual_len. Lengths are u64 element
-// counts. Launch: grid = (rows, 1, 1), block = (fused_norm_threads(dim), 1, 1),
-// no dynamic shared memory.
+// counts. Launch: grid = (rows, 1, 1), block =
+// (fused_norm_cuda_block(dim, n_reads), 1, 1), no dynamic shared memory.
 
 #include <cuda.h>
 
@@ -123,11 +123,16 @@ std::vector<float> lcg_values(uint32_t seed, size_t n, float center, float sprea
     return out;
 }
 
-// `fused_norm_threads` of kernels/fused_norm.cpp and the manifests' rule.
-unsigned fused_norm_threads(unsigned dim) {
-    unsigned threads = (dim + 3) / 4;
-    threads = ((threads + 31) / 32) * 32;
-    return std::clamp(threads, 32u, 1024u);
+// `fused_norm_cuda_block` of kernels/fused_norm.cpp and the manifests' rule:
+// the block MLX's CUDA `rms_norm` launches for a row of `dim` elements read as
+// `n_reads`-wide vectors.
+unsigned fused_norm_cuda_block(unsigned dim, unsigned n_reads) {
+    unsigned nvec = (dim + n_reads - 1) / n_reads;
+    if (dim > n_reads * 1024u) return 1024u;
+    if (dim <= n_reads * 64u) return 64u;
+    if (nvec % 128u == 0) return 128u;
+    if (nvec % 64u == 0 && nvec <= 512u) return 64u;
+    return 128u;
 }
 
 struct Shape {
@@ -283,7 +288,11 @@ int main(int argc, char** argv) {
         uint32_t dim = s.dim;
         void* params[13] = {&d_x, &len, &d_r, &len, &d_w, &wlen, &eps, &weight_bias, &dim,
                             &d_normed, &len, &d_newres, &len};
-        unsigned block = fused_norm_threads(s.dim);
+        // `n_reads = 16 / sizeof(compute)`, compute = promote(act, weight):
+        // bf16 under an f32 weight computes in bf16, f16 under one in f32.
+        bool sixteen = s.act == s.weight ? s.act != Dtype::F32 : s.act == Dtype::BF16;
+        unsigned n_reads = sixteen ? 8u : 4u;
+        unsigned block = fused_norm_cuda_block(s.dim, n_reads);
         auto launch = [&]() {
             check(cuLaunchKernel(fn, s.rows, 1, 1, block, 1, 1, 0, stream, params, nullptr),
                   "cuLaunchKernel");

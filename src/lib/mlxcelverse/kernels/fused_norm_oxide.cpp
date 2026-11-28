@@ -301,8 +301,9 @@ class OxideFusedAddRmsNorm : public mlx::core::Primitive {
         for (const auto& t : copies) {
             encoder.add_temporary(t);
         }
-        // One block per row, `fused_norm_threads(dim)` lanes, no dynamic
-        // shared memory: the launch rule in the artifact's manifest.
+        // One block per row, `fused_norm_cuda_block(dim, n_reads)` lanes
+        // (`threads_`, computed by `fused_norm.cpp`), no dynamic shared
+        // memory: the launch rule in the artifact's manifest.
         encoder.add_kernel_node_raw(
             kernel, dim3(rows_, 1, 1), dim3(threads_, 1, 1), {}, 0, args.args());
         g_launches.fetch_add(1, std::memory_order_relaxed);

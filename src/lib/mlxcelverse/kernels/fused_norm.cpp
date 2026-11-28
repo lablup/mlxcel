@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fused_norm.h"
+#include "fused_norm_cuda.h"
 #include "fused_norm_hip.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
@@ -154,106 +155,12 @@ constexpr const char* FUSED_ADD_RMS_NORM_SOURCE = R"(
     }
 )";
 
-// CUDA port of the fused residual-add + RMSNorm kernel.
-//
-// Validated on GB10 (sm_121) since #2832 / #2834: `fused_norm_parity_tests`
-// passes against `graph_add_rms_norm` at f32 / f16 / bf16, the cuda-oxide
-// artifact is checked bitwise against this kernel (130-case matrix), and
-// Llama 3.2 1B end to end runs on it. It is not byte-identical to MLX's CUDA
-// `rms_norm` (#3501): `new_residual` matches exactly, but MLX reduces the sum
-// of squares with its own launch geometry (at bf16 dim 2048,
-// `rms_norm_small` with a 128-thread block and 8-wide chunks; the `ALIGNED`
-// argument selects only the load function, not the summation order), while this kernel runs
-// `fused_norm_threads(dim)` lanes of 4 elements, so the fp32 normalizer can
-// differ in its last bits and a `normed` element lands one or two bf16 ulps
-// away. `cuda_near_tie.rs` in the parity tests pins exactly that. Matching
-// MLX bit for bit would mean copying its per-dim block size, chunk count and
-// 16-byte vector loads, and the cuda-oxide artifact, a bitwise port of this
-// body, would have to be regenerated with it.
-//
-// Same one-block-per-row mapping, same `N_READS = 4` sweep, same two-stage
-// reduction with `__shfl_xor_sync` standing in for `simd_sum` (a butterfly
-// all-reduce, so every lane sees the total, matching Metal's semantics) and
-// `__syncthreads()` for the threadgroup barrier.
-//
-// Grid mapping: MLX passes Metal-style total threads and ceil-divides by the
-// threadgroup tuple (cf. `backend/cuda/custom_kernel.cpp`), so grid
-// `(Threads, 1, rows)` over threadgroup `(Threads, 1, 1)` yields blocks
-// `(1, 1, rows)` with `blockDim = (Threads, 1, 1)`. Every field divides exactly,
-// so no padded threads are launched and the `__syncthreads()` calls are always
-// reached by the whole block.
-constexpr const char* FUSED_ADD_RMS_NORM_CUDA_SOURCE = R"(
-    uint32_t row = blockIdx.z;
-    uint32_t lid = threadIdx.x;
-    uint32_t lane = threadIdx.x % 32u;
-    uint32_t sg = threadIdx.x / 32u;
+// The CUDA body, `FUSED_ADD_RMS_NORM_CUDA_SOURCE`, and its launch geometry,
+// `fused_norm_cuda_block`, live in `fused_norm_cuda.h`. Unlike the Metal body
+// above, that port follows MLX's CUDA `rms_norm` geometry and is
+// byte-identical to the graph (#3510).
 
-    const uint32_t dim = (uint32_t)Dim;
-    const uint32_t tg = (uint32_t)Threads;
-    const uint64_t base = (uint64_t)row * (uint64_t)dim;
-
-    __shared__ float local_sums[32];
-    __shared__ float local_inv_mean[1];
-
-    // Stage 1: residual sum, store, sum of squares.
-    float acc = 0.0f;
-    for (uint32_t r = 0; r < dim; r += tg * 4) {
-        uint32_t d0 = r + lid * 4;
-        for (uint32_t j = 0; j < 4; j++) {
-            uint32_t d = d0 + j;
-            if (d < dim) {
-                float s = (float)x[base + d] + (float)residual[base + d];
-                T st = (T)s;
-                new_residual[base + d] = st;
-                float sr = (float)st;
-                acc += sr * sr;
-            }
-        }
-    }
-
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        acc += __shfl_xor_sync(0xffffffffu, acc, o);
-    }
-    if (sg == 0u) {
-        local_sums[lane] = 0.0f;
-    }
-    __syncthreads();
-    if (lane == 0u) {
-        local_sums[sg] = acc;
-    }
-    __syncthreads();
-    if (sg == 0u) {
-        float total = local_sums[lane];
-        #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) {
-            total += __shfl_xor_sync(0xffffffffu, total, o);
-        }
-        if (lane == 0u) {
-            local_inv_mean[0] = rsqrtf(total / dim + eps[0]);
-        }
-    }
-    __syncthreads();
-
-    // Stage 2: scale and apply the (weight_bias + weight) gain.
-    float inv_mean = local_inv_mean[0];
-    float wbias = weight_bias[0];
-    for (uint32_t r = 0; r < dim; r += tg * 4) {
-        uint32_t d0 = r + lid * 4;
-        for (uint32_t j = 0; j < 4; j++) {
-            uint32_t d = d0 + j;
-            if (d < dim) {
-                float sr = (float)new_residual[base + d];
-                float wv = (float)weight[d];
-                float gain = (wbias == 0.0f) ? wv : (float)(TW)(wbias + wv);
-                float scaled = (float)(T)(sr * inv_mean);
-                normed[base + d] = (T)(gain * scaled);
-            }
-        }
-    }
-)";
-
-// Elements each lane reads per sweep step. Matches MLX's `RMS_N_READS`.
+// Elements each Metal lane reads per sweep step. Matches MLX's `RMS_N_READS`.
 constexpr int FUSED_NORM_N_READS = 4;
 constexpr int FUSED_NORM_SIMD_WIDTH = 32;
 constexpr int FUSED_NORM_MAX_THREADS = 1024;
@@ -262,10 +169,11 @@ constexpr int FUSED_NORM_MAX_THREADS = 1024;
 constexpr int FUSED_NORM_ROCM_THREADS = 256;
 #endif
 
-// Threadgroup width for a row of `dim` elements: enough lanes to cover the row
-// at `FUSED_NORM_N_READS` elements each, rounded up to a whole SIMD group and
-// clamped to the hardware threadgroup limit. Rows longer than
-// `FUSED_NORM_MAX_THREADS * FUSED_NORM_N_READS` loop.
+// Metal threadgroup width for a row of `dim` elements: enough lanes to cover
+// the row at `FUSED_NORM_N_READS` elements each, rounded up to a whole SIMD
+// group and clamped to the hardware threadgroup limit. Rows longer than
+// `FUSED_NORM_MAX_THREADS * FUSED_NORM_N_READS` loop. CUDA does not use this:
+// see `fused_norm_cuda_block`.
 [[maybe_unused]] int fused_norm_threads(int dim) {
     if (dim <= 0) {
         return FUSED_NORM_SIMD_WIDTH;
@@ -439,15 +347,23 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     }
 
     const int rows = static_cast<int>(x.size() / dim);
-    // Threads per row. Metal and CUDA: enough lanes to cover the row at
-    // `N_READS` each. ROCm: the overlay's `rms_norm_kernel` block of 256
-    // (`rms_norm.hip`), whose per-thread strided sums and 32-wide folds the HIP
-    // body then reproduces term for term, so the fused sum of squares is the
-    // graph's bit for bit (#2063). A ROCm build has no Metal or CUDA backend,
-    // so the build flag is the backend here, as in `fused_add3_layer_norm`.
-    // `Threads` is a template arg, so each width compiles and caches apart.
-#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    // Threads per row. Metal: enough lanes to cover the row at `N_READS` each.
+    // ROCm: the overlay's `rms_norm_kernel` block of 256 (`rms_norm.hip`),
+    // whose per-thread strided sums and 32-wide folds the HIP body then
+    // reproduces term for term, so the fused sum of squares is the graph's bit
+    // for bit (#2063). CUDA: the block MLX's `rms_norm` launches for this
+    // width in the compute dtype, the promotion `fast::rms_norm` applies to
+    // its inputs, which the CUDA body sweeps in MLX's order, so it is the
+    // graph's bit for bit too (#3510). A ROCm or CUDA build has no other GPU
+    // backend, so the build flag is the backend here, as in
+    // `fused_add3_layer_norm`. `Threads` is a template arg, so each width
+    // compiles and caches apart.
+#if defined(MLXCEL_BRIDGE_ROCM_BACKEND)
     const int threads = FUSED_NORM_ROCM_THREADS;
+#elif defined(MLXCEL_BRIDGE_CUDA_BACKEND)
+    const Dtype compute = mlx::core::promote_types(x.dtype(), weight.dtype());
+    const int threads = fused_norm_cuda_block(
+        dim, fused_norm_cuda_n_reads(mlx::core::size_of(compute)));
 #else
     const int threads = fused_norm_threads(dim);
 #endif
@@ -476,6 +392,14 @@ std::vector<mlx::core::array> fused_add_rms_norm(
         {"Dim", dim},
         {"Threads", threads},
     };
+#if defined(MLXCEL_BRIDGE_CUDA_BACKEND) && !defined(MLXCEL_BRIDGE_ROCM_BACKEND)
+    // CUDA only: the compute dtype, and which of the two inputs is cast to it
+    // (see `fused_norm_cuda.h`). The Metal and ROCm bodies take none of
+    // these, so their template args and cache keys are unchanged.
+    template_args.emplace_back("TC", compute);
+    template_args.emplace_back("RoundX", compute != x.dtype() ? 1 : 0);
+    template_args.emplace_back("RoundW", compute != weight.dtype() ? 1 : 0);
+#endif
 
     // `eps` and `weight_bias` ride in as 1-element f32 arrays rather than 0-D
     // scalars: a 0-D input is declared `const constant float&` by the Metal

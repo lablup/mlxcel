@@ -30,15 +30,17 @@
  *                            cold and warm timings with event boundaries
  *
  * Reference semantics: `src/lib/mlxcelverse/kernels/fused_norm.cpp`
- * (`FUSED_ADD_RMS_NORM_CUDA_SOURCE`) and
+ * (`FUSED_ADD_RMS_NORM_CUDA_SOURCE` in `fused_norm_cuda.h`) and
  * `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs`. The kernel keeps the
- * same block-per-row mapping, the same four-wide lane sweep, the same
- * rounding points (residual sum rounded to the activation dtype before it is
- * squared, `x * inv_mean` rounded before the gain multiply, the weight bias
- * folded in the weight dtype), f32 accumulation, and the same two-stage
- * butterfly reduction order, so the device output is expected to match the
- * existing fused CUDA kernel bit for bit. That identity is reported, not
- * assumed: the pass criterion is the parity budget from the tests above.
+ * same block-per-row mapping, the same strided sweep of `N_READS`-wide
+ * vectors (MLX's `rms_norm` geometry since #3510: `fused_norm_cuda_block`),
+ * the same rounding points (residual sum rounded to the activation dtype
+ * before it is squared, `x * inv_mean` rounded to the compute dtype before
+ * the gain multiply, the weight bias folded in the weight dtype), f32
+ * accumulation, and the same two-stage butterfly reduction order, so the
+ * device output is expected to match the existing fused CUDA kernel bit for
+ * bit. That identity is reported, not assumed: the pass criterion is the
+ * parity budget from the tests above.
  */
 
 #![feature(f16)]
@@ -55,28 +57,36 @@ use cuda_device::float::{fma_rn_f32, rsqrt_approx_f32};
 use cuda_device::{SharedArray, cuda_module, kernel, thread, warp};
 
 // ---------------------------------------------------------------------------
-// Launch geometry: the reference launcher's rule (`fused_norm_threads`).
+// Launch geometry: the reference launcher's rule (`fused_norm_cuda_block`).
 // ---------------------------------------------------------------------------
 
 /// Lanes per SIMD group (warp).
 const SIMD_WIDTH: u32 = 32;
-/// Contiguous elements each lane reads per sweep.
-const N_READS: u32 = 4;
 /// Largest block the kernel is written for (32 warps, `LOCAL_SUMS` has 32 slots).
 const MAX_THREADS: u32 = 1024;
+/// Bytes of one vector of MLX's `rms_norm`: `N_READS = 16 / sizeof(compute)`.
+const VECTOR_BYTES: u32 = 16;
 
-/// Threads per row: enough lanes to cover the row at `N_READS` each, rounded up
-/// to a whole warp, clamped to `[SIMD_WIDTH, MAX_THREADS]`. Rows wider than
-/// `MAX_THREADS * N_READS` loop. This is `fused_norm_threads` in
-/// `kernels/fused_norm.cpp`, so a comparison against the existing kernel uses
-/// the same block for the same width.
-fn fused_norm_threads(dim: u32) -> u32 {
-    if dim == 0 {
-        return SIMD_WIDTH;
+/// Threads per row for a row of `dim` elements read as `n_reads`-wide
+/// vectors: the block MLX's CUDA `rms_norm` launches for that width, so each
+/// lane sums the same elements in the same order as the graph path. This is
+/// `fused_norm_cuda_block` in `kernels/fused_norm_cuda.h`, which mirrors
+/// `dispatch_num_chunks` and the `eval_gpu` threshold of
+/// `mlx/backend/cuda/rms_norm.cu`: rows wider than `n_reads * 1024` take the
+/// looped 1024-thread kernel, narrower ones 64 or 128 threads.
+fn fused_norm_cuda_block(dim: u32, n_reads: u32) -> u32 {
+    let nvec = dim.div_ceil(n_reads);
+    if dim > n_reads * MAX_THREADS {
+        MAX_THREADS
+    } else if dim <= n_reads * 64 {
+        64
+    } else if nvec.is_multiple_of(128) {
+        128
+    } else if nvec.is_multiple_of(64) && nvec <= 512 {
+        64
+    } else {
+        128
     }
-    let lanes = dim.div_ceil(N_READS);
-    let threads = lanes.div_ceil(SIMD_WIDTH) * SIMD_WIDTH;
-    threads.clamp(SIMD_WIDTH, MAX_THREADS)
 }
 
 // ---------------------------------------------------------------------------
@@ -143,19 +153,31 @@ fn warp_sum(mut value: f32) -> f32 {
     value
 }
 
-/// One block owns one row of `dim` elements. `blockDim.x` lanes sweep the row
-/// in `N_READS`-wide contiguous chunks. Two passes, as in the reference:
+/// One block owns one row of `dim` elements, read as `n_reads`-wide vectors
+/// (vector `v` is elements `[v * n_reads, (v + 1) * n_reads)`). Lane `t` of
+/// `blockDim.x` takes vectors `t`, `t + blockDim.x`, ... in ascending order,
+/// which is the order MLX's `rms_norm_small` and `rms_norm` accumulate in. Two
+/// passes, as in the reference:
 ///
 ///   1. read `x` and `residual`, sum in f32, round the sum to the activation
 ///      dtype, store it as `new_residual`, accumulate its square (f32 FMA);
-///   2. re-read `new_residual`, scale by `rsqrt(mean + eps)`, round, apply
-///      the `(weight_bias + weight)` gain folded in the weight dtype.
+///   2. re-read `new_residual`, scale by `rsqrt(mean + eps)`, round to the
+///      compute dtype `C = promote(activation, weight)`, apply the
+///      `(weight_bias + weight)` gain folded in the weight dtype and, when
+///      `round_gain` is set, cast to `C` (the reference's `RoundW`).
+///
+/// Every entry's `C` holds its activation dtype exactly, so the reference's
+/// `RoundX` casts are identities here and are not written. `n_reads`
+/// (`16 / sizeof(C)`) and `round_gain` (`C` is not the weight dtype) are
+/// literals at every call site, so they fold into the inlined body.
 ///
 /// `sums` and `inv_mean` point at block shared memory declared by the kernel
 /// wrapper (32 floats and 1 float). Every lane reaches every barrier: the
 /// grid is exactly one block per row, so no block returns early.
 #[inline(always)]
-fn fused_add_rms_norm_row<A: Copy, W: Copy, CA: Conv<A>, CW: Conv<W>>(
+fn fused_add_rms_norm_row<A: Copy, W: Copy, C: Copy, CA: Conv<A>, CW: Conv<W>, CC: Conv<C>>(
+    n_reads: u32,
+    round_gain: bool,
     x: &[A],
     residual: &[A],
     weight: &[W],
@@ -171,18 +193,19 @@ fn fused_add_rms_norm_row<A: Copy, W: Copy, CA: Conv<A>, CW: Conv<W>>(
     let lid = thread::threadIdx_x();
     let lane = (lid % SIMD_WIDTH) as usize;
     let sg = (lid / SIMD_WIDTH) as usize;
-    let stride = (thread::blockDim_x() * N_READS) as usize;
+    let block = thread::blockDim_x() as usize;
+    let n = n_reads as usize;
     let dim_u = dim as usize;
+    let nvec = dim_u.div_ceil(n);
     let base = row * dim_u;
 
     // Stage 1: residual sum, store, sum of squares.
     let mut acc = 0.0f32;
-    let mut r = 0usize;
-    while r < dim_u {
-        let d0 = r + (lid as usize) * (N_READS as usize);
+    let mut v = lid as usize;
+    while v < nvec {
         let mut j = 0usize;
-        while j < N_READS as usize {
-            let d = d0 + j;
+        while j < n {
+            let d = v * n + j;
             if d < dim_u {
                 let s = CA::load(x[base + d]) + CA::load(residual[base + d]);
                 let st = CA::store(s);
@@ -194,7 +217,7 @@ fn fused_add_rms_norm_row<A: Copy, W: Copy, CA: Conv<A>, CW: Conv<W>>(
             }
             j += 1;
         }
-        r += stride;
+        v += block;
     }
 
     acc = warp_sum(acc);
@@ -222,36 +245,50 @@ fn fused_add_rms_norm_row<A: Copy, W: Copy, CA: Conv<A>, CW: Conv<W>>(
     // Stage 2: scale and apply the (weight_bias + weight) gain.
     // SAFETY: `inv_mean` was published by lane 0 of warp 0 before the barrier.
     let scale = unsafe { *inv_mean };
-    let mut r = 0usize;
-    while r < dim_u {
-        let d0 = r + (lid as usize) * (N_READS as usize);
+    let mut v = lid as usize;
+    while v < nvec {
         let mut j = 0usize;
-        while j < N_READS as usize {
-            let d = d0 + j;
+        while j < n {
+            let d = v * n + j;
             if d < dim_u {
                 let sr = CA::load(new_residual[base + d]);
                 let wv = CW::load(weight[d]);
                 // Fold the bias in the weight's own precision so
                 // `weight_bias = 1` reproduces GemmaRMSNorm's precomputed
                 // `(1 + w)` tensor exactly.
-                let gain = if weight_bias == 0.0 {
+                let folded = if weight_bias == 0.0 {
                     wv
                 } else {
                     CW::load(CW::store(weight_bias + wv))
                 };
-                // Round `x * inv_mean` to the activation dtype before the gain
-                // multiply: the store order MLX's rms_norm kernel uses.
-                let scaled = CA::load(CA::store(sr * scale));
+                // rms_norm casts its weight to the compute dtype.
+                let gain = if round_gain {
+                    CC::load(CC::store(folded))
+                } else {
+                    folded
+                };
+                // Round `x * inv_mean` to the compute dtype before the gain
+                // multiply, as MLX's rms_norm kernel does (`w * (T)y`). For a
+                // 16-bit `C` the f32 product of two 16-bit values is exact,
+                // so the one rounding below is MLX's multiply in `C`; for
+                // `C = f32` under a 16-bit activation it is the graph's f32
+                // result cast to the activation dtype.
+                let scaled = CC::load(CC::store(sr * scale));
                 normed[base + d] = CA::store(gain * scaled);
             }
             j += 1;
         }
-        r += stride;
+        v += block;
     }
 }
 
 /// Five dtype pairs: activations f32 / f16 / bf16 with the weight in the same
-/// dtype, plus the two mixed pairs (16-bit activations, f32 weight). Each
+/// dtype, plus the two mixed pairs (16-bit activations, f32 weight). The
+/// compute dtype is the pair's promotion under mlxcel's table (bf16 with f32
+/// is bf16, f16 with f32 is f32), so the f16, bf16 and bf16-under-f32 entries
+/// read 8-wide vectors and round `x * inv_mean` to 16 bits, the last one
+/// rounding its weight to bf16 as well, while the f32 and f16-under-f32
+/// entries read 4-wide vectors and keep it in f32. Each
 /// kernel declares its own block shared memory and hands raw pointers to the
 /// shared row routine.
 #[cuda_module]
@@ -285,7 +322,9 @@ mod kernels {
         new_residual: &mut [f32],
     ) {
         let (sums, inv) = shared_slots!();
-        fused_add_rms_norm_row::<f32, f32, F32Conv, F32Conv>(
+        fused_add_rms_norm_row::<f32, f32, f32, F32Conv, F32Conv, F32Conv>(
+            4,
+            false,
             x,
             residual,
             weight,
@@ -311,7 +350,9 @@ mod kernels {
         new_residual: &mut [u16],
     ) {
         let (sums, inv) = shared_slots!();
-        fused_add_rms_norm_row::<u16, u16, F16Conv, F16Conv>(
+        fused_add_rms_norm_row::<u16, u16, u16, F16Conv, F16Conv, F16Conv>(
+            8,
+            false,
             x,
             residual,
             weight,
@@ -337,7 +378,9 @@ mod kernels {
         new_residual: &mut [u16],
     ) {
         let (sums, inv) = shared_slots!();
-        fused_add_rms_norm_row::<u16, u16, Bf16Conv, Bf16Conv>(
+        fused_add_rms_norm_row::<u16, u16, u16, Bf16Conv, Bf16Conv, Bf16Conv>(
+            8,
+            false,
             x,
             residual,
             weight,
@@ -363,7 +406,9 @@ mod kernels {
         new_residual: &mut [u16],
     ) {
         let (sums, inv) = shared_slots!();
-        fused_add_rms_norm_row::<u16, f32, F16Conv, F32Conv>(
+        fused_add_rms_norm_row::<u16, f32, f32, F16Conv, F32Conv, F32Conv>(
+            4,
+            false,
             x,
             residual,
             weight,
@@ -389,7 +434,9 @@ mod kernels {
         new_residual: &mut [u16],
     ) {
         let (sums, inv) = shared_slots!();
-        fused_add_rms_norm_row::<u16, f32, Bf16Conv, F32Conv>(
+        fused_add_rms_norm_row::<u16, f32, u16, Bf16Conv, F32Conv, Bf16Conv>(
+            8,
+            true,
             x,
             residual,
             weight,
@@ -653,8 +700,24 @@ impl Case {
         }
     }
 
+    /// Compute dtype: `promote_types(act, w)`, as `fast::rms_norm` promotes
+    /// with mlxcel's table (`overlays/*/mlx/dtype.cpp`): bf16 with f32 is
+    /// bf16, f16 with anything else is f32.
+    fn compute(&self) -> Dt {
+        match (self.act, self.w) {
+            (a, w) if a == w => a,
+            (Dt::Bf16, Dt::F32) | (Dt::F32, Dt::Bf16) => Dt::Bf16,
+            _ => Dt::F32,
+        }
+    }
+
+    /// Elements per vector: `16 / sizeof(compute)`.
+    fn n_reads(&self) -> u32 {
+        VECTOR_BYTES / self.compute().bytes() as u32
+    }
+
     fn threads(&self) -> u32 {
-        fused_norm_threads(self.dim as u32)
+        fused_norm_cuda_block(self.dim as u32, self.n_reads())
     }
 
     fn elements(&self) -> usize {
@@ -768,7 +831,11 @@ struct Model {
 
 /// The same rounding points as the kernel, with the sum of squares and the
 /// reciprocal square root in f64 and a sequential summation order, so it is a
-/// check on the semantics rather than a copy of the device arithmetic.
+/// check on the semantics rather than a copy of the device arithmetic. It is a
+/// tolerance model, not an order model: it does not mirror the kernel's
+/// summation order, and the f64 sum stays within the frozen tolerances of any
+/// fp32 order. Order identity is checked by the byte-identity test against the
+/// graph path, not here.
 fn host_model(case: &Case, inp: &Inputs) -> Model {
     let dim = case.dim;
     let mut normed = vec![0.0f32; case.elements()];
@@ -791,12 +858,12 @@ fn host_model(case: &Case, inp: &Inputs) -> Model {
         for d in 0..dim {
             let sr = new_residual[base + d];
             let wv = inp.weight[d];
-            let gain = if case.weight_bias == 0.0 {
+            let gain = case.compute().round(if case.weight_bias == 0.0 {
                 wv
             } else {
                 case.w.round(case.weight_bias + wv)
-            };
-            let scaled = case.act.round((sr as f64 * inv) as f32);
+            });
+            let scaled = case.compute().round((sr as f64 * inv) as f32);
             normed[base + d] = case.act.round(gain * scaled);
         }
     }
@@ -1854,7 +1921,7 @@ fn cmd_bench(out: Option<PathBuf>, iters: usize) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn usage() -> String {
-    "usage:\n  cuda-oxide-fused-norm run [--out DIR]\n  cuda-oxide-fused-norm compare --fixtures DIR --oracle DIR --out results.json [--note key=value ...]\n  cuda-oxide-fused-norm bench [--out bench.json] [--iters N]\n  cuda-oxide-fused-norm threads DIM   (print the block size for a width)".to_string()
+    "usage:\n  cuda-oxide-fused-norm run [--out DIR]\n  cuda-oxide-fused-norm compare --fixtures DIR --oracle DIR --out results.json [--note key=value ...]\n  cuda-oxide-fused-norm bench [--out bench.json] [--iters N]\n  cuda-oxide-fused-norm threads DIM N_READS   (print the block size for a width; N_READS is 8 for a 16-bit compute dtype, 4 for f32)".to_string()
 }
 
 fn run() -> Result<(), String> {
@@ -1870,7 +1937,11 @@ fn run() -> Result<(), String> {
         }
         "threads" => {
             let dim: u32 = it.next().ok_or_else(usage)?.parse().map_err(|_| usage())?;
-            println!("{}", fused_norm_threads(dim));
+            let n_reads: u32 = it.next().ok_or_else(usage)?.parse().map_err(|_| usage())?;
+            if dim == 0 || !matches!(n_reads, 4 | 8) {
+                return Err(usage());
+            }
+            println!("{}", fused_norm_cuda_block(dim, n_reads));
             Ok(())
         }
         "run" => {

@@ -16,8 +16,11 @@
 //! Llama checkpoint (issue #3501).
 //!
 //! On GB10, `llama-3.2-1b-instruct-bf16` at B=1 on the 128-token synthesized
-//! prompt generates different greedy text with `MLXCEL_FUSED_ADD_RMSNORM=1`
-//! than without it. The switch is process-global, so each arm is one process
+//! prompt generated different greedy text with `MLXCEL_FUSED_ADD_RMSNORM=1`
+//! than without it, until #3510 made the CUDA kernel byte-identical to the
+//! graph; since then the two arms' dumps compare equal and the op diff
+//! reports no differing element, which makes this probe the end-to-end check
+//! of that identity. The switch is process-global, so each arm is one process
 //! of this probe, and the arms are compared offline:
 //!
 //! - **Steps.** The prompt (`synthesize_prompt_tokens`, as the checkpoint

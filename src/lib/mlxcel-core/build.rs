@@ -518,6 +518,7 @@ fn main() {
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_cuda.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_hip.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_oxide.h");
     println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_oxide.cpp");

@@ -505,7 +505,7 @@ DECLARED = (
     ),
     Rule(
         pattern="spike/cuda-oxide-fused-norm/artifacts/fused_add_rms_norm.sm_121.cubin",
-        max_bytes=80 * 1024,
+        max_bytes=100 * 1024,
         why=(
             "Committed consumer artifact for the cuda-oxide fused residual-add + "
             "RMSNorm kernel (#2832): one module, five dtype entry points. The "
@@ -513,7 +513,9 @@ DECLARED = (
             "layout, and it was validated bit for bit against the existing "
             "fused CUDA kernel on GB10; reproducing it needs LLVM 21, CUDA 13.0 "
             "and the pinned cuda-oxide compiler, so the verified bytes ship "
-            "with the evidence."
+            "with the evidence. Regenerated for #3510 with MLX's rms_norm "
+            "sweep (8-wide vectors in three entries), which took the cubin "
+            "from 77.5 KB to 89.8 KB."
         ),
     ),
 )
