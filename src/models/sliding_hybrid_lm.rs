@@ -22,8 +22,8 @@
 //! [`SlidingHybridModel::FAMILY`] and [`SlidingHybridModel::KV_NAMES`], and
 //! each impl delegates to them (issue #3297).
 //!
-//! Used by: AFMoE (`src/models/afmoe.rs`) and Kolibri-1
-//! (`src/models/kolibri1_lm.rs`).
+//! Used by: AFMoE (`src/models/afmoe.rs`), Kolibri-1
+//! (`src/models/kolibri1_lm.rs`) and PLaMo 3 (`src/models/plamo3_lm.rs`).
 
 use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};

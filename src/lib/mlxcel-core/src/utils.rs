@@ -351,7 +351,7 @@ impl PrefillAttention {
 /// Ernie4.5MoeVL, and the global layers of Cohere2MoE, CohereCompass, Olmo3,
 /// Ministral3, Exaone4, ExaoneMoe, Mellum, Step3P5, AFMoE and Gemma3n
 /// (#3072); GptOss, FalconOcr and the sink full layers of MiMoV2 (#3098);
-/// the NoPE global layers of Limite (#2360).
+/// the NoPE global layers of Limite (#2360); the full layers of Plamo3 (#2374).
 pub fn prefill_causal_mask(
     seq_len: i32,
     offset: i32,
@@ -1219,7 +1219,8 @@ pub fn create_causal_mask_with_window(
 /// softcapped single-pass prefill longer than the sliding window (#413), and
 /// `window_sdpa::legacy_causal_window_mask`, the legacy arm of the native
 /// window route that the unsoftcapped over-window prefill takes (#2621; the
-/// native arm hands MLX the window instead of this mask). Every caller of
+/// native arm hands MLX the window instead of this mask), and Plamo3's sliding
+/// prefill mask (`window_size + 1` band over a `window_size` ring, #2374). Every caller of
 /// [`create_sliding_window_prefill_mask`] (GptOss, Mellum, Exaone4, ExaoneMoE,
 /// Ministral3, Step3P5, Gemma3, Gemma4, AFMoE, DeepSeekV4, the tensor-parallel
 /// Llama runtime) and of [`create_sliding_window_prefill_mask_dense`]

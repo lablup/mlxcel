@@ -1670,7 +1670,7 @@ pub(crate) fn validate_quantized_packing(
     )
 }
 
-/// Used by: AFMoE, Kolibri1.
+/// Used by: AFMoE, Kolibri1, PLaMo 3.
 pub(crate) fn validate_projection(
     weights: &WeightMap,
     prefix: &str,
@@ -1703,7 +1703,7 @@ pub(crate) fn validate_projection(
     validate_quantized_packing(weights, prefix, in_features, group_size, bits)
 }
 
-/// Used by: AFMoE, Kolibri1.
+/// Used by: AFMoE, Kolibri1, PLaMo 3.
 pub(crate) fn validate_norm(weights: &WeightMap, key: &str, dim: usize) -> Result<(), String> {
     let weight = weights
         .get(key)

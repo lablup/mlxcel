@@ -1258,6 +1258,7 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     // so `byte_fallback` can resolve them, matching the Python tokenizer, which
     // keeps every entry addressable by id.
     let mut vocab: Vec<serde_json::Value> = Vec::new();
+    let mut control_tokens: Vec<(u32, String)> = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
         let line = line
             .map_err(|e| anyhow::anyhow!("Failed to read {:?} line {}: {}", jsonl_path, idx, e))?;
@@ -1297,6 +1298,11 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
                 line
             )
         })?;
+        // `CONTROL` rows (PLaMo 3's `<|plamo:msg|>` = 19, `<|plamo:tag|>` = 16,
+        // ...; PLaMo 2's reserved range) become special added tokens below.
+        if entry.get(2).and_then(|v| v.as_str()) == Some("CONTROL") {
+            control_tokens.push((vocab.len() as u32, token.to_string()));
+        }
         vocab.push(serde_json::json!([token, score]));
     }
 
@@ -1314,11 +1320,23 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
         plamo_added_token(2, "<|plamo:eos|>"),
         plamo_added_token(3, "<|plamo:pad|>"),
     ];
+    // Every `CONTROL` row is a whole-string special token: the reference
+    // scores them 0.0, so its Viterbi pass already encodes each as its single
+    // id, and registering them makes `skip_special_tokens` drop them and the
+    // chat stop id (`<|plamo:tag|>`) decode as a control marker. The four
+    // fixed specials above are not repeated.
+    added_tokens.extend(
+        control_tokens
+            .iter()
+            .filter(|(id, _)| *id > 3)
+            .map(|(id, content)| plamo_added_token(*id, content)),
+    );
     added_tokens.extend(
         extra_tokens
             .iter()
             .map(|(id, content)| plamo_added_token(*id, content)),
     );
+    let pre_tokenizer = plamo3_pre_tokenizer(model_path);
 
     // Raw text in, raw text out: no normalizer and no pre-tokenizer (PLaMo
     // tokens carry literal spaces, e.g. " of"/"  ", not SentencePiece `_`
@@ -1329,7 +1347,7 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
         "padding": null,
         "added_tokens": added_tokens,
         "normalizer": null,
-        "pre_tokenizer": null,
+        "pre_tokenizer": pre_tokenizer,
         "post_processor": null,
         "decoder": {"type": "ByteFallback"},
         "model": {
@@ -1362,6 +1380,55 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
         }
     }
     Ok(tokenizer)
+}
+
+/// The boundary splits `Plamo3Tokenizer` inserts before its Unigram pass, as
+/// a `tokenizers` pre-tokenizer, or `null` for any other PLaMo tokenizer.
+///
+/// `tokenization_plamo.py` (PLaMo 3) surrounds three kinds of span with a
+/// private-use boundary character the Viterbi pass cannot cross, in this
+/// order: every `<|plamo:...|>` string (64 characters at most), then runs of
+/// one character repeated `break_around_repeated_chars_threshold` times or
+/// more, then runs of at least `break_around_consecutive_spaces_threshold`
+/// spaces (both from `tokenizer_config.json`; a missing threshold disables its
+/// split). Two isolated `Split` steps reproduce those sequential
+/// substitutions: each piece is then encoded on its own, exactly as a span
+/// between two boundaries is. PLaMo 2's tokenizer has none of this, so it is
+/// keyed on `tokenizer_class == "Plamo3Tokenizer"` and PLaMo 2 keeps no
+/// pre-tokenizer.
+///
+/// Used by: `build_plamo_tokenizer`.
+fn plamo3_pre_tokenizer(model_path: &Path) -> serde_json::Value {
+    let Some(config) = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return serde_json::Value::Null;
+    };
+    if config.get("tokenizer_class").and_then(|v| v.as_str()) != Some("Plamo3Tokenizer") {
+        return serde_json::Value::Null;
+    }
+    let threshold = |key: &str| config.get(key).and_then(|v| v.as_u64()).filter(|&n| n >= 1);
+    let split = |pattern: String| {
+        serde_json::json!({
+            "type": "Split",
+            "pattern": {"Regex": pattern},
+            "behavior": "Isolated",
+            "invert": false,
+        })
+    };
+    let mut steps = vec![split(r"<\|plamo:[^|\s]{0,64}\|>".to_string())];
+    let mut runs = Vec::new();
+    if let Some(n) = threshold("break_around_repeated_chars_threshold") {
+        runs.push(format!(r"(.)\1{{{},}}", n - 1));
+    }
+    if let Some(n) = threshold("break_around_consecutive_spaces_threshold") {
+        runs.push(format!(" {{{n},}}"));
+    }
+    if !runs.is_empty() {
+        steps.push(split(runs.join("|")));
+    }
+    serde_json::json!({"type": "Sequence", "pretokenizers": steps})
 }
 
 /// Added tokens a PLaMo checkpoint declares beyond its `tokenizer.jsonl`
@@ -2052,6 +2119,10 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 
 #[cfg(test)]
 mod contains_id_tests;
+
+#[cfg(test)]
+#[path = "plamo3_tokenizer_tests.rs"]
+mod plamo3_tokenizer_tests;
 
 #[cfg(test)]
 mod thinking_markers_tests;
