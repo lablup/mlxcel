@@ -304,7 +304,12 @@ impl RaonMhc {
         let h_post = mlxcel_core::multiply_scalar(&mlxcel_core::sigmoid(&t_post), self.post_factor);
 
         let z = mlxcel_core::reshape(&t_z, &[b, l, nm, nm]);
-        let error = mlxcel_core::matmul(&mlxcel_core::matmul(&self.basis, &z), &self.basis_t);
+        // A batched matmul over the positions: inside a verify block, one
+        // position at a time, since CUDA picks its kernel (and so the
+        // summation order) by the block length.
+        let error = mlxcel_core::row_invariant::per_position(&z, |z| {
+            mlxcel_core::matmul(&mlxcel_core::matmul(&self.basis, z), &self.basis_t)
+        });
         let ratio = mlxcel_core::divide(&mlxcel_core::negative(&error), &self.chart0);
         let ratio = mlxcel_core::reshape(&ratio, &[b, l, n * n]);
         let rho = mlxcel_core::max_axis(&ratio, -1, true);
@@ -324,11 +329,31 @@ impl RaonMhc {
     }
 }
 
+/// `a @ b` for `[1, L, .., ..]` operands batched over the positions. Inside a
+/// speculative verify block each position is multiplied alone, so row `t`
+/// of a block equals its decode step: CUDA picks the batched kernel, and so
+/// the summation order, by the block length. Elsewhere one `matmul`.
+fn matmul_per_position(a: &MlxArray, b: &MlxArray) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(a);
+    let length = shape[1];
+    if !mlxcel_core::row_invariant::in_verify_block()
+        || shape[0] != 1
+        || !(2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&length)
+    {
+        return mlxcel_core::matmul(a, b);
+    }
+    let at = |x: &MlxArray, t: i32| mlxcel_core::utils::slice_axis(x, 1, t, t + 1);
+    let parts: Vec<_> = (0..length)
+        .map(|t| mlxcel_core::matmul(&at(a, t), &at(b, t)))
+        .collect();
+    mlxcel_core::concatenate_many(&parts.iter().map(|p| &**p).collect::<Vec<_>>(), 1)
+}
+
 /// Branch input `sum_s h_pre[s] * streams[s]` in float32, rounded to `dtype`.
 /// `streams_f32` is `[B, L, n, D]` float32, `h_pre` `[B, L, n]`.
 pub fn aggregate(streams_f32: &MlxArray, h_pre: &MlxArray, out_dtype: i32) -> UniquePtr<MlxArray> {
     let weights = mlxcel_core::expand_dims(h_pre, -2); // [B, L, 1, n]
-    let mixed = mlxcel_core::matmul(&weights, streams_f32); // [B, L, 1, D]
+    let mixed = matmul_per_position(&weights, streams_f32); // [B, L, 1, D]
     mlxcel_core::astype(&mlxcel_core::squeeze_axis(&mixed, -2), out_dtype)
 }
 
@@ -351,7 +376,7 @@ fn mix_parts(
     h_res: &MlxArray,
     out_dtype: i32,
 ) -> UniquePtr<MlxArray> {
-    let mixed = mlxcel_core::matmul(h_res, streams_f32);
+    let mixed = matmul_per_position(h_res, streams_f32);
     let branch = mlxcel_core::expand_dims(&mlxcel_core::astype(branch, dtype::FLOAT32), -2);
     let post = mlxcel_core::expand_dims(h_post, -1);
     let written = mlxcel_core::add(&mixed, &mlxcel_core::multiply(&post, &branch));

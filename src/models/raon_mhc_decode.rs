@@ -28,7 +28,12 @@
 //!   bit-equal), and products of several rows keep the plain matmul.
 //! - **Site graphs.** The route, aggregate and mix of a single-position step
 //!   run as two compiled graphs ([`RaonMhc::enter`], [`RaonMhc::leave`])
-//!   that replay the eager ops in the same order, bit for bit.
+//!   that replay the eager ops in the same order. On Metal they match the
+//!   eager ops bit for bit; on CUDA the fused kernel may contract a multiply
+//!   and an add into one FMA, so they can differ in the last bit. A
+//!   speculative verify block therefore runs the same graphs one position at
+//!   a time, which keeps each of its rows equal to the decode step it
+//!   replaces on every backend (issue #3474).
 //!
 //! [`DecodeFusion`] (`MLXCEL_RAON_DECODE_FUSION`) turns either off.
 
@@ -163,15 +168,32 @@ impl RaonMhc {
     /// (`[B, L, D]`, rounded once to the stream dtype) and the write-back
     /// coefficients for [`Self::leave`].
     ///
-    /// A single-position step outside a speculative verify block takes the
-    /// compiled graph when `compiled` is set (issue #3458); every other
-    /// shape runs the eager ops. The two are bit-identical, which is what
-    /// keeps a verify block (eager, several positions) equal to the decode
-    /// steps it replaces.
+    /// With `compiled` set (issue #3458), a single-position step takes the
+    /// compiled graph, and so does every position of a speculative verify
+    /// block, one at a time, so each verify row equals its decode step even
+    /// where the compiled graph and the eager ops differ in the last bit
+    /// (CUDA, issue #3474). Every other shape (prefill) runs the eager ops.
     pub fn enter(&self, streams: &MlxArray, compiled: bool) -> (UniquePtr<MlxArray>, MhcSite) {
         let shape = mlxcel_core::array_shape(streams);
-        if compiled && shape[1] == 1 && !mlxcel_core::row_invariant::in_verify_block() {
+        if compiled && shape[1] == 1 {
             return self.enter_compiled(streams, &shape);
+        }
+        if compiled && is_verify_block(&shape) {
+            let steps: Vec<_> = (0..shape[1])
+                .map(|t| {
+                    let step = position(streams, t);
+                    self.enter_compiled(&step, &mlxcel_core::array_shape(&step))
+                })
+                .collect();
+            let x = concat_positions(steps.iter().map(|(x, _)| &**x));
+            let h_post = concat_positions(steps.iter().map(|(_, s)| &*s.h_post));
+            let h_res = concat_positions(steps.iter().map(|(_, s)| &*s.h_res));
+            let site = MhcSite {
+                h_post,
+                h_res,
+                streams_f32: None,
+            };
+            return (x, site);
         }
         let dt = mlxcel_core::array_dtype(streams);
         let route = self.route(streams);
@@ -233,7 +255,42 @@ impl RaonMhc {
                 &site.h_res,
                 mlxcel_core::array_dtype(streams),
             ),
-            None => mlxcel_core::raon_mhc_mix(streams, branch, &site.h_post, &site.h_res),
+            None if mlxcel_core::array_shape(streams)[1] == 1 => {
+                mlxcel_core::raon_mhc_mix(streams, branch, &site.h_post, &site.h_res)
+            }
+            // A verify block's compiled site: one decode-step graph per position.
+            None => {
+                let length = mlxcel_core::array_shape(streams)[1];
+                let steps: Vec<_> = (0..length)
+                    .map(|t| {
+                        mlxcel_core::raon_mhc_mix(
+                            &position(streams, t),
+                            &position(branch, t),
+                            &position(&site.h_post, t),
+                            &position(&site.h_res, t),
+                        )
+                    })
+                    .collect();
+                concat_positions(steps.iter().map(|s| &**s))
+            }
         }
     }
+}
+
+/// Whether `shape` (`[B, L, ..]`) is a single-sequence verify block the
+/// compiled site splits per position.
+fn is_verify_block(shape: &[i32]) -> bool {
+    mlxcel_core::row_invariant::in_verify_block()
+        && shape[0] == 1
+        && (2..=mlxcel_core::row_invariant::MAX_ROWS).contains(&shape[1])
+}
+
+/// Position `t` of axis 1, keeping the axis.
+fn position(x: &MlxArray, t: i32) -> UniquePtr<MlxArray> {
+    mlxcel_core::utils::slice_axis(x, 1, t, t + 1)
+}
+
+fn concat_positions<'a>(parts: impl Iterator<Item = &'a MlxArray>) -> UniquePtr<MlxArray> {
+    let parts: Vec<&MlxArray> = parts.collect();
+    mlxcel_core::concatenate_many(&parts, 1)
 }

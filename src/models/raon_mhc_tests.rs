@@ -222,9 +222,44 @@ fn raw(a: &MlxArray) -> Vec<u8> {
     mlxcel_core::array_to_raw_bytes(a)
 }
 
-/// The compiled decode graphs (issue #3458) equal the eager ops bit for bit:
-/// the branch input and the write-back of a single-position step, in bf16
-/// and f32, at one and several rows, at the real stream width.
+/// The compiled site graphs against the eager ops on one site: bit for bit
+/// on Metal and the CPU; on CUDA and ROCm the fused kernel may contract a
+/// multiply and an add into one FMA (issue #3474), so the two may differ by
+/// rounding there.
+/// Decode exactness does not rest on this: a verify block runs the compiled
+/// graphs too (see the next test).
+fn assert_same_or_close(got: &MlxArray, want: &MlxArray, what: &str) {
+    if !cfg!(any(feature = "cuda", feature = "rocm")) {
+        assert_eq!(raw(got), raw(want), "{what}");
+        return;
+    }
+    let f32s = |a: &MlxArray| -> Vec<f32> {
+        raw(&mlxcel_core::astype(a, dtype::FLOAT32))
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    // About 8 float32 ulps of the largest value, or one bfloat16 ulp of it.
+    let rel = if mlxcel_core::array_dtype(want) == dtype::FLOAT32 {
+        1e-6
+    } else {
+        1.0 / 128.0
+    };
+    let (got, want) = (f32s(got), f32s(want));
+    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let worst = got
+        .iter()
+        .zip(&want)
+        .fold(0f32, |m, (g, w)| m.max((g - w).abs()));
+    assert!(
+        worst <= rel * scale,
+        "{what}: compiled and eager differ by {worst:e} (largest value {scale:e})"
+    );
+}
+
+/// The compiled decode graphs (issue #3458) replay the eager ops: the branch
+/// input and the write-back of a single-position step, in bf16 and f32, at
+/// one and several rows, at the real stream width.
 #[test]
 fn compiled_site_equals_the_eager_site_bit_for_bit() {
     let _guard = guard();
@@ -268,23 +303,28 @@ fn compiled_site_equals_the_eager_site_bit_for_bit() {
                     assert!(eager.streams_f32.is_some(), "{what}: eager path");
                     assert!(compiled.streams_f32.is_none(), "{what}: compiled path");
                     assert_eq!(mlxcel_core::array_dtype(&x_compiled), dt, "{what}");
-                    assert_eq!(raw(&x_compiled), raw(&x_eager), "{what}: branch input");
-                    assert_eq!(raw(&compiled.h_post), raw(&eager.h_post), "{what}: h_post");
-                    assert_eq!(raw(&compiled.h_res), raw(&eager.h_res), "{what}: h_res");
+                    assert_same_or_close(&x_compiled, &x_eager, &format!("{what}: branch input"));
+                    assert_same_or_close(
+                        &compiled.h_post,
+                        &eager.h_post,
+                        &format!("{what}: h_post"),
+                    );
+                    assert_same_or_close(&compiled.h_res, &eager.h_res, &format!("{what}: h_res"));
                     let out_eager = site.leave(&streams, &branch, &eager);
                     let out_compiled = site.leave(&streams, &branch, &compiled);
                     assert_eq!(mlxcel_core::array_dtype(&out_compiled), dt, "{what}");
-                    assert_eq!(raw(&out_compiled), raw(&out_eager), "{what}: write-back");
+                    assert_same_or_close(&out_compiled, &out_eager, &format!("{what}: write-back"));
                 }
             }
         }
     }
 }
 
-/// A step of several positions, and any step inside a speculative verify
-/// block, stays on the eager ops whatever the caller asks for.
+/// With the compiled site on, a single-position step and a speculative
+/// verify block (one compiled step per position) take the compiled graphs;
+/// a prefill of several positions stays on the eager ops.
 #[test]
-fn compiled_site_is_limited_to_single_position_steps_outside_a_verify_block() {
+fn compiled_site_covers_decode_steps_and_verify_blocks_only() {
     let _guard = guard();
     let (n, d) = (4usize, 8usize);
     let w = n * d;
@@ -309,7 +349,65 @@ fn compiled_site_is_limited_to_single_position_steps_outside_a_verify_block() {
         kernel: false,
         verify_block: true,
     });
-    assert!(site.enter(&step, true).1.streams_f32.is_some());
+    assert!(site.enter(&step, true).1.streams_f32.is_none());
+    assert!(site.enter(&block, true).1.streams_f32.is_none());
+    assert!(site.enter(&block, false).1.streams_f32.is_some());
+}
+
+/// Inside a verify block each position of the compiled site equals the
+/// decode step of that position alone, bit for bit, on every backend
+/// (issue #3474): the branch input, the coefficients and the write-back.
+#[test]
+fn a_compiled_verify_block_equals_its_decode_steps_bit_for_bit() {
+    let _guard = guard();
+    let (n, d, l) = (4usize, 64usize, 5i32);
+    let w = n * d;
+    let weights = site_weights(
+        n,
+        d,
+        noise(n * w, 41),
+        noise(n * w, 42),
+        noise(9 * w, 43).iter().map(|v| v * 40.0).collect(),
+        [1.5, 0.7, 3.0],
+        noise(n, 44),
+        noise(n, 45),
+        noise(9, 46).iter().map(|v| v * 8.0).collect(),
+        0.1,
+    );
+    for dt in [dtype::BFLOAT16, dtype::FLOAT32] {
+        let site = RaonMhc::from_weights(&weights, "site", n, d, 1e-5, 2.0, dt).unwrap();
+        let streams = mlxcel_core::astype(
+            &arr(
+                &noise(l as usize * w, 47)
+                    .iter()
+                    .map(|v| v * 6.0)
+                    .collect::<Vec<_>>(),
+                &[1, l, n as i32, d as i32],
+            ),
+            dt,
+        );
+        let branch = mlxcel_core::astype(&arr(&noise(l as usize * d, 48), &[1, l, d as i32]), dt);
+        let (x, out, h_res) = {
+            let _scope =
+                mlxcel_core::row_invariant::Scope::enter(mlxcel_core::row_invariant::Mode {
+                    kernel: false,
+                    verify_block: true,
+                });
+            let (x, block) = site.enter(&streams, true);
+            let out = site.leave(&streams, &branch, &block);
+            (x, out, block.h_res)
+        };
+        for t in 0..l {
+            let at = |a: &MlxArray| mlxcel_core::utils::slice_axis(a, 1, t, t + 1);
+            let (step_streams, step_branch) = (at(&streams), at(&branch));
+            let (step_x, step) = site.enter(&step_streams, true);
+            let step_out = site.leave(&step_streams, &step_branch, &step);
+            let what = format!("dtype {dt} position {t}");
+            assert_eq!(raw(&at(&x)), raw(&step_x), "{what}: branch input");
+            assert_eq!(raw(&at(&h_res)), raw(&step.h_res), "{what}: h_res");
+            assert_eq!(raw(&at(&out)), raw(&step_out), "{what}: write-back");
+        }
+    }
 }
 
 #[test]
