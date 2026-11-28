@@ -32,6 +32,7 @@ both hold the same new_residual. For every row whose normed output differs:
 """
 
 import json
+import os
 import struct
 import sys
 
@@ -39,6 +40,8 @@ import numpy as np
 
 EPS = 1e-5
 SEARCH = 24
+# MLX rms_norm_small<bf16, 128, 2, _, 8>: block * chunks * reads.
+MODELED_DIM = 128 * 2 * 8
 
 
 def read_bf16(path):
@@ -59,10 +62,22 @@ def bf16_key(a):
 
 
 def read_weight(model_dir, name):
-    with open(f"{model_dir}/model.safetensors", "rb") as f:
+    """One BF16 tensor of a single-file checkpoint; exits on a malformed header."""
+    path = f"{model_dir}/model.safetensors"
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
-        entry = json.loads(f.read(n))[name]
+        if n > size - 8:
+            sys.exit(f"{path}: header length {n} exceeds the file size {size}")
+        header = json.loads(f.read(n))
+        if name not in header:
+            sys.exit(f"{path}: no tensor {name} (is this a sharded checkpoint?)")
+        entry = header[name]
+        if entry.get("dtype") != "BF16":
+            sys.exit(f"{path}: {name} is {entry.get('dtype')}, this script reads BF16")
         start, end = entry["data_offsets"]
+        if not 0 <= start <= end <= size - 8 - n or (end - start) % 2:
+            sys.exit(f"{path}: {name} data offsets {start}..{end} are outside the file")
         f.seek(8 + n + start)
         bits = np.frombuffer(f.read(end - start), dtype=np.uint16)
     return (bits.astype(np.uint32) << 16).view(np.float32)
@@ -119,9 +134,16 @@ def fits(x, w, row, exact):
 
 
 def main():
+    if len(sys.argv) != 5 or not sys.argv[4].isdigit():
+        sys.exit("usage: fused_norm_normalizer_fit.py MODEL_DIR GRAPH_DUMP FUSED_DUMP LAYER")
     model_dir, graph_dir, fused_dir, layer = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
     w = read_weight(model_dir, f"model.layers.{layer}.post_attention_layernorm.weight")
     dim = w.size
+    if dim != MODELED_DIM:
+        sys.exit(
+            f"the summation orders modelled here are those of bf16 dim {MODELED_DIM} "
+            f"(MLX 128 threads x 2 chunks x 8 reads, fused 512 lanes x 4); this layer is {dim} wide"
+        )
     h = read_bf16(f"{graph_dir}/L{layer:02d}_h.bin").reshape(-1, dim)
     if not (read_bf16(f"{fused_dir}/L{layer:02d}_h.bin").reshape(-1, dim) == h).all():
         sys.exit("the two dumps do not hold the same new_residual")

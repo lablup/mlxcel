@@ -68,6 +68,28 @@ impl DumpWriter {
     }
 }
 
+/// Bytes per element of the dtypes this probe writes and decodes.
+fn dtype_size(dt: i32) -> Result<usize> {
+    match dt {
+        dtype::BFLOAT16 | dtype::FLOAT16 => Ok(2),
+        dtype::FLOAT32 => Ok(4),
+        other => bail!("dtype {other} is not a dtype this probe dumps"),
+    }
+}
+
+/// A manifest name becomes a file name inside the dump directory, so it must
+/// not be able to point anywhere else.
+fn check_tensor_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        bail!("tensor name {name:?} is empty, holds a path separator or `..`");
+    }
+    Ok(())
+}
+
+/// Read every tensor of a dump, checking each manifest entry against its file
+/// before anything is handed to `from_bytes`, which trusts the shape: the name
+/// stays inside the directory, the dtype is known, no dimension is negative,
+/// and the element count times the element size equals the file size.
 pub fn read_dump(dir: &Path) -> Result<Vec<Dumped>> {
     let manifest = std::fs::read_to_string(dir.join("manifest.csv"))
         .with_context(|| format!("no manifest.csv in {}", dir.display()))?;
@@ -77,25 +99,42 @@ pub fn read_dump(dir: &Path) -> Result<Vec<Dumped>> {
         let (Some(name), Some(dt), Some(shape)) = (parts.next(), parts.next(), parts.next()) else {
             bail!("malformed manifest line {line:?}");
         };
+        check_tensor_name(name)?;
+        let dt: i32 = dt.parse()?;
+        let elem_size = dtype_size(dt).with_context(|| format!("tensor {name}"))?;
         let shape = shape
             .split('x')
             .map(str::parse)
             .collect::<Result<Vec<i32>, _>>()?;
+        if let Some(dim) = shape.iter().find(|d| **d < 0) {
+            bail!("tensor {name}: negative dimension {dim} in shape {shape:?}");
+        }
+        let expected = shape
+            .iter()
+            .try_fold(elem_size, |acc, &d| acc.checked_mul(d as usize))
+            .with_context(|| format!("tensor {name}: shape {shape:?} overflows"))?;
+        let bytes = std::fs::read(dir.join(format!("{name}.bin")))?;
+        if bytes.len() != expected {
+            bail!(
+                "tensor {name}: shape {shape:?} needs {expected} bytes, {name}.bin holds {}",
+                bytes.len()
+            );
+        }
         out.push(Dumped {
             name: name.to_string(),
-            dtype: dt.parse()?,
+            dtype: dt,
             shape,
-            bytes: std::fs::read(dir.join(format!("{name}.bin")))?,
+            bytes,
         });
     }
     Ok(out)
 }
 
-pub fn read_one(dir: &Path, name: &str) -> Result<Dumped> {
-    read_dump(dir)?
-        .into_iter()
+/// Look a tensor up by name in an already read dump.
+pub fn find<'a>(dump: &'a [Dumped], name: &str) -> Result<&'a Dumped> {
+    dump.iter()
         .find(|d| d.name == name)
-        .with_context(|| format!("{name} is not in the dump at {}", dir.display()))
+        .with_context(|| format!("{name} is not in the dump"))
 }
 
 impl Dumped {

@@ -27,7 +27,7 @@ use mlxcel::models::Llama3Model;
 use mlxcel_core::layers::graph_add_rms_norm;
 use mlxcel_core::{UniquePtr, dtype};
 
-use crate::tensors::{Deviation, DumpWriter, decode, read_one};
+use crate::tensors::{Deviation, DumpWriter, decode, find, read_dump};
 
 /// Round an f32 to bf16 (nearest, ties to even) and back.
 fn round_bf16(v: f32) -> f32 {
@@ -76,10 +76,12 @@ pub fn run(model: &Llama3Model, dump: &Path, out: Option<&Path>) -> Result<()> {
         )),
         None => None,
     };
+    // One read of the whole dump; each layer looks its two tensors up by name.
+    let tensors = read_dump(dump)?;
     let mut first = None;
     for (i, layer) in model.layers.iter().enumerate() {
-        let x = read_one(dump, &format!("L{i:02}_x"))?;
-        let attn = read_one(dump, &format!("L{i:02}_attn_out"))?;
+        let x = find(&tensors, &format!("L{i:02}_x"))?;
+        let attn = find(&tensors, &format!("L{i:02}_attn_out"))?;
         if x.dtype != dtype::BFLOAT16 {
             bail!("this diff decodes bf16 activations, got dtype {}", x.dtype);
         }

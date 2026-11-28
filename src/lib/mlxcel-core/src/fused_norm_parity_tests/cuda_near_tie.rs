@@ -16,8 +16,10 @@
 //! not (issue #3501).
 //!
 //! On CUDA the two are not byte-identical, unlike the ROCm port. MLX's
-//! `rms_norm` at bf16 dim 2048 launches `rms_norm_small<bf16, 128, 2, true, 8>`
-//! (128 threads, two 8-wide chunks each, four warp partials); the fused kernel
+//! `rms_norm` at bf16 dim 2048 launches `rms_norm_small` with a 128-thread
+//! block and two 8-wide chunks per thread (four warp partials; its `ALIGNED`
+//! argument was not observed and selects only the load function, not the
+//! summation order); the fused kernel
 //! launches 512 threads of 4 elements and folds 16 warp partials. Both use the
 //! same xor-butterfly warp reduction, but the different partition sums the
 //! squares in a different fp32 order, so the normalizer can differ in its last
@@ -63,6 +65,8 @@ fn bf16_key(v: f32) -> i64 {
 
 /// Normalizer offsets searched around the fp32 rounding of the exact one.
 const NORMALIZER_ULPS: i32 = 32;
+/// Seeds of 4096 rows each. More seeds make a chance-zero count less likely.
+const SEEDS: u64 = 6;
 
 /// Whether some fp32 normalizer within [`NORMALIZER_ULPS`] of the exact one
 /// reproduces `got` from `row` and `weight` by the graph's formula,
@@ -98,7 +102,7 @@ fn cuda_fused_add_rms_norm_differs_from_the_graph_only_by_its_normalizer() {
     };
     let (rows, dim) = (4096, 2048);
     let mut differing_rows = 0usize;
-    for seed in 0..4u64 {
+    for seed in 0..SEEDS {
         let (delta, residual, weight) = random_case(7000 + seed, rows, dim, dtype::BFLOAT16);
         let (normed, new_residual) = run_fused(&delta, &residual, &weight, EPS, 0.0);
         let norm = RMSNorm::new(copy(&weight), EPS);
@@ -143,13 +147,16 @@ fn cuda_fused_add_rms_norm_differs_from_the_graph_only_by_its_normalizer() {
     }
     eprintln!(
         "bf16 dim {dim}: {differing_rows} of {} rows differ by normalizer rounding",
-        4 * rows
+        SEEDS as usize * rows as usize
     );
-    // Measured 4 of 16384 on GB10. Zero would mean the kernel now matches
-    // MLX's reduction order: switch this to the ROCm-style byte-identity pin.
+    // Measured on GB10 (6 seeds: 5 of 24576 rows; 4 of 16384 with the first four). Zero is possible by chance
+    // if MLX's reduction order moves, so a failure here is a prompt to look,
+    // not proof of byte identity.
     assert!(
         differing_rows > 0,
-        "the CUDA fused kernel is now byte-identical to the graph on these inputs; \
-         replace this test with a byte-identity test like the ROCm one"
+        "no row differs from the graph on these inputs. Before concluding the CUDA fused \
+         kernel now matches MLX, check MLX's dim-2048 dispatch (`dispatch_num_chunks` block \
+         size and chunk count in rms_norm.cu) against `fused_norm_threads`; only if the \
+         geometry matches, replace this test with a byte-identity pin like the ROCm one"
     );
 }

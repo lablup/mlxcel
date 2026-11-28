@@ -84,7 +84,7 @@ struct Args {
     model: Option<PathBuf>,
 
     /// Synthesized prompt length in tokens.
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = 128, value_parser = parse_nonzero)]
     prompt_tokens: usize,
 
     /// Teacher-force the decode on these whitespace-separated token ids.
@@ -105,7 +105,7 @@ struct Args {
     out: Option<PathBuf>,
 
     /// The route this process must have taken: `graph`, `fused` or `oxide`.
-    #[arg(long)]
+    #[arg(long, value_parser = ["graph", "fused", "oxide"])]
     expect_route: Option<String>,
 
     /// Diff two dump directories and exit.
@@ -115,6 +115,15 @@ struct Args {
     /// Feed this dump's per-layer inputs to both join implementations and exit.
     #[arg(long, value_name = "DUMP")]
     op_diff: Option<PathBuf>,
+}
+
+/// A prompt length of at least one token.
+fn parse_nonzero(raw: &str) -> Result<usize, String> {
+    match raw.parse::<usize>() {
+        Ok(0) => Err("an empty prompt has no last position to score".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Top two of a logits row, by value, ties to the lower id (MLX's argmax).
@@ -274,6 +283,17 @@ fn run_steps(args: &Args, model_dir: &Path, out: &Path) -> Result<()> {
     let mut input_token = *prompt.last().context("empty prompt")?;
     for step in 0..args.max_tokens {
         let (row, sha) = logits_row(&logits);
+        if step == 0
+            && let Some(stream) = &forced
+            && let Some(bad) = stream
+                .iter()
+                .find(|&&id| id < 0 || id as usize >= row.len())
+        {
+            bail!(
+                "--tokens holds id {bad}, outside the vocabulary of {} logits",
+                row.len()
+            );
+        }
         let t = top2(&row);
         let argmax = t.first.0 as i32;
         let next = match &forced {
@@ -342,6 +362,9 @@ fn run_steps(args: &Args, model_dir: &Path, out: &Path) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
     if let Some(dirs) = &args.compare {
+        if args.expect_route.is_some() {
+            bail!("--expect-route does not apply to --compare, which runs no model");
+        }
         return tensors::compare_dumps(&dirs[0], &dirs[1]);
     }
     let model_dir = args.model.clone().context("--model is required")?;
@@ -351,7 +374,18 @@ fn main() -> Result<()> {
     let _runtime = mlxcel::initialize_runtime();
     if let Some(dump) = &args.op_diff {
         let model = load_llama(&model_dir)?;
-        return op_diff::run(&model, dump, args.out.as_deref());
+        let result = op_diff::run(&model, dump, args.out.as_deref());
+        // The op diff calls both joins directly, so this names the process's
+        // switch (or counters), which the diff itself does not depend on.
+        let (route, source) = observed_route();
+        println!("[op-diff] route {route} ({source})");
+        result?;
+        if let Some(expected) = &args.expect_route
+            && expected != route
+        {
+            bail!("expected route {expected}, this process took {route} ({source})");
+        }
+        return Ok(());
     }
     let out = args
         .out
