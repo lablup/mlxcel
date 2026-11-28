@@ -54,6 +54,49 @@
 //   passes the same rules on load or is a miss, and the variables are read from
 //   the process environment, since the C runtime's copy does not hold what
 //   ensure_persistent_ptx_cache set. An empty MLX_PTX_CACHE_DIR counts as unset.
+// - Disk cache under a container volume root (lablup/mlxcel#3503, POSIX only;
+//   the rules are in ptx_cache_trust.h). A volume root given to a nonroot pod
+//   is root-owned and group-writable (fsGroup, mode 2775) or mode 0777, and
+//   the process cannot change it, so the walk above refused every such cache.
+//   Two rules accept one:
+//   Rule 1, no opt-in. A component that its group can write, and others
+//   cannot, passes when that group is the trusted gid passed to
+//   set_ptx_cache_trusted_group. mlxcel's binaries pass the effective gid only
+//   when mlxcel-core's private_group.rs proves from /etc/nsswitch.conf,
+//   /etc/group and /etc/passwd that no other account is in it, so the bit
+//   grants nothing to anyone else. It is a call, not an environment variable,
+//   so a launcher cannot name a shared group. Cache entries keep their rule.
+//   Rule 2, opt-in. MLXCEL_CACHE_TRUSTED_ROOT=<absolute dir> names an existing
+//   directory that a proper prefix of the cache path, as given, resolves to.
+//   The root and the directories above it are then not judged by owner or
+//   mode (they must still exist and not be symlinks). Each component below it
+//   is created with mode 0700 if missing, opened from its parent's descriptor
+//   with O_NOFOLLOW, and must be a directory owned by the current user (root
+//   does not count there) that neither group nor others can write. The device
+//   subdirectory's descriptor is kept, and entries are read, published and
+//   discarded through it. An unusable value is ignored with one line,
+//   `mlxcel: MLXCEL_CACHE_TRUSTED_ROOT ignored: <reason>`, and the walk
+//   applies.
+//   Threat model of Rule 2. The adversary is another uid that can write the
+//   trusted root, which is what the opt-in declares harmless above the cache.
+//   It can delete or rename what sits directly in the root, plant a symlink
+//   or a directory of its own at the cache's first component, or create that
+//   name first. Each of those turns the cache off or cold (kernels compile
+//   again); none gets a file the adversary owns loaded, because every
+//   component below the root and every entry is owner-checked, and none
+//   redirects a running process, because the entries come through the pinned
+//   descriptor, not the path. Not covered: the adversary can rename another
+//   directory of this user that also sits directly in the root to the cache's
+//   first component (before the process starts; later the descriptor is
+//   already held). The owner checks pass, and a file there named and placed
+//   like a cache entry would be loaded. So the opt-in is sound only when no
+//   one else can write the root, or when the user's other directories directly
+//   under it hold no <...>/sm<cc>-nvrtc<ver>/<module>.ptx tree of someone
+//   else's choosing; a model store beside the cache holds downloaded file
+//   names. Processes with the same uid are one trust domain, as before: a
+//   volume shared by pods that run as one uid is one shared cache.
+//   The test-only MLXCEL_PTX_CACHE_TEST_TRUSTED_GID (`none` or a gid) replaces
+//   the trusted gid, under MLXCEL_PTX_CACHE_TEST_HOOKS only.
 // - A caller can opt one module out of the disk cache (DiskCache::Bypass,
 //   #2833): the cuda-oxide fused RMSNorm module is a precompiled payload
 //   validated against its manifest, and a cache hit would load bytes that were
@@ -68,6 +111,7 @@
 #include "cuda_jit_sources.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <mutex>
@@ -94,6 +138,7 @@
 
 // After the backend's headers: on Windows it brings in <windows.h>.
 #include "mlx/backend/cuda/ptx_cache_dir.h"
+#include "mlx/backend/cuda/ptx_cache_trust.h"
 
 #if defined(_WIN32)
 #include <process.h>
@@ -103,6 +148,20 @@ namespace mlx::core::cu {
 
 // Defined in dirs.cpp to avoid invalidating compile cache.
 const char* cccl_dir();
+
+namespace {
+
+// [mlxcel #3503] The gid Rule 1 trusts, or -1. See ptx_cache_dir.h.
+std::atomic<std::int64_t>& trusted_group_storage() {
+  static std::atomic<std::int64_t> gid{-1};
+  return gid;
+}
+
+} // namespace
+
+void set_ptx_cache_trusted_group(std::int64_t gid) {
+  trusted_group_storage().store(gid < 0 ? -1 : gid);
+}
 
 namespace {
 
@@ -370,62 +429,123 @@ bool make_private_directories(const std::filesystem::path& dir) {
   return true;
 }
 
+// [mlxcel #3503] The trusted gid the walk uses: what
+// set_ptx_cache_trusted_group stored, or, in a build with the test hooks,
+// what MLXCEL_PTX_CACHE_TEST_TRUSTED_GID says (`none` or a decimal gid; any
+// other value is ignored). The hook wins in both directions, so a test's
+// outcome does not depend on how the host's groups are set up.
+std::int64_t ptx_cache_trusted_group() {
+#if defined(MLXCEL_PTX_CACHE_TEST_HOOKS)
+  if (const char* value = std::getenv("MLXCEL_PTX_CACHE_TEST_TRUSTED_GID");
+      value != nullptr && *value != '\0') {
+    const std::string_view text(value);
+    if (text == "none") {
+      return -1;
+    }
+    if (text.size() <= 10 && std::all_of(text.begin(), text.end(), [](char c) {
+          return c >= '0' && c <= '9';
+        })) {
+      return std::strtoll(value, nullptr, 10);
+    }
+  }
+#endif
+  return trusted_group_storage().load();
+}
+
 // [mlxcel #2539] Whether |dir| is safe to load compiled modules from. On a
 // multi-user host, whoever can write the cache directory, or replace it
 // through a parent they can write, can plant modules under derivable names
 // that load into this process. So every component of the canonical path,
 // from the leaf up to /, must be owned by the current user or by root and
 // must not be group- or other-writable, unless it is root-owned with the
-// sticky bit set (/tmp). Trusting the leaf alone is not enough: the owner of
-// a parent can rename the leaf away and put their own in its place. On
-// success |resolved| holds the canonical path, which callers use from then on
-// so a symlink component swapped in after the check cannot redirect them. On
-// failure |reason| names the offending component.
+// sticky bit set (/tmp) or, [mlxcel #3503], only its group can write it and
+// that group is the trusted one. Trusting the leaf alone is not enough: the
+// owner of a parent can rename the leaf away and put their own in its place.
+// On success |resolved| holds the canonical path, which callers use from then
+// on so a symlink component swapped in after the check cannot redirect them.
+// On failure |reason| names the offending component. The rules themselves
+// are in ptx_cache_trust.h, which the host tests run.
 bool cache_dir_is_trusted(
     const std::filesystem::path& dir,
     std::filesystem::path& resolved,
     std::string& reason) {
-  std::error_code error;
-  auto canonical = std::filesystem::canonical(dir, error);
-  if (error) {
-    reason = fmt::format("{} cannot be resolved ({})", dir.string(), error.message());
-    return false;
+  return ptx_cache_dir_is_trusted(
+      dir, ::geteuid(), ptx_cache_trusted_group(), resolved, reason);
+}
+
+// [mlxcel #3503] The valid MLXCEL_CACHE_TRUSTED_ROOT of this process, set
+// while ptx_cache_dir() resolves the cache directory; root is empty when
+// there is none and the walk decides. device_cache_dir reads it only after
+// ptx_cache_dir() returned.
+PtxTrustedRoot& active_trusted_root() {
+  static auto* root = new PtxTrustedRoot;
+  return *root;
+}
+
+// [mlxcel #3503] Directories opened by the descent under the trusted root,
+// with the descriptor that pins each. Leaked like get_jit_module's cache.
+struct PinnedCacheDir {
+  std::string prefix; // the directory's path with a trailing separator
+  int fd;
+};
+std::mutex& pinned_cache_dirs_mutex() {
+  static auto* mtx = new std::mutex;
+  return *mtx;
+}
+std::vector<PinnedCacheDir>& pinned_cache_dirs() {
+  static auto* dirs = new std::vector<PinnedCacheDir>;
+  return *dirs;
+}
+
+void pin_cache_dir(const std::filesystem::path& dir, int fd) {
+  std::lock_guard<std::mutex> lock(pinned_cache_dirs_mutex());
+  pinned_cache_dirs().push_back({dir.string() + "/", fd});
+}
+
+// [mlxcel #3503] How to reach the cache file or directory |path|: through the
+// descriptor of the pinned directory that holds it, by its name relative to
+// that directory, or by the path itself (AT_FDCWD) when no pinned directory
+// holds it, which is every case without a trusted root. Under a trusted root
+// the path's first component below the root can be replaced at any time by
+// whoever can write the root; the descriptor still refers to the directory
+// the descent checked.
+struct CacheEntryRef {
+  int dir_fd;
+  std::string name;
+};
+CacheEntryRef cache_entry_ref(const std::filesystem::path& path) {
+  std::string name = path.string();
+  std::lock_guard<std::mutex> lock(pinned_cache_dirs_mutex());
+  for (const auto& pinned : pinned_cache_dirs()) {
+    if (name.size() > pinned.prefix.size() &&
+        name.compare(0, pinned.prefix.size(), pinned.prefix) == 0) {
+      name.erase(0, pinned.prefix.size());
+      return {pinned.fd, std::move(name)};
+    }
   }
-  const uid_t euid = ::geteuid();
-  bool leaf = true;
-  for (auto component = canonical;; component = component.parent_path()) {
+  return {AT_FDCWD, std::move(name)};
+}
+
+// [mlxcel #3503] make_private_directories for the directory |dir| holds
+// entries in: by path without a pinned directory, exactly as before, and
+// through the descriptor with one.
+bool make_private_entry_directories(const std::filesystem::path& dir) {
+  const auto ref = cache_entry_ref(dir);
+  if (ref.dir_fd == AT_FDCWD) {
+    return make_private_directories(dir);
+  }
+  std::filesystem::path partial;
+  for (const auto& part : std::filesystem::path(ref.name)) {
+    partial /= part;
+    if (::mkdirat(ref.dir_fd, partial.c_str(), 0700) == 0 || errno == EEXIST) {
+      continue;
+    }
     struct stat st;
-    if (::lstat(component.c_str(), &st) != 0) {
-      reason = fmt::format("{} cannot be inspected", component.string());
+    if (::fstatat(ref.dir_fd, partial.c_str(), &st, 0) != 0 ||
+        !S_ISDIR(st.st_mode)) {
       return false;
-    }
-    // canonical() resolved every link; one here was swapped in since.
-    if (S_ISLNK(st.st_mode)) {
-      reason = fmt::format("{} is a symbolic link", component.string());
-      return false;
-    }
-    if (leaf && !S_ISDIR(st.st_mode)) {
-      reason = fmt::format("{} is not a directory", component.string());
-      return false;
-    }
-    if (st.st_uid != euid && st.st_uid != 0) {
-      reason = fmt::format(
-          "{} is not owned by the current user", component.string());
-      return false;
-    }
-    const bool shared_write = (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
-    const bool root_sticky = st.st_uid == 0 && (st.st_mode & S_ISVTX) != 0;
-    if (shared_write && !root_sticky) {
-      reason = fmt::format(
-          "{} is group- or other-writable", component.string());
-      return false;
-    }
-    leaf = false;
-    if (component == component.root_path()) {
-      break;
     }
   }
-  resolved = std::move(canonical);
   return true;
 }
 #endif
@@ -506,6 +626,37 @@ const std::filesystem::path& ptx_cache_dir() {
         return std::filesystem::path();
       }
     }
+    // [mlxcel #3503] A valid MLXCEL_CACHE_TRUSTED_ROOT replaces the walk by
+    // the descent from that root, which also creates what is missing. The
+    // split is taken on the path as given, before weakly_canonical below
+    // would resolve a symlink planted under the root. An unusable value is
+    // reported here, apart from report_cache_disabled, whose single notice
+    // would otherwise be spent before a refusal by the walk.
+    {
+      PtxTrustedRoot trusted_root;
+      std::string ignored;
+      if (resolve_ptx_trusted_root(
+              env.trusted_root, cache, trusted_root, ignored)) {
+        std::string reason;
+        const int fd = open_ptx_cache_below_trusted_root(
+            trusted_root.root, trusted_root.below, ::geteuid(), reason);
+        if (fd < 0) {
+          report_cache_disabled(reason);
+          return std::filesystem::path();
+        }
+        ::close(fd);
+        auto trusted = trusted_root.root / trusted_root.below;
+        active_trusted_root() = std::move(trusted_root);
+        return trusted;
+      }
+      if (!ignored.empty()) {
+        std::fprintf(
+            stderr,
+            "mlxcel: MLXCEL_CACHE_TRUSTED_ROOT ignored: %s\n",
+            ignored.c_str());
+        std::fflush(stderr);
+      }
+    }
     // [mlxcel #2765] Resolve `..` before creating anything. The component
     // walk below would otherwise create <dir>/missing for <dir>/missing/../cache
     // and step back out of it, leaving a stray directory. weakly_canonical
@@ -579,7 +730,13 @@ bool read_trusted_cache_entry(
         ::close(fd);
       }
     }
-  } guard{::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
+  } guard{-1};
+  // [mlxcel #3503] Through the pinned directory when there is one.
+  const auto ref = cache_entry_ref(path);
+  guard.fd = ::openat(
+      ref.dir_fd,
+      ref.name.c_str(),
+      O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   const int fd = guard.fd;
   if (fd < 0) {
     return false;
@@ -761,7 +918,7 @@ void write_cached_ptx(
 #else
     // [mlxcel #2539] Nested directories (module names over 245 characters)
     // are private like the cache directory itself.
-    if (!make_private_directories(parent)) {
+    if (!make_private_entry_directories(parent)) {
       return;
     }
 #endif
@@ -813,24 +970,6 @@ void write_cached_ptx(
       file.close();
       written = !file.fail();
     }
-#else
-    // [mlxcel #2539] Create the temporary exclusively and without following
-    // a symlink. Upstream's std::ofstream opened an existing path, so a
-    // symlink planted at a predicted temporary name was written through,
-    // to wherever it pointed. Any failure here (EEXIST from a planted file
-    // or symlink, ELOOP) leaves this entry unpublished and the cache cold
-    // for this kernel, whose compiled code is still used; the path is not
-    // ours, so it is not removed either.
-    int fd = ::open(
-        tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd < 0) {
-      return false;
-    }
-    written = write_all(fd, data, size);
-    if (::close(fd) != 0) {
-      written = false;
-    }
-#endif
     std::error_code error;
     if (written) {
       std::filesystem::rename(tmp, path, error);
@@ -840,6 +979,42 @@ void write_cached_ptx(
     }
     std::filesystem::remove(tmp, error);
     return false;
+#else
+    // [mlxcel #2539] Create the temporary exclusively and without following
+    // a symlink. Upstream's std::ofstream opened an existing path, so a
+    // symlink planted at a predicted temporary name was written through,
+    // to wherever it pointed. Any failure here (EEXIST from a planted file
+    // or symlink, ELOOP) leaves this entry unpublished and the cache cold
+    // for this kernel, whose compiled code is still used; the path is not
+    // ours, so it is not removed either.
+    // [mlxcel #3503] The temporary is created, renamed and removed through
+    // the pinned directory when there is one (cache_entry_ref); otherwise
+    // these are the same calls by path as before.
+    const auto tmp_ref = cache_entry_ref(tmp);
+    const auto path_ref = cache_entry_ref(path);
+    int fd = ::openat(
+        tmp_ref.dir_fd,
+        tmp_ref.name.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        0600);
+    if (fd < 0) {
+      return false;
+    }
+    written = write_all(fd, data, size);
+    if (::close(fd) != 0) {
+      written = false;
+    }
+    if (written &&
+        ::renameat(
+            tmp_ref.dir_fd,
+            tmp_ref.name.c_str(),
+            path_ref.dir_fd,
+            path_ref.name.c_str()) == 0) {
+      return true;
+    }
+    ::unlinkat(tmp_ref.dir_fd, tmp_ref.name.c_str(), 0);
+    return false;
+#endif
   };
 
   // Write the mangled names, then the compiled code
@@ -939,7 +1114,21 @@ std::filesystem::path device_cache_dir(Device& device) {
 #else
   std::filesystem::path trusted;
   std::string reason;
-  if (make_owned_directory(dir, reason) &&
+  if (const auto& trusted_root = active_trusted_root();
+      !trusted_root.root.empty()) {
+    // [mlxcel #3503] Under a trusted root the whole chain is opened again
+    // from the root, and the descriptor is kept for the entries.
+    const int fd = open_ptx_cache_below_trusted_root(
+        trusted_root.root, trusted_root.below / key, ::geteuid(), reason);
+    if (fd >= 0) {
+      pin_cache_dir(dir, fd);
+    } else {
+      if (!reason.empty()) {
+        report_cache_disabled(reason);
+      }
+      dir.clear();
+    }
+  } else if (make_owned_directory(dir, reason) &&
       cache_dir_is_trusted(dir, trusted, reason)) {
     dir = std::move(trusted);
   } else {
@@ -1230,8 +1419,14 @@ JitModule::JitModule(
         module_ = nullptr;
       }
       auto bad_path = get_ptx_path(cache_dir, module_name);
+#if defined(_WIN32)
       std::error_code remove_error;
       std::filesystem::remove(bad_path, remove_error);
+#else
+      // [mlxcel #3503] Through the pinned directory when there is one.
+      const auto bad_ref = cache_entry_ref(bad_path);
+      ::unlinkat(bad_ref.dir_fd, bad_ref.name.c_str(), 0);
+#endif
       compile_and_publish();
       load_module(module_name, ptx, ptx_kernels, module_, kernels_);
     }

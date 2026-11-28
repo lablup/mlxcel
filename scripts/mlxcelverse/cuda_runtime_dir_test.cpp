@@ -16,8 +16,11 @@
 // (lablup/mlxcel#2640): choose_cuda_runtime_dir(), cuda_runtime_marker(),
 // missing_runtime_preloads() and choose_cuda_include_dir() from the CUDA
 // overlay's runtime_dir.h. None touches the file system or CUDA, so the test
-// runs on any host.
+// runs on any host. On POSIX it also runs the PTX cache directory's trust
+// rules (lablup/mlxcel#3503, ptx_cache_trust.h) against real directories
+// under the temp directory; see cuda_runtime_dir_test.ptx_trust.inc.
 #include "mlx/backend/cuda/ptx_cache_dir.h"
+#include "mlx/backend/cuda/ptx_cache_trust.h"
 #include "mlx/backend/cuda/runtime_dir.h"
 
 #include <cstdio>
@@ -321,6 +324,10 @@ void test_include_dir() {
       "include: nothing qualifies");
 }
 
+#if !defined(_WIN32)
+#include "cuda_runtime_dir_test.ptx_trust.inc"
+#endif
+
 } // namespace
 
 // lablup/mlxcel#2797: a relative MLX_PTX_CACHE_DIR, or MLXCEL_CACHE_DIR when it
@@ -333,39 +340,42 @@ void test_ptx_cache_env() {
 
   check(ptx_cache_env_refusal(PtxCacheEnv{}).empty(), "ptx env: all unset");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{absolute, {}}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{absolute, {}, {}}).empty(),
       "ptx env: absolute override");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{{}, absolute}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{{}, absolute, {}}).empty(),
       "ptx env: absolute root");
   // An empty override is unset, so the root decides.
   check(
-      !ptx_cache_env_refusal(PtxCacheEnv{{}, "rel"}).empty(),
+      !ptx_cache_env_refusal(PtxCacheEnv{{}, "rel", {}}).empty(),
       "ptx env: an empty override leaves a relative root to refuse");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{absolute, "rel"}).empty(),
+      ptx_cache_env_refusal(PtxCacheEnv{absolute, "rel", {}}).empty(),
       "ptx env: a relative root is unused under an absolute override");
 
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{"rel/cache", absolute}) ==
+      ptx_cache_env_refusal(PtxCacheEnv{"rel/cache", absolute, {}}) ==
           "MLX_PTX_CACHE_DIR must be an absolute path, got \"rel/cache\"",
       "ptx env: relative override");
   check(
-      ptx_cache_env_refusal(PtxCacheEnv{{}, "./rel"}) ==
+      ptx_cache_env_refusal(PtxCacheEnv{{}, "./rel", {}}) ==
           "MLXCEL_CACHE_DIR must be an absolute path, got \"./rel\"",
       "ptx env: relative root");
 #if defined(_WIN32)
   check(
-      !ptx_cache_env_refusal(PtxCacheEnv{"\\cache", {}}).empty(),
+      !ptx_cache_env_refusal(PtxCacheEnv{"\\cache", {}, {}}).empty(),
       "ptx env: a rooted path without a drive is relative");
   check(
-      !ptx_cache_env_refusal(PtxCacheEnv{"C:cache", {}}).empty(),
+      !ptx_cache_env_refusal(PtxCacheEnv{"C:cache", {}, {}}).empty(),
       "ptx env: a drive-relative path is relative");
 #endif
 }
 
 int main() {
   test_ptx_cache_env();
+#if !defined(_WIN32)
+  test_ptx_cache_trust();
+#endif
   test_runtime_dir();
   test_marker();
   test_runtime_preloads();
