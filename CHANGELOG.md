@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The CUDA fused residual-add + RMSNorm kernel is byte-identical to the default path** (#3510). With `MLXCEL_FUSED_ADD_RMSNORM=1` on CUDA, both outputs now equal the `add` + `fast_rms_norm` pair bit for bit for every dtype pair and row width, so opting in no longer changes greedy text. The kernel sums the squares in the order of MLX's own `rms_norm` (its block width and vector width per row length and compute dtype) instead of its own, which had left a `normed` element one or two bf16 ulps away on a few rows in ten thousand and could break an exact logit tie the other way (#3501). The opt-in cuda-oxide artifact was regenerated with the same geometry and stays bit-identical to the kernel; an artifact built before this change is refused at install. The default is unchanged (off on CUDA), and Metal and ROCm are untouched ([results](docs/benchmark_results/cuda-fused-norm-byte-identity-gb10-2026-11-28/README.md)).
+
 ## [v0.9.0-beta.3] - 2026-11-28
 
 ### Added
