@@ -67,6 +67,8 @@ pub(crate) fn unix_millis(t: SystemTime) -> i64 {
 }
 
 /// Unix microseconds, rounded toward the past (`chrono` `timestamp_micros()`).
+// Only the WebUI request ids read it outside the tests.
+#[cfg(any(feature = "webui", test))]
 pub(crate) fn unix_micros(t: SystemTime) -> i64 {
     unix_nanos_wide(t).div_euclid(1_000) as i64
 }
@@ -111,6 +113,8 @@ pub(crate) fn rfc3339_seconds_z(t: SystemTime) -> String {
 /// RFC 3339 in UTC with a `+00:00` offset and the shortest of no, 3, 6 or 9
 /// fraction digits that holds the sub-second part exactly:
 /// `2026-11-26T16:07:00.123456+00:00` (`chrono` `to_rfc3339()`).
+// Only the WebUI runtime snapshot reads it outside the tests.
+#[cfg(any(feature = "webui", test))]
 pub(crate) fn rfc3339(t: SystemTime) -> String {
     let dt = utc_civil(t);
     let nanos = dt.subsec_nanosecond();
@@ -177,7 +181,8 @@ pub(crate) fn unix_millis_now() -> i64 {
 ///
 /// Used by: the `req_{micros}` request ids built in `app.rs`,
 /// `router_server.rs`, `webui/events.rs`, `webui/library.rs` and
-/// `webui/security.rs`.
+/// `webui/security.rs`, every one behind the `webui` feature.
+#[cfg(feature = "webui")]
 pub(crate) fn unix_micros_now() -> i64 {
     unix_micros(SystemTime::now())
 }
@@ -201,7 +206,8 @@ pub(crate) fn rfc3339_seconds_z_now() -> String {
 /// [`rfc3339`] of the current time.
 ///
 /// Used by: the runtime snapshot `sampled_at` / `measured_at` in
-/// `webui/runtime.rs`.
+/// `webui/runtime.rs`, behind the `webui` feature.
+#[cfg(feature = "webui")]
 pub(crate) fn rfc3339_now() -> String {
     rfc3339(SystemTime::now())
 }
