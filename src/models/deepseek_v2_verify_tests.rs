@@ -199,6 +199,14 @@ fn a_verify_block_matches_the_single_token_chain_on_metal() {
 }
 
 /// The default: without the scope the same block parts from the chain.
+///
+/// The widths reach past the few-row GEMV route of the matmul overlay
+/// (`MLXCEL_DENSE_GEMV_ROWS`, 6 rows by default): on GPU generations 13 and
+/// 14 (M1, M2) a dense product of up to that many rows runs each row through
+/// the one-row GEMV, so the decompressed layout's projections at widths 2
+/// and 4 already equal the chain there (issue #3468). Wider blocks take the
+/// steel GEMM tile on every generation, which sums in another order than the
+/// decode step's GEMV.
 #[test]
 fn without_the_scope_a_block_differs_from_the_chain_on_metal() {
     if !mlxcel_core::metal_is_available() {
@@ -207,7 +215,7 @@ fn without_the_scope_a_block_differs_from_the_chain_on_metal() {
     let _mode = RowInvariantTestMode::set(None);
     for absorbed in [true, false] {
         let model = model(absorbed);
-        let differing: usize = [2, 4]
+        let differing: usize = [2, 4, 8, 12]
             .into_iter()
             .map(|width| differing_rows(&model, width).len())
             .sum();

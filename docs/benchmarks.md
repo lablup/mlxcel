@@ -498,6 +498,16 @@ loaded host inverted the ordering. It prints why and exits when
 `MLXCEL_DEVICE=cpu`. Record the result in
 `docs/benchmark_results/fused-gelu-tanh-f32-<hw>-<date>.md`.
 
+## Comparing implementations behind one fused kernel (issue #2834)
+
+The cuda-oxide experiment put a second implementation behind `fused_add_rms_norm` (#2833), selected by process environment. Comparing it with the existing kernel needed three things the tools above do not give, and they are reusable for any A/B whose arms are environment switches:
+
+- **The route has to be proven per run.** `mlxcel_core::fused_norm_route::fused_norm_route_snapshot()` returns the adapter's counters (`None` in a build without it). `examples/oxide_fused_norm_checkpoint_bench.rs` runs the same engine probes as `mlxcel-bench-engine`, plus a batch of concurrent requests on the in-process scheduler, and records the counters, MLX peak memory and the token ids of every pass; `--expect-route` turns a wrong route into a failed run. `examples/logit_trace` prints the route after a trace in such a build.
+- **Arms that differ by environment.** `scripts/oxide_fused_norm_rounds.py run` rotates `graph`, `fused`, `oxide` and a `fused-null` arm as fresh processes under `gpu-lock`; `summarize` prints medians, per-round paired deltas and the null floor, and applies the 2 % rule frozen in the #2834 protocol.
+- **Kernel time from one instrument.** `src/lib/mlxcel-core/examples/oxide_fused_norm_bench.rs` times the three implementations through MLX (`iso`, `pipe`, `cold`), and `spike/cuda-oxide-fused-norm/scripts/standalone-bench.sh` launches the same artifact with the driver API alone. Profile both with `nsys profile --trace=cuda` and read the kernel table with `scripts/nsys_kernel_table.py`. On GB10 kernels inside CUDA graphs are missing from that table, so the MLX capture needs `MLX_USE_CUDA_GRAPHS=0`; that is not the production mode, so take kernel durations from it and end-to-end numbers from a graphs-on run.
+
+Protocol, commands and results: [cuda-oxide benchmark evidence](mlxcelverse/cuda-oxide-benchmark-evidence.md) and `docs/benchmark_results/cuda-oxide-fused-norm-gb10-2026-11-27/`.
+
 ## Warm vs cold last-level cache (issue #906)
 
 An op-level microbenchmark that allocates its inputs once and reuses them on

@@ -47,13 +47,17 @@ Current GitHub-facing docs:
 
 ## mlxcelverse maintenance
 
-The [cuda-oxide feasibility review](mlxcelverse/cuda-oxide-feasibility.md) evaluates optional Rust-authored CUDA kernels, the MLX integration boundary, hardware/toolchain constraints, and a proposed validation plan. Its experiments are recorded in `mlxcelverse/cuda-oxide-smoke-evidence.md` (#2831), `mlxcelverse/cuda-oxide-fused-norm-evidence.md` (#2832) and `mlxcelverse/cuda-oxide-mlx-adapter-evidence.md` (#2833, the default-off MLX adapter behind `fused_add_rms_norm`).
+The [cuda-oxide feasibility review](mlxcelverse/cuda-oxide-feasibility.md) evaluates optional Rust-authored CUDA kernels, the MLX integration boundary, hardware/toolchain constraints, and a proposed validation plan. Its experiments are recorded in `mlxcelverse/cuda-oxide-smoke-evidence.md` (#2831), `mlxcelverse/cuda-oxide-fused-norm-evidence.md` (#2832), `mlxcelverse/cuda-oxide-mlx-adapter-evidence.md` (#2833, the default-off MLX adapter behind `fused_add_rms_norm`) and `mlxcelverse/cuda-oxide-benchmark-evidence.md` (#2834, the GB10 benchmark and its recorded result: correct, no benefit, recommendation to stop).
 
 `mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds fork-side fix packages kept as historical reference, not submitted: fixes to the fork stay in the overlay and no PRs go to NripeshN/mlx; its README is the index.
 
 ## Architecture Decision Records
 
 `adr/` holds numbered Architecture Decision Records, one significant decision per file, immutable once Accepted. See `adr/README.md` for the index.
+
+## Technical reports
+
+`../TECHNICAL_REPORTS/` holds one technical report per merged change, in English and Korean, recording what the change did, how it was validated and what it left open. Reports are grouped into one folder per minor release line (`0.8/`, `0.9/`); `../TECHNICAL_REPORTS/README.md` describes the layout and the filing rule. Each released line has a generated index by PR number at `<X.Y>/README.md` (`make reports-index`), and `make reports-index-current` prints the index of the line under development.
 
 ## The MkDocs manual
 

@@ -1,6 +1,6 @@
 [package]
 name = "mlxcel-core"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 edition = "2024"
 authors = ["Jeongkyu Shin"]
 description = "Low-level MLX building blocks for mlxcel"
@@ -63,6 +63,13 @@ path = "examples/wht_microbench.rs"
 [[example]]
 name = "oxide_fused_norm_oracle"
 path = "examples/oxide_fused_norm_oracle.rs"
+
+# Op-level comparison of the graph path, the existing fused kernel and the
+# cuda-oxide node behind `fused_add_rms_norm` (issue #2834). Loads no model. The
+# cuda-oxide arm needs a build made with MLXCEL_BUILD_CUDA_OXIDE_FUSED_NORM=1.
+[[example]]
+name = "oxide_fused_norm_bench"
+path = "examples/oxide_fused_norm_bench.rs"
 
 # Per-call time and TFLOP/s of the fused ROCm SDPA prefill path at the
 # chunked-prefill shapes (issue #2251). Needs a ROCm host; builds only under

@@ -34,7 +34,7 @@ Only `records` and the test are in the Makefile gates, because only they are off
 
 ### Why a residual record rather than line counts
 
-The overlay's core files are whole-file copies: upstream at the pin with the fork's hooks merged in. The earlier bump check compared each overlay's +/- line counts against the old and the new upstream base. That confirms upstream's changes came in and ours stayed, but it cannot see an overlay that was already wrong before the bump; a Metal overlay once carried half of an upstream fix for months until a reviewer compared it line by line (TECHNICAL_REPORTS/1772, section 3).
+The overlay's core files are whole-file copies: upstream at the pin with the fork's hooks merged in. The earlier bump check compared each overlay's +/- line counts against the old and the new upstream base. That confirms upstream's changes came in and ours stayed, but it cannot see an overlay that was already wrong before the bump; a Metal overlay once carried half of an upstream fix for months until a reviewer compared it line by line (TECHNICAL_REPORTS/0.8/1772, section 3).
 
 `drift` makes the line-by-line comparison mechanical. It rebuilds the file the overlay should be, the pin with the fork's own change to that file merged in (a 3-way merge with the fork's merge base as the base, conflict markers kept), and diffs the overlay against it. What is left is exactly what the overlay adds on its own: conflict resolutions and local fixes. At `81ba1c6a`/`75915908` that is 4 of the 15 core files, all explained by LOCAL_FIXES items 1 and 24; the other 11 reproduce byte for byte. A half-applied upstream change shows up as a new hunk that deletes the upstream line, and it has to be reviewed and noted before `records` passes again.
 
@@ -67,7 +67,7 @@ The general procedure is "Bumping the MLX upstream pin" in `CONTRIBUTING.md`. Fo
 
 ## The "ROCm overlay" section of a bump or sync PR
 
-Put this in the PR body, and in the technical report when there is one (as section 3 of `TECHNICAL_REPORTS/1772-mlx-pin-mxfp8-round-up-20260911.en.md` does for the Metal and CUDA overlays):
+Put this in the PR body, and in the technical report when there is one (as section 3 of `TECHNICAL_REPORTS/0.8/1772-mlx-pin-mxfp8-round-up-20260911.en.md` does for the Metal and CUDA overlays):
 
 ```markdown
 ## ROCm overlay

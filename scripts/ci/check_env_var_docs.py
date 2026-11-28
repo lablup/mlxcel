@@ -241,6 +241,14 @@ _ALLOWLIST_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "MLXCEL_TEST_GUMBEL_SAMPLES",
         "MLXCEL_TEST_REJECTION_SAMPLES",
     )),
+    ("test-only: fixture input and probe parameters of the #[ignore] Greedy "
+     "margin probes in vlm_gemma3_margin_tests.rs and vlm_phi4mm_margin_tests.rs "
+     "(#3391)", (
+        "MLXCEL_GREEDY_MARGIN_PROMPT",
+        "MLXCEL_GREEDY_MARGIN_STEPS",
+        "MLXCEL_PHI4MM_FIXTURE",
+        "MLXCEL_PHI4MM_IMAGE",
+    )),
     ("test-only: parameter of the Laguna DFlash developer probe in "
      "laguna_dflash_tests.rs", (
         "MLXCEL_LAGUNA_PROBE_BLOCK",
