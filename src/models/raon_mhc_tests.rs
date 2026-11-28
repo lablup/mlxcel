@@ -223,12 +223,13 @@ fn raw(a: &MlxArray) -> Vec<u8> {
 }
 
 /// The compiled site graphs against the eager ops on one site: bit for bit
-/// off CUDA; on CUDA the fused kernel may contract a multiply and an add
-/// into one FMA (issue #3474), so the two may differ by rounding there.
+/// on Metal and the CPU; on CUDA and ROCm the fused kernel may contract a
+/// multiply and an add into one FMA (issue #3474), so the two may differ by
+/// rounding there.
 /// Decode exactness does not rest on this: a verify block runs the compiled
 /// graphs too (see the next test).
 fn assert_same_or_close(got: &MlxArray, want: &MlxArray, what: &str) {
-    if !cfg!(feature = "cuda") {
+    if !cfg!(any(feature = "cuda", feature = "rocm")) {
         assert_eq!(raw(got), raw(want), "{what}");
         return;
     }
