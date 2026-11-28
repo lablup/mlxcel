@@ -634,3 +634,7 @@ mod entries;
 // The trusted group and the trusted root (#3503).
 #[path = "cuda_ptx_cache_trust/trusted_root.rs"]
 mod trusted_root;
+
+// I/O through the descriptor of a directory below a trusted root (#3503).
+#[path = "cuda_ptx_cache_trust/pinned_dir.rs"]
+mod pinned_dir;
