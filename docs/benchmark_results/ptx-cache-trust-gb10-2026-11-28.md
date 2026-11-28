@@ -5,7 +5,7 @@ Issue: [#3503](https://github.com/lablup/mlxcel/issues/3503). Question: with the
 ## Setup
 
 - Host: NVIDIA GB10 (spark-101), 20 cores, driver 580.178.04, CUDA 13.0.3, kernel 7.0.0-1019-nvidia. Not quiet: 1-minute load between 2.0 and 6.0 during the runs (other users' jobs), recorded per arm below.
-- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arm at `5a9c96f2`; control arm from `main` at `7ab71f92`. Review changes after `5a9c96f2` (the device subdirectory opened from a kept descriptor, the sweep through the descriptor, no Rust-side directory creation under the opt-in) were re-checked with the child tests and one cold and warm pass, not with the full table.
+- Binaries: `mlxcel-server` built with `cargo build --release --features cuda`, `MLX_CUDA_ARCHITECTURES=121`. Branch arm at `5a9c96f2`; control arm from `main` at `7ab71f92`. Review changes after `5a9c96f2` (the device subdirectory opened from a kept descriptor, the sweep through the descriptor, no Rust-side directory creation under the opt-in) were re-checked at `2a62154c` with the child tests and the short pass under "Re-check after review", not with the full table.
 - Model: `mlx-community/Qwen3-4B-4bit` (local `models/qwen3-4b-4bit`).
 - Volume roots, created as root through a container so their owner and mode match what a nonroot pod gets: `vol-0777` is `root:root` mode `0777`; `vol-fsgroup` is `root:1000` mode `2775`, where 1000 is the test user's own group. The user is uid 1000, gid 1000; `/etc/nsswitch.conf` lists `files systemd` for `passwd` and `group`, `/etc/group` has no other member of gid 1000 and no other `/etc/passwd` account has it as primary group, so the group is provably private.
 - Harness: `scripts/bench/ptx_cache_trust_ttft.py`, run under `gpu-lock run --tag issue-3503`. One run starts the server with `MLXCEL_CACHE_DIR` set to the volume root, waits for `/health`, sends one streaming chat request (`max_tokens` 16, temperature 0) and stops the server. A cold run deletes `<root>/cuda-ptx` first. Five runs per cell.
@@ -29,6 +29,16 @@ Seconds, median (min, max), n = 5 per cell.
 | E | main | `root:1000 2775` | none | refused | 17.06 (17.01, 19.14) | 5.42 (5.38, 6.47) | 11.66 (11.63, 12.68) | 5/5 | 0/5 | 1.98-3.87 |
 
 Refused arms printed `mlxcel: CUDA kernel disk cache disabled: <root> is group- or other-writable` once per run. In the accepted arms `cuda-ptx` and `cuda-ptx/<mlx-commit>` were created `0700`, owned by the user.
+
+## Re-check after review
+
+At `2a62154c`, two runs per cell, same harness and attribution rule. Arm F is the layout the documentation recommends where the root may be shared: `MLXCEL_CACHE_DIR=<root>/mlxcel` with `MLXCEL_CACHE_TRUSTED_ROOT=<root>` on the `0777` root.
+
+| Arm | Start to first token, cold | Start to first token, warm | JIT notice cold / warm | Runs that wrote cache files cold / warm | Load (1 min) |
+|---|---|---|---|---|---|
+| A, opt-in on the `0777` root | 17.89 (17.51, 18.28) | 2.02 (1.99, 2.05) | 2/2, 0/2 | 2/2, 0/2 | 3.1-3.6 |
+| B, Rule 1 on the `2775` root | 18.45 (18.20, 18.69) | 1.94 (1.89, 2.00) | 2/2, 0/2 | 2/2, 0/2 | 2.4-2.6 |
+| F, mlxcel one level below the `0777` root | 18.16 (17.15, 19.16) | 1.99 (1.99, 1.99) | 2/2, 0/2 | 2/2, 0/2 | 1.9-3.4 |
 
 ## Reading
 
