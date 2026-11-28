@@ -24,7 +24,9 @@
 //! order is load-bearing.
 //!
 //! Reference: mlx-vlm
-//! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/ernie4_5_moe_vl/processing_ernie4_5_moe_vl.py>.
+//! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/ernie4_5_moe_vl/processing_ernie4_5_moe_vl.py>
+//! for the patch layout; the checkpoint's own `processing_ernie4_5_vl.py`
+//! for the resize (see [`Ernie45VlProcessor::smart_resize`]).
 
 use super::ImageProcessor;
 use image::imageops::FilterType;
@@ -55,23 +57,69 @@ impl Default for Ernie45VlProcessor {
 impl Ernie45VlProcessor {
     /// Target size rounded to multiples of `patch_size * spatial_merge_size`,
     /// clamped into `[min_pixels, max_pixels]`. Returns `(height, width)`.
+    ///
+    /// Reference: `smart_resize` in the `processing_ernie4_5_vl.py` that the
+    /// ERNIE 4.5 VL checkpoints ship and load with `trust_remote_code`
+    /// (`preprocessor_config.json` names `Ernie4_5_VLImageProcessor` through
+    /// `auto_map`; the same file in `baidu/ERNIE-4.5-VL-28B-A3B-PT` at
+    /// `e3815e6`, `baidu/ERNIE-4.5-VL-28B-A3B-Thinking` at `e7487b6` and the
+    /// validated `mlx-community/ERNIE-4.5-VL-28B-A3B-Thinking-4bit`). It
+    /// floors the first rounding step at one factor, clamps an aspect ratio
+    /// past 200:1 instead of raising, and ceils/floors the rescaled edge
+    /// without truncating it first. transformers 5.16.1 `ernie4_5_vl_moe`
+    /// was rejected because no ERNIE checkpoint loads it and it drops the
+    /// first-step floor and raises past 200:1; mlx-vlm's port was rejected
+    /// because its `int()` before `ceil`/`floor` moves an edge (4x15 gives
+    /// 28x112 there, 56x112 in the checkpoint code).
     fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
-        let factor = (self.patch_size * self.spatial_merge_size) as u32;
+        const MAX_RATIO: u64 = 200;
+        let factor = (self.patch_size * self.spatial_merge_size) as u64;
+        let (min_pixels, max_pixels) = (self.min_pixels as u64, self.max_pixels as u64);
+        let area = |h: u64, w: u64| h.saturating_mul(w);
+        // `round_by_factor` uses Python's `round`, which rounds half to even.
+        let round_by_factor = |n: u64| (n as f64 / factor as f64).round_ties_even() as u64 * factor;
+        let floor_by_factor = |n: u64| n / factor * factor;
 
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
+        // A zero edge (the reference divides by it and raises) is treated as
+        // one pixel so `beta` stays finite and no edge saturates.
+        let (mut height, mut width) = (u64::from(orig_h.max(1)), u64::from(orig_w.max(1)));
+        // Past 200:1 the reference snaps the short side and caps the long one
+        // at 200 short sides: 10x3000 becomes 28x5600.
+        if height.max(width) > MAX_RATIO.saturating_mul(height.min(width)) {
+            let short = factor.max(round_by_factor(height.min(width)));
+            let long = floor_by_factor(short.saturating_mul(MAX_RATIO));
+            (height, width) = if height > width {
+                (long, short)
+            } else {
+                (short, long)
+            };
+        }
 
-        if (h * w) as usize > self.max_pixels {
-            let scale = (self.max_pixels as f64 / (h * w) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
+        let mut h = factor.max(round_by_factor(height));
+        let mut w = factor.max(round_by_factor(width));
+
+        // Out of bounds the reference scales the (clamped) original size:
+        // `beta = sqrt(h * w / max_pixels)`, then `floor(h / beta / factor)`
+        // (`ceil(h * beta / factor)` under `min_pixels`). The one-factor
+        // floor on the rescaled edge is a deviation where the reference
+        // would produce 0 and raise.
+        let orig_area = area(height, width) as f64;
+        let (height, width, factor_f) = (height as f64, width as f64, factor as f64);
+        let snap = |steps: f64| (steps as u64).max(1).saturating_mul(factor);
+        let pixels = area(h, w);
+        if pixels > max_pixels {
+            let beta = (orig_area / max_pixels as f64).sqrt();
+            h = snap((height / beta / factor_f).floor());
+            w = snap((width / beta / factor_f).floor());
+        } else if pixels < min_pixels {
+            let beta = (min_pixels as f64 / orig_area).sqrt();
+            h = snap((height * beta / factor_f).ceil());
+            w = snap((width * beta / factor_f).ceil());
         }
-        if ((h * w) as usize) < self.min_pixels {
-            let scale = (self.min_pixels as f64 / (h * w) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-        }
-        (h, w)
+        (
+            u32::try_from(h).unwrap_or(u32::MAX),
+            u32::try_from(w).unwrap_or(u32::MAX),
+        )
     }
 
     /// Per image `(t = 1, h_patches, w_patches)`.
@@ -164,6 +212,21 @@ impl ImageProcessor for Ernie45VlProcessor {
 mod tests {
     use super::*;
 
+    /// Expected values are the reference `smart_resize` (transformers 5.24.1
+    /// `ernie4_5_vl_moe` and mlx-vlm `ernie4_5_moe_vl`, which agree), whose
+    /// `round_by_factor` uses Python's `round`: a tie goes to the even side.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let proc = Ernie45VlProcessor::default();
+        // 854 / 28 = 30.5 -> 30; 630 / 28 = 22.5 -> 22; 350 / 28 = 12.5 -> 12.
+        assert_eq!(proc.smart_resize(480, 854), (476, 840));
+        assert_eq!(proc.smart_resize(630, 1200), (616, 1204));
+        assert_eq!(proc.smart_resize(350, 350), (336, 336));
+        // A non-tie and an odd tie (1050 / 28 = 37.5 -> 38) do not move.
+        assert_eq!(proc.smart_resize(480, 640), (476, 644));
+        assert_eq!(proc.smart_resize(700, 1050), (700, 1064));
+    }
+
     #[test]
     fn grid_is_multiple_of_merge_and_rows_are_588_wide() {
         let proc = Ernie45VlProcessor::default();
@@ -239,5 +302,70 @@ mod tests {
                 "windows must be emitted row-major: {window_means:?}"
             );
         }
+    }
+
+    /// Over `max_pixels` the reference (transformers 5.24.1 `ernie4_5_vl_moe`
+    /// and mlx-vlm `ernie4_5_moe_vl`, which agree here) scales the original
+    /// size by `beta = sqrt(h * w / max_pixels)`; no input has an even `x.5`
+    /// edge, so tie rounding (#3463) does not enter.
+    #[test]
+    fn smart_resize_rescales_out_of_bounds_images_from_the_original_size() {
+        let proc = Ernie45VlProcessor::default();
+        assert_eq!(proc.smart_resize(1050, 1680), (784, 1260));
+        assert_eq!(proc.smart_resize(772, 1372), (728, 1316));
+        assert_eq!(proc.smart_resize(768, 1366), (728, 1316));
+        // In bounds, or clamped to the same multiple either way: unchanged.
+        assert_eq!(proc.smart_resize(1080, 1920), (728, 1316));
+        assert_eq!(proc.smart_resize(3000, 4000), (840, 1148));
+        assert_eq!(proc.smart_resize(480, 640), (476, 644));
+        assert_eq!(proc.smart_resize(30, 50), (56, 84));
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = Ernie45VlProcessor::default();
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
+    }
+
+    /// The checkpoint's `processing_ernie4_5_vl.py` (see `smart_resize`)
+    /// floors the first rounding step at one factor, so a thin 10x1000 image
+    /// rounds to 28x1008 (28224 pixels, in bounds) and is not rescaled.
+    /// transformers 5.16.1 `ernie4_5_vl_moe` has no floor and gives 28x560.
+    #[test]
+    fn smart_resize_thin_edge_follows_the_checkpoint_code() {
+        let p = Ernie45VlProcessor::default();
+        assert_eq!(p.smart_resize(10, 1000), (28, 1008));
+        assert_eq!(p.smart_resize(1000, 10), (1008, 28));
+    }
+
+    /// Under `min_pixels` the checkpoint code ceils `h * beta` directly:
+    /// 4x15 gives `beta = sqrt(3136 / 60) = 7.23`, `ceil(28.92 / 28) = 2` and
+    /// `ceil(108.4 / 28) = 4`, so 56x112 (transformers agrees). mlx-vlm's
+    /// `ceil_by_factor(int(h * beta))` truncates 28.92 to 28 first and
+    /// gives 28x112.
+    #[test]
+    fn smart_resize_min_pixels_branch_does_not_truncate_before_ceil() {
+        let p = Ernie45VlProcessor::default();
+        assert_eq!(p.smart_resize(4, 15), (56, 112));
+        assert_eq!(p.smart_resize(3, 19), (28, 168));
+    }
+
+    /// Past 200:1 the checkpoint code clamps the ratio instead of raising:
+    /// the short side snaps to `max(28, round_by_factor(short))` and the long
+    /// side becomes `floor_by_factor(short * 200)`, then the usual bounds
+    /// apply. Values computed with that function: 10x3000 -> 28x5600,
+    /// 1x1000 -> 28x5600, 28x8000 -> 28x5600 (mlx-vlm's `height = width //
+    /// 200` clamp gives 28x2996, 28x1008 and 28x8008).
+    #[test]
+    fn smart_resize_clamps_extreme_aspect_like_the_checkpoint_code() {
+        let p = Ernie45VlProcessor::default();
+        assert_eq!(p.smart_resize(10, 3000), (28, 5600));
+        assert_eq!(p.smart_resize(3000, 10), (5600, 28));
+        assert_eq!(p.smart_resize(1, 1000), (28, 5600));
+        assert_eq!(p.smart_resize(28, 8000), (28, 5600));
     }
 }

@@ -1218,8 +1218,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         // the loader drops the tower via `vlm_has_vision` (the Qwen2-VL-family
         // convention of #1367): the decoder config is nested under
         // `text_config` with `language_model.*` keys, which the flat `qwen3`
-        // text route cannot read.
-        "mage_vl" => Ok(ModelType::MageVLM),
+        // text route cannot read. Mage-VL-Cowork, the computer-use release
+        // with the same tower and decoder, declares `llava_onevision2`.
+        "mage_vl" | "llava_onevision2" => Ok(ModelType::MageVLM),
         // GOT-OCR 2.0 declares `model_type: "GOT"` in upper case; the
         // normalization above lowercases it before this match.
         "got" => Ok(ModelType::GotOcrVLM),

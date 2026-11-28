@@ -112,6 +112,7 @@ fn make_test_qwen35_args() -> Qwen35Config {
         moe_intermediate_size: 0,
         shared_expert_intermediate_size: 0,
         rope_parameters: None,
+        max_position_embeddings: None,
         full_attention_interval: 2,
         rms_norm_eps: 1e-6,
         tie_word_embeddings: false,
@@ -2329,4 +2330,76 @@ fn tensor_parallel_gemma4_last_row_matches_full_forward_row() {
         let tp = TensorParallelGemma4Model::from_full_weights(&args, &weights, &plan).unwrap();
         assert_last_row_matches_full_row(&tp, true);
     }
+}
+
+/// Two layers, sliding then full, four query heads and four sliding KV
+/// heads, with the full layer's shape given by a Gemma 4 `per_layer_config`
+/// (#3215) and `attention_k_eq_v` off.
+fn make_test_gemma4_per_layer_args(full_kv_heads: usize) -> Gemma4ModelArgs {
+    let mut args = make_test_gemma4_args();
+    let text = args.text_config.as_object_mut().unwrap();
+    for (key, value) in [
+        ("num_hidden_layers", serde_json::json!(2)),
+        ("num_attention_heads", serde_json::json!(4)),
+        ("num_key_value_heads", serde_json::json!(4)),
+        (
+            "layer_types",
+            serde_json::json!(["sliding_attention", "full_attention"]),
+        ),
+        (
+            "per_layer_config",
+            serde_json::json!({"1": {"head_dim": 4, "num_key_value_heads": full_kv_heads}}),
+        ),
+    ] {
+        text.insert(key.to_string(), value);
+    }
+    args
+}
+
+/// A `per_layer_config` selects the global KV-head count on full-attention
+/// layers without `attention_k_eq_v`, so the per-rank config has to divide
+/// it, and has to still resolve to the divided count when the rank parses
+/// that config again.
+#[test]
+fn local_gemma4_args_shard_the_per_layer_config_kv_heads() {
+    let args = make_test_gemma4_per_layer_args(4);
+    let full = args.text_args();
+    assert_eq!(
+        (full.global_head_dim, full.num_global_key_value_heads),
+        (Some(4), Some(4))
+    );
+    let plan = generate_shard_plan("gemma4", 2, &ShardConfig::with_tp_size(2)).unwrap();
+
+    let local = super::local_gemma4_args(&args, &plan).unwrap().text_args();
+
+    assert_eq!(local.num_attention_heads, 2);
+    assert_eq!(local.num_key_value_heads, 2);
+    assert_eq!(
+        (local.global_head_dim, local.num_global_key_value_heads),
+        (Some(4), Some(2))
+    );
+}
+
+/// The K/V shard spec reads the same rule: one global KV head is replicated
+/// across two ranks on the full layer, while the sliding layer's four, and a
+/// full layer left on the base count, go to the generic split.
+#[test]
+fn gemma4_kv_shard_spec_follows_per_layer_config() {
+    let plan = generate_shard_plan("gemma4", 2, &ShardConfig::with_tp_size(2)).unwrap();
+    let full_layer = "language_model.model.layers.1.self_attn.k_proj.weight";
+    let sliding_layer = "language_model.model.layers.0.self_attn.k_proj.weight";
+
+    let per_layer = make_test_gemma4_per_layer_args(1).text_args();
+    assert!(super::gemma4_kv_shard_spec(full_layer, &[4, 4], &plan, 0, &per_layer).is_some());
+    assert!(super::gemma4_kv_shard_spec(sliding_layer, &[8, 4], &plan, 0, &per_layer).is_none());
+
+    let mut legacy = make_test_gemma4_per_layer_args(1);
+    let text = legacy.text_config.as_object_mut().unwrap();
+    text.remove("per_layer_config");
+    text.insert(
+        "num_global_key_value_heads".to_string(),
+        serde_json::json!(1),
+    );
+    let legacy = legacy.text_args();
+    assert!(super::gemma4_kv_shard_spec(full_layer, &[8, 4], &plan, 0, &legacy).is_none());
 }

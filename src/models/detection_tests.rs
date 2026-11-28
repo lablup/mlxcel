@@ -352,6 +352,46 @@ fn muse_glimmer_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// `microsoft/Mage-VL-Cowork` is a Mage-VL checkpoint that declares
+/// `model_type: "llava_onevision2"` at the top level and in its vision
+/// config (mlx-vlm#2636).
+#[test]
+fn llava_onevision2_detects_as_mage_vl() {
+    let model_dir = temp_path("llava_onevision2");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "llava_onevision2",
+            "image_token_id": 151655,
+            "text_config": {
+                "model_type": "qwen3",
+                "hidden_size": 2560,
+                "num_hidden_layers": 36,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "vocab_size": 151936
+            },
+            "vision_config": {
+                "model_type": "llava_onevision2",
+                "hidden_size": 1024,
+                "num_attention_heads": 16,
+                "num_hidden_layers": 24,
+                "patch_size": 16,
+                "temporal_patch_size": 1,
+                "layer_norm_type": "layer_norm"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::MageVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 #[test]
 fn gpt2_model_type_is_detected() {
     // GPT-2 configs use the original OpenAI field names (`n_embd` / `n_head` /

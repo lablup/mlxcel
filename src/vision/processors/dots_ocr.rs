@@ -56,22 +56,35 @@ impl DotsOcrProcessor {
     /// area into `[min_pixels, max_pixels]`. Returns `(height, width)` in pixels.
     fn smart_resize(&self, h: u32, w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.merge_size) as f64; // 28
-        let round = |x: f64| ((x / factor).round().max(1.0) * factor) as u32;
+        // The reference (transformers' Qwen2-VL `smart_resize`) uses Python's
+        // `round`, which rounds half to even, and puts no floor on it: a thin
+        // edge rounding to 0 drops the area under `min_pixels`, which then
+        // rescales the original size (10x1000 gives 28x560, not 28x1008).
+        let round = |x: f64| ((x / factor).round_ties_even() * factor) as u32;
         let mut rh = round(h as f64);
         let mut rw = round(w as f64);
         let pixels = (rh as usize) * (rw as usize);
+        // Out of bounds the reference scales the original size, not the
+        // rounded one: `beta = sqrt(h * w / max_pixels)`, then
+        // `floor(h / beta / factor)` (`ceil(h * beta / factor)` under
+        // `min_pixels`). A zero edge (the reference raises on it) is
+        // rescaled as one pixel so `beta` stays finite.
+        let (h, w) = (f64::from(h.max(1)), f64::from(w.max(1)));
         if pixels > self.max_pixels {
-            let scale = (self.max_pixels as f64 / pixels as f64).sqrt();
+            let beta = (h * w / self.max_pixels as f64).sqrt();
             let floor = |x: f64| (((x / factor).floor()).max(1.0) * factor) as u32;
-            rh = floor(rh as f64 * scale);
-            rw = floor(rw as f64 * scale);
+            rh = floor(h / beta);
+            rw = floor(w / beta);
         } else if pixels < self.min_pixels {
-            let scale = (self.min_pixels as f64 / pixels as f64).sqrt();
+            let beta = (self.min_pixels as f64 / (h * w)).sqrt();
             let ceil = |x: f64| (((x / factor).ceil()).max(1.0) * factor) as u32;
-            rh = ceil(rh as f64 * scale);
-            rw = ceil(rw as f64 * scale);
+            rh = ceil(h * beta);
+            rw = ceil(w * beta);
         }
-        (rh, rw)
+        // Deviation: with `min_pixels == 0` an edge rounding to 0 passes both
+        // checks and the reference returns a zero edge; floor it to `factor`.
+        let factor = factor as u32;
+        (rh.max(factor), rw.max(factor))
     }
 
     /// `(temporal=1, h_patches, w_patches)` per image.
@@ -152,6 +165,20 @@ impl DotsOcrProcessor {
 mod tests {
     use super::*;
 
+    /// Expected values are transformers 5.24.1 `qwen2_vl` `smart_resize` with
+    /// the dots.ocr bounds (the processor mlx-vlm's `dots_ocr` loads). Its
+    /// Python `round` breaks a tie towards the even neighbour.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let p = DotsOcrProcessor::default();
+        // 854 / 28 = 30.5 -> 30; 630 / 28 = 22.5 -> 22.
+        assert_eq!(p.smart_resize(480, 854), (476, 840));
+        assert_eq!(p.smart_resize(630, 1200), (616, 1204));
+        // Non-ties and an odd tie (1050 / 28 = 37.5 -> 38) do not move.
+        assert_eq!(p.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p.smart_resize(1050, 1680), (1064, 1680));
+    }
+
     #[test]
     fn smart_resize_rounds_to_factor_and_clamps() {
         let p = DotsOcrProcessor::default();
@@ -187,5 +214,50 @@ mod tests {
             }
         }
         assert_eq!(r, hp * wp);
+    }
+
+    /// Over `max_pixels` the reference (transformers 5.24.1 `qwen2_vl`
+    /// `smart_resize` with the dots.ocr bounds) scales the original size by
+    /// `beta = sqrt(h * w / max_pixels)`; no input has an even `x.5` edge, so
+    /// tie rounding (#3463) does not enter.
+    #[test]
+    fn smart_resize_rescales_out_of_bounds_images_from_the_original_size() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(4000, 6000), (2716, 4088));
+        assert_eq!(p.smart_resize(2880, 5120), (2520, 4480));
+        assert_eq!(p.smart_resize(3472, 4624), (2884, 3864));
+        // In bounds, or clamped to the same multiple either way: unchanged.
+        assert_eq!(p.smart_resize(3000, 4000), (2884, 3864));
+        assert_eq!(p.smart_resize(1080, 1920), (1092, 1932));
+        assert_eq!(p.smart_resize(40, 60), (56, 84));
+    }
+
+    /// A zero edge must not turn `beta` infinite and saturate the other edge
+    /// to `u32::MAX` (a multi-gigabyte resize); it is rescaled as one pixel.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(0, 10), (28, 196));
+        assert_eq!(p.smart_resize(10, 0), (196, 28));
+        assert_eq!(p.smart_resize(0, 0), (56, 56));
+    }
+
+    /// A thin edge rounds to 0 in the reference's first step, so the area
+    /// falls under `min_pixels` and the original size is rescaled. Expected
+    /// values are transformers 5.16.1 `qwen2_vl` `smart_resize(10, 1000, 28,
+    /// 3136, 11289600)`: `beta = sqrt(3136 / 10000) = 0.56`, then
+    /// `ceil(10 * 0.56 / 28) = 1` and `ceil(1000 * 0.56 / 28) = 20`, so
+    /// 28x560 (a one-factor floor on the first step kept 28x1008).
+    #[test]
+    fn smart_resize_thin_edge_rescales_like_the_reference() {
+        let p = DotsOcrProcessor::default();
+        assert_eq!(p.smart_resize(10, 1000), (28, 560));
+        assert_eq!(p.smart_resize(1000, 10), (560, 28));
+        // `min_pixels == 0`: the reference returns a zero edge; one factor here.
+        let p0 = DotsOcrProcessor {
+            min_pixels: 0,
+            ..DotsOcrProcessor::default()
+        };
+        assert_eq!(p0.smart_resize(10, 1000), (28, 1008));
     }
 }

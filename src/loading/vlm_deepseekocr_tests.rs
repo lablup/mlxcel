@@ -21,7 +21,10 @@
 //! SIGABRT rather than fail, because `gather_qmm` crosses the cxx bridge as
 //! `UniquePtr<MlxArray>` rather than `Result`.
 
-use super::{deepseekocr_language_args, unlimited_ocr_sliding_window};
+use super::{
+    deepseekocr_clip_config, deepseekocr_language_args, unlimited_ocr_clip_config,
+    unlimited_ocr_sliding_window,
+};
 use serde_json::{Value, json};
 
 /// The `family` labels the three loaders in this module pass to
@@ -232,4 +235,28 @@ fn unlimited_ocr_window_falls_back_and_clamps() {
     let mut zero = full_config(None, None);
     zero["language_config"]["sliding_window_size"] = json!(0);
     assert_eq!(unlimited_ocr_sliding_window(&zero), 1);
+}
+
+/// Unlimited-OCR's released CLIP encoder layers normalize at the PyTorch
+/// default eps 1e-5 (mlx-vlm `unlimited_ocr/config.py`,
+/// `VisionConfig.layer_norm_eps`; issue #3235). Neither `baidu/Unlimited-OCR`
+/// nor `mlx-community/Unlimited-OCR-4bit` declares `vision_config.layer_norm_eps`,
+/// so the loader hardcodes it the way upstream does.
+#[test]
+fn unlimited_ocr_clip_uses_layer_norm_eps_1e5() {
+    let config = unlimited_ocr_clip_config();
+    assert_eq!(config.layer_norm_eps, 1e-5);
+    // Only the eps differs from the DeepSeek-OCR encoder.
+    let base = deepseekocr_clip_config();
+    assert_eq!(config.hidden_size, base.hidden_size);
+    assert_eq!(config.num_heads, base.num_heads);
+    assert_eq!(config.num_layers, base.num_layers);
+    assert_eq!(config.pos_grid, base.pos_grid);
+}
+
+/// DeepSeek-OCR keeps its CLIP encoder layers at eps 1e-6 (mlx-vlm
+/// `deepseekocr/config.py`).
+#[test]
+fn deepseekocr_clip_keeps_layer_norm_eps_1e6() {
+    assert_eq!(deepseekocr_clip_config().layer_norm_eps, 1e-6);
 }

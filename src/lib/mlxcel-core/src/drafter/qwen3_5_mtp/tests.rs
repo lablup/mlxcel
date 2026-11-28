@@ -28,7 +28,7 @@ use cxx::UniquePtr;
 const HIDDEN: i32 = 8;
 const VOCAB: i32 = 16;
 
-fn tiny_config() -> Qwen35MtpConfig {
+pub(super) fn tiny_config() -> Qwen35MtpConfig {
     let cfg: Qwen35MtpConfig = serde_json::from_str(
         r#"{
         "model_type": "qwen3_5_mtp",
@@ -60,7 +60,7 @@ fn insert_val(w: &mut WeightMap, key: &str, shape: &[i32], val: f32) {
 
 /// The published 15-tensor inventory (already `mtp.`-prefix stripped), with
 /// deterministic small values so real MLX forwards run.
-fn tiny_weights() -> WeightMap {
+pub(super) fn tiny_weights() -> WeightMap {
     let mut w: WeightMap = WeightMap::new();
     insert_val(&mut w, "fc.weight", &[8, 16], 0.05);
     insert_val(&mut w, "pre_fc_norm_embedding.weight", &[8], 1.0);

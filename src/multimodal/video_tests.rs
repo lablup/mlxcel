@@ -427,8 +427,9 @@ fn video_frame_knobs_num_frames_out_of_range_errors_before_decoding() {
     );
 
     // A count above the clip's own frame total is equally out of range, so a
-    // caller can never be handed a padded or duplicated sample.
-    let err = case(301).expect_err("an over-long frame count must be refused");
+    // caller can never be handed a padded or duplicated sample. (301 would
+    // round half to even down to 300, which fits, as in the reference.)
+    let err = case(303).expect_err("an over-long frame count must be refused");
     assert!(
         matches!(err, VideoError::Extract { .. }),
         "expected VideoError::Extract, got {err:?}"
@@ -501,6 +502,19 @@ fn smart_nframes_explicit_nframes_rounds_to_factor() {
     // Caller supplies an odd target — round to the nearest even.
     let n = smart_nframes(40, 30.0, None, Some(7)).unwrap();
     assert_eq!(n, 8);
+}
+
+#[test]
+fn smart_nframes_explicit_nframes_breaks_ties_to_even_like_python_round() {
+    // mlx-vlm `_round(n) = round(n / frame_factor) * frame_factor` with
+    // Python's half-to-even `round`: 5 / 2 = 2.5 -> 2, 9 / 2 = 4.5 -> 4.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(5)).unwrap(), 4);
+    assert_eq!(smart_nframes(40, 30.0, None, Some(9)).unwrap(), 8);
+    // Odd ties round up under both rules: 3 / 2 = 1.5 -> 2.
+    assert_eq!(smart_nframes(40, 30.0, None, Some(3)).unwrap(), 4);
+    // A 5-frame clip asked for all 5 frames samples 4, as the reference does,
+    // instead of rounding to 6 and rejecting the request.
+    assert_eq!(smart_nframes(5, 30.0, None, Some(5)).unwrap(), 4);
 }
 
 #[test]
@@ -1583,12 +1597,13 @@ fn extract_frames_preserves_color_increment_per_frame() {
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
     // Compute the expected source-frame indices for the sampled frames.
-    // uniform_indices(50, 25) → linspace(0, 49, 25).round() = [0,2,4,...,48].
+    // uniform_indices(50, 25) → linspace(0, 49, 25).round() =
+    // [0, 2, ..., 24, 27, ..., 49]; numpy rounds the 24.5 at i = 12 to 24.
     let expected_indices: Vec<usize> = (0..frames.len())
         .map(|i| {
             let last = (TOTAL_FRAMES - 1) as f64;
             let step = last / (frames.len() as f64 - 1.0);
-            (i as f64 * step).round() as usize
+            (i as f64 * step).round_ties_even() as usize
         })
         .collect();
 
@@ -1670,6 +1685,15 @@ fn sampled_loader_reports_source_indices_and_fps() {
         sampled.frame_indices
     );
     assert!(sampled.frame_indices.iter().all(|&idx| idx < TOTAL_FRAMES));
+    // The probed frame count travels with the sample, so the achieved rate
+    // (#3234) is the frames kept over the clip's 5 seconds.
+    assert_eq!(sampled.total_frames, TOTAL_FRAMES);
+    let sampled_fps = sampled.sampled_fps().expect("a decoded clip has a rate");
+    let expected_fps = sampled.frames.len() as f64 / TOTAL_FRAMES as f64 * sampled.source_fps;
+    assert!(
+        (sampled_fps - expected_fps).abs() < 1e-9,
+        "sampled fps {sampled_fps} != {expected_fps}"
+    );
     // Frame i of the color-increment clip has R = 5 * i (clamped), so the
     // reported index must agree with the decoded pixels, not just the plan.
     for (frame, &idx) in sampled.frames.iter().zip(&sampled.frame_indices) {
@@ -1678,6 +1702,45 @@ fn sampled_loader_reports_source_indices_and_fps() {
         assert!(
             (mean_r - expected_r).abs() <= 15.0,
             "index {idx}: decoded R {mean_r:.1} != expected {expected_r:.1}"
+        );
+    }
+}
+
+fn sampled_clip(sampled_frames: usize, total_frames: usize, source_fps: f64) -> SampledVideo {
+    SampledVideo {
+        frames: (0..sampled_frames)
+            .map(|_| DynamicImage::new_rgb8(2, 2))
+            .collect(),
+        frame_indices: (0..sampled_frames).collect(),
+        source_fps,
+        total_frames,
+    }
+}
+
+/// `sampled_fps` is transformers' `VideoMetadata.sampled_fps`:
+/// `len(frames_indices) / total_num_frames * fps`. Eight frames kept from a
+/// 120-frame clip at 30 fps (4 s) are 2 frames per second.
+#[test]
+fn sampled_fps_matches_transformers_definition() {
+    assert_eq!(sampled_clip(8, 120, 30.0).sampled_fps().unwrap(), 2.0);
+    // It is the achieved rate, not the requested one: 16 frames fixed by a
+    // `num_frames` request over the same clip are 4 fps.
+    assert_eq!(sampled_clip(16, 120, 30.0).sampled_fps().unwrap(), 4.0);
+
+    let no_frames = sampled_clip(0, 120, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_frames.to_string().contains("no sampled frames"),
+        "got: {no_frames}"
+    );
+    let no_source_frames = sampled_clip(8, 0, 30.0).sampled_fps().unwrap_err();
+    assert!(
+        no_source_frames.to_string().contains("zero source frames"),
+        "got: {no_source_frames}"
+    );
+    for source_fps in [0.0, -30.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            sampled_clip(8, 120, source_fps).sampled_fps().is_err(),
+            "source fps {source_fps} must not give a sampled fps"
         );
     }
 }
@@ -1921,6 +1984,29 @@ fn subsample_evenly_identity_when_under_cap() {
             "a clip that sampled to {count} frame(s) must pass through untouched under a cap of 16"
         );
     }
+}
+
+/// numpy's `np.linspace(0, T - 1, n).round()` rounds half to even, so a tie
+/// samples the even neighbour: `np.linspace(0, 5, 3).round()` is `[0, 2, 5]`
+/// and `np.linspace(0, 49, 25).round()` puts 24.5 on 24.
+#[test]
+fn frame_indices_round_ties_to_even_like_numpy() {
+    assert_eq!(uniform_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(evenly_spaced_indices(6, 3), vec![0, 2, 5]);
+    assert_eq!(uniform_indices(50, 25)[12], 24);
+    assert_eq!(evenly_spaced_indices(50, 25)[12], 24);
+    // Non-ties are unchanged.
+    assert_eq!(uniform_indices(12, 4), vec![0, 4, 7, 11]);
+}
+
+/// Inkling's anchor formula is `round(i * (padded - 2) / (pairs - 1))` with
+/// Python's `round` (half to even): 12 frames in 5 pairs give anchors at
+/// 0, 2.5, 5, 7.5, 10, which round to 0, 2, 5, 8, 10.
+#[test]
+fn pair_adjacent_frame_anchors_round_ties_to_even() {
+    let plan = pair_adjacent_frame_indices(12, 5).unwrap();
+    assert_eq!(plan.anchors, vec![0, 2, 5, 8, 10]);
+    assert_eq!(plan.pairs, vec![[0, 1], [2, 3], [5, 6], [8, 9], [10, 11]]);
 }
 
 #[test]

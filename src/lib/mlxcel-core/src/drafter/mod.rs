@@ -566,8 +566,10 @@ struct DrafterConfigPeek {
 /// `model_type` value that identifies a Qwen 3.5 MTP drafter checkpoint
 /// (see [`qwen3_5_mtp::Qwen35MtpConfig`]). Named so the block-size peek
 /// below and the kind map in [`drafter_kind_by_model_type`] cannot drift
-/// independently.
-const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
+/// independently. Public so the binary-side drafter loader, which installs
+/// the YaRN table core cannot build (issue #3479), dispatches on the same
+/// spelling.
+pub const QWEN35_MTP_MODEL_TYPE: &str = "qwen3_5_mtp";
 
 /// `model_type` value that identifies a GLM-4.7-Flash MTP drafter directory
 /// produced by `mlxcel split-mtp` (issue #1326). Public so the binary-side
@@ -1654,7 +1656,10 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                     let model = inkling_mtp::InklingMtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
                 }
-                Some("qwen3_5_mtp") => {
+                // Without YaRN: a `rope_parameters` block naming `yarn` is
+                // applied by the binary crate's `drafter_loader`, which every
+                // binary caller goes through (issue #3479).
+                Some(QWEN35_MTP_MODEL_TYPE) => {
                     let model = qwen3_5_mtp::Qwen35MtpDraftModel::from_path(path)?;
                     Ok((Box::new(model), resolved))
                 }

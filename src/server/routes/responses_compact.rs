@@ -144,7 +144,7 @@ async fn compact(state: &AppState, body: Value) -> Result<Value, CompactionError
     Ok(json!({
         "id": id,
         "object": "response.compaction",
-        "created_at": chrono::Utc::now().timestamp(),
+        "created_at": crate::server::clock::unix_seconds_now(),
         "model": state.display_model_id(),
         "output": output,
         "usage": {

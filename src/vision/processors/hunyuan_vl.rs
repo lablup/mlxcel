@@ -51,21 +51,45 @@ impl Default for HunyuanVlProcessor {
 }
 
 impl HunyuanVlProcessor {
+    /// Port of transformers' `hunyuan_vl` `smart_resize`. Returns
+    /// `(height, width)`, both multiples of `patch_size * spatial_merge_size`.
     fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
-        let factor = (self.patch_size * self.spatial_merge_size) as u32;
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
+        let factor = (self.patch_size * self.spatial_merge_size) as u64;
+        let (min_pixels, max_pixels) = (self.min_pixels as u64, self.max_pixels as u64);
+        let area = |h: u64, w: u64| h.saturating_mul(w);
+        // Python's `round` in the reference rounds half to even, and the
+        // reference puts no floor on it: a thin edge rounding to 0 drops the
+        // area under `min_pixels`, which then rescales the original size.
+        let round_to =
+            |edge: u32| (f64::from(edge) / factor as f64).round_ties_even() as u64 * factor;
+        let mut h = round_to(orig_h);
+        let mut w = round_to(orig_w);
 
-        if (h * w) as usize > self.max_pixels {
-            let beta = ((orig_h as f64 * orig_w as f64) / self.max_pixels as f64).sqrt();
-            h = ((orig_h as f64 / beta / factor as f64).floor() as u32).max(1) * factor;
-            w = ((orig_w as f64 / beta / factor as f64).floor() as u32).max(1) * factor;
-        } else if ((h * w) as usize) < self.min_pixels {
-            let beta = (self.min_pixels as f64 / (orig_h as f64 * orig_w as f64)).sqrt();
-            h = ((orig_h as f64 * beta / factor as f64).ceil() as u32).max(1) * factor;
-            w = ((orig_w as f64 * beta / factor as f64).ceil() as u32).max(1) * factor;
+        // Out of bounds the reference scales the original size. A zero edge
+        // (the reference raises on it) is rescaled as one pixel so `beta`
+        // stays finite; u64 saturating arithmetic keeps a huge edge from
+        // wrapping.
+        let (orig_h, orig_w) = (orig_h.max(1), orig_w.max(1));
+        let orig_area = area(u64::from(orig_h), u64::from(orig_w)) as f64;
+        let (orig_h, orig_w) = (f64::from(orig_h), f64::from(orig_w));
+        let factor_f = factor as f64;
+        let snap = |steps: f64| (steps as u64).max(1).saturating_mul(factor);
+        let pixels = area(h, w);
+        if pixels > max_pixels {
+            let beta = (orig_area / max_pixels as f64).sqrt();
+            h = snap((orig_h / beta / factor_f).floor());
+            w = snap((orig_w / beta / factor_f).floor());
+        } else if pixels < min_pixels {
+            let beta = (min_pixels as f64 / orig_area).sqrt();
+            h = snap((orig_h * beta / factor_f).ceil());
+            w = snap((orig_w * beta / factor_f).ceil());
         }
-        (h, w)
+        // Deviation: with `min_pixels == 0` an edge rounding to 0 passes both
+        // checks and the reference returns a zero edge; floor it to `factor`.
+        (
+            u32::try_from(h.max(factor)).unwrap_or(u32::MAX),
+            u32::try_from(w.max(factor)).unwrap_or(u32::MAX),
+        )
     }
 
     /// Per image `(t = 1, h_patches, w_patches)`.
@@ -153,6 +177,60 @@ impl ImageProcessor for HunyuanVlProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Expected values are the reference `smart_resize` (transformers 5.24.1
+    /// `hunyuan_vl` and mlx-vlm, which agree), whose Python `round` breaks a
+    /// tie towards the even neighbour.
+    #[test]
+    fn smart_resize_breaks_ties_to_even_like_python_round() {
+        let proc = HunyuanVlProcessor::default();
+        // 720 / 32 = 22.5 -> 22; 1680 / 32 = 52.5 -> 52.
+        assert_eq!(proc.smart_resize(720, 1280), (704, 1280));
+        assert_eq!(proc.smart_resize(1050, 1680), (1056, 1664));
+        // Non-ties, an odd tie (1200 / 32 = 37.5 -> 38) and both clamps.
+        assert_eq!(proc.smart_resize(1080, 1920), (1088, 1920));
+        assert_eq!(proc.smart_resize(1200, 1920), (1216, 1920));
+        assert_eq!(proc.smart_resize(3024, 4032), (1760, 2336));
+        assert_eq!(proc.smart_resize(336, 336), (512, 512));
+    }
+
+    /// A zero edge must not turn `beta` infinite and overflow the other edge
+    /// (a debug panic, a wrapped size in release); it is rescaled as one
+    /// pixel. `(0, 10)`: `beta = sqrt(262144 / 10) = 161.9`, so
+    /// `ceil(161.9 / 32) = 6` and `ceil(1619 / 32) = 51` give 192x1632.
+    #[test]
+    fn smart_resize_zero_edge_stays_bounded() {
+        let p = HunyuanVlProcessor::default();
+        assert_eq!(p.smart_resize(0, 10), (192, 1632));
+        assert_eq!(p.smart_resize(10, 0), (1632, 192));
+        assert_eq!(p.smart_resize(0, 0), (512, 512));
+    }
+
+    /// A thin edge rounds to 0 in the reference's first step, so the area
+    /// falls under `min_pixels` and the original size is rescaled. Expected
+    /// values are transformers 5.16.1 `hunyuan_vl` `smart_resize`. With the
+    /// HunyuanOCR bounds `(10, 1000, 32, 262144, 4194304)` gives 64x5120,
+    /// as before (32x992 was under `min_pixels` too). With `min_pixels =
+    /// 4096`, `beta = sqrt(4096 / 10000) = 0.64`, `ceil(6.4 / 32) = 1` and
+    /// `ceil(640 / 32) = 20` give 32x640, where a one-factor floor on the
+    /// first step kept 32x992 (31744 pixels, over the bound).
+    #[test]
+    fn smart_resize_thin_edge_rescales_like_the_reference() {
+        let p = HunyuanVlProcessor::default();
+        assert_eq!(p.smart_resize(10, 1000), (64, 5120));
+        assert_eq!(p.smart_resize(1000, 10), (5120, 64));
+        let small = HunyuanVlProcessor {
+            min_pixels: 4096,
+            ..HunyuanVlProcessor::default()
+        };
+        assert_eq!(small.smart_resize(10, 1000), (32, 640));
+        assert_eq!(small.smart_resize(1000, 10), (640, 32));
+        let zero = HunyuanVlProcessor {
+            min_pixels: 0,
+            ..HunyuanVlProcessor::default()
+        };
+        assert_eq!(zero.smart_resize(10, 1000), (32, 992));
+    }
 
     #[test]
     fn grid_and_rows_and_count() {

@@ -53,7 +53,10 @@ use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_t
 use crate::vision::InklingVlModel;
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
-use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
+use crate::vision::feature_cache::{
+    CacheKey, ModelVisionCaches, hash_with_grid_layout, image_hash_from_pixels,
+    request_hash_from_image_keys,
+};
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
 use crate::vision::processors::qwen2_vl::Qwen2VLMediaInput;
@@ -827,13 +830,37 @@ where
     ))
 }
 
-/// Pick the first explicit (non-None) cache key from a caller-supplied slice.
+/// Request-scoped cache key built from the caller's per-image keys.
 ///
-/// Used by Qwen-VL families which pack every image into a single pixel tensor
-/// per request: a request-scoped cache key is sufficient and we prefer the
-/// caller's key when they provided one (e.g. a filesystem path).
-fn first_explicit_key(keys: Option<&[Option<CacheKey>]>) -> Option<CacheKey> {
-    keys.and_then(|slice| slice.iter().find_map(|k| k.clone()))
+/// Used by Qwen-VL families, which pack every image of a request into a single
+/// pixel tensor and cache the vision output of the whole request under one
+/// key, so the key has to cover every image in order (#3265). Returns `Some`
+/// only when the caller supplied exactly one key for each of the request's
+/// `image_count` images; otherwise `None`, and the caller falls back to
+/// [`qwen_pixel_cache_key`] over the whole tensor. Either key also covers the
+/// patch grids (`grid_thw`), so the same bytes encoded at another layout never
+/// share an entry.
+fn qwen_request_cache_key(
+    keys: Option<&[Option<CacheKey>]>,
+    image_count: usize,
+    grid_thw: &[(i32, i32, i32)],
+) -> Option<CacheKey> {
+    let keys = keys.filter(|keys| !keys.is_empty() && keys.len() == image_count)?;
+    let keys: Option<Vec<CacheKey>> = keys.iter().cloned().collect();
+    let request = request_hash_from_image_keys(&keys?);
+    Some(CacheKey::from_hash(hash_with_grid_layout(
+        &request, grid_thw,
+    )))
+}
+
+/// Fallback request key for Qwen-VL: the pixel tensor's bytes plus its patch
+/// grids. The flattened patches carry no shape, so the bytes alone cannot tell
+/// two layouts of the same patches apart.
+fn qwen_pixel_cache_key(pixel_values: &MlxArray, grid_thw: &[(i32, i32, i32)]) -> CacheKey {
+    CacheKey::from_hash(hash_with_grid_layout(
+        &image_hash_from_pixels(pixel_values),
+        grid_thw,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1032,12 +1059,20 @@ fn qwen_video_group_prefixes(
 /// (`video_timestamps`) requires `video_timestamps` whenever the request has
 /// videos; passing `None` there is an error rather than a silent fall back to
 /// the timeless flat layout. Families without timestamps ignore it.
+///
+/// `video_second_per_grid` is `temporal_patch_size / sampled fps` per clip,
+/// indexed like `videos`; it is reordered into prompt order here and handed
+/// to the runtime, which uses it only where the reference model spaces video
+/// positions by real time (Qwen2.5-VL, Blaizzy/mlx-vlm#2760). `None` means no
+/// video is timed, which is what an images-only caller passes.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_qwen_vl_media_embeddings(
     qwen: &dyn crate::qwen_vl::QwenVlRuntime,
     prompt_tokens: &mut Vec<i32>,
     images: &[DynamicImage],
     videos: &[Vec<DynamicImage>],
     video_timestamps: Option<&QwenVideoTimestamps<'_>>,
+    video_second_per_grid: Option<&[f32]>,
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
 ) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
@@ -1112,20 +1147,43 @@ pub fn compute_qwen_vl_media_embeddings(
         None
     };
     let qwen_cache_key = if active_caches.is_some() {
-        first_explicit_key(image_cache_keys)
-            .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
+        qwen_request_cache_key(image_cache_keys, images.len(), &grid_thw)
+            .or_else(|| Some(qwen_pixel_cache_key(&pixel_values, &grid_thw)))
     } else {
         None
     };
 
+    // Per-clip timing arrives in the caller's `videos` order; the runtime
+    // wants one entry per video grid in prompt order.
+    let prompt_order_second_per_grid = match video_second_per_grid {
+        Some(second_per_grid) => {
+            if second_per_grid.len() != videos.len() {
+                anyhow::bail!(
+                    "Qwen-VL video timing covers {} video(s), but request has {}",
+                    second_per_grid.len(),
+                    videos.len()
+                );
+            }
+            media_order
+                .iter()
+                .filter_map(|ordinal| match *ordinal {
+                    QwenMediaOrdinal::Video(idx) => Some(second_per_grid[idx]),
+                    QwenMediaOrdinal::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+        }
+        None => Vec::new(),
+    };
+
     let input_ids_arr = prompt_ids_array(prompt_tokens);
-    let embeddings = qwen.input_embeddings_with_cache(
+    let embeddings = qwen.input_embeddings_with_video_timing(
         &input_ids_arr,
         &pixel_values,
         &grid_thw,
+        &prompt_order_second_per_grid,
         qwen_cache_key.as_ref(),
         active_caches,
-    );
+    )?;
     Ok((embeddings, stats))
 }
 
@@ -1348,6 +1406,7 @@ where
                 prompt_tokens,
                 images,
                 &[],
+                None,
                 None,
                 image_cache_keys,
                 active_caches,

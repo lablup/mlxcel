@@ -146,7 +146,7 @@ fn llama_not_found(message: &str) -> Response {
 
 #[cfg(feature = "webui")]
 fn request_id() -> String {
-    format!("req_{}", chrono::Utc::now().timestamp_micros())
+    format!("req_{}", crate::server::clock::unix_micros_now())
 }
 
 #[cfg(feature = "webui")]
@@ -399,7 +399,7 @@ async fn router_models_list(
     {
         return llama_server_error(&err.to_string());
     }
-    let created = chrono::Utc::now().timestamp();
+    let created = crate::server::clock::unix_seconds_now();
     let data: Vec<serde_json::Value> = state
         .pool
         .snapshot()

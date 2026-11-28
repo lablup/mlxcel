@@ -109,11 +109,38 @@ pub struct DrafterTextConfig {
     pub final_logit_softcapping: Option<f32>,
     #[serde(default)]
     pub use_double_wide_mlp: bool,
+    /// The full-attention layers' shapes as transformers 5.15+ writes them,
+    /// in place of `global_head_dim` / `num_global_key_value_heads`
+    /// (Blaizzy/mlx-vlm#2719). Folded into those two fields by
+    /// [`Gemma4AssistantConfig::normalize`]. Mirrors
+    /// `crate::models::gemma4::TextConfig::per_layer_config`.
+    #[serde(default)]
+    pub per_layer_config: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     pub quantization: Option<DrafterQuantizationArgs>,
 }
 
 impl DrafterTextConfig {
+    /// Overwrite `global_head_dim` and `num_global_key_value_heads` with the
+    /// shape `per_layer_config` gives the full-attention layers; a config
+    /// without the block is left as parsed. Mirrors
+    /// `crate::models::gemma4::TextConfig::apply_per_layer_config`, through
+    /// the same [`crate::gemma4_per_layer`] rule.
+    fn apply_per_layer_config(&mut self) -> Result<(), String> {
+        let layer_types: Vec<&str> = self.layer_types.iter().map(String::as_str).collect();
+        let resolved = crate::gemma4_per_layer::gemma4_global_attention_from_per_layer_config(
+            self.per_layer_config.as_ref(),
+            &layer_types,
+            self.head_dim,
+            self.num_key_value_heads,
+        )?;
+        if let Some((head_dim, kv_heads)) = resolved {
+            self.global_head_dim = Some(head_dim);
+            self.num_global_key_value_heads = Some(kv_heads);
+        }
+        Ok(())
+    }
+
     /// Effective group size used for quantized weight loading. Mirrors
     /// `crate::models::gemma4::TextConfig::group_size`.
     pub fn group_size(&self) -> i32 {
@@ -171,11 +198,14 @@ impl DrafterTextConfig {
     }
 
     /// Effective num_kv_heads for the given layer. Full-attention layers with
-    /// `attention_k_eq_v = true` collapse to `num_global_key_value_heads`
-    /// (when present), otherwise fall back to `num_key_value_heads`. Mirrors
+    /// `attention_k_eq_v = true`, or of a config that carried
+    /// `per_layer_config`, collapse to `num_global_key_value_heads` (when
+    /// present), otherwise fall back to `num_key_value_heads`. Mirrors
     /// `crate::models::gemma4::TextConfig::num_kv_heads_for_layer`.
     pub fn num_kv_heads_for_layer(&self, layer_idx: usize) -> i32 {
-        if self.attention_k_eq_v && !self.is_sliding_layer(layer_idx) {
+        if (self.attention_k_eq_v || self.per_layer_config.is_some())
+            && !self.is_sliding_layer(layer_idx)
+        {
             self.num_global_key_value_heads
                 .unwrap_or(self.num_key_value_heads) as i32
         } else {
@@ -280,7 +310,9 @@ impl Gemma4AssistantConfig {
     /// Apply the upstream `__post_init__` fixup: when `num_kv_shared_layers`
     /// is missing or zero, set it to `num_hidden_layers` so every drafter
     /// layer reads from shared K/V. Returns `Err` when `text_config` is
-    /// absent (the upstream Python raises `ValueError` in that case).
+    /// absent (the upstream Python raises `ValueError` in that case), or
+    /// when its `per_layer_config` is one the drafter cannot represent
+    /// (upstream's `TextConfig.__post_init__` raises there).
     pub fn normalize(mut self) -> Result<Self, String> {
         let text_cfg = self
             .text_config
@@ -289,6 +321,7 @@ impl Gemma4AssistantConfig {
         if text_cfg.num_kv_shared_layers == 0 {
             text_cfg.num_kv_shared_layers = text_cfg.num_hidden_layers;
         }
+        text_cfg.apply_per_layer_config()?;
         Ok(self)
     }
 
@@ -461,6 +494,7 @@ mod tests {
             vocab_size: 262144,
             num_key_value_heads: 1,
             num_global_key_value_heads: None,
+            per_layer_config: None,
             num_kv_shared_layers: 4,
             rope_parameters,
             sliding_window: 512,

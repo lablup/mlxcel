@@ -794,6 +794,43 @@ mod ffi {
             hyper: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
+        /// One Raon_mHC site of a decode step up to the branch input, as one
+        /// compiled graph (issue #3458): the selector scaling, `h_pre`,
+        /// `h_post`, the Helmert-chart residual mix `h_res`, and the
+        /// aggregated branch input rounded once to the stream dtype. Same ops
+        /// in the same order as the eager `models::raon_mhc` path, so the
+        /// outputs are bit-identical. Fixed-shape compile: call it for
+        /// single-position steps only.
+        /// Used by: Raon1Mini (`RaonMhc::enter`)
+        #[allow(clippy::too_many_arguments)]
+        fn raon_mhc_route_aggregate(
+            streams: &MlxArray,
+            proj: &MlxArray,
+            alpha: &MlxArray,
+            bias: &MlxArray,
+            eps: &MlxArray,
+            post_factor: &MlxArray,
+            basis: &MlxArray,
+            basis_t: &MlxArray,
+            chart0: &MlxArray,
+            identity: &MlxArray,
+            gamma: &MlxArray,
+            x_out: &mut UniquePtr<MlxArray>,
+            h_post_out: &mut UniquePtr<MlxArray>,
+            h_res_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// The Raon_mHC write-back `h_res @ streams + h_post * branch` in
+        /// float32, rounded once to the stream dtype, as one compiled graph
+        /// (issue #3458). Bit-identical to the eager `raon_mhc::mix`.
+        /// Used by: Raon1Mini (`RaonMhc::leave`)
+        fn raon_mhc_mix(
+            streams: &MlxArray,
+            branch: &MlxArray,
+            h_post: &MlxArray,
+            h_res: &MlxArray,
+        ) -> UniquePtr<MlxArray>;
+
         /// Explicit float32 RMS normalization and scale, rounded once to the input dtype.
         /// Matches Qwen4-Exp's compiled zero-centered normalization graph.
         fn compiled_scaled_rms_norm(
@@ -4305,7 +4342,8 @@ pub fn fast_rope_batched(
 ///
 /// Used by: Llama3 batched decode with a `rope_scaling` table (#1355), and
 /// through it Qwen2 / Qwen2.5 and every VLM whose text backbone is the shared
-/// Llama decoder; Ministral3 batched decode with YaRN frequencies.
+/// Llama decoder; Ministral3 batched decode with YaRN frequencies; Qwen 3.5
+/// batched decode with a YaRN `rope_parameters` table (#3215).
 pub fn fast_rope_batched_with_freqs(
     x: &MlxArray,
     dims: i32,
@@ -4720,9 +4758,17 @@ pub mod weight_wiring;
 // Currently: proportional RoPE used by Gemma 4 full-attention layers.
 pub mod rope_proportional;
 
+// YaRN attention-factor scaling of the rotated lanes only, shared by the
+// Qwen 3.5 target attention and its MTP drafter layer (#3479).
+pub mod rope_lanes;
+
 // transformers 5 `rope_parameters` lift shared by every config struct that
 // reads the flat `rope_theta` / `rope_scaling` keys (#2443).
 pub mod rope_parameters;
+
+// Gemma 4 `per_layer_config` (transformers 5.15+), resolved once for the
+// target config in the model crate and the MTP drafter config here (#3215).
+pub mod gemma4_per_layer;
 
 // How many positions the sequence currently being prefilled will span, so a
 // model whose RoPE table is chosen from the whole prompt length can still make
@@ -4834,6 +4880,13 @@ mod conv_no_plan_tests;
 #[cfg(test)]
 #[path = "reduce_output_dtype_tests.rs"]
 mod reduce_output_dtype_tests;
+
+// `fast_rope` over broadcast and strided inputs returns what a dense buffer of
+// the same values rotates to (the CUDA RoPE kernel gave every index along a
+// broadcast axis one shared output element). Runs on every backend.
+#[cfg(test)]
+#[path = "rope_input_layout_tests.rs"]
+mod rope_input_layout_tests;
 
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a

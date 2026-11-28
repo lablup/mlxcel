@@ -28,6 +28,7 @@ use crate::vision::weights::load_dense_param;
 use mlxcel_core::layers::{
     LayerNorm, Linear, QuantizedTensorShapes, UnifiedEmbedding, validate_quantized_packing,
 };
+use mlxcel_core::utils::GeluActivation;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -100,7 +101,9 @@ impl ClipLayer {
         let y = self.attn.forward(&self.layer_norm1.forward(x));
         let x = mlxcel_core::add(x, &y);
         let y = self.fc1.forward(&self.layer_norm2.forward(&x));
-        let y = mlxcel_core::gelu(&y);
+        // The reference MLP is `quick_gelu`, `x * sigmoid(1.702 x)` (mlx-vlm
+        // `deepseekocr/vision.py`), not erf GELU (#3235).
+        let y = GeluActivation::Fast.apply(&y);
         let y = self.fc2.forward(&y);
         mlxcel_core::add(&x, &y)
     }
@@ -242,7 +245,8 @@ impl ClipEncoder {
             class_embedding,
             position_embedding,
             // `pre_layrnorm` is `nn.LayerNorm(hidden)` in the reference: MLX
-            // default eps 1e-5 (not the 1e-6 of the encoder layers).
+            // default eps 1e-5, whatever `layer_norm_eps` the encoder layers
+            // use (1e-6 for DeepSeek-OCR, 1e-5 for Unlimited-OCR).
             pre_layrnorm: ln(&format!("{prefix}.pre_layrnorm"), 1e-5)?,
             config,
             layers,
@@ -265,7 +269,7 @@ impl ClipEncoder {
         let cls = mlxcel_core::astype(&cls, mlxcel_core::array_dtype(&patches));
         let mut x = mlxcel_core::concatenate(&cls, &patches, 1); // (B, n_patch+1, hidden)
 
-        // Position embedding, resampled (plain cubic, no antialias) for tiles.
+        // Position embedding, resampled (antialiased bicubic) for tiles.
         let pos = self.abs_pos(n_patch + 1);
         let pos = mlxcel_core::astype(&pos, mlxcel_core::array_dtype(&x));
         x = mlxcel_core::add(&x, &pos);
@@ -291,7 +295,13 @@ impl ClipEncoder {
         let total = mlxcel_core::array_shape(&self.position_embedding)[0];
         let grid = mlxcel_core::slice(&self.position_embedding, &[1, 0], &[total, hidden]);
         let grid = mlxcel_core::reshape(&grid, &[src, src, hidden]);
-        let grid = bicubic_resample(&grid, src, src, hidden, tgt, tgt, false);
+        // The reference resizes with `bicubic_interpolate(..., antialias=True)`
+        // on a float32 copy and casts the result back to the table dtype
+        // (#3235).
+        let dtype = mlxcel_core::array_dtype(&grid);
+        let grid = mlxcel_core::astype(&grid, mlxcel_core::dtype::FLOAT32);
+        let grid = bicubic_resample(&grid, src, src, hidden, tgt, tgt, true);
+        let grid = mlxcel_core::astype(&grid, dtype);
         let grid = mlxcel_core::reshape(&grid, &[tgt * tgt, hidden]);
         let out = mlxcel_core::concatenate(&cls, &grid, 0);
         mlxcel_core::reshape(&out, &[1, tgt * tgt + 1, hidden])

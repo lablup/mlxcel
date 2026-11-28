@@ -4498,3 +4498,299 @@ async fn system_root_is_absent_without_a_system_block_or_with_the_switch_off() {
     assert!(off.history_prompt.is_some());
     assert!(off.root_prompt.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// #3265: per-request image geometry fields and per-turn Phi image tags
+// ---------------------------------------------------------------------------
+
+fn parts_message(role: Role, parts: Vec<ContentPart>) -> Message {
+    Message {
+        role,
+        content: MessageContent::Parts(parts),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }
+}
+
+fn image_part() -> ContentPart {
+    ContentPart::ImageUrl {
+        image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+    }
+}
+
+fn text_part(text: &str) -> ContentPart {
+    ContentPart::Text {
+        text: text.to_string(),
+    }
+}
+
+fn one_image_request() -> ChatCompletionRequest {
+    request_with_messages(vec![parts_message(
+        Role::User,
+        vec![image_part(), text_part("Describe.")],
+    )])
+}
+
+/// mlxcel's per-request image budget is `max_soft_tokens` / `detail`, and the
+/// operator bounds are `--image-min-tokens` / `--image-max-tokens`. A Qwen-style
+/// per-request pixel bound or resize sent by an mlx-vlm client lands in the
+/// extra-body capture, where nothing reads it, so the request used to succeed at
+/// the server's geometry with no sign the field was dropped.
+#[tokio::test]
+async fn image_geometry_fields_are_not_silently_ignored() {
+    let processor = ChatTemplateProcessor::with_template("ok".to_string());
+
+    let mut root = one_image_request();
+    root.extra_body_fields
+        .insert("min_pixels".to_string(), serde_json::json!(200704));
+    let error = prepare_chat_request(&processor, &root, None)
+        .await
+        .err()
+        .expect("root min_pixels on an image request must be refused");
+    assert!(error.to_string().contains("min_pixels"), "{error}");
+
+    let mut nested = one_image_request();
+    nested.extra_body = Some(
+        serde_json::json!({"min_pixels": 200704})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let error = prepare_chat_request(&processor, &nested, None)
+        .await
+        .err()
+        .expect("extra_body min_pixels on an image request must be refused");
+    assert!(error.to_string().contains("min_pixels"), "{error}");
+
+    for (field, value) in [
+        ("max_pixels", serde_json::json!(1003520)),
+        ("resize_shape", serde_json::json!([448, 448])),
+        ("resized_height", serde_json::json!(448)),
+        ("resized_width", serde_json::json!(448)),
+    ] {
+        let mut request = one_image_request();
+        request.extra_body_fields.insert(field.to_string(), value);
+        let error = prepare_chat_request(&processor, &request, None)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{field} on an image request must be refused"));
+        assert!(error.to_string().contains(field), "{field}: {error}");
+    }
+}
+
+/// A video request reaches the same refusal before any clip is resolved.
+#[tokio::test]
+async fn image_geometry_fields_are_refused_on_video_requests() {
+    let processor = ChatTemplateProcessor::with_template("ok".to_string());
+    let mut request = request_with_messages(vec![parts_message(
+        Role::User,
+        vec![
+            ContentPart::VideoUrl {
+                video_url: VideoUrl {
+                    url: "file:///nonexistent-3265/clip.mp4".to_string(),
+                    fps: None,
+                },
+            },
+            text_part("Describe."),
+        ],
+    )]);
+    request
+        .extra_body_fields
+        .insert("max_pixels".to_string(), serde_json::json!(1003520));
+    let error = prepare_chat_request(&processor, &request, None)
+        .await
+        .err()
+        .expect("max_pixels on a video request must be refused");
+    assert!(error.to_string().contains("max_pixels"), "{error}");
+}
+
+/// A client that sends the fields on every request keeps working for text.
+#[tokio::test]
+async fn image_geometry_fields_on_text_requests_are_ignored() {
+    let processor = ChatTemplateProcessor::with_template("ok".to_string());
+    let mut request = request_with_messages(vec![text_message(Role::User, "hi")]);
+    request
+        .extra_body_fields
+        .insert("min_pixels".to_string(), serde_json::json!(200704));
+    request.extra_body = Some(
+        serde_json::json!({"resize_shape": [448, 448]})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .expect("text-only request must not be refused for image geometry fields");
+    assert!(prepared.image_data.is_empty());
+}
+
+/// `mlx-community/Phi-3.5-vision-instruct-4bit` `chat_template` (HF revision
+/// 9055619fe9dec921b8323f689064c23cd2c540d3): content is rendered as a string,
+/// so image parts never reach it.
+const PHI3V_CHAT_TEMPLATE: &str = "{% for message in messages %}{{'<|' + message['role'] + '|>' + '\n' + message['content'] + '<|end|>\n' }}{% endfor %}{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{- '<|assistant|>\n' -}}{% endif %}";
+
+/// `microsoft/Phi-4-multimodal-instruct` `chat_template` (HF revision
+/// 93f923e1a7727d1c4f446756212d9d3e8fcc5d81).
+const PHI4MM_CHAT_TEMPLATE: &str = "{% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}";
+
+/// Load a processor the way the server does, from a checkpoint directory whose
+/// `config.json` names the family.
+fn phi_family_processor(model_type: &str, template: &str) -> ChatTemplateProcessor {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::json!({"model_type": model_type}).to_string(),
+    )
+    .expect("write config.json");
+    std::fs::write(
+        dir.path().join("tokenizer_config.json"),
+        serde_json::json!({
+            "chat_template": template,
+            "bos_token": "<s>",
+            "eos_token": "<|endoftext|>",
+        })
+        .to_string(),
+    )
+    .expect("write tokenizer_config.json");
+    ChatTemplateProcessor::from_model_path(dir.path())
+        .expect("load processor")
+        .expect("template present")
+}
+
+/// `[user: (image, first), assistant: "A cat.", user: (image, second)]`.
+fn two_turn_image_request(first: &str, second: &str) -> ChatCompletionRequest {
+    request_with_messages(vec![
+        parts_message(Role::User, vec![image_part(), text_part(first)]),
+        text_message(Role::Assistant, "A cat."),
+        parts_message(Role::User, vec![image_part(), text_part(second)]),
+    ])
+}
+
+/// Phi-3V: the server render followed by the runtime's tag normalization
+/// (`ensure_phi3v_image_tags`), i.e. the text whose `<|image_N|>` tags become
+/// image slots.
+mod phi3v_prompt {
+    use super::*;
+
+    async fn runtime_prompt(request: &ChatCompletionRequest) -> String {
+        let processor = phi_family_processor("phi3_v", PHI3V_CHAT_TEMPLATE);
+        let prepared = prepare_chat_request(&processor, request, None)
+            .await
+            .expect("prepare");
+        crate::phi3v_prompt::ensure_phi3v_image_tags(&prepared.prompt, prepared.image_data.len())
+    }
+
+    #[tokio::test]
+    async fn numbered_tags_follow_their_turn() {
+        let prompt = runtime_prompt(&two_turn_image_request("A?", "And this one?")).await;
+        assert_eq!(
+            prompt,
+            "<|user|>\n<|image_1|>\nA?<|end|>\n<|assistant|>\nA cat.<|end|>\n\
+             <|user|>\n<|image_2|>\nAnd this one?<|end|>\n<|assistant|>\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_and_implicit_tags_mix() {
+        let prompt =
+            runtime_prompt(&two_turn_image_request("<|image_1|>\nA?", "And this one?")).await;
+        assert_eq!(prompt.matches("<|image_1|>").count(), 1, "{prompt}");
+        assert_eq!(prompt.matches("<|image_2|>").count(), 1, "{prompt}");
+        let second_user = prompt.rfind("<|user|>").unwrap();
+        assert!(
+            prompt.find("<|image_1|>").unwrap() < second_user,
+            "{prompt}"
+        );
+        assert!(
+            prompt.find("<|image_2|>").unwrap() > second_user,
+            "{prompt}"
+        );
+    }
+
+    /// A single-turn request renders exactly as before, whatever the part order.
+    #[tokio::test]
+    async fn single_turn_prompt_is_unchanged() {
+        for parts in [
+            vec![image_part(), text_part("Describe.")],
+            vec![text_part("Describe."), image_part()],
+        ] {
+            let request = request_with_messages(vec![parts_message(Role::User, parts)]);
+            assert_eq!(
+                runtime_prompt(&request).await,
+                "<|user|>\n<|image_1|>\nDescribe.<|end|>\n<|assistant|>\n"
+            );
+        }
+    }
+}
+
+/// Phi-4MM: the server render followed by `prepare_phi4mm_prompt_tokens`, the
+/// runtime step that turns tags into image slots, decoded back to text with
+/// `[IMG]` for each slot.
+mod phi4mm_prompt {
+    use super::*;
+    use crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX;
+
+    async fn runtime_prompt(request: &ChatCompletionRequest) -> Result<String, String> {
+        let processor = phi_family_processor("phi4mm", PHI4MM_CHAT_TEMPLATE);
+        let prepared = prepare_chat_request(&processor, request, None)
+            .await
+            .expect("prepare");
+        let tokens = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+            &prepared.prompt,
+            prepared.image_data.len(),
+            0,
+            |text, _| text.bytes().map(i32::from).collect(),
+        )?;
+        Ok(tokens
+            .tokens
+            .iter()
+            .map(|&token| {
+                if token == PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
+                    "[IMG]".to_string()
+                } else {
+                    char::from(u8::try_from(token).unwrap()).to_string()
+                }
+            })
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn numbered_tags_follow_their_turn() {
+        let prompt = runtime_prompt(&two_turn_image_request("A?", "And this one?"))
+            .await
+            .expect("two images, two slots");
+        assert_eq!(
+            prompt,
+            "<|user|>[IMG]A?<|end|><|assistant|>A cat.<|end|>\
+             <|user|>[IMG]And this one?<|end|><|assistant|>"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_and_implicit_tags_mix() {
+        let prompt = runtime_prompt(&two_turn_image_request("<|image_1|>A?", "And this one?"))
+            .await
+            .expect("an explicit tag in turn 1 must not leave turn 2's image without one");
+        assert_eq!(
+            prompt,
+            "<|user|>[IMG]A?<|end|><|assistant|>A cat.<|end|>\
+             <|user|>[IMG]And this one?<|end|><|assistant|>"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_turn_prompt_is_unchanged() {
+        for parts in [
+            vec![image_part(), text_part("Describe.")],
+            vec![text_part("Describe."), image_part()],
+        ] {
+            let request = request_with_messages(vec![parts_message(Role::User, parts)]);
+            assert_eq!(
+                runtime_prompt(&request).await.expect("one image, one slot"),
+                "<|user|>[IMG]Describe.<|end|><|assistant|>"
+            );
+        }
+    }
+}

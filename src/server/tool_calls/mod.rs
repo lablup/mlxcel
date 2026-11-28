@@ -32,7 +32,8 @@ pub mod types;
 pub use atem::render_muse_channels_for_display;
 pub use parser::{
     clean_structural_tokens, content_with_thinking_block, generate_tool_call_id, parse_tool_calls,
-    strip_answer_wrapper, thinking_marker_pair, thinking_marker_pair_for_close,
+    parse_tool_calls_with_context, strip_answer_wrapper, thinking_marker_pair,
+    thinking_marker_pair_for_close,
 };
 pub use types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
@@ -508,6 +509,9 @@ pub fn build_tool_call_responses(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod reasoning_tool_calls_tests;
 
 #[cfg(test)]
 mod tool_choice_grammar_tests {

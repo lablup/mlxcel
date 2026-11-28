@@ -175,6 +175,11 @@ pub struct Qwen35Config {
     // Rope parameters (dict format)
     #[serde(default)]
     pub rope_parameters: Option<serde_json::Value>,
+    /// The training context. Read for one thing: the YaRN original context
+    /// when `rope_parameters` declares `yarn` without
+    /// `original_max_position_embeddings` (see [`Qwen35Config::yarn`]).
+    #[serde(default)]
+    pub max_position_embeddings: Option<usize>,
 
     #[serde(default = "default_full_attention_interval")]
     pub full_attention_interval: usize,
@@ -389,6 +394,167 @@ fn default_true() -> bool {
     true
 }
 
+/// The YaRN rotation a Qwen 3.5 `rope_parameters` block declares
+/// (Blaizzy/mlx-vlm#2649, #3215). Built by [`Qwen35Config::yarn`].
+pub(crate) struct Qwen35Yarn {
+    /// Float32 `[rope_dims / 2]` divisor table, the form
+    /// `fast_rope_with_freqs` takes. Its reciprocal is transformers'
+    /// `inv_freq`.
+    pub(crate) freqs: UniquePtr<MlxArray>,
+    /// Multiplies the rotated lanes of Q and K, and only those.
+    pub(crate) attention_factor: f32,
+}
+
+/// The inverse frequencies the cos/sin MRoPE path multiplies positions by:
+/// the reciprocal of a YaRN divisor table ([`Qwen35Yarn::freqs`]).
+pub(crate) fn yarn_inv_freq(freqs: &MlxArray) -> Vec<f32> {
+    mlxcel_core::utils::array_to_vec_f32(freqs)
+        .into_iter()
+        .map(|freq| 1.0 / freq)
+        .collect()
+}
+
+/// The YaRN attention factor by the transformers rules
+/// (`_compute_yarn_parameters`, mirrored by upstream's `_yarn_inv_freq`):
+/// `attention_factor` when the block has one; else
+/// `get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)` only
+/// when both are non-zero; else `get_mscale(factor) = 0.1 * ln(factor) + 1`.
+///
+/// Deliberately not `rope_utils::yarn_rope_setup`'s multiplier, which follows
+/// mlx-lm's `YarnRoPE`: that one ignores `attention_factor` and applies a
+/// lone `mscale`.
+fn qwen35_yarn_attention_factor(block: &serde_json::Value, factor: f64) -> f64 {
+    let number = |key: &str| block.get(key).and_then(|value| value.as_f64());
+    let get_mscale = |mscale: f64| {
+        if factor <= 1.0 {
+            1.0
+        } else {
+            0.1 * mscale * factor.ln() + 1.0
+        }
+    };
+    if let Some(declared) = number("attention_factor") {
+        return declared;
+    }
+    match (number("mscale"), number("mscale_all_dim")) {
+        (Some(mscale), Some(all_dim)) if mscale != 0.0 && all_dim != 0.0 => {
+            get_mscale(mscale) / get_mscale(all_dim)
+        }
+        _ => get_mscale(1.0),
+    }
+}
+
+/// The YaRN frequency table and attention factor, when `rope_parameters`
+/// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
+/// block, which keeps the plain `rope_theta` rotation.
+///
+/// Port of `Qwen3_5RotaryEmbedding` / `_yarn_inv_freq` in
+/// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_5/language.py>
+/// (Blaizzy/mlx-vlm#2649). The table comes from the shared
+/// [`super::rope_utils::yarn_rope_setup`] over the rotary dims and
+/// `rope_theta`, with `max_position_embeddings` as the original context
+/// when the block names none, so the `--yarn-orig-ctx`, `--yarn-beta-fast`,
+/// `--yarn-beta-slow` and `--yarn-ext-factor` knobs reach it. The
+/// attention factor follows the transformers rules
+/// ([`qwen35_yarn_attention_factor`]), except that with a resolved
+/// extrapolation mix of 0 it is `--yarn-attn-factor`, as on the shared
+/// path.
+///
+/// A block that names `yarn` and cannot build a table is a load error
+/// naming the field, never a fallback to the unscaled rotation.
+///
+/// The inputs are the config's rotary geometry so the Qwen 3.5 MTP
+/// drafter, whose `text_config` mirrors the target's, builds a
+/// bit-identical table through this same code (issue #3479).
+///
+/// Used by: [`Qwen35Config::yarn`] and
+/// `crate::models::drafter_loader::load_drafter` (the `qwen3_5_mtp` arm).
+pub(crate) fn qwen35_yarn(
+    rope_parameters: Option<&serde_json::Value>,
+    rope_dims: i32,
+    rope_theta: f32,
+    max_position_embeddings: Option<usize>,
+) -> Result<Option<Qwen35Yarn>, String> {
+    use super::rope_overrides;
+    use super::rope_utils::{RopeScalingSpec, yarn_rope_setup};
+
+    let Some(block) = rope_parameters else {
+        return Ok(None);
+    };
+    let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
+    if spec.rope_type() != "yarn" {
+        return Ok(None);
+    }
+
+    let wrong_type = |key: &str, value: &serde_json::Value, expected: &str| {
+        format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `{key}` must be {expected}, got {}",
+            truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS)
+        )
+    };
+    for key in [
+        "factor",
+        "original_max_position_embeddings",
+        "beta_fast",
+        "beta_slow",
+        "attention_factor",
+        "mscale",
+        "mscale_all_dim",
+    ] {
+        if let Some(value) = block.get(key)
+            && !value.is_null()
+            && !value.is_number()
+        {
+            return Err(wrong_type(key, value, "a number"));
+        }
+    }
+    if let Some(value) = block.get("truncate")
+        && !value.is_null()
+        && !value.is_boolean()
+    {
+        return Err(wrong_type("truncate", value, "a boolean"));
+    }
+    let Some(factor) = block.get("factor").and_then(|value| value.as_f64()) else {
+        return Err("Qwen3.5 rope_parameters declares YaRN, but `factor` is missing".to_string());
+    };
+
+    let dims = rope_dims.max(0) as usize;
+    let train_ctx = max_position_embeddings.map(|ctx| ctx as f32);
+    let (freqs, shared_multiplier) = yarn_rope_setup(&spec, dims, rope_theta, train_ctx)
+        .map_err(|reason| format!("Qwen3.5 rope_parameters declares YaRN, but {reason}"))?;
+
+    let ext_factor = rope_overrides::installed_yarn_knobs()
+        .and_then(|knobs| knobs.ext_factor)
+        .unwrap_or(1.0);
+    let attention_factor = if ext_factor == 0.0 {
+        shared_multiplier
+    } else {
+        qwen35_yarn_attention_factor(block, factor) as f32
+    };
+    if !(attention_factor.is_finite() && attention_factor > 0.0) {
+        return Err(format!(
+            "Qwen3.5 rope_parameters declares YaRN, but `attention_factor` resolves to \
+             {attention_factor}, which is not a positive finite number"
+        ));
+    }
+
+    // Qwen 3.5 is not on the `--rope-scaling` / `--rope-scale` /
+    // `--rope-freq-scale` / `--rope-freq-base` seam, so an override that
+    // carries any of those must keep failing `verify_applied`. One made
+    // of `--yarn-*` knobs alone has just been consumed by the table.
+    if let Some(over) = rope_overrides::installed()
+        && over.scaling_type().is_none()
+        && over.freq_base().is_none()
+        && over.freq_scale().is_none()
+    {
+        rope_overrides::note_application();
+    }
+
+    Ok(Some(Qwen35Yarn {
+        freqs,
+        attention_factor,
+    }))
+}
+
 impl Qwen35Config {
     pub fn group_size(&self) -> i32 {
         self.quantization
@@ -426,6 +592,25 @@ impl Qwen35Config {
 
     pub fn rope_dims(&self) -> i32 {
         (self.head_dim_resolved() as f32 * self.partial_rotary_factor()) as i32
+    }
+
+    /// The YaRN frequency table and attention factor, when `rope_parameters`
+    /// names `yarn` under `type` or `rope_type`; `Ok(None)` for every other
+    /// block, which keeps the plain `rope_theta` rotation. See
+    /// [`qwen35_yarn`], which this delegates to with this config's rotary
+    /// geometry.
+    ///
+    /// Used by: `Qwen35Model::from_weights_impl` and
+    /// `Qwen35StageModel::from_filtered_weights`, and through them every
+    /// Qwen 3.5 loader (text, VLM, MiniCPM-V 4.6, tensor-parallel, pipeline
+    /// stage).
+    pub(crate) fn yarn(&self) -> Result<Option<Qwen35Yarn>, String> {
+        qwen35_yarn(
+            self.rope_parameters.as_ref(),
+            self.rope_dims(),
+            self.rope_theta(),
+            self.max_position_embeddings,
+        )
     }
 
     /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out
@@ -530,7 +715,7 @@ impl Qwen35Config {
             vocab_size: self.vocab_size,
             rope_theta: self.rope_theta(),
             partial_rotary_factor: self.partial_rotary_factor(),
-            max_position_embeddings: None,
+            max_position_embeddings: self.max_position_embeddings,
             norm_topk_prob: self.norm_topk_prob,
             tie_word_embeddings: self.tie_word_embeddings,
             attention_bias: self.attention_bias,
@@ -1318,10 +1503,13 @@ impl Qwen35DecoderLayer {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    /// `yarn` is the model's [`Qwen35Config::yarn`], resolved once by the
+    /// caller; each full-attention layer takes its own handle on the table.
     fn from_weights(
         weights: &WeightMap,
         config: &Qwen35Config,
         qn_config: &Qwen3NextConfig,
+        yarn: Option<&Qwen35Yarn>,
         layer_idx: usize,
     ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
@@ -1334,11 +1522,15 @@ impl Qwen35DecoderLayer {
                 &format!("{}.linear_attn", prefix),
             )?)
         } else {
-            Qwen35AttentionVariant::FullAttention(Qwen3NextAttention::from_weights(
+            let mut attn = Qwen3NextAttention::from_weights(
                 weights,
                 qn_config,
                 &format!("{}.self_attn", prefix),
-            )?)
+            )?;
+            if let Some(yarn) = yarn {
+                attn.set_yarn_rope(mlxcel_core::copy(&yarn.freqs), yarn.attention_factor);
+            }
+            Qwen35AttentionVariant::FullAttention(attn)
         };
 
         let mlp = if config.is_moe_layer(layer_idx) {
@@ -2473,13 +2665,15 @@ impl Qwen35Model {
         let group_size = config.group_size();
         let bits = config.bits();
         let qn_config = config.to_qwen3next_config();
+        let yarn = config.yarn()?;
 
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
-            let layer = Qwen35DecoderLayer::from_weights(weights, config, &qn_config, i)?;
+            let layer =
+                Qwen35DecoderLayer::from_weights(weights, config, &qn_config, yarn.as_ref(), i)?;
             layers.push(layer);
         }
 
@@ -2635,15 +2829,33 @@ impl Qwen35Model {
         self.layers.len()
     }
 
-    /// Set MRoPE on all full-attention layers
+    /// Set MRoPE on all full-attention layers.
+    ///
+    /// A layer built from a YaRN `rope_parameters` block
+    /// ([`Qwen35Config::yarn`]) gets an MRoPE over the same table and
+    /// attention factor its text rotation uses, so image and text positions
+    /// rotate with one set of frequencies; `rope_theta` is already folded
+    /// into that table.
     pub fn set_mrope(&mut self, mrope_section: Vec<i32>, rope_theta: f32, rope_dims: usize) {
         for layer in &mut self.layers {
             if let Qwen35AttentionVariant::FullAttention(ref mut attn) = layer.attention {
-                attn.mrope = Some(super::qwen3_vl::InterleavedMRoPE::new(
-                    rope_dims, // dim = rope_dims (MRoPE sections sum to dim/2)
-                    rope_theta,
-                    mrope_section.clone(),
-                ));
+                let yarn = attn
+                    .yarn_rope()
+                    .map(|(freqs, attention_factor)| (yarn_inv_freq(freqs), attention_factor));
+                attn.mrope = Some(match yarn {
+                    Some((inv_freq, attention_factor)) => {
+                        super::qwen3_vl::InterleavedMRoPE::with_inv_freq(
+                            inv_freq,
+                            mrope_section.clone(),
+                            attention_factor,
+                        )
+                    }
+                    None => super::qwen3_vl::InterleavedMRoPE::new(
+                        rope_dims, // dim = rope_dims (MRoPE sections sum to dim/2)
+                        rope_theta,
+                        mrope_section.clone(),
+                    ),
+                });
             }
         }
     }
@@ -3902,6 +4114,7 @@ impl Qwen35StageModel {
         let group_size = config.group_size();
         let bits = config.bits();
         let qn_config = config.to_qwen3next_config();
+        let yarn = config.yarn()?;
 
         let load_embeddings =
             filter.has_embedding || (config.tie_word_embeddings && filter.has_lm_head);
@@ -3919,7 +4132,11 @@ impl Qwen35StageModel {
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
             layers.push(Qwen35DecoderLayer::from_weights(
-                weights, config, &qn_config, layer_idx,
+                weights,
+                config,
+                &qn_config,
+                yarn.as_ref(),
+                layer_idx,
             )?);
         }
 

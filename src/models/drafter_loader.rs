@@ -26,16 +26,21 @@
 //! This wrapper is the one entry point the binary's callers (the
 //! offline CLI, the server's drafter slot, the speculative bench) go through:
 //! it builds those two itself and delegates everything else to core
-//! unchanged.
+//! unchanged, except the Qwen 3.5 MTP head (`qwen3_5_mtp`), which core loads
+//! and this wrapper finishes by installing the YaRN table its config's
+//! `rope_parameters` declares (issue #3479). The table builder lives in this
+//! crate ([`crate::models::qwen3_5::qwen35_yarn`]), so core cannot do it.
 
 use std::path::Path;
 
+use mlxcel_core::drafter::qwen3_5_mtp::{Qwen35MtpDraftModel, Qwen35MtpTextConfig};
 use mlxcel_core::drafter::{
     DrafterError, DrafterKind, GLM4_MOE_LITE_MTP_MODEL_TYPE, LoadedDrafter, QWEN4_EXP_MODEL_TYPE,
-    QWEN4_EXP_MTP_MODEL_TYPE, peek_drafter_model_type, resolve_drafter_kind,
+    QWEN4_EXP_MTP_MODEL_TYPE, QWEN35_MTP_MODEL_TYPE, peek_drafter_model_type, resolve_drafter_kind,
 };
 
 use crate::models::glm4_moe_lite_mtp_drafter::Glm4MoeLiteMtpDraftModel;
+use crate::models::qwen3_5::{Qwen35Yarn, qwen35_yarn};
 use crate::models::qwen4_exp_mtp_drafter::Qwen4ExpMtpDraftModel;
 
 /// Load a drafter from `path`, reconciling `kind` with the directory's
@@ -64,10 +69,41 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
                 let model = Qwen4ExpMtpDraftModel::from_target_checkpoint(path)?;
                 return Ok((Box::new(model), resolved));
             }
+            Some(QWEN35_MTP_MODEL_TYPE) => {
+                let model = load_qwen35_mtp(path)?;
+                return Ok((Box::new(model), resolved));
+            }
             _ => {}
         }
     }
     mlxcel_core::drafter::load_drafter(path, kind)
+}
+
+/// Load a `qwen3_5_mtp` drafter through core and install the YaRN rotation
+/// its `rope_parameters` declares, the table the target builds from the same
+/// block (issue #3479). Without YaRN the drafter keeps plain `rope_theta`.
+pub(crate) fn load_qwen35_mtp(path: &Path) -> Result<Qwen35MtpDraftModel, DrafterError> {
+    let mut model = Qwen35MtpDraftModel::from_path(path)?;
+    if let Some(yarn) = qwen35_mtp_yarn(model.config().text_config())? {
+        model.set_yarn_rope(&yarn.freqs, yarn.attention_factor);
+    }
+    Ok(model)
+}
+
+/// The drafter's YaRN table, through the same [`qwen35_yarn`] the target's
+/// `Qwen35Config::yarn` calls, over the drafter's own (target-mirroring)
+/// rotary geometry, so the `--yarn-*` knobs reach both. A block that names
+/// `yarn` and cannot build a table fails the load with the target's message.
+pub(crate) fn qwen35_mtp_yarn(
+    text_config: &Qwen35MtpTextConfig,
+) -> Result<Option<Qwen35Yarn>, DrafterError> {
+    qwen35_yarn(
+        text_config.rope_parameters.as_ref(),
+        text_config.rope_dims(),
+        text_config.rope_theta(),
+        text_config.max_position_embeddings,
+    )
+    .map_err(DrafterError::Config)
 }
 
 #[cfg(test)]

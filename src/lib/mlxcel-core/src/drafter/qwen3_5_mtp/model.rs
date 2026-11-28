@@ -375,6 +375,33 @@ impl Qwen35MtpDraftModel {
         })
     }
 
+    /// The normalized drafter config this model was built from.
+    pub fn config(&self) -> &Qwen35MtpConfig {
+        &self.config
+    }
+
+    /// Rotate every MTP layer with the YaRN divisor table `freqs` and scale
+    /// the rotated Q/K lanes by `attention_factor`, matching the target's
+    /// YaRN attention (issue #3479).
+    ///
+    /// The table builder lives in the binary crate (`Qwen35Config::yarn`), so
+    /// [`Self::from_path`] cannot build it; the binary-side
+    /// `mlxcel::models::drafter_loader::load_drafter` calls this after the
+    /// load when the drafter config's `rope_parameters` names `yarn`. Without
+    /// the call the drafter keeps the plain `rope_theta` rotation.
+    pub fn set_yarn_rope(&mut self, freqs: &MlxArray, attention_factor: f32) {
+        for layer in &mut self.layers {
+            layer.set_yarn_rope(freqs, attention_factor);
+        }
+    }
+
+    /// The YaRN table and attention factor of the first MTP layer, `None`
+    /// when the drafter uses the plain `rope_theta` rotation. Every layer is
+    /// set together by [`Self::set_yarn_rope`].
+    pub fn yarn_rope(&self) -> Option<(&MlxArray, f32)> {
+        self.layers.first().and_then(|layer| layer.yarn_rope())
+    }
+
     /// Apply the upstream `sanitize` rules to a freshly loaded weight map:
     ///
     /// - Strip the `mtp.` prefix from raw-HF-layout keys.

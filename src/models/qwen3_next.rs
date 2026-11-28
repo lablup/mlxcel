@@ -581,6 +581,16 @@ pub(crate) struct Qwen3NextAttention {
     scale: f32,
     rope_dims: i32,
     rope_base: f32,
+    /// YaRN frequency table (float32 `[rope_dims / 2]`, the divisors
+    /// `fast_rope_with_freqs` takes), set by [`Self::set_yarn_rope`] for a
+    /// Qwen 3.5 checkpoint whose `rope_parameters` declare `yarn` (#3215).
+    /// `None` for every other user of this attention, which keeps the plain
+    /// `rope_base` rotation.
+    rope_freqs: Option<UniquePtr<MlxArray>>,
+    /// The YaRN attention factor: multiplies the first `rope_dims` lanes of
+    /// Q and K before the rotation, the pass-through lanes untouched, as
+    /// transformers and mlx-vlm do. `1.0` when `rope_freqs` is `None`.
+    rope_attention_factor: f32,
     /// Optional interleaved MRoPE for VLM (Qwen3.5 VLM)
     pub(crate) mrope: Option<super::qwen3_vl::InterleavedMRoPE>,
     /// Rotate a `B = 1` verify block's Q and K one row at a time, as classic
@@ -601,6 +611,110 @@ impl Qwen3NextAttention {
             value_dim: self.head_dim,
             sinks: false,
         }
+    }
+
+    /// Rotate with a YaRN frequency table and attention factor instead of
+    /// the plain `rope_base` rotation (Blaizzy/mlx-vlm#2649).
+    ///
+    /// `freqs` is the float32 `[rope_dims / 2]` divisor table
+    /// `rope_utils::yarn_rope_setup` builds. Every non-MRoPE path of this
+    /// attention then rotates through it: the standard path, the per-row
+    /// verify paths and native batched decode. The MRoPE path takes the same
+    /// values through `InterleavedMRoPE::with_inv_freq`.
+    ///
+    /// Used by: Qwen 3.5 (`Qwen35DecoderLayer::from_weights`). Not used by
+    /// Qwen3-Next, Qwen4-Exp or the Qwen3-Omni talker, which keep `None`.
+    pub(crate) fn set_yarn_rope(&mut self, freqs: UniquePtr<MlxArray>, attention_factor: f32) {
+        self.rope_freqs = Some(freqs);
+        self.rope_attention_factor = attention_factor;
+    }
+
+    /// The YaRN table and attention factor, when [`Self::set_yarn_rope`] set
+    /// them.
+    pub(crate) fn yarn_rope(&self) -> Option<(&MlxArray, f32)> {
+        self.rope_freqs
+            .as_deref()
+            .map(|freqs| (freqs, self.rope_attention_factor))
+    }
+
+    /// Multiply the first `rope_dims` lanes of a `[.., D]` Q or K block by
+    /// the YaRN attention factor and leave the pass-through lanes as they
+    /// are. The scalar is materialized in the block's own dtype. Shared with
+    /// the Qwen 3.5 MTP drafter layer through
+    /// [`mlxcel_core::rope_lanes::scale_rotary_lanes`] (issue #3479).
+    fn scale_rotary_lanes(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        mlxcel_core::rope_lanes::scale_rotary_lanes(x, self.rope_dims, self.rope_attention_factor)
+    }
+
+    /// The standard rotation of a `[B, H, L, D]` block at `offset`: the
+    /// YaRN table when one is set, the plain `rope_base` rotation otherwise.
+    pub(crate) fn rope(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        match &self.rope_freqs {
+            Some(freqs) => mlxcel_core::fast_rope_with_freqs(
+                &self.scale_rotary_lanes(x),
+                self.rope_dims,
+                false,
+                1.0,
+                offset,
+                freqs,
+            ),
+            None => mlxcel_core::fast_rope(x, self.rope_dims, false, self.rope_base, 1.0, offset),
+        }
+    }
+
+    /// [`verify_rope::fast_rope_rows_like_decode`] through the same choice of
+    /// table as [`Self::rope`].
+    pub(crate) fn rope_rows_like_decode(&self, x: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+        match &self.rope_freqs {
+            Some(freqs) => verify_rope::fast_rope_rows_like_decode_with_freqs(
+                &self.scale_rotary_lanes(x),
+                self.rope_dims,
+                freqs,
+                offset,
+            ),
+            None => {
+                verify_rope::fast_rope_rows_like_decode(x, self.rope_dims, self.rope_base, offset)
+            }
+        }
+    }
+
+    /// The interleaved-MRoPE rotation of `[B, H, L, D]` queries and keys:
+    /// only the first `rope_dims` lanes rotate. A YaRN attention factor
+    /// arrives inside `mrope`'s cos and sin, so it scales exactly those
+    /// lanes.
+    pub(crate) fn apply_mrope(
+        &self,
+        mrope: &super::qwen3_vl::InterleavedMRoPE,
+        position_ids: &MlxArray,
+        queries: &MlxArray,
+        keys: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let q_shape = mlxcel_core::array_shape(queries);
+        let (b, l) = (q_shape[0], q_shape[2]);
+        let (cos, sin) = mrope.forward(position_ids);
+        let embed_dtype = mlxcel_core::array_dtype(queries);
+        let cos = mlxcel_core::astype(&cos, embed_dtype);
+        let sin = mlxcel_core::astype(&sin, embed_dtype);
+        // Partial rotary: only apply to first rope_dims dimensions
+        let rotary_dim = self.rope_dims;
+        let q_rot = mlxcel_core::slice(queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
+        let q_pass = mlxcel_core::slice(
+            queries,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_heads, l, self.head_dim],
+        );
+        let k_rot = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
+        let k_pass = mlxcel_core::slice(
+            keys,
+            &[0, 0, 0, rotary_dim],
+            &[b, self.num_kv_heads, l, self.head_dim],
+        );
+        let (q_embed, k_embed) =
+            super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
+        (
+            mlxcel_core::concatenate(&q_embed, &q_pass, -1),
+            mlxcel_core::concatenate(&k_embed, &k_pass, -1),
+        )
     }
 
     pub(crate) fn forward(
@@ -814,30 +928,7 @@ impl Qwen3NextAttention {
                 "per-row DFlash verify is not supported with MRoPE position ids"
             );
             // Interleaved MRoPE for VLM
-            let (cos, sin) = mrope.forward(pos_ids);
-            let embed_dtype = mlxcel_core::array_dtype(&queries);
-            let cos = mlxcel_core::astype(&cos, embed_dtype);
-            let sin = mlxcel_core::astype(&sin, embed_dtype);
-            // Partial rotary: only apply to first rope_dims dimensions
-            let rotary_dim = self.rope_dims;
-            let q_rot =
-                mlxcel_core::slice(&queries, &[0, 0, 0, 0], &[b, self.num_heads, l, rotary_dim]);
-            let q_pass = mlxcel_core::slice(
-                &queries,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_heads, l, self.head_dim],
-            );
-            let k_rot =
-                mlxcel_core::slice(&keys, &[0, 0, 0, 0], &[b, self.num_kv_heads, l, rotary_dim]);
-            let k_pass = mlxcel_core::slice(
-                &keys,
-                &[0, 0, 0, rotary_dim],
-                &[b, self.num_kv_heads, l, self.head_dim],
-            );
-            let (q_embed, k_embed) =
-                super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
-            queries = mlxcel_core::concatenate(&q_embed, &q_pass, -1);
-            keys = mlxcel_core::concatenate(&k_embed, &k_pass, -1);
+            (queries, keys) = self.apply_mrope(mrope, pos_ids, &queries, &keys);
         } else if let Some(ends) = divergent_rows {
             // Each row rotates its window at its own logical positions, so the
             // relative RoPE distance to that row's valid history stays what a
@@ -851,30 +942,12 @@ impl Qwen3NextAttention {
             // is byte-identical to the chain's (#2191). `B > 1` blocks keep
             // the block call: batched classic decode does not take the
             // single-row kernel either.
-            queries = verify_rope::fast_rope_rows_like_decode(
-                &queries,
-                self.rope_dims,
-                self.rope_base,
-                offset,
-            );
-            keys = verify_rope::fast_rope_rows_like_decode(
-                &keys,
-                self.rope_dims,
-                self.rope_base,
-                offset,
-            );
+            queries = self.rope_rows_like_decode(&queries, offset);
+            keys = self.rope_rows_like_decode(&keys, offset);
         } else {
             // Standard RoPE with offset
-            queries = mlxcel_core::fast_rope(
-                &queries,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                1.0,
-                offset,
-            );
-            keys =
-                mlxcel_core::fast_rope(&keys, self.rope_dims, false, self.rope_base, 1.0, offset);
+            queries = self.rope(&queries, offset);
+            keys = self.rope(&keys, offset);
         }
 
         #[cfg(test)]
@@ -988,14 +1061,7 @@ impl Qwen3NextAttention {
             "apply_rope_per_row: one offset per batch row"
         );
         if b == 1 {
-            return mlxcel_core::fast_rope(
-                x,
-                self.rope_dims,
-                false,
-                self.rope_base,
-                1.0,
-                row_valid_ends[0],
-            );
+            return self.rope(x, row_valid_ends[0]);
         }
         let mut out: Option<UniquePtr<MlxArray>> = None;
         for (r, &offset) in row_valid_ends.iter().enumerate() {
@@ -1004,8 +1070,7 @@ impl Qwen3NextAttention {
                 &[r as i32, 0, 0, 0],
                 &[r as i32 + 1, shape[1], shape[2], shape[3]],
             );
-            let rotated =
-                mlxcel_core::fast_rope(&row, self.rope_dims, false, self.rope_base, 1.0, offset);
+            let rotated = self.rope(&row, offset);
             out = Some(match out {
                 None => rotated,
                 Some(prev) => mlxcel_core::concatenate(&prev, &rotated, 0),
@@ -1112,6 +1177,8 @@ impl Qwen3NextAttention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: config.rope_dims(),
             rope_base: config.rope_theta,
+            rope_freqs: None,
+            rope_attention_factor: 1.0,
             mrope: None,
             verify_rope_rows: mlxcel_core::cuda_is_available(),
         })
@@ -1142,6 +1209,19 @@ impl mlxcel_core::batched_decode::SplitAttention for Qwen3NextAttention {
         k: &MlxArray,
         offsets: &[i32],
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        if let Some(freqs) = &self.rope_freqs {
+            let rotate = |x: &MlxArray| {
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    &self.scale_rotary_lanes(x),
+                    self.rope_dims,
+                    false,
+                    1.0,
+                    offsets,
+                    freqs,
+                )
+            };
+            return (rotate(q), rotate(k));
+        }
         (
             mlxcel_core::fast_rope_batched(q, self.rope_dims, false, self.rope_base, 1.0, offsets),
             mlxcel_core::fast_rope_batched(k, self.rope_dims, false, self.rope_base, 1.0, offsets),

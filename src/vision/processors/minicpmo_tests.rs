@@ -15,6 +15,25 @@
 use super::MiniCPMOProcessor;
 use image::{DynamicImage, RgbImage};
 
+/// Upstream's `ensure_divide` is `max(round(length / divisor) * divisor,
+/// divisor)` with Python's `round`, so a tie goes to the even multiple.
+/// Expected values are transformers 5.24.1 `minicpmv4_6.ensure_divide` and
+/// mlx-vlm `MiniCPMOImageProcessor._ensure_divide`, which agree.
+#[test]
+fn ensure_divide_breaks_ties_to_even_like_python_round() {
+    let processor = MiniCPMOProcessor::new(14, 448, 64);
+    // 35 / 14 = 2.5 -> 2; 63 / 14 = 4.5 -> 4; 140 / 56 = 2.5 -> 2.
+    assert_eq!(processor.ensure_divide(35, 14), 28);
+    assert_eq!(processor.ensure_divide(63, 14), 56);
+    assert_eq!(processor.ensure_divide(140, 56), 112);
+    // Odd ties, non-ties and the one-divisor floor do not move.
+    assert_eq!(processor.ensure_divide(49, 14), 56);
+    assert_eq!(processor.ensure_divide(84, 56), 112);
+    assert_eq!(processor.ensure_divide(36, 14), 42);
+    assert_eq!(processor.ensure_divide(100, 56), 112);
+    assert_eq!(processor.ensure_divide(5, 14), 14);
+}
+
 #[test]
 fn find_best_resize_respects_patch_alignment() {
     let processor = MiniCPMOProcessor::new(14, 448, 64);

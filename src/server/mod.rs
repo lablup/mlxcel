@@ -28,6 +28,7 @@ pub mod chat_template;
 pub mod chat_template_json;
 pub mod chat_template_kwargs;
 pub mod cli_input;
+pub(crate) mod clock;
 pub(crate) mod completion_control;
 mod config;
 pub mod conversation_store;
@@ -194,7 +195,13 @@ mod got_chat_template_tests;
 mod plamo2_vl_chat_template_tests;
 
 #[cfg(test)]
+mod unlimited_ocr_chat_template_tests;
+
+#[cfg(test)]
 mod minicpm_chat_template_tests;
+
+#[cfg(test)]
+mod image_geometry_route_tests;
 
 #[cfg(test)]
 mod llama_compat_tests;

@@ -174,6 +174,14 @@ pub struct CreateResponseRequest {
     /// `seed`, `stop`, `thinking_budget*`).
     #[serde(default, flatten)]
     pub sampling: SamplingParams,
+
+    /// Root fields no other field of this request recognizes.
+    ///
+    /// Read only for the image geometry fields the translator carries into the
+    /// chat request, so `/v1/responses` refuses them the way
+    /// `/v1/chat/completions` does (#3265). Everything else stays ignored.
+    #[serde(default, flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `input` field discriminator: a bare string or an array of typed items.

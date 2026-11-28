@@ -279,7 +279,12 @@ tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
 uuid = { version = "1.23", features = ["v4"] }
-chrono = "0.4"
+# Calendar fields for the server's timestamp strings (`src/server/clock.rs`),
+# replacing the unmaintained `chrono` (RUSTSEC-2026-0543, #3266). Unix values
+# come from `std::time`. `tz-system` resolves the host zone for the chat
+# template `strftime_now`; `tzdb-zoneinfo` reads the host zoneinfo database
+# on Unix and `tzdb-bundle-platform` bundles one on Windows only.
+jiff = { version = "1", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The `cors` feature is deliberately absent: #1432 replaced the tower-http

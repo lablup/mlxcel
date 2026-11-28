@@ -35,6 +35,8 @@ pub mod model;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod yarn_tests;
 
 pub use config::{Qwen35MtpConfig, Qwen35MtpTextConfig};
 pub use model::Qwen35MtpDraftModel;

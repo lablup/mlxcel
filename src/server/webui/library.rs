@@ -153,7 +153,7 @@ fn mutation_unavailable(state: &RouterServerState, download: bool) -> Option<Res
 }
 
 fn request_id() -> String {
-    format!("req_{}", chrono::Utc::now().timestamp_micros())
+    format!("req_{}", crate::server::clock::unix_micros_now())
 }
 
 fn webui_error(

@@ -839,9 +839,10 @@ pub(crate) fn drive_response_run(
         .map(|g| g.clone())
         .unwrap_or_default();
     let mut parsed_tools = if parse_tools {
-        Some(tool_calls::parse_tool_calls(
+        Some(tool_calls::parse_tool_calls_with_context(
             &full_raw,
             tools_for_parser.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None
@@ -951,7 +952,7 @@ pub(crate) fn drive_response_run(
     // Final response object. The text is the message accumulator; the
     // outbound assembly fills the canonical output[] for the
     // "completed" event payload.
-    let completed_at_now = chrono::Utc::now().timestamp() as f64;
+    let completed_at_now = crate::server::clock::unix_seconds_now() as f64;
     // Retiring the registry entry first closes the window where a cancel
     // would be answered `cancelled` after this status was decided.
     let cancel_acknowledged = events.finish_registration();

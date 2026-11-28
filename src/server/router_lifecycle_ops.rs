@@ -775,10 +775,10 @@ fn new_server_instance_id() -> String {
     format!(
         "srv_{}_{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_millis()
+        crate::server::clock::unix_millis_now()
     )
 }
 
 fn rfc3339_now() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::server::clock::rfc3339_seconds_z_now()
 }

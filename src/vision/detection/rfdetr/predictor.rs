@@ -8,7 +8,7 @@ use std::path::Path;
 use image::{DynamicImage, GrayImage};
 use mlxcel_core::MlxArray;
 
-use crate::vision::dense::interpolate::resize_bicubic_nhwc;
+use crate::vision::dense::interpolate::resize_bilinear_nhwc;
 use crate::vision::detection::{Detection, DetectionResult, Detector};
 
 use super::model::{RfDetrModel, RfDetrOutput};
@@ -218,10 +218,12 @@ pub(crate) fn decode_masks(
     let indices = mlxcel_core::from_slice_i32(&indices, &[indices.len() as i32]);
     let selected = mlxcel_core::take(pred_masks, &indices, 1);
     let nhwc = mlxcel_core::transpose_axes(&selected, &[0, 2, 3, 1]);
-    let resized = resize_bicubic_nhwc(
+    // rfdetr's `PostProcess`: `F.interpolate(mode="bilinear",
+    // align_corners=False)`, then `> 0`.
+    let resized = resize_bilinear_nhwc(
         &mlxcel_core::astype(&nhwc, mlxcel_core::dtype::FLOAT32),
-        Some((height as usize, width as usize)),
-        None,
+        (height as usize, width as usize),
+        false,
         false,
     )
     .map_err(|error| format!("RF-DETR output mask resize failed: {error}"))?;

@@ -825,6 +825,8 @@ impl AppState {
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
         let (tokenizer, chat_template) =
             attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -832,7 +834,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
-            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
+            thinking_markers: Arc::new(thinking_markers),
             tokenizer,
             model_path,
             effective_context_size,
@@ -861,7 +863,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),
@@ -899,6 +901,8 @@ impl AppState {
         let current_live = Arc::new(RwLock::new(startup_live.clone()));
         let (tokenizer, chat_template) =
             attach_native_chat_renderer_for_model(tokenizer, chat_template, Some(&model_path));
+        let thinking_markers =
+            tokenizer.infer_thinking_markers_with_template(Some(chat_template.template_source()));
         Self {
             model_provider,
             config: Arc::new(config),
@@ -906,7 +910,7 @@ impl AppState {
             current_live,
             settings_update_lock: Arc::new(std::sync::Mutex::new(())),
             chat_template: Arc::new(chat_template),
-            thinking_markers: Arc::new(tokenizer.infer_thinking_markers()),
+            thinking_markers: Arc::new(thinking_markers),
             tokenizer,
             model_path,
             effective_context_size,
@@ -935,7 +939,7 @@ impl AppState {
             slots,
             slots_debug,
             llama_scrape: Arc::new(std::sync::Mutex::new(LlamaScrapeBaseline::default())),
-            started_at_unix: chrono::Utc::now().timestamp(),
+            started_at_unix: crate::server::clock::unix_seconds_now(),
             gcp_dispatch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "webui")]
             webui_catalog_cache: Arc::new(super::webui::catalog::CatalogProjectionCache::new()),

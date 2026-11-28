@@ -122,7 +122,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -158,7 +158,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -202,7 +202,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -261,7 +261,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -293,7 +293,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -332,7 +332,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![StreamChoice {
@@ -400,7 +400,7 @@ impl ChatCompletionChunk {
         Self {
             id,
             object: "chat.completion.chunk".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![],
@@ -461,7 +461,7 @@ impl CompletionChunk {
         Self {
             id,
             object: "text_completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![CompletionStreamChoice {
@@ -479,7 +479,7 @@ impl CompletionChunk {
         Self {
             id,
             object: "text_completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![CompletionStreamChoice {
@@ -528,7 +528,7 @@ impl CompletionChunk {
         Self {
             id,
             object: "text_completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::server::clock::unix_seconds_now(),
             model,
             system_fingerprint: None,
             choices: vec![],

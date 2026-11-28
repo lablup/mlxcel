@@ -61,8 +61,9 @@ impl Qwen3VLModel {
     ///
     /// Caches both the post-merger hidden states and the DeepStack side-branch
     /// features, since Qwen3-VL injects DeepStack outputs at selected language
-    /// model layers. The cache key covers the concatenated pixel tensor for
-    /// all images in the request (see [`Qwen25VLModel::get_input_embeddings_with_cache`]).
+    /// model layers. One entry holds the output for all images in the request,
+    /// so `cache_key` must cover every one of them in order (see
+    /// [`Qwen25VLModel::get_input_embeddings_with_cache`]).
     ///
     /// MRoPE state and the visual position mask are recomputed on every call
     /// because they depend on the current `input_ids`.
